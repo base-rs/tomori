@@ -6,14 +6,16 @@ use crate::trail;
 
 /// Where the eyes may be: above every corner of the ground participants land on, in the yard, along the trail and
 /// round its clearings, and of the way out through the gate; but the upper terrace's, from which the far plane is
-/// checked as it is from the waterfall rock ([`beyond_from_the_terrace`]).
+/// checked as it is from the waterfall rock ([`beyond_from_the_terrace`]), and the campsite's clearing, from which it is
+/// checked a metre short of it rather than two ([`campsite_eyes`]).
 fn eyes() -> Vec<Vec3> {
     let ground = crate::walkable::navmesh()
         .triangles()
         .iter()
         .flatten()
         .filter(|corner| corner.y < layout::TERRACE - 1.0)
-        .map(|corner| Vec2::new(corner.x, corner.z));
+        .map(|corner| Vec2::new(corner.x, corner.z))
+        .filter(|corner| !at_the_campsite(*corner));
     let way_out = trail::way_out()
         .into_iter()
         .flat_map(|(outline, _)| outline);
@@ -115,19 +117,41 @@ fn beyond_fence(point: Vec2) -> f32 {
 /// The headset's far plane: nothing nearer is cut off.
 const FAR: f32 = 50.0;
 
-#[test]
-fn the_backdrop_stands_within_the_far_plane_from_where_participants_stand_at_the_campsite() {
-    // A metre short of it rather than two, as the campsite stands a little further out than the trail.
-    let eyes: Vec<Vec3> = crate::campsite::standing()
+/// Whether `point` is on the campsite's clearing, off the trail.
+fn at_the_campsite(point: Vec2) -> bool {
+    let fire = crate::campsite::FIRE;
+    point.distance(Vec2::new(fire.x, fire.z)) < crate::campsite::CLEARING + 0.01
+        && trail::from_middle(point) > trail::HALF + 0.2
+}
+
+/// Where the eyes may be at the campsite: about the places to stand by its fire, and above every corner of its
+/// clearing's walkable ground, all the way round it.
+fn campsite_eyes() -> Vec<Vec3> {
+    let standing = crate::campsite::standing()
         .into_iter()
         .flat_map(|(middle, radius)| {
             (0..12).map(move |step| {
                 let yaw = step as f32 / 12.0 * TAU;
-                let at = middle + Vec2::new(yaw.sin(), yaw.cos()) * radius;
-                Vec3::new(at.x, tomori_environment::sightlines::EYES, at.y)
+                middle + Vec2::new(yaw.sin(), yaw.cos()) * radius
             })
-        })
-        .collect();
+        });
+    let ground = crate::walkable::navmesh()
+        .triangles()
+        .iter()
+        .flatten()
+        .map(|corner| Vec2::new(corner.x, corner.z))
+        .filter(|corner| at_the_campsite(*corner));
+    standing
+        .chain(ground)
+        .map(|at| Vec3::new(at.x, tomori_environment::sightlines::EYES, at.y))
+        .collect()
+}
+
+#[test]
+fn the_backdrop_stands_within_the_far_plane_from_where_participants_stand_at_the_campsite() {
+    // Most of a metre short of it rather than two, as the campsite stands a little further out than the trail.
+    let eyes = campsite_eyes();
+    assert!(eyes.len() > 60);
     let foothills = model();
     for eye in &eyes {
         for position in &foothills.meshes[0].primitives[0].positions {
@@ -200,6 +224,7 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
     assert_eq!(super::ground(Vec2::new(5.0, 1.6)), 0.0);
     // Every plant at least 3 m beyond the fence, standing on the ground, none in the way in through the gate nor on the
     // trail, and its top within the far plane.
+    let mut bush = crate::ferns::bush().into_iter();
     for plant in plants() {
         let (reach, height) = plant.size();
         let at = Vec2::new(plant.at.x, plant.at.z);
@@ -214,17 +239,32 @@ fn the_backdrop_stands_beyond_the_fence_within_the_far_plane() {
         beyond_from_the_terrace(&terrace, plant.at + Vec3::Y * height);
         // Nor on the trail, beyond the fence, where participants walk.
         assert!(from_trail(at) > reach + trail::HALF, "{plant:?}");
+        // Nor reaching over where they walk, but a tree fern's crown, drawn as the ferns are, high overhead, as a ponga's
+        // over the campsite's clearing, its trunk off it by more than the clearance.
+        let fern = (plant.kind == Kind::Fern).then(|| bush.next().unwrap().solids());
+        let footprint = |solid: &tomori_environment::sightlines::Solid, grown: f32| {
+            layout::Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]])
+                .grown(grown)
+        };
         let solid = plant.solid();
-        let footprint =
-            layout::Footprint::new([solid.low[0], solid.low[2]], [solid.high[0], solid.high[2]]);
-        assert!(
-            crate::walkable::navmesh()
-                .triangles()
-                .iter()
-                .flatten()
-                .all(|corner| !footprint.contains(Vec2::new(corner.x, corner.z))),
-            "{plant:?}"
-        );
+        for corner in crate::walkable::navmesh().triangles().iter().flatten() {
+            let on = Vec2::new(corner.x, corner.z);
+            if !footprint(&solid, 0.0).contains(on) {
+                continue;
+            }
+            let fern = fern
+                .as_ref()
+                .expect("only a tree fern reaches over where anyone walks");
+            assert!(
+                !footprint(&fern[0], layout::CLEARANCE - 1e-3).contains(on),
+                "{plant:?}"
+            );
+            assert!(
+                !footprint(&fern[1], 0.0).contains(on)
+                    || fern[1].low[1] - corner.y >= crate::ferns::OVERHEAD,
+                "{plant:?} {corner}"
+            );
+        }
         assert_eq!(crate::walkable::height_at(at), None, "{plant:?}");
     }
     // And the pines with them, out of the water.

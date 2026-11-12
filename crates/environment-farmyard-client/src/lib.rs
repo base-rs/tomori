@@ -174,7 +174,8 @@ mod tests {
         };
         // The ground the farmyard draws, the trail's way out and the places to stand about the campsite's fire, all
         // within the centimetre a backstep goes up or down of the yard's earth, but the track's edges, which rise to
-        // their crests, and the upper terrace's floor, at its own height above the waterfall.
+        // their crests, the campsite's clearing, which rises a few centimetres towards the pool, and the upper
+        // terrace's floor, at its own height above the waterfall.
         assert_eq!(
             surfaces.len(),
             1 + trail::way_out().len() + tomori_environment_farmyard::campsite::standing().len()
@@ -193,6 +194,11 @@ mod tests {
                                 (shingle - corner.y).abs() < 1e-4 && corner.y > lowest - 1e-4
                             })
                             || (corner.y - layout::TERRACE).abs() < 1e-5
+                            || (Vec2::new(corner.x, corner.z).distance(Vec2::new(
+                                tomori_environment_farmyard::campsite::FIRE.x,
+                                tomori_environment_farmyard::campsite::FIRE.z,
+                            )) < tomori_environment_farmyard::campsite::CLEARING
+                                && (0.0..0.06).contains(&corner.y))
                     }))
                 }
                 None => assert!((0.0..0.009).contains(&surface.height())),
@@ -457,6 +463,14 @@ mod tests {
                         lost && kept_by.is_none() && !drawn_clearing && middle > trail::HALF,
                     ),
                     (
+                        "gained: the campsite's clearing, round its fire",
+                        new.is_some_and(|new| new < 0.06)
+                            && point.distance(Vec2::new(
+                                tomori_environment_farmyard::campsite::FIRE.x,
+                                tomori_environment_farmyard::campsite::FIRE.z,
+                            )) < tomori_environment_farmyard::campsite::CLEARING,
+                    ),
+                    (
                         "gained: the beach's shingle",
                         old.is_none()
                             && tomori_environment_farmyard::beach::height(point)
@@ -491,7 +505,8 @@ mod tests {
                 "higher: up the track's edge",
                 "lost: trail's posts, seat and rock",
                 "lost: undrawn clearing",
-                "gained: the beach's shingle"
+                "gained: the beach's shingle",
+                "gained: the campsite's clearing, round its fire"
             ]
             .contains(kind)),
             "{kinds:?}"

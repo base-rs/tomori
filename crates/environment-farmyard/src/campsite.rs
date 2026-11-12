@@ -40,15 +40,20 @@ pub const FIRE_EXTENT: f32 = PIT + 0.13;
 /// The middle of the campsite's clearing of packed earth is [`FIRE`], and this its radius.
 pub const CLEARING: f32 = 1.65;
 /// How far where participants stand at the campsite stays from the backdrop's middle, at most, so that from there the
-/// whole backdrop is within the headset's far plane, a metre short of it: half a metre beyond the trail's
-/// [`trail::REACH`] and its two metres, as nowhere nearer has room for a fire with seats about it.
-pub const REACH: f32 = 12.6;
+/// whole backdrop is within the headset's far plane, a metre short of it: three quarters of a metre beyond the trail's
+/// [`trail::REACH`] and its two metres, as nowhere nearer has room for a fire with seats about it that participants
+/// walk all the way round.
+pub const REACH: f32 = 12.75;
+
+/// How far from [`FIRE`] its clearing is walked, at most: short of its edge, so that the ground ferns about it stay
+/// beyond the clearance from where anyone stands.
+pub const WALKED: f32 = CLEARING - 0.15;
 
 /// The log seat across the fire from the lookout's, on the fire's west side: its middle, the way it lies, how long it
-/// is and its radius. The sticks lean over it.
+/// is and its radius. The sticks lean over it. Far enough from the fire that participants walk between the two.
 pub fn seat() -> (Vec3, Vec2, f32, f32) {
     (
-        Vec3::new(FIRE.x - 1.45, 0.0, FIRE.z + 0.35),
+        Vec3::new(FIRE.x - 1.65, 0.0, FIRE.z + 0.35),
         Vec2::new(0.06, 1.0).normalize(),
         1.0,
         0.19,
@@ -579,13 +584,61 @@ pub struct Event {
 }
 
 /// The solids of the campsite, which the agent, walls and panels keep clear of, as `(least, greatest)` corners: the
-/// fire pit with its flames, and the log seat across it with the sticks leaning on it.
+/// fire pit with its flames, and what stands about it ([`furniture`]).
 pub fn solids() -> Vec<([f32; 3], [f32; 3])> {
     let reach = PIT + 0.12;
     let mut solids = vec![(
         [FIRE.x - reach, 0.0, FIRE.z - reach],
         [FIRE.x + reach, FLAMES, FIRE.z + reach],
     )];
+    solids.extend(furniture());
+    solids
+}
+
+/// The ring of stones about the fire pit, seen from above: every corner of its stones' bases, X and Z, whose hull
+/// participants keep clear of, rather than the box about the pit and its flames that the agent keeps clear of, so that
+/// they walk round the fire between it and its seats.
+pub fn pit() -> Vec<Vec2> {
+    (0..PIT_STONES)
+        .flat_map(|stone| pit_stone(stone).0)
+        .map(|corner| Vec2::new(corner.x, corner.z))
+        .collect()
+}
+
+/// The campsite's clearing, as it is drawn, which the farmyard's walkable ground takes in, so that participants walk
+/// all the way round the fire: the part of each triangle of its fan within [`WALKED`] of the fire and [`REACH`] of the
+/// backdrop's middle, a triangle in the same plane, reaching the trail and a metre from the fire towards the pool.
+/// The fire's stones and what stands about it are cut from it as the walkable ground is derived.
+pub fn ground() -> Vec<[Vec3; 3]> {
+    let edge = clearing();
+    let middle = Vec3::new(FIRE.x, trail::CLEARING_HEIGHT, FIRE.z);
+    // How far towards `corner` from the middle stays within reach: where |d + w t| is the reach, at most all the way.
+    let walked = |corner: Vec3| {
+        let way = corner - middle;
+        let (d, w) = (
+            Vec2::new(middle.x, middle.z) - layout::BACKDROP_CENTRE,
+            Vec2::new(way.x, way.z),
+        );
+        let (a, b, c) = (
+            w.length_squared(),
+            d.dot(w),
+            d.length_squared() - REACH * REACH,
+        );
+        let t = (-b + (b * b - a * c).max(0.0).sqrt()) / a;
+        middle + way * t.clamp(0.0, WALKED / CLEARING)
+    };
+    (0..edge.len())
+        .map(|index| {
+            let (from, to) = (edge[index], edge[(index + 1) % edge.len()]);
+            [middle, walked(from), walked(to)]
+        })
+        .collect()
+}
+
+/// What stands about the fire, as `(least, greatest)` corners, which participants, the agent, walls and panels keep
+/// clear of: the log seat across it with the sticks leaning on it.
+pub fn furniture() -> Vec<([f32; 3], [f32; 3])> {
+    let mut solids = Vec::new();
     let (middle, along, length, radius) = seat();
     let along = Vec3::new(along.x, 0.0, along.y);
     let ends = [middle + along * length * 0.5, middle - along * length * 0.5];

@@ -100,7 +100,7 @@ fn the_campsite_stands_beside_the_lookout_s_seat_off_the_trail_and_clear_of_the_
     }
     // The second seat across the fire from the lookout's, low enough to sit on, facing the fire along it.
     let (middle, along, length, radius) = seat();
-    assert!((1.2..1.6).contains(&ground(middle).distance(fire)));
+    assert!((1.5..1.8).contains(&ground(middle).distance(fire)));
     assert!((0.35..0.5).contains(&seat_top(radius)));
     assert!((1.0..1.6).contains(&length));
     assert!(along.dot((fire - ground(middle)).normalize()).abs() < 0.2);

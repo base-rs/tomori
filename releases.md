@@ -18,6 +18,8 @@
 
 - For environments: `tomori-environment-farmyard`'s `campsite` gains `BURNS`, `burns` and `doused`; its client crate gains the `embers` module, `scenery::Clock::elapsed` and `Farmyard::embers_mut`, and `campsite::Shown` gains `index`, **breaking** for code that builds it.
 
+- **Walk all the way round the campfire.** In the farmyard, you can now walk, and land, all the way round the campsite's fire, between its ring of stones and the logs about it; the log the marshmallow sticks lean on is a step further back to make room. The agent follows you round it too. See `design/farmyard.md`.
+
 - **Bigger marshmallows.** The campsite's marshmallows are twice as big, 9 cm long, on the end of each stick, and they toast at the same distances from the flames as before; a burnt one's flame is twice as big too. The sticks rest a little further back on their log so they don't tip off it, and a stick dropped in the pool floats and comes back after a minute as before. See `design/farmyard.md`.
 
 - For environments: `tomori-physics` now soaks a body lighter than the water that rests floating in it, its middle within the water's outline and some of it below the surface, even with its middle above it, and takes it back as the water says; a stone, heavier than the water, still soaks only with its middle in it. `tomori-environment-farmyard`'s `campsite::in_pool` takes the stick's placement rather than its middle, **breaking** for code that calls it, `campsite::girth` is new, and the campsite's world is unclustered. See `design/physics.md`.
