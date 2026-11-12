@@ -33,6 +33,7 @@ pub mod ferns;
 pub mod flock;
 pub mod layout;
 pub mod props;
+pub mod random;
 mod shapes;
 #[cfg(feature = "side")]
 pub mod side;

@@ -82,13 +82,8 @@ impl Cluck {
             |milliseconds: u32| (f64::from(milliseconds) * rate / 1000.0).round() as usize;
         let mut output = vec![0.0_f64; samples(self.length())];
         // A fixed noise, the same every time.
-        let mut noise_state = 0x2545_f491_u32;
-        let mut noise = move || {
-            noise_state = noise_state
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
-            f64::from(noise_state >> 8) / f64::from(1u32 << 23) - 1.0
-        };
+        let mut noise = crate::random::noise(0x2545_f491);
+        let mut noise = move || f64::from(noise());
         for syllable in self.syllables() {
             let start = samples(syllable.start);
             let length = samples(syllable.length).max(1);
