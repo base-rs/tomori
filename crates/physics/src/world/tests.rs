@@ -466,6 +466,131 @@ fn a_body_whose_letting_go_never_arrived_is_taken_again_by_its_holder_alone() {
 }
 
 #[test]
+fn a_body_held_in_one_hand_is_passed_to_the_other_without_falling_and_only_by_its_holder() {
+    let (mut world, mut seen, take) = one();
+    seen.hands[0] = Some(Placement::at(Vec3::new(-0.1, 0.9, 0.3)));
+    assert_eq!(world.take(3, &take, Some(&seen)), Ok(1));
+    world.step(0.0);
+    // Their free left hand grips it at the epoch they hold it at: passed to it, at the offset that hand took it at,
+    // still held, nothing let go, moving or landing, however long the world steps.
+    let offset = Placement::new(Vec3::new(0.05, 0.0, -0.1), Quat::from_rotation_y(0.4))
+        .encoded(Precision::Rest);
+    let pass = Take {
+        epoch: 1,
+        hand: Side::Left,
+        offset,
+        ..take
+    };
+    assert!(world.passing(3, &pass));
+    assert!(!world.passing(4, &pass));
+    assert!(!world.passing(3, &Take { epoch: 2, ..pass }));
+    assert!(!world.passing(3, &Take { body: 9, ..pass }));
+    assert!(!world.passing(
+        3,
+        &Take {
+            hand: Side::Right,
+            ..pass
+        }
+    ));
+    // Out of the hand's reach, or seen nowhere, or not seen at all, it is refused, and stays in the right hand.
+    let mut unsound = seen;
+    unsound.hands[0] = Some(Placement::at(Vec3::NAN));
+    let mut far = seen;
+    far.hands[0] = Some(Placement::at(Vec3::new(0.0, 0.9, PULL + 2.0)));
+    for seen in [Some(&unsound), Some(&far), None] {
+        assert_eq!(world.take(3, &pass, seen), Err(Refused::Reach(1)));
+    }
+    assert_eq!(world.held(1).map(|held| held.hand), Some(Side::Right));
+    assert_eq!(world.take(3, &pass, Some(&seen)), Ok(2));
+    assert_eq!(
+        world.held(1),
+        Some(Held {
+            by: 3,
+            hand: Side::Left,
+            offset
+        })
+    );
+    assert_eq!(world.placement(1), None);
+    let update = world.step(0.5);
+    assert_eq!(
+        update,
+        Update {
+            holding: vec![Holding {
+                body: 1,
+                epoch: 2,
+                held: world.held(1)
+            }],
+            ..Default::default()
+        }
+    );
+    assert!(!world.moving());
+    // Passed back, by the right hand gripping it again.
+    let back = Take {
+        epoch: 2,
+        hand: Side::Right,
+        ..take
+    };
+    assert!(world.passing(3, &back));
+    assert_eq!(world.take(3, &back, Some(&seen)), Ok(3));
+    assert_eq!(world.held(1).map(|held| held.hand), Some(Side::Right));
+    // Someone else's grip on it, at the epoch it is at, is refused: a handover from another's hand is stage 3's.
+    let theirs = Take {
+        epoch: 3,
+        hand: Side::Left,
+        ..take
+    };
+    assert!(!world.passing(4, &theirs));
+    assert_eq!(world.take(4, &theirs, Some(&seen)), Err(Refused::Held(1)));
+    assert_eq!(world.held(1).map(|held| held.by), Some(3));
+    // Let go by the hand it was passed to, at the epoch the pass made, it is let go.
+    let let_go = LetGo {
+        body: 1,
+        epoch: 3,
+        at: Placement::at(Vec3::new(0.0, 0.3, 0.0)).encoded(Precision::Rest),
+        velocity: [0.0; 3],
+        spin: [0.0; 3],
+        clock: 0,
+    };
+    assert_eq!(world.let_go(3, &let_go, Some(&seen)), Ok(4));
+}
+
+#[test]
+fn a_body_is_passed_only_to_a_free_hand() {
+    let bodies: Vec<Body> = (0..2)
+        .map(|id| {
+            Body::convex(id, pebble(id, 0.15, 0.06)).at(Placement::at(Vec3::new(
+                id as f32 * 0.3,
+                0.04,
+                0.0,
+            )))
+        })
+        .collect();
+    let mut world = world(bodies);
+    world.settle(5.0);
+    let seen = Seen {
+        head: Vec3::new(0.15, 1.6, 0.5),
+        hands: [
+            Some(Placement::at(Vec3::new(0.0, 1.0, 0.3))),
+            Some(Placement::at(Vec3::new(0.3, 1.0, 0.3))),
+        ],
+    };
+    let take = |body, epoch, hand| Take {
+        body,
+        epoch,
+        hand,
+        offset: Encoded::default(),
+    };
+    assert_eq!(world.take(2, &take(0, 0, Side::Left), Some(&seen)), Ok(1));
+    assert_eq!(world.take(2, &take(1, 0, Side::Right), Some(&seen)), Ok(1));
+    assert!(world.passing(2, &take(0, 1, Side::Right)));
+    assert_eq!(
+        world.take(2, &take(0, 1, Side::Right), Some(&seen)),
+        Err(Refused::Hands)
+    );
+    assert_eq!(world.held(0).map(|held| held.hand), Some(Side::Left));
+}
+
+#[test]
 fn each_participant_holds_one_body_in_each_hand() {
     let bodies: Vec<Body> = (0..3)
         .map(|id| {

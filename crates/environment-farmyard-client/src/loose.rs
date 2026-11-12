@@ -4,10 +4,11 @@
 //! Loose bodies as a client shows them, whatever they are, the beach's stones or the campsite's sticks, from what the
 //! farmyard's server side shares: every body where it rests, or between the snapshots of those that move,
 //! `tomori-physics`'s mirror of them; those this participant holds, one in each hand, drawn from their own hand every
-//! frame, taken within reach of it or pulled to it along the ray, and let go, thrown as fast as the hand moved, foreseen
-//! until the server's snapshots take over; those the others hold, drawn from the hands their presence brings; and the
-//! sounds of those that land; and those on their way back, fading out where they were and in where they return to, which
-//! nobody takes until they are there. What differs between them, their shapes, how a hand holds them and how they sound, is
+//! frame, taken within reach of it or pulled to it along the ray, passed from one hand to the other as the free hand
+//! grips what the other holds, and let go, thrown as fast as the hand moved, foreseen until the server's snapshots take
+//! over; those the others hold, drawn from the hands their presence brings; and the sounds of those that land; and
+//! those on their way back, fading out where they were and in where they return to, which nobody takes until they are
+//! there. What differs between them, their shapes, how a hand holds them and how they sound, is
 //! their [`Shapes`]. The client never simulates. See `design/physics.md`.
 use std::collections::{BTreeMap, VecDeque};
 use std::marker::PhantomData;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 use glam::Vec3;
 use tomori_physics::message::{Intent, LetGo, State, Take, Update};
 use tomori_physics::mirror::{Fade, Mirror};
-use tomori_physics::{PULL, PULL_TIME, Placement, Precision, RELEASE_SPEED, RELEASE_SPIN};
+use tomori_physics::{HOLD, PULL, PULL_TIME, Placement, Precision, RELEASE_SPEED, RELEASE_SPIN};
 use tomori_scene::client_side::{Actions, Grab, Hand, Phase, Picked, Side, Sound};
 use tomori_scene::pointing::Ray;
 
@@ -38,6 +39,9 @@ pub trait Shapes {
     fn met(origin: Vec3, direction: Vec3, body: u32, placement: &Placement) -> Option<f32>;
     /// How far a hand at `hand` is from where it takes body `body`, placed at `placement`.
     fn reach(body: u32, placement: &Placement, hand: Vec3) -> f32;
+    /// How far a hand at `hand` is from any part of body `body`, placed at `placement`, as a hand taking it from the
+    /// other hand may grip it anywhere.
+    fn touch(body: u32, placement: &Placement, hand: Vec3) -> f32;
     /// Where body `body`, at `at`, is held in a hand at `hand` that takes it, `within` reach or pulling it along the
     /// ray: and whether it flies there from where it was.
     fn held(body: u32, at: &Placement, hand: &Placement, within: bool) -> (Placement, bool);
@@ -52,6 +56,11 @@ pub trait Shapes {
     /// The sound of body `body` landing at `speed`, into water or not, if it is heard.
     fn sound(body: u32, water: bool, speed: f32) -> Option<Sound>;
 }
+
+/// How near a hand comes to any part of a body this participant holds in their other hand, as [`Shapes::touch`]
+/// measures it, to take it there, passing it from that hand: farther than a body lying loose is reached from, so that
+/// passing from hand to hand is forgiving.
+pub const PASS_REACH: f32 = 0.18;
 
 /// How long a taking waits for the server side to agree before it is given up, as when it was dropped.
 pub const UNAGREED: Duration = Duration::from_millis(1500);
@@ -128,6 +137,14 @@ fn now_minus(latest: Option<&(Instant, Placement)>, at: Instant) -> Duration {
     })
 }
 
+/// The place of hand `side` among those this participant holds with, left then right.
+fn which(side: Side) -> usize {
+    match side {
+        Side::Left => 0,
+        _ => 1,
+    }
+}
+
 /// A hand as a placement.
 pub fn placed(hand: &Hand) -> Placement {
     Placement::new(hand.position, hand.orientation.normalize())
@@ -148,6 +165,8 @@ pub struct Loose<S> {
     /// until the server side's epoch for each moves on: since when, or since each was last let go of again, and at
     /// which epoch.
     astray: BTreeMap<u32, (Instant, u32)>,
+    /// The hands that took a body from the other hand since this was last asked, which feel it.
+    passed: Vec<Side>,
     shapes: PhantomData<S>,
 }
 
@@ -159,6 +178,7 @@ impl<S> Default for Loose<S> {
             me: None,
             drawn: BTreeMap::new(),
             astray: BTreeMap::new(),
+            passed: Vec::new(),
             shapes: PhantomData,
         }
     }
@@ -246,11 +266,28 @@ impl<S: Shapes> Loose<S> {
                 .all(|holding| holding.body != body)
     }
 
+    /// The body this participant holds in the hand other than `side`, which that hand may take from it.
+    fn in_other(&self, side: Side) -> Option<u32> {
+        self.holding[1 - which(side)]
+            .as_ref()
+            .map(|holding| holding.body)
+    }
+
     /// What `ray` meets first of the bodies that may be taken, within [`PULL`], which the grip pulls to the hand.
     pub fn pick(&self, ray: &Ray) -> Option<Picked> {
+        self.picked(ray, None)
+    }
+
+    /// What the ray of the hand `side` meets first of the bodies that may be taken, or that this participant holds in
+    /// the other hand, which its grip passes to it, within [`PULL`].
+    pub fn pick_by(&self, side: Side, ray: &Ray) -> Option<Picked> {
+        self.picked(ray, self.in_other(side))
+    }
+
+    fn picked(&self, ray: &Ray, other: Option<u32>) -> Option<Picked> {
         self.drawn
             .iter()
-            .filter(|(body, _)| self.free(**body))
+            .filter(|(body, _)| self.free(**body) || other == Some(**body))
             .filter_map(|(body, placement)| {
                 S::met(ray.origin, ray.direction, *body, placement)
                     .filter(|along| *along <= PULL)
@@ -264,13 +301,34 @@ impl<S: Shapes> Loose<S> {
 
     /// The body that may be taken that a hand at `hand` is within [`Shapes::REACH`] of, the nearest.
     pub fn within_reach(&self, hand: Vec3) -> Option<String> {
+        self.reached(hand, None)
+    }
+
+    /// The nearest body that the hand `side`, at `hand`, is within [`Shapes::REACH`] of, or of any part of which, held in
+    /// this participant's other hand, it is within [`PASS_REACH`], which its grip passes to it.
+    pub fn within_reach_of(&self, side: Side, hand: Vec3) -> Option<String> {
+        self.reached(hand, self.in_other(side))
+    }
+
+    fn reached(&self, hand: Vec3, other: Option<u32>) -> Option<String> {
         self.drawn
             .iter()
-            .filter(|(body, _)| self.free(**body))
-            .map(|(body, placement)| (*body, S::reach(*body, placement, hand)))
-            .filter(|(_, distance)| *distance <= S::REACH)
+            .filter_map(|(body, placement)| {
+                if other == Some(*body) {
+                    Some((*body, S::touch(*body, placement, hand)))
+                        .filter(|(_, distance)| *distance <= PASS_REACH)
+                } else {
+                    Some((*body, S::reach(*body, placement, hand)))
+                        .filter(|(body, distance)| *distance <= S::REACH && self.free(*body))
+                }
+            })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(body, _)| format!("{}{}", S::PREFIX, S::number(body)))
+    }
+
+    /// The hands that took a body from the other hand since this was last asked, which feel it.
+    pub fn passed(&mut self) -> Vec<Side> {
+        std::mem::take(&mut self.passed)
     }
 
     /// A frame at `now`, the farmyard's clock at `clock`: the grips on bodies this frame, by this participant,
@@ -307,6 +365,15 @@ impl<S: Shapes> Loose<S> {
             };
             let hand = placed(&grab.hand);
             match grab.phase {
+                Phase::Began
+                    if participant.is_some()
+                        && self.holding[which].is_none()
+                        && self.holding[1 - which]
+                            .as_ref()
+                            .is_some_and(|holding| holding.body == body) =>
+                {
+                    intents.push(self.pass(body, grab.side, side, &hand, now));
+                }
                 Phase::Began => {
                     if participant.is_none() || !self.free(body) || self.holding[which].is_some() {
                         continue;
@@ -377,6 +444,52 @@ impl<S: Shapes> Loose<S> {
         }
         intents.extend(self.again(now, clock));
         intents
+    }
+
+    /// Body `body`, held in this participant's other hand, passed to the hand `grab`, `side` to the server side, at
+    /// `hand`, at `now`: in that hand at once, at the epoch the other hand's taking made, never let go on the way, held
+    /// where the hand took it, within [`PASS_REACH`] of any part of it and no farther than [`HOLD`] from it, or else pulled
+    /// to it as along the ray, its toasting, or anything else of it, kept; the other hand holding nothing, though its grip
+    /// is still closed, until it lets go and grips again. The latest grip wins: two hands on one body is a two-handed
+    /// carry, which is the two-handed proposal's third stage. What to ask the server side.
+    fn pass(
+        &mut self,
+        body: u32,
+        grab: Side,
+        side: tomori_physics::Side,
+        hand: &Placement,
+        now: Instant,
+    ) -> Intent {
+        let which = which(grab);
+        let from = self.holding[1 - which]
+            .take()
+            .expect("held in the other hand");
+        // Every body the mirror knows was drawn as it was shared, and one held is drawn each frame where it is held.
+        let at = self.drawn[&body];
+        let kept = hand.inverse().then(&at).snapped(Precision::Rest);
+        let (offset, pulled) =
+            if S::touch(body, &at, hand.position) <= PASS_REACH && kept.position.length() <= HOLD {
+                (kept, false)
+            } else {
+                let (offset, _) = S::held(body, &at, hand, false);
+                (offset.snapped(Precision::Rest), true)
+            };
+        self.holding[which] = Some(Holding {
+            body,
+            epoch: from.epoch.wrapping_add(1),
+            offset,
+            pulled: pulled.then_some((at, now)),
+            hand: VecDeque::from([(now, *hand)]),
+            since: now,
+            agreed: false,
+        });
+        self.passed.push(grab);
+        Intent::Take(Take {
+            body,
+            epoch: from.epoch,
+            hand: side,
+            offset: offset.encoded(Precision::Rest),
+        })
     }
 
     /// The bodies this participant let go of whose letting go the server side has not answered, and those it says they

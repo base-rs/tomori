@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Pass a stone or stick from hand to hand.** In the farmyard, squeeze your free hand's grip on the stone or marshmallow stick your other hand holds, touching it anywhere or pointing at it, and it moves into that hand at once, where you took it, without falling or a throw; you feel a light tap. Your first hand holds nothing now, even if you are still squeezing; let go and squeeze again to take it back. A marshmallow stays as toasted. With both hands on one thing, the latest grip has it, until two-handed carrying is designed. See `design/physics.md`.
+
+- For environments: `tomori-scene`'s `ClientSide` gains `pick_by` and `within_reach_of`, asked of each hand by its side, which are `pick` and `within_reach` unless a client side says, and `Output` gains `passed` and `with_pass`, **breaking** for code that builds `Output` field by field; `tomori-client`'s `feedback::Event` gains `Passed`, **breaking** for code that matches it exhaustively; `tomori-physics`'s `World` gains `passing`; `tomori-environment-farmyard`'s `campsite::Pose` gains `from_stick`, and its client crate's `loose::Shapes` requires `touch`, with `PASS_REACH`, `Loose::pick_by`, `within_reach_of` and `passed`, **breaking** for code that implements `Shapes`.
+
 - **Tomori's tools follow a moved session.** A space whose OpenCode session is moved to another directory, as with OpenCode's session move after a repository moves on disk, now follows it: Tomori's tools are removed from the old directory and registered for the new one, so that the agent keeps them, whether it moved while the server ran or while it was stopped, even from a directory that no longer exists. The server logs the move, and the space shows its new directory. See `design/mcp.md`.
 
 - For backends: `tomori-backend`'s `Snapshot` gains `directory`, where the session is now, **breaking** for code that builds it without `..`; `Event` gains `DirectoryChanged`, **breaking** for code that matches it exhaustively; and `Backend` gains `locate`, which says by default that it cannot tell.

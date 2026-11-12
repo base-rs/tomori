@@ -282,6 +282,89 @@ fn a_marshmallow_held_in_the_fire_is_foreseen_toasting_and_eases_to_what_the_ser
 }
 
 #[test]
+fn a_stick_passed_to_the_other_hand_is_held_where_that_hand_took_it_and_toasts_on_as_foreseen() {
+    let mut sticks = Sticks::new();
+    let ray = |from: Vec3, to: Vec3| Ray::new(from, (to - from).normalize()).unwrap();
+    // Nothing before the server side says what there is.
+    assert_eq!(sticks.pick_by(Side::Left, &ray(Vec3::ZERO, Vec3::X)), None);
+    sticks.share(&shared(|_| {}));
+    let start = Instant::now();
+    let me = Some(3);
+    sticks.update(
+        [grab(1, hand_on(1), Phase::Began, Side::Right)].iter(),
+        me,
+        start,
+        0,
+    );
+    sticks.changed(&holding(1, 1, held_by(3)), 0);
+    let mut now = start;
+    let right = over_the_fire();
+    for _ in 0..60 {
+        now += Duration::from_millis(16);
+        sticks.update(
+            [grab(1, right, Phase::Changed, Side::Right)].iter(),
+            me,
+            now,
+            0,
+        );
+        sticks.shown(&[], &[], now, 0);
+    }
+    let foreseen = sticks.foreseen[&campsite::body(1)];
+    assert!(foreseen > 0.0, "{foreseen}");
+    let was = sticks.shown(&[], &[], now, 0)[1];
+    // The left hand on its shaft, beyond the handle a free stick is taken by, takes it from the right hand there.
+    let pose = Pose::of(&placed(&right).then(&campsite::grip()));
+    let shaft = right.position + pose.along * 0.55;
+    assert_eq!(sticks.within_reach(shaft), None);
+    assert_eq!(sticks.within_reach_of(Side::Right, shaft), None);
+    assert_eq!(
+        sticks.within_reach_of(Side::Left, shaft).as_deref(),
+        Some("stick-1")
+    );
+    // The left ray meets it too, near the right hand, away from the fire; the right's not.
+    let handle = right.position + pose.along * 0.1;
+    let beside = handle + Vec3::new(0.0, 0.5, 0.3);
+    assert_eq!(
+        sticks
+            .pick_by(Side::Left, &ray(beside, handle))
+            .map(|picked| picked.object),
+        Some("stick-1".to_owned())
+    );
+    assert_ne!(
+        sticks
+            .pick_by(Side::Right, &ray(beside, handle))
+            .map(|picked| picked.object),
+        Some("stick-1".to_owned())
+    );
+    let left = Hand::new(shaft, right.orientation);
+    now += Duration::from_millis(16);
+    let intents = sticks.update([grab(1, left, Phase::Began, Side::Left)].iter(), me, now, 0);
+    let [Intent::Take(take)] = intents.as_slice() else {
+        panic!("{intents:?}")
+    };
+    assert_eq!((take.epoch, take.hand), (1, tomori_physics::Side::Left));
+    // Held where the left hand took it, not slid back to its handle: drawn just where it was, as toasted as foreseen.
+    let offset = take.offset.placement(Precision::Rest);
+    assert!(offset.position.distance(campsite::grip().position) > 0.3);
+    let shown = sticks.shown(&[], &[], now, 0)[1];
+    assert!(shown.transform.abs_diff_eq(was.transform, 1e-3));
+    assert!(sticks.foreseen[&campsite::body(1)] >= foreseen);
+    assert_eq!(sticks.passed(), [Side::Left]);
+    assert_eq!(sticks.loose().held_in(tomori_physics::Side::Right), None);
+    // The right grip, still closed, lets go of nothing.
+    assert!(
+        sticks
+            .update(
+                [grab(1, right, Phase::Ended, Side::Right)].iter(),
+                me,
+                now,
+                0
+            )
+            .is_empty()
+    );
+}
+
+#[test]
 fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_says_and_fresh_once_put_back()
  {
     let mut sticks = Sticks::new();

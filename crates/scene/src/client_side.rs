@@ -513,13 +513,14 @@ impl Selector {
     }
 }
 
-/// What a client side does each frame: the intents to send its server side, the sounds it makes, and what its scenery
-/// draws.
+/// What a client side does each frame: the intents to send its server side, the sounds it makes, the hands that took
+/// an object of its from the participant's other hand, which feel it, and what its scenery draws.
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Output {
     pub intents: Vec<Payload>,
     pub sounds: Vec<(Sound, [f32; 3])>,
+    pub passed: Vec<Side>,
     pub drawn: Option<Drawn>,
 }
 
@@ -537,6 +538,13 @@ impl Output {
     /// This output, making `sound` at `position` too.
     pub fn with_sound(mut self, sound: Sound, position: [f32; 3]) -> Self {
         self.sounds.push((sound, position));
+        self
+    }
+
+    /// This output, with the hand `side` having taken an object of its from the other hand, as a stone passed from hand
+    /// to hand, felt as a light tap on that hand where the client has haptics. See `design/feedback.md`.
+    pub fn with_pass(mut self, side: Side) -> Self {
+        self.passed.push(side);
         self
     }
 
@@ -559,6 +567,20 @@ pub trait ClientSide: Send {
     fn within_reach(&self, hand: Vec3) -> Option<String> {
         let _ = hand;
         None
+    }
+
+    /// What the ray of the hand `side` meets first, as [`ClientSide::pick`], which it is unless a client side says: so
+    /// that one may let a hand's ray meet what the participant holds in their other hand, which the grip passes to it.
+    fn pick_by(&self, side: Side, ray: &Ray) -> Option<Picked> {
+        let _ = side;
+        self.pick(ray)
+    }
+
+    /// The object of its within reach of the hand `side` at `hand`, as [`ClientSide::within_reach`], which it is unless
+    /// a client side says: so that one may let a hand take what the participant holds in their other hand, passing it.
+    fn within_reach_of(&self, side: Side, hand: Vec3) -> Option<String> {
+        let _ = side;
+        self.within_reach(hand)
     }
 
     /// A frame: take what the server side sent, move on to `input.now`, note what the participant points at and does,
@@ -638,6 +660,36 @@ mod tests {
         let picked = Picked::new("stick", "the stick", 1.0).handles(Actions::GRAB);
         assert!(picked.actions.contains(Actions::GRAB));
         assert!(!picked.actions.contains(Actions::SCROLL));
+    }
+
+    /// A client side that says only what its ray meets, a lamp ahead, as one from before either hand was asked.
+    struct Lamp;
+
+    impl ClientSide for Lamp {
+        fn pick(&self, ray: &Ray) -> Option<Picked> {
+            (ray.direction.z < 0.0).then(|| Picked::new("lamp", "the lamp", 1.0))
+        }
+
+        fn update(&mut self, _input: Input<'_>) -> Output {
+            Output::new().with_pass(Side::Left)
+        }
+    }
+
+    #[test]
+    fn a_client_side_that_says_nothing_of_either_hand_is_asked_of_each_as_of_any() {
+        let lamp = Lamp;
+        let ahead = Ray::new(Vec3::ZERO, Vec3::NEG_Z).unwrap();
+        for side in [Side::Left, Side::Right] {
+            assert_eq!(
+                lamp.pick_by(side, &ahead).map(|picked| picked.object),
+                Some("lamp".to_owned())
+            );
+            assert_eq!(lamp.within_reach_of(side, Vec3::ZERO), None);
+        }
+        // What it passes from hand to hand it says, in turn.
+        let output = Lamp.update(Input::new(Vec::new(), Instant::now()));
+        assert_eq!(output.passed, [Side::Left]);
+        assert!(Output::new().passed.is_empty());
     }
 
     #[test]

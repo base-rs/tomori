@@ -146,6 +146,12 @@ impl Pose {
         (distance <= reach && along >= 0.0).then_some(along)
     }
 
+    /// How far `point` is from any part of the stick, from its butt to its tip.
+    pub fn from_stick(&self, point: Vec3) -> f32 {
+        let along = (point - self.butt).dot(self.along).clamp(0.0, STICK_LENGTH);
+        point.distance(self.butt + self.along * along)
+    }
+
     /// How far `point` is from the part of the stick a hand holds, from its butt to its middle.
     pub fn from_handle(&self, point: Vec3) -> f32 {
         let along = (point - self.butt)

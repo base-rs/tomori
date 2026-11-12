@@ -27,11 +27,30 @@ struct Stick {
     there: Arc<AtomicBool>,
     /// Whether it is selectable and takes the right stick too.
     selectable: Arc<AtomicBool>,
+    /// Whether it is held in the right hand, for the left to take from it: the left ray, then, meets nothing of it, the
+    /// left hand reaches it from twice as far, and a squeeze of the left grip on it passes it, felt on the left hand.
+    passes: Arc<AtomicBool>,
     told: Told,
     left: ToldLeft,
 }
 
 impl crate::client_side::ClientSide for Stick {
+    fn pick_by(
+        &self,
+        side: crate::client_side::Side,
+        ray: &Ray,
+    ) -> Option<crate::client_side::Picked> {
+        let passes = self.passes.load(Ordering::Relaxed);
+        self.pick(ray)
+            .filter(|_| !passes || side == crate::client_side::Side::Right)
+    }
+
+    fn within_reach_of(&self, side: crate::client_side::Side, hand: Vec3) -> Option<String> {
+        let passes = self.passes.load(Ordering::Relaxed) && side == crate::client_side::Side::Left;
+        let reach = if passes { 0.2 } else { 0.1 };
+        (self.takes && hand.distance(HANDLE) < reach).then(|| "stick".to_owned())
+    }
+
     fn pick(&self, ray: &Ray) -> Option<crate::client_side::Picked> {
         let stick = crate::client_side::Picked::new("stick", "the stick", 1.0);
         (ray.direction.z < 0.0 && self.there.load(Ordering::Relaxed)).then(|| {
@@ -48,10 +67,6 @@ impl crate::client_side::ClientSide for Stick {
         })
     }
 
-    fn within_reach(&self, hand: Vec3) -> Option<String> {
-        (self.takes && hand.distance(HANDLE) < 0.1).then(|| "stick".to_owned())
-    }
-
     fn update(&mut self, input: crate::client_side::Input<'_>) -> crate::client_side::Output {
         self.left
             .lock()
@@ -61,7 +76,17 @@ impl crate::client_side::ClientSide for Stick {
             .lock()
             .unwrap()
             .push((self.made, input.grab, input.hands, input.participant));
-        crate::client_side::Output::new()
+        let passed = self.passes.load(Ordering::Relaxed)
+            && input
+                .left_grab
+                .as_ref()
+                .is_some_and(|grab| grab.phase == Phase::Began);
+        let output = crate::client_side::Output::new();
+        if passed {
+            output.with_pass(crate::client_side::Side::Left)
+        } else {
+            output
+        }
     }
 }
 
@@ -95,6 +120,8 @@ struct Rig {
     left: ToldLeft,
     there: Arc<AtomicBool>,
     selectable: Arc<AtomicBool>,
+    passes: Arc<AtomicBool>,
+    feedback: Feedback,
     now: Instant,
 }
 
@@ -105,13 +132,15 @@ impl Rig {
         let left = ToldLeft::default();
         let there = Arc::new(AtomicBool::new(true));
         let selectable = Arc::new(AtomicBool::new(false));
+        let passes = Arc::new(AtomicBool::new(false));
         let made = Arc::new(AtomicUsize::new(0));
         let factory: crate::client_side::Factory = {
-            let (told, left, there, selectable) = (
+            let (told, left, there, selectable, passes) = (
                 told.clone(),
                 left.clone(),
                 there.clone(),
                 selectable.clone(),
+                passes.clone(),
             );
             Arc::new(move |_: &str| {
                 Box::new(Stick {
@@ -119,6 +148,7 @@ impl Rig {
                     takes,
                     there: there.clone(),
                     selectable: selectable.clone(),
+                    passes: passes.clone(),
                     told: told.clone(),
                     left: left.clone(),
                 }) as Box<dyn crate::client_side::ClientSide>
@@ -140,6 +170,8 @@ impl Rig {
             left,
             there,
             selectable,
+            passes,
+            feedback: felt(),
             now: Instant::now(),
         };
         for _ in 0..400 {
@@ -157,7 +189,7 @@ impl Rig {
         self.step.update(
             &self.senses,
             &mut self.conversation,
-            &mut felt(),
+            &mut self.feedback,
             self.now,
             FRAME,
         );
@@ -478,6 +510,54 @@ fn the_left_grip_takes_a_stick_within_reach_of_the_left_hand_as_the_right_does()
     assert_eq!(right.map(|grab| grab.side), Some(Side::Right));
     rig.senses.grip = Some(0.0);
     rig.left_grip(0.0);
+    rig.left_grip(0.0);
+}
+
+#[test]
+fn each_hand_is_asked_what_it_reaches_and_points_at_by_its_side_and_a_pass_is_felt_on_the_hand_that_took_it()
+ {
+    use crate::client_side::Side;
+    let mut rig = Rig::new(ConnectionRole::Owner, true);
+    rig.passes.store(true, Ordering::Relaxed);
+    // The left ray ahead, on the stick, meets nothing of it, as its client side says for the left hand alone.
+    rig.senses.ray = behind();
+    rig.senses.left_ray = ahead();
+    rig.frame();
+    assert_eq!(rig.left_grip(1.0).0, None);
+    rig.left_grip(0.0);
+    // The left hand 15 cm from the handle reaches it, as its client side says the left hand does; the right would not.
+    let near = HANDLE + Vec3::new(0.15, 0.0, 0.0);
+    rig.senses.left_ray = behind();
+    rig.senses.controllers[crate::controller::LEFT] = Some(Pose {
+        position: near.to_array(),
+        orientation: glam::Quat::IDENTITY.to_array(),
+    });
+    rig.senses.controllers[crate::controller::RIGHT] = Some(Pose {
+        position: near.to_array(),
+        orientation: glam::Quat::IDENTITY.to_array(),
+    });
+    rig.frame();
+    assert_eq!(rig.grip(1.0), None);
+    rig.grip(0.0);
+    let _ = rig.feedback.haptics(rig.now + Duration::from_secs(1));
+    let (left, _) = rig.left_grip(1.0);
+    assert_eq!(
+        left.map(|grab| (grab.object, grab.phase, grab.side)),
+        Some(("stick".to_owned(), Phase::Began, Side::Left))
+    );
+    // Its client side passing it into the left hand, the left hand feels a light tap, and the right nothing.
+    let felt = rig.feedback.haptics(rig.now);
+    assert!(
+        felt.contains(&(
+            Side::Left,
+            tomori_client::feedback::Haptic::Vibrate {
+                length: Some(Duration::from_millis(15)),
+                amplitude: 0.35
+            }
+        )),
+        "{felt:?}"
+    );
+    assert!(felt.iter().all(|(hand, _)| *hand == Side::Left), "{felt:?}");
     rig.left_grip(0.0);
 }
 
