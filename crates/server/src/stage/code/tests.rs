@@ -58,6 +58,7 @@ fn tokens(content: &Content) -> Vec<(String, TokenKind)> {
 }
 
 #[test]
+#[cfg_attr(not(feature = "highlight"), ignore = "needs the server's highlighters")]
 fn a_code_block_is_a_code_panel_titled_with_its_info_string_and_highlighted() {
     let content = block(
         "rust",
@@ -119,6 +120,7 @@ fn a_block_of_one_line_or_none_stays_in_the_transcript_without_its_blank_lines()
 }
 
 #[test]
+#[cfg_attr(not(feature = "highlight"), ignore = "needs the server's highlighters")]
 fn a_long_block_keeps_its_first_lines_each_cut_and_says_how_long_it_is() {
     // The 17 lines of the block the maintainer could not scroll are all held, as are as many as a panel holds of a longer
     // one.
@@ -212,6 +214,7 @@ fn panel(content: &Content) -> Panel {
 }
 
 #[test]
+#[cfg_attr(not(feature = "highlight"), ignore = "needs the server's highlighters")]
 fn a_code_panel_sent_short_keeps_its_first_lines_and_their_spans_and_its_length() {
     // A long block, highlighted to its end, sent short: its first 16 lines, with their spans, and its length, so that a
     // client says how many it was not sent.
@@ -257,6 +260,7 @@ fn a_code_panel_sent_short_keeps_its_first_lines_and_their_spans_and_its_length(
 }
 
 #[test]
+#[cfg_attr(not(feature = "highlight"), ignore = "needs the server's highlighters")]
 fn code_is_cleaned_of_tabs_controls_and_format_characters() {
     let content = block(
         "rust\u{202e}",

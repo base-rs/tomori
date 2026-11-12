@@ -202,6 +202,7 @@ fn code_is_plain_when_it_cannot_be_highlighted() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "highlight"), ignore = "needs the server's highlighters")]
 fn only_the_code_of_the_last_reply_with_any_is_highlighted_and_within_bounds() {
     // An oversized reply: more code blocks than are projected, each far longer and wider than is shown.
     let line = format!("let s = \"{}\";", "é".repeat(1_000));
@@ -230,6 +231,8 @@ fn only_the_code_of_the_last_reply_with_any_is_highlighted_and_within_bounds() {
         let characters = text.chars().filter(|c| *c != '\n').count();
         assert!(characters > CODE_CHARS && characters <= 2 * CODE_CHARS);
         assert!(text.lines().count() <= CODE_LINES);
+        // The highlighters' own bound, which a server built without them has none of.
+        #[cfg(feature = "highlight")]
         assert!(text.len() <= tomori_highlight::INPUT_BYTES);
     }
     assert!(replies[0].0[0].0.code.as_ref().unwrap().spans.is_empty());
