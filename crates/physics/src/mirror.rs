@@ -4,8 +4,9 @@
 //! The client's half: every body as the side shares and announces it, drawn where it rests, between the snapshots of
 //! what moves, turning as it moves, [`DELAY`] behind the environment's clock, or, for a body this participant just let
 //! go, from their own foresight of it, under gravity from where they let it go, until the server's snapshots arrive, and
-//! then from those carried to the clock, so that the holder sees no hitch. What arrives that moves where a body is
-//! drawn is blended in over [`BLEND`], so that nothing jumps. A body on its way back fades out where it was and in where it returns
+//! then from those carried to the clock, so that the holder sees no hitch; and one someone else let go, alike, from
+//! where it was drawn in their hand, as fast as it moved there. What arrives that moves where a body is drawn is blended
+//! in over [`BLEND`], so that nothing jumps. A body on its way back fades out where it was and in where it returns
 //! to, [`Fade`], each over [`FADE`], and is never drawn between. A held body is placed by its holder's hand, which only
 //! the client knows each frame: see [`Mirror::held`].
 use std::collections::{BTreeMap, VecDeque};
@@ -13,7 +14,10 @@ use std::collections::{BTreeMap, VecDeque};
 use glam::{Quat, Vec3};
 
 use crate::message::{State, Update};
-use crate::{BLEND, DELAY, FADE, Held, Placement, Precision, SNAPSHOT_RATE, Settings};
+use crate::{
+    BLEND, DELAY, FADE, Held, Placement, Precision, RELEASE_SPEED, RELEASE_SPIN, SNAPSHOT_RATE,
+    Settings,
+};
 
 /// How many snapshots of each moving body are kept: two seconds of them.
 const TRACK: usize = 40;
@@ -21,6 +25,9 @@ const TRACK: usize = 40;
 /// the holder's foresight lasts without a snapshot, at most.
 const AHEAD: u64 = DELAY;
 const FORESIGHT: u64 = 500;
+/// How long back where a body was drawn in someone else's hand is followed, in milliseconds, to say how fast it moved
+/// as they let it go.
+const FOLLOWED: u64 = 80;
 
 /// How a body moves, in metres and radians a second.
 type Motion = (Vec3, Vec3);
@@ -172,6 +179,12 @@ struct Mirrored {
     correction: Option<Correction>,
     /// Its way back, while it is on it.
     back: Option<Back>,
+    /// Where it was drawn in someone else's hand, by the clock, over the last [`FOLLOWED`], while they hold it.
+    followed: VecDeque<(u64, Placement)>,
+    /// Whether they passed it to their other hand since it was last drawn; and, once it is, how far it is drawn from
+    /// where that hand puts it, as it was passed.
+    passing: bool,
+    passed: Option<Correction>,
 }
 
 impl Mirrored {
@@ -261,6 +274,50 @@ impl Mirrored {
             });
     }
 
+    /// Where it was last drawn in someone else's hand, and how fast and spinning it moved there, over the last
+    /// [`FOLLOWED`], within the bounds a letting go is held to, as a foresight from then.
+    fn followed(&self) -> Option<Foresight> {
+        let (&(from, first), &(to, last)) = self.followed.front().zip(self.followed.back())?;
+        let (velocity, spin) = if to > from {
+            moved(&first, &last, to - from)
+        } else {
+            (Vec3::ZERO, Vec3::ZERO)
+        };
+        Some(Foresight {
+            from: to,
+            at: last,
+            velocity: velocity.clamp_length_max(RELEASE_SPEED),
+            spin: spin.clamp_length_max(RELEASE_SPIN),
+        })
+    }
+
+    /// Where it would be drawn at `clock` in someone else's hand, moving on as it moved there, if it was drawn there.
+    fn foreseen(&self, clock: u64) -> Option<Placement> {
+        self.followed().map(|followed| {
+            let seconds = clock.saturating_sub(followed.from) as f32 / 1000.0;
+            Placement::new(
+                followed.at.position + followed.velocity * seconds,
+                spun(followed.at.rotation, followed.spin, seconds),
+            )
+        })
+    }
+
+    /// Let go by someone else: foreseen from where it was last drawn in their hand, as fast and spinning as it moved
+    /// there, as its holder foresees it, if it was drawn there.
+    fn freed(&mut self) -> bool {
+        let Some(foresight) = self.followed() else {
+            return false;
+        };
+        self.followed.clear();
+        self.passed = None;
+        self.track.clear();
+        self.rested = None;
+        self.ahead = None;
+        self.correction = None;
+        self.foresight = Some(foresight);
+        true
+    }
+
     /// Its foresight, once the server's first snapshot of it arrives at `clock`, giving way to them.
     fn answered(&mut self, clock: u64) {
         if let Some(foresight) = self.foresight.take() {
@@ -309,15 +366,25 @@ impl Mirror {
     /// What changed, as the side announced it at `sent` on the environment's clock, arriving at `now` on it, as this
     /// client reckons it. Each body it moves is drawn off from where it now is by as far as that moved it, less and
     /// less, over [`BLEND`], so that it never jumps; one beginning to move from rest moves from where it rested, a
-    /// snapshot's interval before. A body on its way back, from then, forgets how it moved, and its snapshots begin anew
-    /// where it returns to.
+    /// snapshot's interval before. One someone else let go is drawn on from where it was drawn in their hand, as
+    /// [`Mirror::drawn_held`] said, as fast as it moved there, foreseen until the server's snapshots take over and then
+    /// carried to the clock on them, as for its holder. A body on its way back, from then, forgets how it moved, and its
+    /// snapshots begin anew where it returns to.
     pub fn apply(&mut self, sent: u64, update: &Update, now: u64) {
-        // What someone else let go was drawn in their hand, which this does not know of, so it is not drawn off.
+        // What someone else let go that was never drawn in their hand is drawn from the first snapshot, not drawn off.
         let mut freed = Vec::new();
         for holding in &update.holding {
             if let Some(body) = self.bodies.get_mut(&holding.body) {
-                if body.held.is_some() && holding.held.is_none() {
+                if body.held.is_some() && holding.held.is_none() && !body.freed() {
                     freed.push(holding.body);
+                }
+                if body.held.is_none() {
+                    // Taken anew, followed anew.
+                    body.followed.clear();
+                    body.passing = false;
+                    body.passed = None;
+                } else if holding.held.is_some() && holding.held != body.held {
+                    body.passing = true;
                 }
                 body.epoch = holding.epoch;
                 body.held = holding.held;
@@ -387,6 +454,8 @@ impl Mirror {
         if let Some(mirrored) = self.bodies.get_mut(&body) {
             // In their hand until now, it neither rests nor moves as its snapshots said.
             mirrored.held = None;
+            mirrored.followed.clear();
+            mirrored.passed = None;
             mirrored.track.clear();
             mirrored.rested = None;
             mirrored.ahead = None;
@@ -398,6 +467,49 @@ impl Mirror {
                 spin,
             });
         }
+    }
+
+    /// Body `body`, which someone else holds, put at `at` at `clock` on the environment's clock by their hand; and where
+    /// it is drawn: there, or, just passed to their other hand, which puts it elsewhere, on from where it was drawn as it
+    /// moved, drawn off from where that hand puts it by as far, less and less, over [`BLEND`], so that it never jumps.
+    /// So that, once they let it go, it is drawn on from where it was drawn, as fast as it moved over the last
+    /// [`FOLLOWED`].
+    pub fn drawn_held(&mut self, body: u32, at: Placement, clock: u64) -> Placement {
+        let Some(mirrored) = self
+            .bodies
+            .get_mut(&body)
+            .filter(|body| body.held.is_some())
+        else {
+            return at;
+        };
+        if std::mem::take(&mut mirrored.passing) {
+            mirrored.passed = mirrored.foreseen(clock).map(|was| Correction {
+                at: clock,
+                position: was.position - at.position,
+                rotation: (was.rotation * at.rotation.inverse()).normalize(),
+            });
+        }
+        if mirrored
+            .passed
+            .is_some_and(|passed| clock >= passed.at + BLEND)
+        {
+            mirrored.passed = None;
+        }
+        let at = mirrored
+            .passed
+            .map_or(at, |passed| passed.applied(at, clock));
+        let followed = &mut mirrored.followed;
+        if followed
+            .back()
+            .is_some_and(|(then, _)| *then > clock || clock - then > FOLLOWED)
+        {
+            followed.clear();
+        }
+        followed.push_back((clock, at));
+        while followed.len() > 2 && clock - followed[1].0 >= FOLLOWED {
+            followed.pop_front();
+        }
+        at
     }
 
     /// Whether body `body` is known, and its epoch.
@@ -685,6 +797,161 @@ mod tests {
             mirror.placement(0, 1_420),
             Some(Placement::at(Vec3::new(1.0, 1.0, 0.0)))
         );
+    }
+
+    #[test]
+    fn what_someone_else_lets_go_is_drawn_on_from_their_hand_as_fast_as_it_moved_there() {
+        let mut mirror = Mirror::new();
+        mirror.share(&state());
+        // Body 1, held by participant 7, drawn in their hand each frame, moving along x at 2 m/s and turning about the
+        // vertical at a radian a second; followed for the last 80 ms only, anew after a gap, and passed to their other
+        // hand on the way, still followed. A body nobody holds is not followed.
+        let hand = |clock: u64| {
+            let seconds = (clock as f32 - 1_000.0) / 1_000.0;
+            Placement::new(
+                Vec3::new(2.0 * seconds, 1.0, 0.0),
+                Quat::from_rotation_y(seconds),
+            )
+        };
+        mirror.drawn_held(1, Placement::at(Vec3::new(9.0, 0.0, 0.0)), 500);
+        for clock in (800..=996).step_by(14) {
+            mirror.drawn_held(1, hand(clock), clock);
+            if clock == 912 {
+                mirror.apply(
+                    clock,
+                    &Update {
+                        holding: vec![Holding {
+                            body: 1,
+                            epoch: 2,
+                            held: Some(Held {
+                                by: 7,
+                                hand: Side::Right,
+                                offset: Encoded::default(),
+                            }),
+                        }],
+                        ..Default::default()
+                    },
+                    clock,
+                );
+            }
+        }
+        mirror.drawn_held(0, hand(996), 996);
+        assert!(mirror.bodies[&0].followed.is_empty());
+        let followed = &mirror.bodies[&1].followed;
+        assert_eq!((followed[0].0, followed.len()), (912, 7));
+        // Let go, with the side's first snapshot, as it had it a little behind their hand: drawn on from where it was
+        // drawn in their hand, as fast as it moved there, under gravity, and then on the snapshots carried to the clock,
+        // each frame farther along, until it is where they say.
+        let snapshot = |sent: u64| Snapshot::new(1, &hand(sent), Precision::Moving);
+        mirror.apply(
+            1_000,
+            &Update {
+                holding: vec![Holding {
+                    body: 1,
+                    epoch: 3,
+                    held: None,
+                }],
+                moving: vec![snapshot(1_000)],
+                ..Default::default()
+            },
+            1_010,
+        );
+        let foreseen = Placement::new(
+            Vec3::new(0.02, 1.0 - 0.5 * 9.81 * 0.014 * 0.014, 0.0),
+            Quat::from_rotation_y(0.01),
+        );
+        let (x, angle) = apart(mirror.placement(1, 1_010).unwrap(), foreseen);
+        assert!(x < 1e-3 && angle < 1e-3, "{x} {angle}");
+        assert!(mirror.bodies[&1].followed.is_empty());
+        let mut was = mirror.placement(1, 1_010).unwrap();
+        let mut next = 1_050;
+        for clock in (1_024..1_500).step_by(14) {
+            if clock >= next + 10 && next <= 1_400 {
+                mirror.apply(
+                    next,
+                    &Update {
+                        moving: vec![snapshot(next)],
+                        ..Default::default()
+                    },
+                    clock,
+                );
+                next += 50;
+            }
+            let at = mirror.placement(1, clock).unwrap();
+            let step = at.position.x - was.position.x;
+            assert!(step > 0.01 && step < 0.05, "{clock}: {step}");
+            was = at;
+        }
+        let (x, angle) = apart(mirror.placement(1, 1_490).unwrap(), hand(1_490));
+        assert!(x < 1e-2 && angle < 1e-2, "{x} {angle}");
+        // Taken again, drawn in their hand only once and let go: falling from there, unmoving as it begins to.
+        let holding = |epoch, held| Update {
+            holding: vec![Holding {
+                body: 1,
+                epoch,
+                held,
+            }],
+            ..Default::default()
+        };
+        let held = state().bodies[1].held;
+        mirror.apply(2_000, &holding(4, held), 2_000);
+        let at = Placement::at(Vec3::new(5.0, 1.0, 0.0));
+        mirror.drawn_held(1, at, 2_000);
+        mirror.apply(2_000, &holding(5, None), 2_000);
+        let fallen = mirror.placement(1, 2_100).unwrap().position;
+        assert_eq!((fallen.x, fallen.z), (5.0, 0.0));
+        assert!(
+            (fallen.y - (1.0 - 0.5 * 9.81 * 0.01)).abs() < 1e-4,
+            "{fallen}"
+        );
+    }
+
+    #[test]
+    fn what_someone_else_passes_to_their_other_hand_is_eased_there_from_where_it_was() {
+        let mut mirror = Mirror::new();
+        mirror.share(&state());
+        // Body 1, held by participant 7 in their left hand, moving along x at a metre a second, drawn where it is put.
+        let moving = |clock: u64| Placement::at(Vec3::new(clock as f32 / 1000.0, 1.0, 0.0));
+        for clock in (1_000..=1_098).step_by(14) {
+            assert_eq!(mirror.drawn_held(1, moving(clock), clock), moving(clock));
+        }
+        // Passed to their right hand, which puts it 5 cm higher and turned: drawn on from where it was as it moved, then
+        // eased into that hand, each frame moving on, rising no more than a centimetre, until it is where it is put.
+        mirror.apply(
+            1_100,
+            &Update {
+                holding: vec![Holding {
+                    body: 1,
+                    epoch: 2,
+                    held: Some(Held {
+                        by: 7,
+                        hand: Side::Right,
+                        offset: Encoded::default(),
+                    }),
+                }],
+                ..Default::default()
+            },
+            1_100,
+        );
+        let other = |clock: u64| {
+            Placement::new(
+                moving(clock).position + Vec3::new(0.0, 0.05, 0.0),
+                Quat::from_rotation_y(0.2),
+            )
+        };
+        let mut was = mirror.drawn_held(1, other(1_112), 1_112);
+        let (x, angle) = apart(was, moving(1_112));
+        assert!(x < 1e-4 && angle < 1e-4, "{x} {angle}");
+        for clock in (1_126..1_300).step_by(14) {
+            let at = mirror.drawn_held(1, other(clock), clock);
+            assert!(at.position.x - was.position.x > 0.013, "{clock}");
+            assert!((at.position.y - was.position.y).abs() < 0.01, "{clock}");
+            was = at;
+        }
+        assert_eq!(mirror.drawn_held(1, other(1_300), 1_300), other(1_300));
+        assert_eq!(mirror.bodies[&1].passed, None);
+        // A body nobody holds is drawn where it is put.
+        assert_eq!(mirror.drawn_held(0, other(1_300), 1_300), other(1_300));
     }
 
     #[test]

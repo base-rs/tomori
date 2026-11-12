@@ -500,6 +500,8 @@ pub struct Step {
     indicator: Indicator,
     /// What each hand's ray points at, chooses and takes hold of. See `design/interaction.md`.
     hands: Hands<HandState>,
+    /// The others' hands, drawn between the presence updates that bring them, for the environment's client side.
+    relayed: Hands<crate::relayed::Relayed>,
     /// The hand whose trigger began drawing the swarm first, outside a space, while either does.
     attracting: Option<Side>,
     /// The agent as this client shows it: the swarm, or the avatar the joined space's backend names. See
@@ -714,6 +716,7 @@ impl Default for Step {
             wrist: Wrist::default(),
             indicator: Indicator::default(),
             hands: Hands::default(),
+            relayed: Hands::default(),
             attracting: None,
             coordinator: crate::avatar::Coordinator::default(),
             signals: interaction::Signals::default(),
@@ -2648,22 +2651,27 @@ impl Step {
                     self.hands.left.grip_closed,
                     Side::Left,
                 );
-                let hands_of = |hands: Vec<(u32, tomori_protocol::Pose)>| {
-                    hands
-                        .into_iter()
-                        .map(|(source, pose)| {
-                            (
-                                source,
-                                crate::client_side::Hand::new(
-                                    carriage.unplace(Vec3::from_array(pose.position)),
-                                    unturn * glam::Quat::from_array(pose.orientation).normalize(),
-                                ),
-                            )
-                        })
-                        .collect()
-                };
-                let hands = hands_of(conversation.right_hands());
-                let left_hands = hands_of(conversation.left_hands());
+                // The others' hands, each drawn between the presence updates that bring it, about a frame behind.
+                let hands_of =
+                    |relayed: &mut crate::relayed::Relayed,
+                     hands: Vec<(u32, tomori_protocol::Pose)>| {
+                        let hands = hands
+                            .into_iter()
+                            .map(|(source, pose)| {
+                                (
+                                    source,
+                                    crate::client_side::Hand::new(
+                                        carriage.unplace(Vec3::from_array(pose.position)),
+                                        unturn
+                                            * glam::Quat::from_array(pose.orientation).normalize(),
+                                    ),
+                                )
+                            })
+                            .collect();
+                        relayed.update(now, hands)
+                    };
+                let hands = hands_of(&mut self.relayed.right, conversation.right_hands());
+                let left_hands = hands_of(&mut self.relayed.left, conversation.left_hands());
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(

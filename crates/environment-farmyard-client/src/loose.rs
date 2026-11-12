@@ -6,7 +6,8 @@
 //! `tomori-physics`'s mirror of them; those this participant holds, one in each hand, drawn from their own hand every
 //! frame, taken within reach of it or pulled to it along the ray, passed from one hand to the other as the free hand
 //! grips what the other holds, and let go, thrown as fast as the hand moved, foreseen until the server's snapshots take
-//! over; those the others hold, drawn from the hands their presence brings; and the sounds of those that land; and
+//! over; those the others hold, drawn from the hands their presence brings, eased from one to the other as they pass
+//! them, and let go, drawn on from there as fast as they moved; and the sounds of those that land; and
 //! those on their way back, fading out where they were and in where they return to, which nobody takes until they are
 //! there. What differs between them, their shapes, how a hand holds them and how they sound, is
 //! their [`Shapes`]. The client never simulates. See `design/physics.md`.
@@ -572,12 +573,15 @@ impl<S: Shapes> Loose<S> {
                             tomori_physics::Side::Left => left,
                             tomori_physics::Side::Right => right,
                         };
-                        hands
+                        let placement = hands
                             .iter()
                             .find(|(number, _)| *number == held.by)
                             .map(|(_, hand)| S::lifted(body, held.placement(&placed(hand))))
                             .or_else(|| self.drawn.get(&body).copied())
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        // Eased from one of their hands to the other as they pass it, and, let go, drawn on from
+                        // where it was drawn, as fast as it moved.
+                        self.mirror.drawn_held(body, placement, clock)
                     }
                     (None, None) => self
                         .mirror

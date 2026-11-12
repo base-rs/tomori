@@ -319,21 +319,19 @@ fn a_stone_another_holds_is_drawn_in_their_hand_or_where_it_was_last() {
     // Their hand unreported, it stays where it was drawn.
     let again = stones.shown(&[], &[], Instant::now(), 40);
     assert_eq!(again[1], shown[1]);
-    // In their right hand, from their right hand.
+    // Passed to their right hand, eased there from where it was, and then from their right hand.
     stones.changed(50, &held(tomori_physics::Side::Right), 60);
     let right = Hand::new(Vec3::new(10.0, 1.2, -5.0), Quat::IDENTITY);
+    let at = |shown: &[Shown]| shown[1].transform.w_axis.truncate();
     let shown = stones.shown(&[(7, right)], &[], Instant::now(), 70);
-    assert!(
-        shown[1]
-            .transform
-            .w_axis
-            .truncate()
-            .distance(Vec3::new(10.0, 1.2, -5.05))
-            < 1e-3
-    );
+    assert!(at(&shown).distance(Vec3::new(10.5, 1.0, -5.05)) < 1e-3);
+    let shown = stones.shown(&[(7, right)], &[], Instant::now(), 145);
+    assert!(at(&shown).distance(Vec3::new(10.25, 1.1, -5.05)) < 1e-3);
+    let shown = stones.shown(&[(7, right)], &[], Instant::now(), 220);
+    assert!(at(&shown).distance(Vec3::new(10.0, 1.2, -5.05)) < 1e-3);
     // Never drawn inside the shingle, though held there.
     let low = Hand::new(lying(0).position - Vec3::Y * 0.2, Quat::IDENTITY);
-    let shown = stones.shown(&[(7, low)], &[], Instant::now(), 80);
+    let shown = stones.shown(&[(7, low)], &[], Instant::now(), 230);
     let point = shown[1].transform.w_axis.truncate();
     assert!(point.y > beach::height(Vec2::new(point.x, point.z)).unwrap());
     // Nothing known, nothing drawn.
