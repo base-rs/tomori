@@ -473,7 +473,7 @@ impl Mirror {
     /// it is drawn: there, or, just passed to their other hand, which puts it elsewhere, on from where it was drawn as it
     /// moved, drawn off from where that hand puts it by as far, less and less, over [`BLEND`], so that it never jumps.
     /// So that, once they let it go, it is drawn on from where it was drawn, as fast as it moved over the last
-    /// [`FOLLOWED`].
+    /// `FOLLOWED`.
     pub fn drawn_held(&mut self, body: u32, at: Placement, clock: u64) -> Placement {
         let Some(mirrored) = self
             .bodies
@@ -539,7 +539,7 @@ impl Mirror {
     /// Where body `body` is drawn at `clock` on the environment's clock, unless someone holds it: where it rests,
     /// between its snapshots, as this participant foresees it, carried to the clock once the server's snapshots have
     /// taken over from that, or on its way back, where it was or where it returns to. A foresight nothing answers for
-    /// [`FORESIGHT`] is given up; one answered is drawn behind the clock again once it rests; and a body is back once
+    /// `FORESIGHT` is given up; one answered is drawn behind the clock again once it rests; and a body is back once
     /// it is whole.
     pub fn placement(&mut self, body: u32, clock: u64) -> Option<Placement> {
         let mirrored = self

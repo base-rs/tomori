@@ -606,8 +606,8 @@ pub fn foresee(foreseen: f32, said: f32, at: Vec3, seconds: f32) -> f32 {
 
 /// The toasting this participant foresees of a marshmallow they hold, `foreseen`, at `at`, `seconds` on, as the server
 /// side said `said`, the fire as big as it said, `size`: toasted by the same rule the side toasts it by, never more
-/// than [`AHEAD`] beyond what the side said, which only rises, so that it never runs far from what everyone else sees,
-/// and eased up to it, should it fall more than [`BEHIND`] short, so that it never jumps.
+/// than `AHEAD` beyond what the side said, which only rises, so that it never runs far from what everyone else sees,
+/// and eased up to it, should it fall more than `BEHIND` short, so that it never jumps.
 pub fn foresee_by(foreseen: f32, said: f32, at: Vec3, seconds: f32, size: f32) -> f32 {
     let toasted = campsite::toasted_at(foreseen, at, seconds, size).min((said + AHEAD).min(1.0));
     let least = (said - BEHIND).max(0.0);

@@ -369,7 +369,7 @@ fn roughness(kind: Kind) -> (f32, f32, f32, (f32, f32), f32) {
 /// or, a long one, much longer: its bottom flat and its top flat but a little tilted, each its own way, as stones
 /// chosen for a cairn are, so that it lies still where it is put and a stone put on it lies still on it. It is drawn
 /// from the same points, and collided as their convex hull, at most [`tomori_physics::HULL_POINTS`]. A building stone
-/// is [`dressed`] rather than worn.
+/// is `dressed` rather than worn.
 pub fn stone(index: usize) -> Vec<Vec3> {
     if building(index) {
         return dressed(index);
@@ -598,7 +598,7 @@ fn building_homes() -> Vec<(usize, Placement)> {
 
 /// Where stone `index` lies to begin with, roughly, as the server side lets it settle: the river's scattered over the
 /// beach, more of them near the water, apart from each other, from the building stones and from the river's own
-/// stones, each turned as it fell; and the building stones as [`building_homes`] lays them.
+/// stones, each turned as it fell; and the building stones as `building_homes` lays them.
 pub fn homes() -> Vec<Placement> {
     let boulders = boulders();
     let dry = dry();
@@ -670,8 +670,8 @@ pub const GRANITE: f32 = 2_650.0;
 const HEFTED: f32 = 1.5;
 const HEAVIEST: f32 = 0.25;
 
-/// How much of the hand's speed stone `index` leaves it with: all of it, for a stone of [`HEFTED`] or less, and less
-/// the heavier it is, down to [`HEAVIEST`], so that a big stone thrown as a small one is goes slower and less far, as
+/// How much of the hand's speed stone `index` leaves it with: all of it, for a stone of `HEFTED` or less, and less
+/// the heavier it is, down to `HEAVIEST`, so that a big stone thrown as a small one is goes slower and less far, as
 /// it would, and a building stone, of 50 kg or more, barely leaves the hand.
 pub fn heft(index: usize) -> f32 {
     let mass = volume(index) * GRANITE;
@@ -694,7 +694,7 @@ fn region() -> Vec<Vec2> {
 
 const MEADOW_SQUARE: f32 = 1.0;
 
-/// The ground as it is drawn within reach of the beach, which its stones rest on: the meadow, within [`region`], at its
+/// The ground as it is drawn within reach of the beach, which its stones rest on: the meadow, within `region`, at its
 /// height in squares a metre across, the
 /// foothills' faces about it, the beach's among them, down the bank and across the river's bed to its far bank, and the
 /// trail's track and its edges' slopes; each triangle as it is drawn, so that a stone rests on what is seen.
@@ -936,7 +936,7 @@ pub fn pebbles() -> Vec<(Vec3, f32, u32)> {
         .collect()
 }
 
-/// The beach's pebbles, as a model of one node, each a low pyramid of [`PEBBLE_SIDES`] faces, its foot following the
+/// The beach's pebbles, as a model of one node, each a low pyramid of `PEBBLE_SIDES` faces, its foot following the
 /// ground and sunk a little into it, a grey or a brown of its own. Its shingle is the ground's own faces, which the
 /// yard and the backdrop draw.
 pub fn model() -> Model {
