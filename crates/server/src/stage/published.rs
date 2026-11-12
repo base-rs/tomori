@@ -54,6 +54,10 @@ pub(super) struct Published {
     /// no more updates nor choices, and is taken away [`WITHDRAWN_SECS`] later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) gone: Option<u64>,
+    /// The window it is declared to show, by [`tomori_environment::Panel::for_window`], if any. See
+    /// `design/panel-context.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) window: Option<(i64, i64)>,
 }
 
 /// Why a row of an instance its side has not published yet is not chosen: what it shows is its panel's, not its own.
@@ -508,6 +512,7 @@ pub struct Publishing {
     highlighted: Option<String>,
     columns: Vec<ListColumn>,
     depends: Vec<String>,
+    window: Option<(i64, i64)>,
 }
 
 impl Publishing {
@@ -520,6 +525,16 @@ impl Publishing {
         let declared = panel.columns().to_vec();
         let depends = panel.depends().to_vec();
         super::context::dependencies(&depends)?;
+        let window = panel.window();
+        if let Some((from_ms, to_ms)) = window
+            && !(from_ms < to_ms
+                && from_ms >= tomori_environment::chart::CHART_EARLIEST_MS
+                && to_ms <= tomori_environment::chart::CHART_INSTANT_MS)
+        {
+            return Err(
+                "A panel's window ends after it begins, within the years 0 to 9999.".to_owned(),
+            );
+        }
         let (id, title, body, chart, wall, slot, reference) = panel.into_parts();
         // An instance the server made is published to by the id it minted, which no panel of the side's own takes.
         if !(tomori_environment::valid_panel_id(&id) || tomori_environment::is_instance(&id)) {
@@ -572,8 +587,17 @@ impl Publishing {
             highlighted,
             columns,
             depends,
+            window,
         };
         Ok(publishing)
+    }
+
+    /// Whether it is declared to show what the window from `from_ms` to `to_ms` held: a chart whose time axis is that
+    /// window, or a panel published [`tomori_environment::Panel::for_window`] it.
+    pub(super) fn declared_for(&self, (from_ms, to_ms): (i64, i64)) -> bool {
+        self.window == Some((from_ms, to_ms))
+            || self.chart.as_ref().and_then(|chart| chart.time)
+                == Some(tomori_environment::chart::TimeAxis::Fixed { from_ms, to_ms })
     }
 
     /// How many bytes of JSON its content and chart take.
@@ -693,6 +717,12 @@ impl Stage {
             }
             return Ok(Change::Unchanged);
         }
+        // A panel held to a window takes only content declared for it, keeping what it shows otherwise.
+        if let Some(window) = self.held_window(walls.environment, publishing.id())
+            && !publishing.declared_for(window)
+        {
+            return Ok(Change::Unchanged);
+        }
         let Publishing {
             id,
             content,
@@ -704,6 +734,7 @@ impl Stage {
             highlighted,
             columns,
             depends,
+            window,
         } = publishing;
         let earlier = self
             .kept_published(walls.environment, &id)
@@ -724,6 +755,7 @@ impl Stage {
             of: None,
             copied: false,
             gone: None,
+            window,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -837,6 +869,7 @@ impl Stage {
                         && same_rows(published.rows.as_deref(), publishing.rows.as_deref())
                         && published.columns == publishing.columns
                         && published.depends == publishing.depends
+                        && published.window == publishing.window
                 }) && kept.content == publishing.content
             })
     }
@@ -1096,6 +1129,13 @@ impl Stage {
         }
         if published.copied {
             return Err(COPYING);
+        }
+        // Held to a window it shows nothing for yet, it shows no rows to choose.
+        if self
+            .held_window(walls.environment, &published.id)
+            .is_some_and(|window| !published.shows_window(window))
+        {
+            return Err(super::held::WAITING_ROWS);
         }
         Ok((&published.id, &row.id))
     }

@@ -376,6 +376,7 @@ pub struct Panel {
     highlighted: Option<String>,
     columns: Vec<Column>,
     depends: Vec<String>,
+    window: Option<(i64, i64)>,
 }
 
 impl Panel {
@@ -393,6 +394,7 @@ impl Panel {
             highlighted: None,
             columns: Vec::new(),
             depends: Vec::new(),
+            window: None,
         }
     }
 
@@ -448,6 +450,30 @@ impl Panel {
     /// The parameters it depends on, by their ids, in the order it named them.
     pub fn depends(&self) -> &[String] {
         &self.depends
+    }
+
+    /// The panel, declared to show what the window from `from_ms` to `to_ms` held, absolute instants in milliseconds
+    /// since the Unix epoch in UTC, as a panel whose time is fixed to that window is shown only with content for it.
+    /// A chart says its window by its time axis ([`crate::chart::TimeAxis::Fixed`]) and needs none. A side without
+    /// history, or past what it keeps, publishes for the window it was told a panel saying it has no data for it, never
+    /// what it shows live. The server refuses a window that does not end after it begins, or reaches beyond the years 0
+    /// to 9999. See `design/panel-context.md`.
+    ///
+    /// ```
+    /// use tomori_environment::Panel;
+    ///
+    /// let pods = Panel::text("pods", "Pods", "No history for that window.").depends_on(["time"]).for_window(0, 60_000);
+    /// assert_eq!(pods.window(), Some((0, 60_000)));
+    /// assert_eq!(Panel::text("rota", "Rota", "").window(), None);
+    /// ```
+    pub fn for_window(mut self, from_ms: i64, to_ms: i64) -> Self {
+        self.window = Some((from_ms, to_ms));
+        self
+    }
+
+    /// The window it is declared to show, if it is declared for one.
+    pub fn window(&self) -> Option<(i64, i64)> {
+        self.window
     }
 
     /// The panel, highlighting its row `row`, by its id: the server draws that row with a pointer before it. Only a list
