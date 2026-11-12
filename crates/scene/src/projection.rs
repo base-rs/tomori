@@ -2088,17 +2088,13 @@ impl Projector {
                 let scroll = self.scroll(&panel.id);
                 self.faces_for(panel).item(fit, model, scroll, point)
             });
-            told[side].part = pointed
+            let met = pointed
                 .zip(hand.ray)
-                .and_then(|((panel, model, fit, ..), ray)| {
-                    let (met, _) = self.meet(panel, model, fit, &ray)?;
-                    Some(match met {
-                        volume::Met::Node(node) => {
-                            Part::Node(panel.diagram.as_ref()?.nodes.get(node)?.id.clone())
-                        }
-                        volume::Met::Edge(edge) => Part::Edge(u16::try_from(edge).ok()?),
-                    })
-                });
+                .and_then(|((panel, model, fit, ..), ray)| self.meet(panel, model, fit, &ray))
+                .map(|(met, _)| met);
+            told[side].part = pointed
+                .zip(met)
+                .map(|((panel, ..), met)| self.named(panel, met));
             // The trigger, pressed on a node, focuses on it, for this participant alone, or, on the node focused on,
             // ends the focus.
             let trigger = hand.free && hand.active && hand.pointing;
@@ -2106,11 +2102,7 @@ impl Projector {
             self.triggers[side] = trigger;
             if pressed
                 && self.held[side].is_none()
-                && let (Some((panel, ..)), Some(Part::Node(node))) = (pointed, &told[side].part)
-                && let Some(index) = panel
-                    .diagram
-                    .as_ref()
-                    .and_then(|diagram| diagram.node(node))
+                && let (Some((panel, ..)), Some(volume::Met::Node(index))) = (pointed, met)
             {
                 let focus = (panel.id.clone(), index);
                 self.focus = (self.focus.as_ref() != Some(&focus)).then_some(focus);
@@ -2260,10 +2252,10 @@ impl Projector {
             .saturating_duration_since(*self.started.get_or_insert(input.now))
             .as_secs_f32();
         for (panel, model, fit) in &standing {
-            let (Some(diagram), Some(mesh)) = (&panel.diagram, self.meshes.get(&panel.id)) else {
+            let Some(mesh) = self.meshes.get(&panel.id) else {
                 continue;
             };
-            let model = *model * volume::placed(panel, diagram, *fit);
+            let model = *model * volume::placed(panel, mesh.source(), *fit);
             let focus = self
                 .focus
                 .as_ref()
@@ -2833,10 +2825,20 @@ impl Projector {
     /// The node or edge of `panel`, a volume standing at `model` sized as `fit` says, that `ray` meets first, and how
     /// far along it; `None` for a panel that is not a volume, or where the ray meets neither.
     fn meet(&self, panel: &Panel, model: Mat4, fit: Fit, ray: &Ray) -> Option<(volume::Met, f32)> {
-        let diagram = panel.diagram.as_ref()?;
-        self.meshes
-            .get(&panel.id)?
-            .hit(model * volume::placed(panel, diagram, fit), ray)
+        // Every volume shown has its mesh, kept as the projection is followed, and no other panel has one.
+        let mesh = self.meshes.get(&panel.id)?;
+        mesh.hit(model * volume::placed(panel, mesh.source(), fit), ray)
+    }
+
+    /// What `met` of the volume `panel`, which the ray met, is named: its node by its id, or its edge by its index.
+    fn named(&self, panel: &Panel, met: volume::Met) -> Part {
+        match met {
+            volume::Met::Node(node) => {
+                Part::Node(self.meshes[&panel.id].diagram().nodes[node].id.clone())
+            }
+            // At most `diagram::EDGES` of them, which a u16 holds.
+            volume::Met::Edge(edge) => Part::Edge(edge as u16),
+        }
     }
 
     /// The node this participant focuses on, by its volume's identity and its index, if any.

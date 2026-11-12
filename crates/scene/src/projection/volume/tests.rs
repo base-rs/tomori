@@ -105,6 +105,26 @@ fn groups_are_trays_floors_and_frames_with_their_labels() {
     // The node, a tray, a floor and a frame's twelve edges.
     assert_eq!(counted(&instances, Solid::Box), 1 + 1 + 1 + 12);
     assert_eq!(mesh.labels(), 1 + 3);
+    // Focused on the node, the groups dim.
+    let mut focused = Vec::new();
+    mesh.instances(Mat4::IDENTITY, Some(0), 0.0, &mut focused);
+    assert_eq!(focused[1].colour, TRAY.map(|channel| channel * DIMMED));
+    // A volume floating is as large as its face's cells, as every panel is.
+    let panel = Panel::new(
+        "panel-1",
+        "Groups",
+        "",
+        Place::Free {
+            pose: Pose::default(),
+        },
+    )
+    .with_diagram(drawn.clone());
+    let (columns, rows) = fit(&panel, &drawn, Fit::Text);
+    assert_eq!(crate::projection::fit(&panel, Fit::Text), (columns, rows));
+    assert_eq!(
+        crate::projection::fitted_size(&panel, Fit::Text),
+        super::super::sized(columns, rows)
+    );
 }
 
 #[test]
@@ -269,6 +289,10 @@ fn labels_are_drawn_smaller_with_the_volume_down_to_their_least() {
         Vec3::X * 0.5
     );
     assert_eq!(point_along(&[Vec3::ZERO, Vec3::X], 5.0), Vec3::X);
+    assert_eq!(
+        point_along(&[Vec3::ZERO, Vec3::ZERO, Vec3::X], 0.0),
+        Vec3::ZERO
+    );
     assert_eq!(Solid::ALL.len(), 7);
     // More nodes than are labelled: the largest are.
     let nodes: Vec<(String, Shape, [i16; 3])> = (0..40)

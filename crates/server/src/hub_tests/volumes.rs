@@ -360,11 +360,10 @@ fn a_volume_goes_onto_the_wall_whoever_asked_was_looking_at_or_else_floats_besid
     hub.drive_event(&space, Event::Delivered { key: prompt.key });
     reply(&hub, &space, "m1", BLOCK);
     let (shown, _) = volumes(&ada);
-    assert!(
-        matches!(&shown[0].place, tomori_protocol::Place::Wall { wall: on, .. } if *on == wall),
-        "{:?}",
-        shown[0].place
-    );
+    let tomori_protocol::Place::Wall { wall: on, .. } = &shown[0].place else {
+        unreachable!("on the wall she looked at, not {:?}", shown[0].place)
+    };
+    assert_eq!(*on, wall);
     // Asked again looking away from every wall, its next goes beside her.
     ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.5, 6.0]));
     hub.drive_event(&space, Event::Idle);
@@ -377,8 +376,7 @@ fn a_volume_goes_onto_the_wall_whoever_asked_was_looking_at_or_else_floats_besid
         &BLOCK.replace("id: renderer", "id: other"),
     );
     let (shown, _) = volumes(&ada);
-    assert!(matches!(
-        shown[1].place,
-        tomori_protocol::Place::Free { .. }
-    ));
+    let tomori_protocol::Place::Free { .. } = shown[1].place else {
+        unreachable!("floating beside her, not {:?}", shown[1].place)
+    };
 }

@@ -216,15 +216,15 @@ pub(super) fn turned(spots: &mut [Spot]) {
     let mut axes = [first, second, third];
     let project =
         |spot: &Spot, axis: &Spot| (0..3).map(|index| spot[index] * axis[index]).sum::<f64>();
-    if let Some(start) = centred.first() {
-        if project(start, &axes[0]) > 0.0 {
-            axes[0] = axes[0].map(|value| -value);
-            axes[2] = axes[2].map(|value| -value);
-        }
-        if project(start, &axes[1]) < 0.0 {
-            axes[1] = axes[1].map(|value| -value);
-            axes[2] = axes[2].map(|value| -value);
-        }
+    // Signed by the first node, of which there is always one where a layout is turned.
+    let start = centred.first().copied().unwrap_or_default();
+    if project(&start, &axes[0]) > 0.0 {
+        axes[0] = axes[0].map(|value| -value);
+        axes[2] = axes[2].map(|value| -value);
+    }
+    if project(&start, &axes[1]) < 0.0 {
+        axes[1] = axes[1].map(|value| -value);
+        axes[2] = axes[2].map(|value| -value);
     }
     for (spot, centred) in spots.iter_mut().zip(&centred) {
         *spot = axes.map(|axis| project(centred, &axis));
