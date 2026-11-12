@@ -101,7 +101,7 @@ fn the_agent_sets_lists_and_cancels_timers_that_everyone_in_its_space_sees() {
             "cron */30 9-17 * * 1-5",
         ),
         (
-            json!({"name": "later", "note": "Later", "once_at": "23:59", "name_unknown": true}),
+            json!({"name": "later", "note": "Later", "once_at": "23:59"}),
             "once at 23:59",
         ),
     ] {
@@ -291,5 +291,69 @@ fn a_timer_set_seconds_ahead_fires_at_its_second_through_the_server() {
     assert!(
         fired <= took + std::time::Duration::from_millis(2900),
         "fired after {fired:?}, the call taking {took:?}"
+    );
+}
+
+#[test]
+fn a_timer_named_with_an_argument_set_timer_does_not_take_is_refused_and_nothing_is_set() {
+    let backend = FakeBackend::new();
+    let server = TestServer::with_tools(backend.clone(), |backends| {
+        Server::new(backends, Arc::new(TextTranscriber::default()))
+    });
+    let mut ada = server.connect("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Night".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: None,
+        instructions: None,
+    });
+    ada.space(|state| state.title == "Night");
+    let token = eventually(|| server.tools_token());
+    let session = tomori_backend::Session::id(&backend.started()[0]);
+    let call = |name: &str, arguments: Value| call(&server, &token, &session, name, arguments);
+
+    // As the agent once asked, meaning a timer that fires overnight: refused, rather than one that fires only while
+    // someone is present.
+    let refused = call(
+        "set_timer",
+        json!({"name": "overnight", "note": "Check the build", "every_minutes": 60, "when_present": false}),
+    );
+    assert_eq!(
+        refusal(&refused),
+        "when_present is not an argument of set_timer; it takes: condition, count, cron, daily_at, days, every_minutes, every_seconds, in_minutes, in_seconds, name, note, once_at, until, zone."
+    );
+    let refused = call("cancel_timer", json!({"name": "overnight", "force": true}));
+    assert_eq!(
+        refusal(&refused),
+        "force is not an argument of cancel_timer; it takes: name."
+    );
+    let refused = call("timers", json!({"all": true}));
+    assert_eq!(
+        refusal(&refused),
+        "all is not an argument of timers; it takes: none."
+    );
+    assert_eq!(
+        call("timers", json!({}))["structuredContent"]["timers"],
+        json!([])
+    );
+
+    // As it should have asked, with when_present still a condition it takes.
+    let set = call(
+        "set_timer",
+        json!({"name": "overnight", "note": "Check the build", "every_minutes": 60, "condition": "always"}),
+    );
+    assert_eq!(
+        set["structuredContent"]["timer"]["condition"], "always",
+        "{set}"
+    );
+    let set = call(
+        "set_timer",
+        json!({"name": "daytime", "note": "Stand up", "every_minutes": 60, "condition": "when_present"}),
+    );
+    assert_eq!(
+        set["structuredContent"]["timer"]["condition"], "present",
+        "{set}"
     );
 }

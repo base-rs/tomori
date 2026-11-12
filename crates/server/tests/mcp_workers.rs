@@ -619,14 +619,17 @@ fn only_the_space_s_own_workers_are_ever_removed() {
 
     // A sub-agent's session, or one bound to no space, cannot use the tools at all.
     for session in ["w2", "ses_unrelated"] {
-        for tool in ["workers", "remove_workers"] {
+        for (tool, arguments) in [
+            ("workers", json!({})),
+            ("remove_workers", json!({"finished": true})),
+        ] {
             assert!(
                 failure(&call(
                     &spaces.server,
                     &spaces.token,
                     Some(session),
                     tool,
-                    json!({"finished": true})
+                    arguments
                 ))
                 .starts_with("This session is not bound to a Tomori space"),
                 "{session} {tool}"
@@ -751,10 +754,16 @@ fn arguments_are_checked_and_backends_without_workers_say_so() {
             "{arguments}"
         );
     }
+    // An argument it does not take is refused, and nothing is removed.
+    assert_eq!(
+        failure(&spaces.call("remove_workers", json!({"sessions": ["w1"], "extra": 1}))),
+        "extra is not an argument of remove_workers; it takes: finished, force, requested_by, sessions."
+    );
+    assert!(spaces.backend.removed_workers().is_empty());
     // A null flag is no flag.
     let removed = spaces.call(
         "remove_workers",
-        json!({"sessions": ["w1"], "finished": null, "force": null, "extra": 1}),
+        json!({"sessions": ["w1"], "finished": null, "force": null}),
     );
     assert_eq!(sessions(content(&removed), "removed"), ["w1"]);
     assert_eq!(spaces.backend.removed_workers(), ["w1"]);
@@ -767,9 +776,12 @@ fn arguments_are_checked_and_backends_without_workers_say_so() {
     );
     // One that reports no workers says the space has none.
     spaces.backend.report_no_workers();
-    for tool in ["workers", "remove_workers"] {
+    for (tool, arguments) in [
+        ("workers", json!({})),
+        ("remove_workers", json!({"finished": true})),
+    ] {
         assert_eq!(
-            failure(&spaces.call(tool, json!({"finished": true}))),
+            failure(&spaces.call(tool, arguments)),
             "This space's agent backend, fake, does not report workers, so the space has none.",
             "{tool}"
         );
@@ -884,4 +896,37 @@ fn a_worker_is_placed_through_the_endpoint_where_the_space_has_a_place_for_it() 
         json!({ "place": "anchor rack/a12", "requested_by": 3 }),
     );
     assert!(failure(&unnamed).contains("requested_by"));
+}
+
+#[test]
+fn a_placement_refused_for_an_argument_place_worker_does_not_take_counts_for_nothing() {
+    let spaces = Spaces::new();
+    let one = spaces.one.clone();
+    spaces.workers(vec![worker(
+        "w1",
+        &one,
+        "Review commit",
+        WorkerState::Running,
+    )]);
+    // Refused before anything is placed, however often, so that none counts as its first placement or against its limit.
+    for _ in 0..3 {
+        let refused = spaces.call(
+            "place_worker",
+            json!({ "worker": "w1", "place": "home", "urgent": true }),
+        );
+        assert_eq!(
+            failure(&refused),
+            "urgent is not an argument of place_worker; it takes: place, requested_by, worker."
+        );
+    }
+    // Its first placement is free and its second the one a minute allows, so only the third is refused.
+    for _ in 0..2 {
+        let placed = spaces.call("place_worker", json!({ "worker": "w1", "place": "home" }));
+        assert_eq!(content(&placed)["at"], "home");
+    }
+    let again = spaces.call("place_worker", json!({ "worker": "w1", "place": "home" }));
+    assert!(
+        failure(&again).starts_with("That worker was placed in the last minute"),
+        "{again}"
+    );
 }

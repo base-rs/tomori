@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Tomori's tools refuse arguments they don't take.** A tool call with an argument the tool doesn't declare is now refused, and nothing is done, rather than the argument being silently ignored, so that a timer set with `when_present: false`, meant to fire overnight, is refused rather than set to fire only while someone is present. The error names the unknown argument and lists the arguments the tool takes, as `when_present is not an argument of set_timer; it takes: condition, count, …`. Every tool's input schema, and every object in it that declares its properties, now says `"additionalProperties": false`. `update_panel`'s `revision` and each `create_layout` wall's `tilt`, which were taken without being declared, are now declared. See `design/mcp.md`.
+
 - **A locked wall's padlock no longer shows through a floor.** An owner standing on a deck above a locked wall, such as an environment's status wall, no longer sees its padlock through the deck's floor, however near: the padlock shows only within about 3 m and in clear view, with none of the environment's floors or decks in between. The ray no longer takes a padlock, a handle, a grab bar, a wall or a panel on one beneath a floor, and a locked wall a deck hides the padlock of says only that it is locked, rather than to come closer. See `design/projection.md`.
 
 - For clients: `tomori-scene`'s `projection::Input` and `projection::editing::Input` gain `surfaces`, the environment's declared floors and decks, `None` for none; `Conversation::surfaces` gives them, whether or not travel is turned off.
