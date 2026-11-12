@@ -91,7 +91,7 @@ In November 2026, from the headset, the maintainer found the farmyard's ruru cal
 
 ## Scope
 
-`crates/client`'s player and mixer (`playback/spatial.rs`, `playback/duck.rs`, `playback/mixer.rs`, `playback/player.rs`), its ambience (`playback/ambience.rs`, with its scheduler, decoder, thread and bus), its outputs (`speaker.rs`), the live microphone's session (`capture.rs`) and the echo test (`connection.rs`), in `crates/scene` the scene of voices (`spatial_audio.rs`) and where the agent's voice comes from (`avatar.rs`) and the rendering of the player for a device (`playback.rs`), and in `crates/client-quest` the listener in each frame loop, the desktop's devices (`desktop_audio.rs`, `cpal_audio.rs`), and the headset's devices and echo canceller (`android_audio.rs`, `android.rs`).
+`crates/client`'s player and mixer (`playback/spatial.rs`, `playback/duck.rs`, `playback/mixer.rs`, `playback/player.rs`), its ambience (`playback/ambience.rs`, with its scheduler, decoder, thread and bus), its outputs (`speaker.rs`, which the connection opens and opens again in `connection/speaker.rs`), the live microphone's session (`capture.rs`, which the connection opens in `connection/voice.rs`) and the echo test (`connection/echo.rs`), in `crates/scene` the scene of voices (`spatial_audio.rs`) and where the agent's voice comes from (`avatar.rs`) and the rendering of the player for a device (`playback.rs`), and in `crates/client-quest` the listener in each frame loop, the desktop's devices (`desktop_audio.rs`, `cpal_audio.rs`), and the headset's devices and echo canceller (`android_audio.rs`, `android.rs`).
 
 ## Validation
 
