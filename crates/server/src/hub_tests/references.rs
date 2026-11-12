@@ -466,6 +466,14 @@ fn a_space_s_things_are_found_where_they_stand_or_said_to_be_away() {
         Panel::new("panel-1", "On a wall", "", place(Some(0))),
         Panel::new("panel-2", "Somewhere new", "", place(None)),
         Panel::new("panel-3", "In a hand", "", place(Some(1))),
+        Panel::new(
+            "panel-4",
+            "Floating",
+            "",
+            tomori_protocol::Place::Free {
+                pose: tomori_protocol::Pose::at([1.0, 1.4, -1.0]),
+            },
+        ),
     ];
     let state = hub.lock();
     let things = state.world_things(
@@ -485,6 +493,14 @@ fn a_space_s_things_are_found_where_they_stand_or_said_to_be_away() {
     assert!(things.panels[0].frame.is_some());
     assert_eq!(things.panels[1].absent.as_deref(), Some("being carried"));
     assert_eq!(things.panels[2].at, None);
+    assert_eq!(things.panels[3].at, Some([1.0, 1.4, -1.0]));
+    assert_eq!(
+        things.panels[3].frame.map(|frame| frame.size),
+        Some([
+            tomori_protocol::wall::SLOT_SIZE.0,
+            tomori_protocol::wall::SLOT_SIZE.1
+        ])
+    );
     // An added wall is called by its number, never the status wall.
     let named = things
         .walls
