@@ -408,11 +408,12 @@ impl ImageStore {
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            // What a write left behind, as when the server stopped part way through one.
-            let Some(hash) = name
-                .to_str()
-                .and_then(|name| name.strip_suffix(".png").or(name.strip_suffix(".tmp")))
-            else {
+            // What a write left behind, as when the server stopped part way through one: its temporary file is named after the image, and ends in `.tmp`.
+            let Some(hash) = name.to_str().and_then(|name| {
+                name.strip_suffix(".png").or(name
+                    .strip_suffix(".tmp")
+                    .and_then(|name| name.split('.').next()))
+            }) else {
                 continue;
             };
             if tomori_protocol::hash_bytes(hash).is_none() || shown.contains(hash) {

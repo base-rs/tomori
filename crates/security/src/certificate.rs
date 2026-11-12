@@ -192,13 +192,15 @@ mod tests {
         let parent = directory("unstored");
         fs::create_dir_all(&parent).unwrap();
 
-        // The key cannot be written where a directory has its temporary file's name, and then no certificate is written either.
+        // A key that cannot be written is an error, and then no certificate is written either.
         let directory = parent.join("state");
-        fs::create_dir_all(directory.join(KEY_FILE).with_extension("tmp")).unwrap();
-        assert!(ServerCertificate::load_or_create(&directory).is_err());
+        {
+            let _failing =
+                crate::fault::inject(crate::fault::Operation::Write, &directory.join(KEY_FILE));
+            assert!(ServerCertificate::load_or_create(&directory).is_err());
+        }
         assert!(!directory.join(KEY_FILE).exists());
         assert!(!directory.join(CERTIFICATE_FILE).exists());
-        fs::remove_dir(directory.join(KEY_FILE).with_extension("tmp")).unwrap();
 
         #[cfg(unix)]
         {
