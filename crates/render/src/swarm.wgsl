@@ -27,9 +27,9 @@ struct VertexOutput {
 fn growth(position: vec3<f32>, scale: vec3<f32>) -> f32 {
     let matrix = camera.view_projection;
     let depth = (matrix * vec4<f32>(position, 1.0)).w;
-    // Normalised device coordinates down the view for each metre across it, a metre away, whatever the view's scale.
-    let down = length(vec3<f32>(matrix[0].y, matrix[1].y, matrix[2].y))
-        / max(length(vec3<f32>(matrix[0].w, matrix[1].w, matrix[2].w)), 1e-6);
+    // Clip coordinates down the view for each of the scene's units across it, which over `depth` are normalised device
+    // coordinates, however the scene is scaled into the view.
+    let down = length(vec3<f32>(matrix[0].y, matrix[1].y, matrix[2].y));
     let side = max(max(scale.x, scale.y), scale.z);
     let spans = side * down * camera.pixels / max(depth, 1e-6);
     return max(SMALLEST / max(spans, 1e-6), 1.0);
