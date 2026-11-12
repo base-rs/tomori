@@ -3,7 +3,7 @@
 
 //! A Markdown table laid out on rows of cells, for a panel's body and the transcript: a grid where its columns fit, and otherwise a card for each row.
 //!
-//! **The grid.** Each column is as wide as its widest cell where the table fits at that width; otherwise every column keeps at least [`NARROWEST`] cells, or its widest cell where that is narrower, then grows to fit its longest word, then shares what is left in proportion to what it lacks, so that a cell's text wraps within its column, at words, onto as many rows as it needs, and a word is broken only where it is wider than its column. Nothing is cut with "…". A cell is aligned as its column's delimiter row says. The header is bold on a tinted bar, with a rule below it, columns are separated by a faint line, and every other row of the body is faintly striped, so that a row that wraps reads as one.
+//! **The grid.** Each column is as wide as its widest cell where the table fits at that width; otherwise every column keeps at least [`NARROWEST`] cells, or its widest cell where that is narrower, then grows to fit its longest word, then shares what is left in proportion to what it lacks, so that a cell's text wraps within its column, at words, onto as many rows as it needs, a row of the table one row tall where every cell is empty, and a word is broken only where it is wider than its column. Nothing is cut with "…". A cell is aligned as its column's delimiter row says. The header is bold on a tinted bar, with a rule below it, columns are separated by a faint line, and every other row of the body is faintly striped, so that a row that wraps reads as one.
 //!
 //! **Cards.** A table whose columns do not all fit at [`NARROWEST`] cells is laid out as a card for each row, one `Header: value` line for each of its cells, wrapped under a hanging indent, with a rule between cards, since a grid of columns too narrow for words reads worse than lines.
 use crate::markdown_lite::{Align, Table, Text, plain};
@@ -31,12 +31,15 @@ const HEADER: Rgba = [0.18, 0.3, 0.46, 0.32];
 /// Every other row of the body.
 const STRIPE: Rgba = [0.6, 0.7, 0.85, 0.07];
 
-/// A table laid out: its rows of cells, and how many of the first are its header and the rule below it, which a panel
-/// keeps in view as its body scrolls; none for cards.
+/// A table laid out: its rows of cells, how many of the first are its header and the rule below it, which a panel
+/// keeps in view as its body scrolls, none for cards, and, for each of its rows of cells, the row of the table it
+/// shows, from 0, none for the header, its rule and the rules between cards, by which a list laid out as a table finds
+/// each row's lines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Laid {
     pub rows: Vec<Vec<Cell>>,
     pub header: usize,
+    pub owners: Vec<Option<usize>>,
 }
 
 /// `table` laid out on rows of at most `room` cells: a grid where its columns fit, and cards otherwise.
@@ -139,6 +142,7 @@ fn grid(table: &Table, widths: &[usize]) -> Laid {
         rows.push(rule);
     }
     let header = rows.len();
+    let mut owners = vec![None; header];
     for (index, cells) in table.rows.iter().enumerate() {
         let stripe = (index % 2 == 1).then_some(STRIPE);
         row(
@@ -149,12 +153,17 @@ fn grid(table: &Table, widths: &[usize]) -> Laid {
             &table.align,
             &mut rows,
         );
+        owners.resize(rows.len(), Some(index));
     }
-    Laid { rows, header }
+    Laid {
+        rows,
+        header,
+        owners,
+    }
 }
 
 /// The rows of one of a grid's rows, `cells` in `base` on `background`, each wrapped within its column, as tall as its
-/// tallest cell.
+/// tallest cell, and a row tall where every cell is empty.
 fn row(
     cells: &[Text],
     base: Style,
@@ -172,7 +181,12 @@ fn row(
         .enumerate()
         .map(|(column, &width)| wrap(&styled(cell(cells, column), base), width, Wrap::default()))
         .collect();
-    let height = wrapped.iter().map(Vec::len).max().unwrap_or_default();
+    let height = wrapped
+        .iter()
+        .map(Vec::len)
+        .max()
+        .unwrap_or_default()
+        .max(1);
     let blank = (' ', on(Style::plain(base.color)));
     for line in 0..height {
         let mut out = Vec::new();
@@ -212,15 +226,18 @@ fn cards(table: &Table, room: usize) -> Laid {
         ..Default::default()
     };
     let mut rows = Vec::new();
+    let mut owners = Vec::new();
     if table.rows.is_empty() {
         // A header alone, its labels on a line.
         let labels: Vec<String> = (0..table.columns()).filter_map(label).collect();
         let spans = [Span::new(labels.join(" · "), Style::bold(BRIGHT))];
         rows.extend(wrap(&spans, room, hanging));
+        owners.resize(rows.len(), None);
     }
     for (index, cells) in table.rows.iter().enumerate() {
         if index > 0 {
             rows.push(vec![RULE; room]);
+            owners.push(None);
         }
         for column in 0..table.columns() {
             let value = cell(cells, column);
@@ -234,8 +251,13 @@ fn cards(table: &Table, room: usize) -> Laid {
             spans.extend(styled(value, Style::plain(TEXT)));
             rows.extend(wrap(&spans, room, hanging));
         }
+        owners.resize(rows.len(), Some(index));
     }
-    Laid { rows, header: 0 }
+    Laid {
+        rows,
+        header: 0,
+        owners,
+    }
 }
 
 #[cfg(test)]
@@ -552,5 +574,21 @@ pub(crate) mod tests {
             ..table
         };
         assert_eq!(text(&lay_out(&wider, 20)), ["a ▏   ▏", "b ▏cc ▏"]);
+    }
+
+    #[test]
+    fn each_row_laid_out_names_the_row_of_the_table_it_shows_and_an_empty_row_still_takes_a_row() {
+        let table =
+            table("| A | B |\n|---|---|\n| one | x |\n|  |  |\n| `incomprehensibilities` | y |\n");
+        let grid = lay_out(&table, NARROWEST + GAP + 1);
+        assert_eq!(
+            grid.owners,
+            [None, None, Some(0), Some(1), Some(2), Some(2), Some(2)]
+        );
+        assert_eq!(grid.owners.len(), grid.rows.len());
+        let cards = lay_out(&table, 8);
+        assert_eq!(cards.owners.len(), cards.rows.len());
+        assert_eq!(cards.owners[..3], [Some(0), Some(0), None]);
+        assert!(cards.owners.contains(&Some(2)));
     }
 }

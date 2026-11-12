@@ -708,6 +708,86 @@ pub struct Panel {
     /// `design/panel-actions.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<ListRow>,
+    /// What makes a list panel a table, if its environment gave its rows in columns: each column's title, which may be
+    /// empty, how its cells are aligned and whether its rows' values are drawn under it, the first
+    /// [`LIST_COLUMNS`] of them, each row's cells ([`ListRow::cells`]) in their order. A client that draws tables lays
+    /// its rows out as a grid under a header, and an older client ignores it, drawing the body, a line of each row's
+    /// text, as any list. See `design/panel-actions.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ListColumn>,
+}
+
+/// The most columns of a list panel a client lays out ([`Panel::columns`]); the rest are left out.
+pub const LIST_COLUMNS: usize = 8;
+
+/// The most characters of a list panel's cell, or a column's title, a client lays out; the rest are left out.
+pub const LIST_CELL_CHARS: usize = 32;
+
+/// A column of a list panel laid out as a table, [`Panel::columns`]: its title, how its cells are aligned, and whether
+/// each row's value ([`ListRow::value`]) is drawn as a bar under its cell rather than under the whole row.
+///
+/// ```
+/// use tomori_protocol::{CellAlign, ListColumn};
+///
+/// let busy = ListColumn::new("Busy").aligned(CellAlign::Right).with_value(true);
+/// assert_eq!(
+///     serde_json::to_string(&busy).unwrap(),
+///     r#"{"title":"Busy","align":"right","value":true}"#
+/// );
+/// assert_eq!(serde_json::to_value(ListColumn::new("Name")).unwrap(), serde_json::json!({"title": "Name"}));
+/// // An alignment a newer server sends reads as left.
+/// let newer: ListColumn = serde_json::from_str(r#"{"title": "x", "align": "decimal"}"#).unwrap();
+/// assert_eq!(newer.align, CellAlign::Left);
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ListColumn {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "is_left")]
+    pub align: CellAlign,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub value: bool,
+}
+
+impl ListColumn {
+    /// The column `title`, its cells aligned left, with no values under it.
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            align: CellAlign::Left,
+            value: false,
+        }
+    }
+
+    /// The column, its cells aligned as `align` says.
+    pub fn aligned(mut self, align: CellAlign) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// The column, with each row's value drawn under its cell where `value` says.
+    pub fn with_value(mut self, value: bool) -> Self {
+        self.value = value;
+        self
+    }
+}
+
+/// How the cells of a list panel's column are aligned: left, as text reads, right, as numbers read, so that their
+/// digits line up, every character taking one cell of a panel, or centred. One a client does not know reads as left.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum CellAlign {
+    Right,
+    Centre,
+    #[default]
+    #[serde(other)]
+    Left,
+}
+
+fn is_left(align: &CellAlign) -> bool {
+    *align == CellAlign::Left
 }
 
 /// A row of a list panel, [`Panel::rows`]: its environment's id for it, at most 64 bytes of ASCII letters, digits,
@@ -747,6 +827,10 @@ pub struct ListRow {
     /// [`ListRow::fraction`], which holds whatever was sent within that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f32>,
+    /// Its cells, for a list laid out as a table ([`Panel::columns`]), one for each column, in their order, each on one
+    /// line: a client lays out those of the columns it lays out, each cut to [`LIST_CELL_CHARS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<String>,
 }
 
 impl ListRow {
@@ -759,7 +843,14 @@ impl ListRow {
             highlighted: false,
             tone: crate::chart::Tone::Neutral,
             value: None,
+            cells: Vec::new(),
         }
+    }
+
+    /// The row, with `cells`, one for each of its list's columns.
+    pub fn with_cells(mut self, cells: Vec<String>) -> Self {
+        self.cells = cells;
+        self
     }
 
     /// The row, highlighted by its environment where `highlighted` says.
@@ -830,12 +921,19 @@ impl Panel {
             data_seq: 0,
             chart: None,
             rows: Vec::new(),
+            columns: Vec::new(),
         }
     }
 
     /// The panel, a list panel of `rows`, each on its line of the body, in order.
     pub fn with_rows(mut self, rows: Vec<ListRow>) -> Self {
         self.rows = rows;
+        self
+    }
+
+    /// The panel, a list laid out as a table of `columns`.
+    pub fn with_columns(mut self, columns: Vec<ListColumn>) -> Self {
+        self.columns = columns;
         self
     }
 
@@ -857,7 +955,7 @@ impl Panel {
     }
 
     /// Whether it and `other` are alike in everything its version covers but where they are: their identity, title,
-    /// metadata, kind, id, code, image, chart's structure and rows, and, but for a chart panel, whose body is a summary of
+    /// metadata, kind, id, code, image, chart's structure, rows and columns, and, but for a chart panel, whose body is a summary of
     /// its live data, their body. See [`Panel::version`].
     pub fn same_structure(&self, other: &Panel) -> bool {
         let Panel {
@@ -875,6 +973,7 @@ impl Panel {
             data_seq: _,
             chart,
             rows,
+            columns,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -889,6 +988,7 @@ impl Panel {
             && *slug == other.slug
             && *image == other.image
             && *rows == other.rows
+            && *columns == other.columns
             && charts
     }
 
@@ -1797,5 +1897,55 @@ mod tests {
         assert!(!before.same_structure(&list(ListRow::new("pod7", false).with_tone(Tone::Good))));
         assert!(!before.same_structure(&list(ListRow::new("pod7", false).with_value(0.1))));
         assert!(!before.same_structure(&list(ListRow::new("pod7", false).with_highlight(true))));
+    }
+    #[test]
+    fn a_list_s_columns_and_cells_are_sent_only_where_it_has_them_and_count_in_its_version() {
+        let place = Place::Wall {
+            wall: "environment-0".into(),
+            slot: 0,
+        };
+        let row = ListRow::new("grpc", true).with_cells(vec!["GRPC".into(), "100%".into()]);
+        let table = Panel::new("panel-1", "Observers", "- GRPC · Busy 100%", place.clone())
+            .with_rows(vec![row.clone()])
+            .with_columns(vec![
+                ListColumn::new("Name"),
+                ListColumn::new("Busy")
+                    .aligned(CellAlign::Right)
+                    .with_value(true),
+            ]);
+        let json = serde_json::to_value(&table).unwrap();
+        assert_eq!(
+            json["columns"],
+            serde_json::json!([{"title": "Name"}, {"title": "Busy", "align": "right", "value": true}])
+        );
+        assert_eq!(
+            json["rows"][0]["cells"],
+            serde_json::json!(["GRPC", "100%"])
+        );
+        assert_eq!(
+            serde_json::from_value::<Panel>(json.clone()).unwrap(),
+            table
+        );
+        // An older server sends neither, and a list without columns says none.
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("columns");
+        older["rows"][0].as_object_mut().unwrap().remove("cells");
+        let older = serde_json::from_value::<Panel>(older).unwrap();
+        assert!(older.columns.is_empty() && older.rows[0].cells.is_empty());
+        let list = Panel::new("panel-1", "Observers", "- GRPC", place)
+            .with_rows(vec![ListRow::new("grpc", true)]);
+        let json = serde_json::to_value(&list).unwrap();
+        assert!(json.get("columns").is_none() && json["rows"][0].get("cells").is_none());
+        // Both are part of what its version covers.
+        let cells = |cells: &[&str]| {
+            table.clone().with_rows(vec![
+                row.clone()
+                    .with_cells(cells.iter().map(|cell| (*cell).to_owned()).collect()),
+            ])
+        };
+        assert!(table.same_structure(&cells(&["GRPC", "100%"])));
+        assert!(!table.same_structure(&cells(&["GRPC", "99%"])));
+        assert!(!table.same_structure(&table.clone().with_columns(Vec::new())));
+        assert_eq!((LIST_COLUMNS, LIST_CELL_CHARS), (8, 32));
     }
 }

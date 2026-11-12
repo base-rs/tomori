@@ -217,7 +217,27 @@ fn most_bytes(panel: &Panel) -> usize {
         .map(|span| digits(span.start) + digits(span.length) + 18)
         .sum();
     let chart = panel.chart.as_ref().map_or(0, json_size);
-    text + spans + chart + 768
+    // A list's rows and columns: each row's id and cells, and room for its keys, flags, tone and value, and each
+    // column's title and room for its keys.
+    let rows: usize = panel
+        .rows
+        .iter()
+        .map(|row| {
+            escaped(&row.id)
+                + row
+                    .cells
+                    .iter()
+                    .map(|cell| escaped(cell) + 3)
+                    .sum::<usize>()
+                + 96
+        })
+        .sum();
+    let columns: usize = panel
+        .columns
+        .iter()
+        .map(|column| escaped(&column.title) + 48)
+        .sum();
+    text + spans + chart + rows + columns + 768
 }
 
 /// The most a projection's panels may take together, by [`most_bytes`], for its JSON to be measured to fit it to a
@@ -748,12 +768,14 @@ impl Kept {
                     .map(|row| {
                         let mut sent = tomori_protocol::ListRow::new(row.id.clone(), row.choosable)
                             .with_highlight(highlighted == Some(row.id.as_str()))
-                            .with_tone(row.tone);
+                            .with_tone(row.tone)
+                            .with_cells(row.cells.clone());
                         sent.value = row.value;
                         sent
                     })
                     .collect(),
             );
+            panel = panel.with_columns(published.columns.clone());
         }
         panel
     }
@@ -2682,7 +2704,8 @@ impl Stage {
         }
         // The row pointed at of an environment's list, each row a line of its body, from the server's own copy: its
         // number, whether it is highlighted, its tone and its value, each in the server's own words, its id to inspect
-        // it by and its text, in quotes, as it is the environment's.
+        // it by and its text, or a table's row its cells, each after its column's title, in quotes, as it is the
+        // environment's.
         let items = checklist::items(&panel.body);
         if let Some((rows, highlighted)) = self.rows(walls.environment, &panel.id) {
             let found = match row {
@@ -2712,11 +2735,21 @@ impl Stage {
                 let value = row.percent().map_or(String::new(), |percent| {
                     format!(", at {percent}% of its limit")
                 });
+                // A table's row as its cells, each after its column's title, `: ` and ` · ` between them, within their
+                // bounds, so that nothing is cut.
+                let columns = self.columns(walls.environment, &panel.id);
+                let most = if row.cells.is_empty() {
+                    blocks::META_VALUE_CHARS
+                } else {
+                    tomori_environment::ROW_CHARS
+                        + tomori_environment::COLUMN_LIMIT
+                            * (tomori_environment::COLUMN_TITLE_CHARS + 5)
+                };
                 details.push_str(&format!(
                     "; row {} of {}{highlighted}{tone}{value}{id}: \"{}\"",
                     index + 1,
                     rows.len(),
-                    crate::space::one_line(&row.text, blocks::META_VALUE_CHARS)
+                    crate::space::one_line(&row.told(columns), most)
                 ));
             }
         } else if panel.code.is_none()

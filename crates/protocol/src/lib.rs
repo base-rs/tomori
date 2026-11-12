@@ -43,11 +43,11 @@ pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
 pub use projection::group;
 pub use projection::layout as wall;
 pub use projection::{
-    Align, Attach, CODE_CHARS, CODE_LINES, CODE_SPANS, Code, Edge, Grid, IMAGE_BYTES,
-    IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image, ImageChunk, ImageChunkError, Join, ListRow, Meta, Panel,
-    PatchError, PatchOp, Place, Projection, ProjectionPatch, SlotFrame, Span, TOMORI_WALL,
-    TokenKind, WALL_SLOTS, Wall, WallKind, WallShape, hash_bytes, hash_text, row_value,
-    valid_spans,
+    Align, Attach, CODE_CHARS, CODE_LINES, CODE_SPANS, CellAlign, Code, Edge, Grid, IMAGE_BYTES,
+    IMAGE_CHUNK_BYTES, IMAGE_SIDE, Image, ImageChunk, ImageChunkError, Join, LIST_CELL_CHARS,
+    LIST_COLUMNS, ListColumn, ListRow, Meta, Panel, PatchError, PatchOp, Place, Projection,
+    ProjectionPatch, SlotFrame, Span, TOMORI_WALL, TokenKind, WALL_SLOTS, Wall, WallKind,
+    WallShape, hash_bytes, hash_text, row_value, valid_spans,
 };
 pub use space::{
     AVATAR_BYTES, Activity, AgentInstructions, AgentMovement, Anchors, Approval, ApprovalOption,

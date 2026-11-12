@@ -5,7 +5,7 @@
 //! kept with the space in that environment as the agent's panels are, moved, pointed at and dismissed as they are, but
 //! updated only by their environment. See `design/projection.md` and `design/environments.md`.
 use serde::{Deserialize, Serialize};
-use tomori_protocol::{Chart, chart::Tone};
+use tomori_protocol::{Chart, ListColumn, chart::Tone};
 
 use super::{Content, DECLARED_WALLS, Kept, Placed, Pose, Stage, Walls, blocks};
 
@@ -36,6 +36,9 @@ pub(super) struct Published {
     pub(super) rows: Option<Vec<Row>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) highlighted: Option<String>,
+    /// Its columns, cleaned, for a list laid out as a table: none for one that is not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) columns: Vec<ListColumn>,
 }
 
 /// A row of a list panel as its body shows it, on the line of the body that is its place among them: the environment's
@@ -54,6 +57,9 @@ pub(crate) struct Row {
     pub(crate) tone: Tone,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) value: Option<f32>,
+    /// Its cells, cleaned and cut, for a list laid out as a table, at most one for each of its columns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) cells: Vec<String>,
 }
 
 impl Row {
@@ -72,6 +78,115 @@ impl Row {
     pub(crate) fn percent(&self) -> Option<u32> {
         self.value.map(|value| (value * 100.0).round() as u32)
     }
+
+    /// What it shows, as the agent is told it: for a row of a table of `columns`, each of its cells that says
+    /// something after its column's title, as `Name: GRPC · Busy: 100%`, and otherwise its text.
+    pub(crate) fn told(&self, columns: &[ListColumn]) -> String {
+        if self.cells.is_empty() {
+            return self.text.clone();
+        }
+        self.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| !cell.is_empty())
+            .map(|(column, cell)| match columns.get(column) {
+                Some(column) if !column.title.is_empty() => format!("{}: {cell}", column.title),
+                _ => cell.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
+/// `text` on one line, with no spaces at either end, as [`tomori_protocol::text::one_line`] cleans it, cut to at most
+/// `most` characters, the last a `…` where it is cut, and nothing where `most` is none.
+fn cut(text: &str, most: usize) -> String {
+    let line = tomori_protocol::text::one_line(text, usize::MAX);
+    let line = line.trim();
+    if line.chars().count() <= most {
+        return line.to_owned();
+    }
+    let Some(kept) = most.checked_sub(1) else {
+        return String::new();
+    };
+    let mut cut: String = line
+        .chars()
+        .take(kept)
+        .collect::<String>()
+        .trim_end()
+        .to_owned();
+    cut.push('…');
+    cut
+}
+
+/// The columns of a list of `rows` the side declared as `columns`, as many as its columns or its widest row's cells,
+/// each title cleaned and cut, none for a list that is not a table; or why it is refused: more than
+/// [`tomori_environment::COLUMN_LIMIT`] columns or cells, more cells in a row than the columns declared, or more than
+/// one column with the rows' values.
+fn columns(
+    rows: &[tomori_environment::Row],
+    columns: &[tomori_environment::Column],
+) -> Result<Vec<ListColumn>, String> {
+    let most = tomori_environment::COLUMN_LIMIT;
+    if columns.len() > most {
+        return Err(format!("A list panel has at most {most} columns."));
+    }
+    let widest = rows.iter().map(|row| row.cells().len()).max().unwrap_or(0);
+    if widest > most {
+        return Err(format!("A row of a list panel has at most {most} cells."));
+    }
+    if !columns.is_empty() && widest > columns.len() {
+        return Err("A row has more cells than its list has columns.".to_owned());
+    }
+    if columns.iter().filter(|column| column.has_value()).count() > 1 {
+        return Err("At most one column of a list panel shows its rows' values.".to_owned());
+    }
+    Ok((0..columns.len().max(widest))
+        .map(|at| match columns.get(at) {
+            Some(column) => {
+                ListColumn::new(cut(column.title(), tomori_environment::COLUMN_TITLE_CHARS))
+                    .aligned(column.align())
+                    .with_value(column.has_value())
+            }
+            None => ListColumn::new(""),
+        })
+        .collect())
+}
+
+/// The cells of `row` of a table, each cleaned and cut to [`tomori_environment::CELL_CHARS`], together within
+/// [`tomori_environment::ROW_CHARS`], those past that cut or left empty: its text alone where it gives none, and its
+/// id where every one is empty.
+fn cells(row: &tomori_environment::Row) -> Vec<String> {
+    let given: Vec<&str> = if row.cells().is_empty() {
+        vec![row.text()]
+    } else {
+        row.cells().iter().map(String::as_str).collect()
+    };
+    let mut room = tomori_environment::ROW_CHARS;
+    let mut cells: Vec<String> = given
+        .into_iter()
+        .map(|cell| {
+            let cell = cut(cell, tomori_environment::CELL_CHARS.min(room));
+            room -= cell.chars().count();
+            cell
+        })
+        .collect();
+    if cells.iter().all(String::is_empty) {
+        cells[0] = cut(row.id(), tomori_environment::CELL_CHARS);
+    }
+    cells
+}
+
+/// The text of a row of a table whose side gave it none, for the clients that draw no tables: its cells that say
+/// something, as `GRPC · 100% · 0 ms`, without their columns' titles, so that a list of 30 such rows still fits in a
+/// body's characters.
+fn written(cells: &[String]) -> String {
+    cells
+        .iter()
+        .filter(|cell| !cell.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// A row's value as it is kept and sent: within 0 to 1, to the nearest thousandth, finer than a bar on a panel shows,
@@ -91,12 +206,16 @@ const POINTER: &str = "**▸** ";
 /// text that begins with a checkbox, as `[ ] ` or `[x]`, has its brackets made parentheses, so that no row is ever a
 /// checklist item, which A would offer to tick. A row's tone and value add nothing to the body, so that it is the list
 /// every client drew before them, within the same bounds: they are kept with the row, its value to the nearest
-/// thousandth, for the clients that draw rows and for the agent.
+/// thousandth, for the clients that draw rows and for the agent. A list laid out as a table, with `columns` or rows
+/// with cells, keeps its rows' cells and its columns, as [`cells`] and [`columns`] clean them, and a row whose side gave
+/// it no text shows its cells, as [`written`] writes them; rows past a body's bounds are left out of the table too,
+/// each row being a line of the body, as are those whose cells would take the table's past a body's characters.
 #[allow(clippy::type_complexity)]
 fn list(
     rows: &[tomori_environment::Row],
     highlighted: Option<String>,
-) -> Result<(String, Vec<Row>, Option<String>), String> {
+    columns: &[tomori_environment::Column],
+) -> Result<(String, Vec<Row>, Option<String>, Vec<ListColumn>), String> {
     if rows.len() > tomori_environment::ROW_LIMIT {
         return Err(format!(
             "A list panel has at most {} rows.",
@@ -121,13 +240,25 @@ fn list(
     {
         return Err("A list panel highlights only a row it has.".to_owned());
     }
+    let columns = self::columns(rows, columns)?;
     let mut body = String::new();
     let mut room = blocks::BODY_CHARS;
+    // A table's cells together take no more characters than a body, so that a table adds to what is sent and read no
+    // more than its body does.
+    let mut cell_room = blocks::BODY_CHARS;
     let mut shown: Vec<Row> = Vec::new();
     for row in rows {
+        let cells = if columns.is_empty() {
+            Vec::new()
+        } else {
+            cells(row)
+        };
         let mut text = tomori_protocol::text::one_line(row.text(), tomori_environment::ROW_CHARS)
             .trim()
             .to_owned();
+        if text.is_empty() {
+            text = tomori_protocol::text::one_line(&written(&cells), tomori_environment::ROW_CHARS);
+        }
         if text.is_empty() {
             text = row.id().to_owned();
         }
@@ -144,9 +275,11 @@ fn list(
         };
         let line = format!("- {pointer}{text}");
         let length = line.chars().count();
-        if shown.len() == blocks::BODY_LINES || length > room {
+        let cell_length: usize = cells.iter().map(|cell| cell.chars().count()).sum();
+        if shown.len() == blocks::BODY_LINES || length > room || cell_length > cell_room {
             break;
         }
+        cell_room -= cell_length;
         if !body.is_empty() {
             body.push('\n');
         }
@@ -165,11 +298,12 @@ fn list(
             choosable: row.is_choosable(),
             tone: row.tone(),
             value: row.value().and_then(value),
+            cells,
         });
     }
     let highlighted =
         highlighted.filter(|highlighted| shown.iter().any(|row| &row.id == highlighted));
-    Ok((body, shown, highlighted))
+    Ok((body, shown, highlighted, columns))
 }
 
 /// A panel its environment published that no run of its side has published since the space came back to the
@@ -253,6 +387,7 @@ pub struct Publishing {
     reference: Option<String>,
     rows: Option<Vec<Row>>,
     highlighted: Option<String>,
+    columns: Vec<ListColumn>,
 }
 
 impl Publishing {
@@ -262,6 +397,7 @@ impl Publishing {
     pub fn new(panel: tomori_environment::Panel) -> Result<Self, String> {
         let listed = panel.rows().map(<[_]>::to_vec);
         let highlighted = panel.highlighted().map(str::to_owned);
+        let declared = panel.columns().to_vec();
         let (id, title, body, chart, wall, slot, reference) = panel.into_parts();
         if !tomori_environment::valid_panel_id(&id) {
             return Err(format!(
@@ -270,18 +406,22 @@ impl Publishing {
             ));
         }
         let chart = chart.map(Chart::cleaned).transpose()?;
-        let (body, rows, highlighted) = match listed {
+        let (body, rows, highlighted, columns) = match listed {
             Some(listed) => {
-                let (body, rows, highlighted) = list(&listed, highlighted)?;
-                (body, Some(rows), highlighted)
+                let (body, rows, highlighted, columns) = list(&listed, highlighted, &declared)?;
+                (body, Some(rows), highlighted, columns)
             }
             None if highlighted.is_some() => {
                 return Err("Only a list panel highlights a row.".to_owned());
+            }
+            None if !declared.is_empty() => {
+                return Err("Only a list panel has columns.".to_owned());
             }
             None => (
                 blocks::clean_body(&chart.as_ref().map_or(body, Chart::summary)),
                 None,
                 None,
+                Vec::new(),
             ),
         };
         let publishing = Self {
@@ -300,6 +440,7 @@ impl Publishing {
             reference: reference.filter(|reference| tomori_environment::valid_reference(reference)),
             rows,
             highlighted,
+            columns,
         };
         Ok(publishing)
     }
@@ -399,6 +540,7 @@ impl Stage {
             reference,
             rows,
             highlighted,
+            columns,
         } = publishing;
         let room = self.room(walls.environment);
         let published = Published {
@@ -408,6 +550,7 @@ impl Stage {
             chart,
             rows,
             highlighted,
+            columns,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -502,6 +645,7 @@ impl Stage {
                         && published.chart == publishing.chart
                         && published.reference == publishing.reference
                         && published.rows == publishing.rows
+                        && published.columns == publishing.columns
                 }) && kept.content == publishing.content
             })
     }
@@ -593,6 +737,14 @@ impl Stage {
         let published = self.kept(environment, panel)?.published.as_ref()?;
         let rows = published.rows.as_deref()?;
         Some((rows, published.highlighted.as_deref()))
+    }
+
+    /// The columns of the list panel `panel` shown in `environment`, if its environment published it as a table: none
+    /// for any other panel.
+    pub(crate) fn columns(&self, environment: &str, panel: &str) -> &[ListColumn] {
+        self.kept(environment, panel)
+            .and_then(|kept| kept.published.as_ref())
+            .map_or(&[], |published| published.columns.as_slice())
     }
 
     /// The environment's ids for the panel `panel` shown now in `walls`' environment and for its row `row`, by the row's

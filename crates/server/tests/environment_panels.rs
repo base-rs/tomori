@@ -142,6 +142,49 @@ impl ServerSide for Queue {
     }
 }
 
+/// An example environment's side that publishes the observers of a running system as a list laid out as a table, a
+/// name, how busy each is, with its value under that column, and how long callers wait, and, as a participant chooses
+/// one, highlights it. Its data is invented. See `design/panel-actions.md`.
+struct Observers;
+
+impl ServerSide for Observers {
+    fn run(&self, space: &Space) -> Result<()> {
+        use tomori_environment::Column;
+        let table = |highlighted: &str| {
+            let rows = [
+                ("grpc", "GRPC", 100, "0 ms"),
+                ("http", "HTTP", 10, "12 ms"),
+                ("jobs", "Jobs", 1, "0 ms"),
+            ]
+            .map(|(id, name, busy, wait)| {
+                Row::new(id, "")
+                    .with_cells([name.to_owned(), format!("{busy}%"), wait.to_owned()])
+                    .with_value(busy as f32 / 100.0)
+                    .choosable()
+            })
+            .to_vec();
+            Panel::list("observers", "Observers", rows)
+                .with_columns(vec![
+                    Column::new("Name"),
+                    Column::number("Busy").with_value(),
+                    Column::number("Wait"),
+                    Column::new("Breaker").aligned(tomori_environment::CellAlign::Centre),
+                ])
+                .highlighting(highlighted)
+        };
+        space.publish(table("grpc"))?;
+        while !space.cancellation().is_cancelled() {
+            if let Some(chosen) = space
+                .next_intent(Duration::from_millis(20))
+                .and_then(|intent| intent.chosen().cloned())
+            {
+                space.publish(table(chosen.row()))?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// How many regions the Terminals example shows, each a terminal of three charts and a list.
 const REGIONS: usize = 8;
 
@@ -199,7 +242,8 @@ impl ServerSide for Terminals {
     }
 }
 
-/// A server serving Tomori's tools, offering Sky, Gauges and Queue, each of the last two with one wall of its own.
+/// A server serving Tomori's tools, offering Sky, Gauges, Queue and Observers, each of the last three with one wall of
+/// its own.
 fn start(backend: &FakeBackend) -> TestServer {
     TestServer::with_tools(backend.clone(), |backends| {
         Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(vec![
@@ -216,6 +260,11 @@ fn start(backend: &FakeBackend) -> TestServer {
                     tomori_protocol::Pose::at([2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])
                 ])
                 .with_server_side(Queue),
+            Environment::new("observers", "Observers")
+                .with_walls([
+                    tomori_protocol::Pose::at([2.0, 1.4, -3.0]).facing_towards([0.0, 1.4, 0.0])
+                ])
+                .with_server_side(Observers),
         ])
     })
 }
@@ -716,4 +765,84 @@ fn choosing_a_row_of_an_environment_s_list_reaches_its_side_which_highlights_it(
             Some(list.id.clone())
         )
     );
+}
+
+#[test]
+fn an_environment_s_table_reaches_clients_in_columns_the_agent_reads_its_cells_and_a_row_is_chosen()
+{
+    let backend = FakeBackend::new();
+    let server = start(&backend);
+    let mut ada = TestClient::open(server.address);
+    ada.hello_projected("ada", "Ada");
+    ada.send(&ClientMessage::CreateSpace {
+        title: "Observers".to_owned(),
+        backend: FAKE_BACKEND_NAME.to_owned(),
+        directory: "/tmp".to_owned(),
+        session: None,
+        environment: Some("observers".to_owned()),
+        instructions: None,
+    });
+    ada.space(|state| state.title == "Observers");
+    let table = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Observers")
+            .cloned(),
+        _ => None,
+    });
+    // An older client draws the body, each row's text written from its cells; a newer one, its columns and cells.
+    assert_eq!(
+        table.body,
+        "- **▸** GRPC · 100% · 0 ms\n- HTTP · 10% · 12 ms\n- Jobs · 1% · 0 ms"
+    );
+    assert_eq!(
+        serde_json::to_value(&table.columns).unwrap(),
+        json!([
+            {"title": "Name"},
+            {"title": "Busy", "align": "right", "value": true},
+            {"title": "Wait", "align": "right"},
+            {"title": "Breaker", "align": "centre"},
+        ])
+    );
+    assert_eq!(table.rows[1].cells, ["HTTP", "10%", "12 ms"]);
+    // The agent reads its columns and each row's cells.
+    let session = tomori_backend::Session::id(&backend.started()[0]);
+    let token = token(&backend);
+    let read = call(
+        &server,
+        &token,
+        &session,
+        "panels",
+        json!({"panel": "Observers"}),
+    );
+    assert_eq!(
+        read["panels"][0]["columns"],
+        json!([
+            {"title": "Name", "align": "left", "value": false},
+            {"title": "Busy", "align": "right", "value": true},
+            {"title": "Wait", "align": "right", "value": false},
+            {"title": "Breaker", "align": "centre", "value": false},
+        ])
+    );
+    assert_eq!(
+        read["panels"][0]["rows"][0]["cells"],
+        json!(["GRPC", "100%", "0 ms"])
+    );
+    assert!(read["panels"][0]["rows"][0].get("text").is_none());
+    // Choosing a row of the table reaches its side by the row's id, which highlights it.
+    ada.send(&ClientMessage::ChoosePanelRow {
+        panel: table.id.clone(),
+        row: "jobs".into(),
+        revision: Some(table.version),
+    });
+    let highlighted = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panels
+            .iter()
+            .find(|panel| panel.id == table.id && panel.rows[2].highlighted)
+            .map(|panel| panel.rows[2].cells.clone()),
+        _ => None,
+    });
+    assert_eq!(highlighted, ["Jobs", "1%", "0 ms"]);
 }
