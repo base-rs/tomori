@@ -17,6 +17,7 @@ use tomori_protocol::{
 
 use super::{
     Cells, Controls, FRAME, HIGHLIGHT, HINT_ANGLE, LIFT, PENDING, THROW, ghost, slot_unit,
+    two_hands,
 };
 use crate::{
     board::{model, pose},
@@ -307,6 +308,22 @@ struct Carry {
     start: f32,
 }
 
+/// Both hands holding the wall taken hold of: where both took hold, the wall as it was as the second closed and where
+/// it stood then, and whether it is at the least or the most its slots may be, so that reaching either ticks.
+#[derive(Clone, Debug, PartialEq)]
+struct Stretch {
+    hold: two_hands::Hold,
+    start: Wall,
+    frame: Mat4,
+    stopped: bool,
+}
+
+/// Whether both hands size `wall`'s slots as they spread or close, as its corners do: any wall but the Tomori wall,
+/// whose slots are its own size, and a wall of a group, whose walls stand from one another as they are sized.
+fn sized_by_hands(wall: &Wall) -> bool {
+    wall.kind != WallKind::Tomori && wall.group.is_none()
+}
+
 /// Where a wall carried would snap if let go now: the wall of those carried that snaps, the wall it snaps beside, and
 /// how.
 #[derive(Clone, Debug, PartialEq)]
@@ -353,6 +370,14 @@ pub struct Editor {
     /// Each handle's face drawn, by its handle, whether it is highlighted and whether its wall is locked, a handle
     /// across, handed over again whichever wall shows it, so that it is not drawn again and its mesh is kept.
     faces: std::collections::HashMap<(Handle, bool, bool), std::sync::Arc<crate::canvas::Canvas>>,
+    /// Both hands holding the wall taken hold of.
+    stretch: Option<Stretch>,
+    /// The hand the editor follows holds the wall taken hold of by its board, slot or bar, squeezed on it, until it
+    /// lets go, carried or not, so that the other hand may take hold of it too.
+    gripped: bool,
+    /// The wall's version as the second hand took hold of it, once both hands have held it, which a change of its slots'
+    /// size is sent with, so that the server refuses it where the wall changed since.
+    stretched: Option<u64>,
 }
 
 /// What the editor needs this frame.
@@ -372,6 +397,9 @@ pub struct Input<'a> {
     pub panel: f32,
     pub stick: Vec2,
     pub straighten: bool,
+    /// The other hand's ray, while both hands hold the wall: they move and turn it between them, where it is carried,
+    /// and size its slots as they spread or close.
+    pub second: Option<Ray>,
     /// The trigger is held: a wall carried snaps to no other, so that let go it stays where it is.
     pub free: bool,
     pub viewer: Vec3,
@@ -420,7 +448,7 @@ fn on_plane(frame: Mat4, ray: &Ray) -> Option<Vec3> {
 }
 
 /// The corners of `wall` in its own frame: its board's, or, curved, its corner slots' outer corners.
-fn corners(wall: &Wall) -> [Vec3; 4] {
+pub(super) fn corners(wall: &Wall) -> [Vec3; 4] {
     if let Some((width, height)) = wall.board() {
         let (x, y) = (width / 2.0, height / 2.0);
         return [
@@ -1501,9 +1529,78 @@ impl Editor {
         self.carry.as_ref().and(self.wall.as_deref())
     }
 
-    /// Whether a wall is carried or a handle dragged, so that the hand doing it keeps the editor until it lets go.
+    /// Whether a wall is carried or a handle dragged, or both hands hold a wall, so that the hand doing it keeps the
+    /// editor until it lets go.
     pub fn busy(&self) -> bool {
-        self.drag.is_some() || self.carry.is_some()
+        self.drag.is_some() || self.carry.is_some() || self.stretch.is_some()
+    }
+
+    /// Whether both hands hold the wall taken hold of.
+    pub fn stretching(&self) -> bool {
+        self.stretch.is_some()
+    }
+
+    /// The wall the hand the editor follows holds, carried or squeezed by its board, slot or bar, that the other hand
+    /// may take hold of too, by identity: one carried, or one whose slots both hands would size.
+    pub fn held_wall(&self) -> Option<&str> {
+        self.wall
+            .as_deref()
+            .filter(|_| self.drag.is_none() && (self.carry.is_some() || self.gripped))
+    }
+
+    /// Where the wall carried stands as it is drawn, its frame.
+    pub fn carried_frame(&self) -> Option<Mat4> {
+        self.carry.as_ref().map(|carry| carry.model)
+    }
+
+    /// The wall both hands hold, as it is drawn, and its frame.
+    pub fn stretched(&self) -> Option<(Wall, Mat4)> {
+        self.stretch
+            .as_ref()
+            .and(self.preview.as_ref())
+            .and_then(|wall| {
+                self.carry
+                    .as_ref()
+                    .map(|carry| carry.model)
+                    .or_else(|| model(&wall.frame()))
+                    .map(|frame| (wall.clone(), frame))
+            })
+    }
+
+    /// The other hand, its ray `second`, takes hold of `wall`, standing at `frame` as drawn, which the hand the editor
+    /// follows holds, as [`Self::held_wall`] says, its ray `first`, the point `along` its ray, so that both hold it.
+    pub fn join(&mut self, first: Ray, second: Ray, along: f32, wall: &Wall, frame: Mat4) {
+        let start = self.preview.clone().unwrap_or_else(|| wall.clone());
+        let frame = self.carry.as_ref().map_or(frame, |carry| carry.model);
+        // Carried, its hand holds it as far along its ray as it carries it; held where it stands, it does not move.
+        let reach = self
+            .carry
+            .as_ref()
+            .map_or(0.0, |carry| carry.manipulation.distance());
+        self.stretched = Some(start.version);
+        self.preview = Some(start.clone());
+        self.stretch = Some(Stretch {
+            hold: two_hands::Hold::new([first, second], [reach, along]),
+            start,
+            frame,
+            stopped: true,
+        });
+    }
+
+    /// One of the two hands holding the wall lets go, `ray` the ray of the one that still holds it: that hand holds it
+    /// alone from where it is now, carrying it along its ray from there, without a jump, where it is carried.
+    pub fn let_one_go(&mut self, ray: Option<Ray>) {
+        self.stretch = None;
+        for (carry, ray) in self.carry.iter_mut().zip(ray) {
+            let along = (carry.model.w_axis.truncate() - ray.origin).dot(ray.direction);
+            let manipulation = Manipulation::new(along);
+            let at = ray.at(manipulation.distance());
+            let (_, facing, _) = carry.model.to_scale_rotation_translation();
+            carry.facing = facing;
+            carry.grabbed = carry.model.inverse().transform_point3(at);
+            carry.start = manipulation.distance();
+            carry.manipulation = manipulation;
+        }
     }
 
     /// What `ray`, the ray of a hand the editor does not follow, meets of `walls`, with `rights`: how
@@ -1551,6 +1648,9 @@ impl Editor {
     pub fn stop(&mut self) -> bool {
         self.drag = None;
         self.carry = None;
+        self.stretch = None;
+        self.gripped = false;
+        self.stretched = None;
         self.preview = None;
         self.members.clear();
         self.moved.clear();
@@ -1977,7 +2077,11 @@ impl Editor {
                                     && other.group == wall.group
                                     && other.is_locked()
                             });
-                        if carried(wall, input.rights) && !anchored {
+                        let carries = carried(wall, input.rights) && !anchored;
+                        // Held by its board, a wall both hands would carry or size may be taken hold of by the other
+                        // hand too, until this one lets go.
+                        self.gripped = carries || sized_by_hands(wall);
+                        if carries {
                             let (_, facing, _) = frame.to_scale_rotation_translation();
                             self.carry = Some(Carry {
                                 removable: wall.kind == WallKind::Added,
@@ -2094,10 +2198,49 @@ impl Editor {
                 self.preview = Some(changed);
             }
         }
+        // Held with both hands, its slots are sized as they spread or close, about the middle of the points they took,
+        // in the steps and within the bounds its corners size them in, and, carried, it moves and turns between them.
+        let mut held_at = None;
+        if let (Some(stretch), Some(first), Some(second)) = (
+            &mut self.stretch,
+            input.ray.filter(|_| input.active),
+            input.second,
+        ) {
+            let moved = stretch.hold.follow([first, second]);
+            let start = &stretch.start;
+            let shown = self.preview.as_ref().map_or(start.scale(), Wall::scale);
+            let mut changed = start.clone();
+            let mut stopped = false;
+            if sized_by_hands(start) {
+                let scale = two_hands::stepped(start.scale() * moved.spread, layout::SCALES);
+                let sized =
+                    |scale: f32| laid_out(start, start.grid(), scale, start.aspect, start.radius());
+                // Grown past what a wall may be, it stays as large as it was.
+                changed = Some(sized(scale))
+                    .filter(allowed)
+                    .unwrap_or_else(|| sized(shown));
+                stopped = (changed.scale() - layout::SCALES.0).abs() < 1e-4
+                    || (changed.scale() - layout::SCALES.1).abs() < 1e-4
+                    || (changed.scale() - scale).abs() > 1e-4;
+            }
+            output.ticked |= stopped && !stretch.stopped;
+            stretch.stopped = stopped;
+            let ratio = changed.scale() / start.scale();
+            if let Some(carry) = &mut self.carry {
+                carry.model = moved.frame(stretch.frame, ratio);
+                let tilt = Mat4::from_rotation_x(changed.tilt().to_radians());
+                changed.pose = pose(carry.model * tilt.inverse());
+            }
+            held_at = Some(first.at(stretch.hold.along()[0]));
+            self.preview = Some(changed);
+        }
         // A wall carried follows the ray, facing the viewer, as far along it and as turned as the stick puts it.
         if let (Some(carry), Some(ray)) = (&mut self.carry, input.ray.filter(|_| input.active)) {
-            output.ticked |= carry.manipulation.update(input.stick, input.dt);
-            let at = ray.at(carry.manipulation.distance());
+            let stretching = held_at.is_some();
+            if !stretching {
+                output.ticked |= carry.manipulation.update(input.stick, input.dt);
+            }
+            let at = held_at.unwrap_or_else(|| ray.at(carry.manipulation.distance()));
             // Its frame is tilted as it tilts, which carrying keeps, and its pose is upright.
             let tilt = Mat4::from_rotation_x(
                 self.preview
@@ -2105,7 +2248,7 @@ impl Editor {
                     .map_or(0.0, |preview| preview.tilt().to_radians()),
             );
             // Squared up, it faces the participant, its tilt kept, from where it is carried.
-            if input.straighten {
+            if input.straighten && !stretching {
                 let middle = carry.model.transform_point3(Vec3::ZERO);
                 let (_, square, _) = facing(
                     middle,
@@ -2117,13 +2260,15 @@ impl Editor {
                 carry.manipulation.straighten();
                 output.ticked = true;
             }
-            carry.model = Mat4::from_translation(at)
-                * Mat4::from_rotation_y(carry.manipulation.yaw())
-                * Mat4::from_quat(carry.facing)
-                * Mat4::from_translation(-carry.grabbed);
-            self.preview
-                .iter_mut()
-                .for_each(|preview| preview.pose = pose(carry.model * tilt.inverse()));
+            if !stretching {
+                carry.model = Mat4::from_translation(at)
+                    * Mat4::from_rotation_y(carry.manipulation.yaw())
+                    * Mat4::from_quat(carry.facing)
+                    * Mat4::from_translation(-carry.grabbed);
+                self.preview
+                    .iter_mut()
+                    .for_each(|preview| preview.pose = pose(carry.model * tilt.inverse()));
+            }
             // Pulled firmly towards the participant, it comes out of its group alone, and the rest stay.
             if !self.members.is_empty()
                 && !self.detached
@@ -2235,6 +2380,17 @@ impl Editor {
             // The version of the wall as its handle was taken hold of.
             let held = self.drag.take().map(|drag| drag.start.version);
             let dragged = held.is_some();
+            // Or as both hands took hold of it, its slots sized by them.
+            self.stretch = None;
+            self.gripped = false;
+            let stretched = self.stretched.take();
+            let sized = stretched.is_some()
+                && self
+                    .preview
+                    .as_ref()
+                    .zip(before.as_ref())
+                    .is_some_and(|(after, before)| (after.scale() - before.scale()).abs() > 1e-4);
+            let held = held.or(stretched.filter(|_| sized));
             let moved = std::mem::take(&mut self.moved);
             let detached = std::mem::take(&mut self.detached);
             self.members.clear();
@@ -2271,7 +2427,7 @@ impl Editor {
                 self.pending = Some((placed(&after), input.now));
                 self.moved_pending = moved.iter().map(placed).collect();
             } else if let (Some(after), Some(before), true) =
-                (self.preview.take(), before, carried || dragged)
+                (self.preview.take(), before, carried || dragged || sized)
             {
                 let change = Change {
                     wall: after.id.clone(),
@@ -2296,8 +2452,8 @@ impl Editor {
                                 > 1e-3))
                         .then_some(after.pose),
                     join: None,
-                    // Dragged by a handle, it is changed from how it was taken hold of; carried, it is the
-                    // participant's own wherever it was.
+                    // Dragged by a handle, or sized with both hands, it is changed from how it was taken hold of;
+                    // carried, it is the participant's own wherever it was.
                     version: held,
                 };
                 // Pulled out of its group, it leaves it where it was let go; otherwise its group moves with it.
@@ -2519,7 +2675,7 @@ impl Editor {
             .iter()
             .map(|(handle, model)| (*handle, model.w_axis.truncate()))
             .collect();
-        if self.carry.is_none() {
+        if self.carry.is_none() && self.stretch.is_none() {
             // Each face drawn once, a handle across, and kept, its model scaling it to the wall's handles.
             for (handle, model) in &models {
                 let key = (*handle, self.hovered == Some(*handle), wall.is_locked());
@@ -2543,9 +2699,13 @@ impl Editor {
             .filter(|panel| matches!(&panel.place, tomori_protocol::Place::Wall { wall: on, .. } if *on == wall.id))
             .count();
         // While a handle is dragged, what it makes of the wall, in place of what each control does.
-        let hint = match &self.drag {
-            Some(drag) => readout(drag.handle, wall),
-            None => hint_for(
+        let hint = match (&self.drag, &self.stretch) {
+            (Some(drag), _) => readout(drag.handle, wall),
+            // Held with both hands, the size of its slots, as its corner says it.
+            (None, Some(stretch)) if sized_by_hands(&stretch.start) => {
+                readout(Handle::Corner(1, 1), wall)
+            }
+            _ => hint_for(
                 input.controls,
                 wall,
                 self.carry.is_some(),

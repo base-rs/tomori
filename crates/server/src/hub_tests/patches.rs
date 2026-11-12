@@ -199,6 +199,8 @@ fn a_client_that_applies_patches_holds_what_an_older_client_is_sent_whole() {
                 wall: None,
                 slot: None,
                 pose: Some(upright([1.0, 1.5, -1.0])),
+                size: None,
+                revision: None,
             })
         }),
     ));
@@ -210,6 +212,8 @@ fn a_client_that_applies_patches_holds_what_an_older_client_is_sent_whole() {
                 wall: Some(walls(held)[1].clone()),
                 slot: Some(2),
                 pose: None,
+                size: None,
+                revision: None,
             })
         }),
     ));
@@ -823,6 +827,8 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             wall: None,
                             slot: None,
                             pose: Some(upright([random.below(4) as f32 - 2.0, 1.5, -1.0])),
+                            size: None,
+                            revision: None,
                         });
                         true
                     }),
@@ -832,6 +838,8 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             wall: Some(wall.clone()),
                             slot: Some(random.below(6) as u32),
                             pose: None,
+                            size: None,
+                            revision: None,
                         });
                         true
                     }),
@@ -928,6 +936,83 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
 }
 
 #[test]
+fn a_size_given_with_both_hands_is_refused_where_the_panel_changed_since_they_took_hold_of_it() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::live(&hub, Access::open(), "ada");
+    let mut held = Held::default();
+    ada.send(ClientMessage::Join {
+        space: space.clone(),
+    });
+    reply(
+        &hub,
+        &space,
+        "m1",
+        "```panel\nid: agenda\ntitle: Agenda\n---\n- [ ] One\n```\n",
+    );
+    held.read(&ada);
+    let panel = held.shown().panels[0].clone();
+    // Stretched to half as large again against the version seen, it floats at that size, sent whole as it changed.
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.id.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(upright([1.0, 1.5, -1.0])),
+        size: Some(1.5),
+        revision: Some(panel.version),
+    });
+    held.read(&ada);
+    let stretched = held.shown().panels[0].clone();
+    assert_eq!(stretched.size, Some(1.5));
+    let tomori_protocol::Place::Free { .. } = stretched.place else {
+        unreachable!("it floats, as it was left")
+    };
+    assert!(stretched.version > panel.version);
+    // Again against the version it had before, it is refused, naming the panel, and stays as it was.
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.id.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(upright([2.0, 1.5, -1.0])),
+        size: Some(3.0),
+        revision: Some(panel.version),
+    });
+    held.read(&ada);
+    assert!(
+        held.errors
+            .iter()
+            .any(|(_, named, _)| named.as_deref() == Some(panel.id.as_str())),
+        "{:?}",
+        held.errors
+    );
+    let shown = held.shown().panels[0].clone();
+    assert_eq!(shown.size, Some(1.5));
+    assert_eq!(shown.place, stretched.place);
+    // Moved with one hand, without a size, it keeps the one it had.
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.id.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(upright([2.0, 1.5, -1.0])),
+        size: None,
+        revision: None,
+    });
+    held.read(&ada);
+    assert_eq!(held.shown().panels[0].size, Some(1.5));
+    // A size with a wall means nothing: on a wall, its slot sizes it.
+    ada.send(ClientMessage::PlacePanel {
+        panel: panel.id.clone(),
+        wall: Some(tomori_protocol::TOMORI_WALL.into()),
+        slot: None,
+        pose: None,
+        size: Some(2.0),
+        revision: Some(held.shown().panels[0].version),
+    });
+    held.read(&ada);
+    assert_eq!(held.shown().panels[0].size, None);
+}
+
+#[test]
 fn a_panel_s_and_a_wall_s_version_is_the_revision_of_their_last_change() {
     let (hub, _jobs) = hub_waiting();
     let (space, _commands) = idle(&hub);
@@ -964,6 +1049,8 @@ fn a_panel_s_and_a_wall_s_version_is_the_revision_of_their_last_change() {
         wall: None,
         slot: None,
         pose: Some(upright([1.0, 1.5, -1.0])),
+        size: None,
+        revision: None,
     });
     held.read(&ada);
     let patch = held.patches.last().unwrap().clone();

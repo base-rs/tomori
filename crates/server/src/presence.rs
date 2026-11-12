@@ -552,8 +552,11 @@ pub(crate) fn meet(
         }
     }
     for panel in &projection.panels {
+        // A panel stretched or shrunk with both hands is met as large as it floats.
+        let size = panel.floating_size();
         if let Place::Free { pose } = &panel.place
-            && let Some(along) = Rectangle::at(pose, [0.0; 3], PANEL).meets(origin, direction)
+            && let Some(along) = Rectangle::at(pose, [0.0; 3], (PANEL.0 * size, PANEL.1 * size))
+                .meets(origin, direction)
         {
             consider(
                 Met::Panel {

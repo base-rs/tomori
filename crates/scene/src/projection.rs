@@ -172,7 +172,29 @@ pub enum Target {
     Wall(String, u32),
     /// Floating free at this pose.
     Free(Pose),
+    /// Floating free at this pose, stretched or shrunk with both hands to a size of its own.
+    Sized(Pose, Resized),
 }
+
+/// How large a panel let go floats, as a participant stretched or shrank it with both hands, and its version as the
+/// second hand took hold of it, so that the server refuses the change where the panel has changed since.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Resized {
+    /// As a proportion of its own size, within [`tomori_protocol::FLOAT_SIZES`].
+    pub size: f32,
+    pub version: u64,
+}
+
+/// How far the second hand reaches to take hold of something the first holds by touch rather than with its ray, in
+/// metres: the hand within this of its face, and of its edges. See `design/projection.md`.
+pub const TOUCH: f32 = 0.12;
+
+/// How long the size of something held with both hands shows after it last changed.
+pub const SIZE_SHOWN: Duration = Duration::from_millis(1500);
+
+/// How long a panel let go of by one of two hands takes to settle onto the ray of the hand that still holds it, as a
+/// time constant: quickly, but without a jump.
+const SETTLE: f32 = 0.12;
 
 /// How a panel's face is sized: to its wall's slot, of the cells a slot of its shape holds, or, floating, to fit its
 /// text.
@@ -1524,7 +1546,7 @@ fn agrees(place: &Place, target: &Target) -> bool {
         (Place::Wall { wall, slot }, Target::Wall(target, chosen)) => {
             wall == target && slot == chosen
         }
-        (Place::Free { pose }, Target::Free(target)) => {
+        (Place::Free { pose }, Target::Free(target) | Target::Sized(target, _)) => {
             Vec3::from_array(pose.position).distance(Vec3::from_array(target.position)) < 0.01
         }
         _ => false,
@@ -1579,11 +1601,25 @@ struct Held {
     /// slot lays it out while it docks, so that it is drawn at the slot's size, and fitting its text otherwise.
     drawn: Mat4,
     fit: Fit,
+    /// How large it is, as a proportion of its own size: as it floated, or as both hands stretched it.
+    size: f32,
+    /// How far from its hand's ray it is carried, settling onto the ray, and how far it is turned beyond its snaps:
+    /// where it was as the other of two hands let go of it, so that it does not jump.
+    shift: Vec3,
+    turn: f32,
+    /// Its version as a second hand took hold of it, once both hands have held it, so that its size is sent with it.
+    stretched: Option<u64>,
+}
+
+/// The way `model` faces about the vertical, in radians, from +Z towards +X.
+fn yaw_of(model: Mat4) -> f32 {
+    let facing = model.z_axis.truncate();
+    facing.x.atan2(facing.z)
 }
 
 impl Held {
-    /// Carried from `model`, docking nowhere yet.
-    fn new(panel: String, distance: f32, model: Mat4) -> Self {
+    /// Carried from `model`, docking nowhere yet, `size` times as large as its own size.
+    fn new(panel: String, distance: f32, model: Mat4, size: f32) -> Self {
         Self {
             panel,
             manipulation: Manipulation::new(distance),
@@ -1592,6 +1628,46 @@ impl Held {
             toward: model,
             drawn: model,
             fit: Fit::Text,
+            size,
+            shift: Vec3::ZERO,
+            turn: 0.0,
+            stretched: None,
+        }
+    }
+
+    /// Carried on along `ray` alone from where it stands, facing a participant at `viewer`, as the other of two hands
+    /// let go: as far along the ray as it is, and as turned, settling onto the ray from where it is.
+    fn anchor(&mut self, ray: Ray, viewer: Vec3) {
+        let middle = self.model.w_axis.truncate();
+        self.manipulation = Manipulation::new((middle - ray.origin).dot(ray.direction));
+        self.shift = middle - ray.at(self.manipulation.distance());
+        let square = facing(middle, Vec3::new(viewer.x, middle.y, viewer.z), 1.0);
+        self.turn = yaw_of(self.model) - yaw_of(square);
+    }
+
+    /// Carried along `ray`, facing a participant at `viewer`, as far along it and as turned as its stick puts it, at its
+    /// size, settling onto the ray over `dt` seconds.
+    fn follow(&mut self, ray: Ray, viewer: Vec3, dt: f32) {
+        self.shift *= (-dt.max(0.0) / SETTLE).exp();
+        // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
+        let at = ray.at(self.manipulation.distance()) + self.shift;
+        self.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0)
+            * Mat4::from_rotation_y(self.manipulation.yaw() + self.turn)
+            * Mat4::from_scale(Vec3::splat(self.size));
+    }
+
+    /// Where it would go if let go now, floating: at its size, where both hands changed it.
+    fn floating(&self) -> Target {
+        let pose = pose(self.model);
+        match self.stretched {
+            Some(version) => Target::Sized(
+                pose,
+                Resized {
+                    size: self.size,
+                    version,
+                },
+            ),
+            None => Target::Free(pose),
         }
     }
 
@@ -1612,6 +1688,132 @@ impl Held {
         let pull = if dock.is_some() { 1.0 } else { 0.0 };
         self.pull += (pull - self.pull) * step;
         self.drawn = blend(self.model, self.toward, self.pull);
+    }
+}
+
+/// A panel both hands hold: the one carrying it, [`Projector::held`], and the other, `second`, which took hold of it
+/// too, and where both took hold of it, with where it stood and how large it was then.
+#[derive(Clone, Debug, PartialEq)]
+struct Both {
+    second: Side,
+    hold: two_hands::Hold,
+    model: Mat4,
+    size: f32,
+    /// When its size last changed, while both hold it, so that its size shows for [`SIZE_SHOWN`] after.
+    changed: Option<Instant>,
+    /// Whether it is at the least or the most it may be, so that reaching either ticks.
+    bounded: bool,
+}
+
+/// Whether `point` is within `reach` of a face of `size` drawn with `model`: in front of it or behind it by at most that,
+/// and within that of its edges, as a hand touching it is.
+fn touches(model: Mat4, (width, height): (f32, f32), point: Vec3, reach: f32) -> bool {
+    let scale = model.x_axis.truncate().length();
+    let local = model.inverse().transform_point3(point) * scale;
+    local.z.abs() <= reach
+        && local.x.abs() <= width * scale / 2.0 + reach
+        && local.y.abs() <= height * scale / 2.0 + reach
+}
+
+/// The marks at the corners of something both hands hold, a panel or a wall, drawn with `model`, its corners `corners`,
+/// in its own frame, top left, top right, bottom left and bottom right, as [`editing`] numbers a wall's: each a small
+/// bright angle just outside its corner, its arms along its edges, faintly, so that what both hands hold reads as held.
+fn corner_marks(mark: &Arc<Canvas>, model: Mat4, corners: [Vec3; 4]) -> Vec<Sheet> {
+    let scale = model.x_axis.truncate().length().max(1e-3);
+    let span = corners[0].distance(corners[3]) * scale;
+    let size = (span * MARK_SHARE).clamp(MARK_SIZES.0, MARK_SIZES.1) / scale;
+    let gap = MARK_GAP / scale;
+    let (pixels, _) = mark.size_in_pixels();
+    // Each turned from the top left's, whose arms reach right and down, to reach along its own edges.
+    let turns = [0.0, -0.5, 0.5, 1.0].map(|turn: f32| turn * std::f32::consts::PI);
+    corners
+        .into_iter()
+        .zip(turns)
+        .map(|(corner, turn)| Sheet {
+            canvas: Some(mark.clone()),
+            model: Some(
+                model
+                    * Mat4::from_translation(corner)
+                    * Mat4::from_rotation_z(turn)
+                    * Mat4::from_translation(Vec3::new(
+                        size / 2.0 - gap,
+                        gap - size / 2.0,
+                        2.0 * LIFT / scale,
+                    ))
+                    * Mat4::from_scale(Vec3::splat(size / pixels as f32)),
+            ),
+        })
+        .collect()
+}
+
+/// How large each corner mark is, as a proportion of the diagonal of what both hands hold, and at the least and most, in
+/// metres, and how far outside its corner it stands.
+const MARK_SHARE: f32 = 0.05;
+const MARK_SIZES: (f32, f32) = (0.03, 0.25);
+const MARK_GAP: f32 = 0.012;
+
+/// The face of a corner mark: an angle, its arms reaching right and down from its top left, a pixel a font pixel.
+fn mark_face() -> Canvas {
+    let mut canvas = Canvas::new(4, 1.0);
+    canvas.padding = (0, 0);
+    canvas.background = [0.0; 4];
+    canvas.rows = vec![Row::default(); 3];
+    let (width, _) = canvas.size_in_pixels();
+    let (length, thick) = (width as f32 * 0.8, width as f32 * 0.12);
+    let color = [HIGHLIGHT[0], HIGHLIGHT[1], HIGHLIGHT[2], 0.85];
+    canvas.shapes = vec![
+        crate::shapes::Shape::Rule {
+            from: [0.0, thick / 2.0],
+            to: [length, thick / 2.0],
+            width: thick,
+            color,
+        },
+        crate::shapes::Shape::Rule {
+            from: [thick / 2.0, 0.0],
+            to: [thick / 2.0, length],
+            width: thick,
+            color,
+        },
+    ];
+    canvas
+}
+
+/// The readout of how large a panel both hands hold is, as a proportion of its own size, such as `120%`, saying so at
+/// the least or the most it may be.
+pub fn size_readout(size: f32) -> Canvas {
+    let percent = (size * 100.0).round();
+    let text = if size <= tomori_protocol::FLOAT_SIZES.0 + 1e-4 {
+        format!("{percent:.0}% · smallest")
+    } else if size >= tomori_protocol::FLOAT_SIZES.1 - 1e-4 {
+        format!("{percent:.0}% · largest")
+    } else {
+        format!("{percent:.0}%")
+    };
+    let columns = crate::ui_text::width(&text) + 2;
+    let mut canvas = Canvas::new(columns, HINT_ANGLE);
+    canvas.padding = (5, 4);
+    canvas.background = [0.0, 0.0, 0.0, 0.82];
+    canvas.border = Some(HIGHLIGHT);
+    canvas.rows = vec![Row::text(
+        &format!(" {text}"),
+        crate::ui_text::Style::bold(crate::transcript::BRIGHT),
+        columns,
+    )];
+    canvas
+}
+
+/// The readout `canvas` standing just above a face of `height` drawn with `model`, facing `viewer`, drawn at
+/// [`HINT_ANGLE`] a font pixel whatever its distance.
+fn readout_above(mut canvas: Canvas, model: Mat4, height: f32, viewer: Vec3) -> Sheet {
+    let middle = model.w_axis.truncate();
+    let distance = middle.distance(viewer).max(0.1);
+    canvas.pixel = HINT_ANGLE * distance;
+    let (_, tall) = canvas.size();
+    let up = model.transform_vector3(Vec3::Y);
+    let above = middle + up * (height / 2.0) + Vec3::Y * (HINT_GAP * distance + tall / 2.0);
+    Sheet {
+        model: Some(facing(above, viewer, 1.0)),
+        canvas: Some(crate::frame_timing::drawn(canvas)),
     }
 }
 
@@ -1778,6 +1980,12 @@ pub struct Output {
     pub linked: Vec<Sheet>,
     /// Which hand's ray the wall editor followed this frame, which [`Self::wall_ticked`] is felt on.
     pub wall_hand: Side,
+    /// The hand that took hold, with the other, of what the other holds this frame, a panel or a wall, so that both
+    /// hold it: to feel on it.
+    pub joined: Option<Side>,
+    /// What both hands hold reached the least or the most it may be, as they stretch or shrink it: to tick on the hand
+    /// that took hold of it second.
+    pub bounded: Option<Side>,
     /// What it did for the left hand: every field above but these is the right hand's.
     pub left: Left,
 }
@@ -1794,6 +2002,13 @@ pub struct Projector {
     pending: Hands<Option<Pending>>,
     /// The hand whose ray and grip the wall editor follows: the one that took hold of the wall, or last squeezed.
     editor_hand: Side,
+    /// A panel one hand carries that the other has taken hold of too, so that both hold it.
+    both: Option<Both>,
+    /// Whether each hand's squeeze would take hold, with it, of what the other hand holds, as things stood this frame:
+    /// its ray on it, or its hand touching it, so that the squeeze is the carrying's. See [`Projector::joins`].
+    joinable: Hands<bool>,
+    /// The corner marks' face, drawn once.
+    mark: Option<Arc<Canvas>>,
     /// A panel thrown away, hidden from when it was until the server's projection no longer shows it, or [`PENDING`]
     /// passes.
     thrown: Option<(String, Instant)>,
@@ -1914,8 +2129,10 @@ impl Projector {
         };
         // The grips are followed even while the panels do not take them, so that a squeeze held as they start to is not
         // a new one.
-        let edges = Hands::from_fn(|side| self.grip[side].update(hands[side].grip));
+        let mut edges = Hands::from_fn(|side| self.grip[side].update(hands[side].grip));
         let Some(projection) = input.projection else {
+            self.both = None;
+            self.joinable = Hands::default();
             self.held = Hands::default();
             self.aim = Hands::default();
             self.pending = Hands::default();
@@ -1958,6 +2175,49 @@ impl Projector {
             }
         }
         let viewer = input.viewer.unwrap_or(HOME);
+        let mut output = Output::default();
+        // Held with both hands, letting go of one leaves it carried by the other from where it is now, so that it does
+        // not jump; letting go of both puts it down, as one hand does.
+        if let Some(both) = &self.both {
+            let second = both.second;
+            let first = second.other();
+            let gone = |side: Side| edges[side].1 || !hands[side].active;
+            match (self.held[first].is_some(), gone(first), gone(second)) {
+                (false, ..) => self.both = None,
+                (true, false, false) => {}
+                (true, false, true) => {
+                    self.both = None;
+                    self.held[first]
+                        .iter_mut()
+                        .zip(hands[first].ray)
+                        .for_each(|(held, ray)| held.anchor(ray, viewer));
+                }
+                (true, true, false) => {
+                    self.both = None;
+                    self.held[second] = self.held[first].take();
+                    self.held[second]
+                        .iter_mut()
+                        .zip(hands[second].ray)
+                        .for_each(|(held, ray)| held.anchor(ray, viewer));
+                    self.aim[second] = self.aim[first].take();
+                }
+                (true, true, true) => self.both = None,
+            }
+        }
+        let wall_both = self.editor.stretching().then_some(self.editor_hand);
+        if let Some(first) = wall_both {
+            let second = first.other();
+            let gone = |side: Side| edges[side].1 || !hands[side].active;
+            match (gone(first), gone(second)) {
+                (false, true) => self.editor.let_one_go(hands[first].ray),
+                // The first letting go, the second holds it on alone, and the editor follows it.
+                (true, false) => {
+                    self.editor.let_one_go(hands[second].ray);
+                    self.editor_hand = second;
+                }
+                _ => {}
+            }
+        }
         // The walls as drawn: one being changed as it is being changed, and the Tomori wall where it travels.
         let shown_walls = travelled(self.editor.walls(projection), travelling);
         let walls: Vec<(&Wall, Mat4)> = shown_walls
@@ -1965,7 +2225,6 @@ impl Projector {
             .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
             .collect();
         let pickable = pickable(&walls, travelling.is_some());
-        let mut output = Output::default();
         let mut told: Hands<Told> = Hands::default();
         // Each hand's stick acts on what that hand carries, a panel or the wall the editor carries for it; the right
         // stick's click, on what the right hand carries, or else on what the left does.
@@ -1978,21 +2237,47 @@ impl Projector {
             let hand = hands[side];
             let (_, released) = edges[side];
             let steers = steered == Some(side);
+            // Held with both hands, it follows the middle of the points they took, turns as the line between them does,
+            // and grows or shrinks about that middle as they spread or close, in steps, within its bounds; the sticks
+            // move it no further meanwhile.
+            if let Some(both) = self
+                .both
+                .as_mut()
+                .filter(|both| both.second.other() == side)
+                && let Some(held) = &mut self.held[side]
+            {
+                if let (Some(first), Some(second)) = (hand.ray, hands[both.second].ray) {
+                    let moved = both.hold.follow([first, second]);
+                    let bounds = tomori_protocol::FLOAT_SIZES;
+                    let size = two_hands::stepped(both.size * moved.spread, bounds);
+                    if (size - held.size).abs() > 1e-4 {
+                        both.changed = Some(input.now);
+                    }
+                    let bounded = (size - bounds.0).abs() < 1e-4 || (size - bounds.1).abs() < 1e-4;
+                    if bounded && !both.bounded {
+                        output.bounded = Some(both.second);
+                    }
+                    both.bounded = bounded;
+                    held.size = size;
+                    held.model = moved.model(both.model, size / both.size);
+                }
+            }
             // The panel carried follows its hand's ray, facing the viewer, as far along it and as turned as its hand's
             // stick puts it.
-            if let Some(held) = &mut self.held[side]
+            else if let Some(held) = &mut self.held[side]
                 && hand.active
             {
                 output.turned |= held.manipulation.update(hand.stick, input.dt);
-                if steers && input.straighten && !held.manipulation.square() {
+                if steers
+                    && input.straighten
+                    && !(held.manipulation.square() && held.turn.abs() < 1e-5)
+                {
                     held.manipulation.straighten();
+                    held.turn = 0.0;
                     output.turned = true;
                 }
                 if let Some(ray) = hand.ray {
-                    // Upright, as it floats: facing the viewer turned only about the vertical, then by its snaps.
-                    let at = ray.at(held.manipulation.distance());
-                    held.model = facing(at, Vec3::new(viewer.x, at.y, viewer.z), 1.0)
-                        * Mat4::from_rotation_y(held.manipulation.yaw());
+                    held.follow(ray, viewer, input.dt);
                 }
             }
             // The slot it would be put in: the one it is carried near, wherever the ray points, and it is drawn pulled
@@ -2020,7 +2305,7 @@ impl Projector {
             {
                 let (target, model) = match self.aim[side].take() {
                     Some(aim) => (Target::Wall(aim.wall, aim.slot), aim.model),
-                    None => (Target::Free(pose(held.model)), held.model),
+                    None => (held.floating(), held.model),
                 };
                 self.pending[side] = Some(Pending {
                     panel: held.panel.clone(),
@@ -2115,6 +2400,96 @@ impl Projector {
                 right_pointed = pointed;
             }
         }
+        // A squeeze of one hand on what the other holds, its ray on it or the hand touching it, takes hold of it too, so
+        // that both hold it: a panel the other carries, or a wall it carries or holds by its board. Its ray takes it
+        // however far away it is, so that one hand points and the other stretches. See `design/projection.md`.
+        self.joinable = Hands::default();
+        for side in Side::BOTH {
+            let hand = hands[side];
+            let other = side.other();
+            if self.both.is_some() || self.editor.stretching() || self.held[side].is_some() {
+                continue;
+            }
+            let pointed = told[side]
+                .pointed
+                .clone()
+                .filter(|(_, distance, _)| *distance < hand.nearer);
+            let carried = self.held[other].as_ref();
+            let panel = standing
+                .iter()
+                .zip(&sizes)
+                .find(|((panel, ..), _)| carried.is_some_and(|held| held.panel == panel.id))
+                .and_then(|((panel, model, _), size)| {
+                    let met = pointed
+                        .as_ref()
+                        .filter(|(id, ..)| *id == panel.id)
+                        .map(|(_, distance, _)| *distance);
+                    let touched = hand
+                        .ray
+                        .filter(|ray| hand.active && touches(*model, *size, ray.origin, TOUCH))
+                        .map(|_| 0.0);
+                    met.or(touched)
+                });
+            let wall = self
+                .editor
+                .held_wall()
+                .filter(|_| self.editor_hand == other && panel.is_none())
+                .and_then(|id| pickable.iter().find(|(wall, _)| wall.id == id))
+                .and_then(|(wall, frame)| {
+                    let frame = self.editor.carried_frame().unwrap_or(*frame);
+                    let ray = hand.ray.filter(|_| hand.active)?;
+                    // A panel on it is the wall held, as much as its board, slot or bar is; one nearer, elsewhere, is
+                    // pulled off instead.
+                    let nearer = pointed
+                        .as_ref()
+                        .filter(|(id, ..)| {
+                            !projection.panel(id).is_some_and(|panel| {
+                                matches!(&panel.place, Place::Wall { wall: on, .. } if *on == wall.id)
+                            })
+                        })
+                        .map_or(hand.nearer, |(_, distance, _)| distance.min(hand.nearer));
+                    let met = hand
+                        .pointing
+                        .then(|| wall_hit(wall, frame, &ray))
+                        .flatten()
+                        .filter(|along| *along < nearer);
+                    let touched = (slot_frames(wall, frame).into_iter().any(|slot| {
+                        touches(slot, slot_unit(wall), ray.origin, TOUCH)
+                    }) || wall
+                        .board()
+                        .is_some_and(|board| touches(frame, board, ray.origin, TOUCH)))
+                    .then_some(0.0);
+                    met.or(touched).map(|along| (along, *wall, frame))
+                });
+            self.joinable[side] = panel.is_some() || wall.is_some();
+            if !edges[side].0 {
+                continue;
+            }
+            let (Some(first), Some(second)) = (hands[other].ray, hand.ray) else {
+                continue;
+            };
+            if let Some(along) = panel
+                && let Some(held) = &mut self.held[other]
+            {
+                let middle = held.model.w_axis.truncate();
+                let reach = (middle - first.origin).dot(first.direction).max(0.0);
+                self.both = Some(Both {
+                    second: side,
+                    hold: two_hands::Hold::new([first, second], [reach, along]),
+                    model: held.model,
+                    size: held.size,
+                    changed: None,
+                    bounded: false,
+                });
+                held.stretched = projection.panel(&held.panel).map(|panel| panel.version);
+                edges[side].0 = false;
+                output.joined = Some(side);
+            } else if let Some((along, wall, frame)) = wall {
+                self.editor.join(first, second, along, wall, frame);
+                edges[side].0 = false;
+                output.joined = Some(side);
+            }
+        }
         // The wall editor follows one hand at a time: the one that carries the wall or drags its handle, until it lets
         // go, or else the one that squeezes now, the right first, of those carrying no panel.
         if !self.editor.busy()
@@ -2145,6 +2520,9 @@ impl Projector {
                     .map_or(f32::INFINITY, |(_, distance, _)| *distance),
                 stick: if picking { hand.stick } else { Vec2::ZERO },
                 straighten: input.straighten && steered == Some(editing) && picking,
+                second: hands[editing.other()]
+                    .ray
+                    .filter(|_| self.editor.stretching()),
                 free: hand.free,
                 viewer,
                 surfaces: input.surfaces,
@@ -2213,12 +2591,15 @@ impl Projector {
                     .pointed
                     .take_if(|(_, distance, _)| *distance < hand.nearer)
             {
-                let model = standing
+                let (model, size) = standing
                     .iter()
                     .find(|(shown, ..)| shown.id == panel)
-                    .map(|(_, model, _)| *model)
+                    .map(|(shown, model, _)| {
+                        let floating = matches!(shown.place, Place::Free { .. });
+                        (*model, if floating { shown.floating_size() } else { 1.0 })
+                    })
                     .expect("pointed at a panel shown");
-                self.held[side] = Some(Held::new(panel, distance, model));
+                self.held[side] = Some(Held::new(panel, distance, model, size));
                 self.pending[side] = None;
                 output.picked = true;
             }
@@ -2322,6 +2703,43 @@ impl Projector {
         });
         // The handles of the wall taken hold of, and the hint below it, over the walls.
         output.sheets.extend(edited.sheets);
+        // What both hands hold shows small marks at its corners, and a panel its size, for a moment after it changes.
+        let mark = self
+            .mark
+            .get_or_insert_with(|| crate::frame_timing::drawn(mark_face()))
+            .clone();
+        if let Some(both) = &self.both
+            && let Some(held) = &self.held[both.second.other()]
+            && let Some(faces) = self.faces.get_mut(&held.panel)
+        {
+            let (width, height) = faces.at(held.fit).size;
+            let (x, y) = (width / 2.0, height / 2.0);
+            let corners = [
+                Vec3::new(-x, y, 0.0),
+                Vec3::new(x, y, 0.0),
+                Vec3::new(-x, -y, 0.0),
+                Vec3::new(x, -y, 0.0),
+            ];
+            output
+                .sheets
+                .extend(corner_marks(&mark, held.drawn, corners));
+            if both
+                .changed
+                .is_some_and(|at| input.now.saturating_duration_since(at) < SIZE_SHOWN)
+            {
+                output.sheets.push(readout_above(
+                    size_readout(held.size),
+                    held.drawn,
+                    height,
+                    viewer,
+                ));
+            }
+        }
+        if let Some((wall, frame)) = self.editor.stretched() {
+            output
+                .sheets
+                .extend(corner_marks(&mark, frame, editing::corners(&wall)));
+        }
         // While a panel is carried, the hint beside it says what each control does to it, and what letting go would do,
         // from the frame after it is pulled off, once where it would go is known: the controls only beside the one they
         // act on, and only what letting go does beside the other.
@@ -2389,6 +2807,7 @@ impl Projector {
             .into_iter()
             .find_map(|side| self.held[side].take().map(|held| (side, held)))?;
         self.aim[side] = None;
+        self.both = None;
         self.thrown = Some((held.panel.clone(), now));
         Some(held.panel)
     }
@@ -2574,7 +2993,7 @@ impl Projector {
                         .iter()
                         .find(|(shown, _)| shown.id == *on)
                         .map_or(Fit::SLOT, |(wall, _)| Fit::Slot(Cells::of(wall))),
-                    Target::Free(_) => Fit::Text,
+                    Target::Free(_) | Target::Sized(..) => Fit::Text,
                 };
                 return Some((pending.model, fit));
             }
@@ -2589,7 +3008,12 @@ impl Projector {
                         .get(*slot as usize)
                         .map(|model| (*model, Fit::Slot(Cells::of(wall))))
                 }),
-            Place::Free { pose } => model(pose).map(|model| (model, Fit::Text)),
+            Place::Free { pose } => model(pose).map(|model| {
+                (
+                    model * Mat4::from_scale(Vec3::splat(panel.floating_size())),
+                    Fit::Text,
+                )
+            }),
             _ => None,
         }
     }
@@ -2640,9 +3064,37 @@ impl Projector {
         self.editor.carrying().filter(|_| self.editor_hand == side)
     }
 
-    /// Whether `side`'s hand carries a panel or a wall.
+    /// Whether `side`'s hand carries a panel or a wall, alone or with the other hand.
     pub fn carrying_in(&self, side: Side) -> bool {
-        self.held[side].is_some() || self.carried_wall_in(side).is_some()
+        self.held[side].is_some()
+            || self.carried_wall_in(side).is_some()
+            || self.both.as_ref().is_some_and(|both| both.second == side)
+            || (self.editor.stretching() && self.editor_hand.other() == side)
+    }
+
+    /// Whether a squeeze of `side`'s grip now would take hold of what the other hand holds, with it, its ray on it or
+    /// the hand touching it, as things stood the frame before: a panel the other hand carries, or a wall it carries or
+    /// holds by its board.
+    pub fn joins(&self, side: Side) -> bool {
+        self.joinable[side]
+    }
+
+    /// Whether both hands hold one panel or one wall.
+    pub fn two_handed(&self) -> bool {
+        self.both.is_some() || self.editor.stretching()
+    }
+
+    /// The server refused a change to the panel `panel`, as made against a version since changed, as a size sent with
+    /// both hands: it is drawn as the server has it at once.
+    pub fn refused_panel(&mut self, panel: &str) {
+        for side in Side::BOTH {
+            if self.pending[side]
+                .as_ref()
+                .is_some_and(|pending| pending.panel == panel)
+            {
+                self.pending[side] = None;
+            }
+        }
     }
 
     /// Whether `panel`, shown last frame, has more than its face shows at once, so that it scrolls.
@@ -2925,6 +3377,7 @@ mod list;
 pub mod volume;
 pub(crate) use list::RowMarks;
 pub mod travel;
+pub mod two_hands;
 mod walls;
 
 #[cfg(test)]

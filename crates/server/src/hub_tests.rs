@@ -3875,6 +3875,8 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         wall: Some("environment-0".into()),
         slot: Some(4),
         pose: None,
+        size: None,
+        revision: None,
     });
     let shown = ada.paced_projections().pop().unwrap();
     assert!(wall(&shown));
@@ -4795,6 +4797,8 @@ fn a_participant_moving_a_panel_to_another_wall_or_dismissing_it_is_told_to_its_
             wall: wall.map(str::to_owned),
             slot,
             pose: pose.map(upright),
+            size: None,
+            revision: None,
         };
     let told = |count: usize| {
         eventually_in("the side is told the move", || {
@@ -4967,6 +4971,8 @@ fn every_panel_of_an_environment_whose_place_changes_is_told_whatever_moved_it()
         wall: None,
         slot: None,
         pose: Some(upright([1.0, 1.5, -1.0])),
+        size: None,
+        revision: None,
     });
     assert_eq!(
         moves_from(&seen, 0, 1),
@@ -4977,6 +4983,8 @@ fn every_panel_of_an_environment_whose_place_changes_is_told_whatever_moved_it()
         wall: Some("environment-0".into()),
         slot: Some(0),
         pose: None,
+        size: None,
+        revision: None,
     });
     assert_eq!(
         moves_from(&seen, 1, 2),
@@ -5029,6 +5037,8 @@ fn every_panel_of_an_environment_whose_place_changes_is_told_whatever_moved_it()
         wall: Some(added.clone()),
         slot: None,
         pose: None,
+        size: None,
+        revision: None,
     });
     assert_eq!(
         moves_from(&seen, 4, 1),
@@ -5097,6 +5107,8 @@ fn moves_past_a_participant_s_rate_wait_and_a_side_started_again_is_told_where_i
         wall: wall.map(str::to_owned),
         slot: None,
         pose: wall.is_none().then(|| upright([1.0, 1.5, -1.0])),
+        size: None,
+        revision: None,
     };
     // Twice her burst of moves, to and fro: at most a burst is told as they come, the inbox never flooded.
     let burst = crate::channel::INTENT_BURST as usize;
@@ -5616,6 +5628,8 @@ fn a_reply_s_code_blocks_are_code_panels_that_the_next_reply_s_replace_unless_pi
         wall: Some(tomori_protocol::TOMORI_WALL.into()),
         slot: None,
         pose: None,
+        size: None,
+        revision: None,
     });
     assert!(ada.projection().panel(&pinned).unwrap().pinned);
     reply(&hub, &space, "m2", CODE_REPLY);
@@ -5896,6 +5910,8 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         wall: None,
         slot: None,
         pose: Some(free),
+        size: None,
+        revision: None,
     });
     for client in [&bob, &vic] {
         let projected = client.projections();
@@ -5911,6 +5927,8 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
             wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
             slot: None,
             pose: None,
+            size: None,
+            revision: None,
         });
         assert_eq!(
             ada.projections()[0].panels[0].place,
@@ -5929,6 +5947,8 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
         slot: Some(4),
         pose: None,
+        size: None,
+        revision: None,
     });
     for client in [&ada, &vic] {
         assert_eq!(
@@ -5945,6 +5965,8 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         wall: Some(tomori_protocol::TOMORI_WALL.to_owned()),
         slot: Some(tomori_protocol::WALL_SLOTS),
         pose: None,
+        size: None,
+        revision: None,
     });
     assert_eq!(bob.errors(), ["That wall has no such slot."]);
     // A visitor moves and dismisses nothing.
@@ -5956,6 +5978,8 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
         wall: None,
         slot: None,
         pose: Some(free),
+        size: None,
+        revision: None,
     });
     assert_eq!(
         vic.errors(),
@@ -5984,18 +6008,24 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
             wall: None,
             slot: None,
             pose: None,
+            size: None,
+            revision: None,
         },
         ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: Some("x".repeat(limits::IDENTIFIER_BYTES + 1)),
             slot: None,
             pose: None,
+            size: None,
+            revision: None,
         },
         ClientMessage::PlacePanel {
             panel: panel.clone(),
             wall: Some("wall-99".to_owned()),
             slot: None,
             pose: None,
+            size: None,
+            revision: None,
         },
     ] {
         ada.send(message);
@@ -6031,6 +6061,8 @@ fn panels_are_pulled_off_snapped_back_and_dismissed_for_everyone_but_never_by_a_
             wall: None,
             slot: None,
             pose: Some(free),
+            size: None,
+            revision: None,
         },
         ClientMessage::DismissPanel { panel },
     ] {
@@ -6282,6 +6314,8 @@ fn participants_change_walls_for_everyone_while_visitors_change_none() {
         wall: Some(added.id.clone()),
         slot: Some(2),
         pose: None,
+        size: None,
+        revision: None,
     });
     ada.send(ClientMessage::RemoveWall {
         wall: added.id.clone(),
@@ -6469,6 +6503,8 @@ fn environment_walls_and_floating_panels_hide_with_their_environment_and_the_tom
         wall: None,
         slot: None,
         pose: Some(upright([0.5, 1.4, -1.0])),
+        size: None,
+        revision: None,
     });
     let in_sky = ada.projection();
     assert_eq!(in_sky.walls.len(), 2);
@@ -7045,6 +7081,8 @@ fn walls_and_panels_are_kept_with_the_space_across_a_restart() {
             wall: None,
             slot: None,
             pose: Some(upright([0.5, 1.4, -1.0])),
+            size: None,
+            revision: None,
         });
         let shown = ada.projection();
         (space, shown)

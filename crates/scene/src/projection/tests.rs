@@ -3387,3 +3387,5 @@ fn the_tomori_wall_folds_travels_and_unfolds_with_its_panels_and_takes_none_mean
     let output = projector.update(input(&moved, at(there), 0.0, later(10.1)));
     assert_eq!(output.pointed.unwrap().0, "a");
 }
+
+mod both_hands;

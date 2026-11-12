@@ -415,6 +415,9 @@ pub struct Conversation {
     /// The wall whose change the server last refused since the frame step last took it, as made against a version since
     /// changed, so that it draws it as the server has it at once rather than as sent.
     refused_wall: Option<String>,
+    /// The panel a tick, a choice or a change of size was refused on, as made against a version since changed, so that
+    /// the frame step draws it as the server has it at once.
+    refused_panel: Option<String>,
     /// The last body paginated, since the console's panel is drawn every frame.
     #[cfg(any(not(target_os = "android"), test))]
     paged: Option<Paged>,
@@ -594,6 +597,7 @@ impl Conversation {
             error: None,
             actions: Vec::new(),
             refused_wall: None,
+            refused_panel: None,
             #[cfg(any(not(target_os = "android"), test))]
             paged: None,
             talk: None,
@@ -684,6 +688,12 @@ impl Conversation {
     /// participant changes one wall at a time. See `design/projection.md`.
     pub fn take_refused_wall(&mut self) -> Option<String> {
         self.refused_wall.take()
+    }
+
+    /// The panel the server last refused a tick, a choice or a change of size on, as made against a version since
+    /// changed, once.
+    pub fn take_refused_panel(&mut self) -> Option<String> {
+        self.refused_panel.take()
     }
 
     /// Take one action so a failure can cancel later queued microphone starts.
@@ -1134,8 +1144,9 @@ impl Conversation {
                 {
                     log::info!("The server refused a choice of a row of {panel}: {error}");
                 } else {
-                    log::info!("The server refused a tick on {panel}: {error}");
+                    log::info!("The server refused a change to {panel}: {error}");
                 }
+                self.refused_panel = Some(panel);
             }
             // So is a change to a wall refused as the wall changed since it was taken hold of, as when another
             // participant changed it meanwhile: the projection sent again shows the wall as it is, at once, to change
@@ -4171,15 +4182,20 @@ impl Conversation {
         if self.projection().is_none() {
             return;
         }
-        let (wall, slot, pose) = match target {
-            crate::projection::Target::Wall(wall, slot) => (Some(wall), Some(slot), None),
-            crate::projection::Target::Free(pose) => (None, None, Some(pose)),
+        let (wall, slot, pose, sized) = match target {
+            crate::projection::Target::Wall(wall, slot) => (Some(wall), Some(slot), None, None),
+            crate::projection::Target::Free(pose) => (None, None, Some(pose), None),
+            crate::projection::Target::Sized(pose, sized) => (None, None, Some(pose), Some(sized)),
         };
+        // Stretched or shrunk with both hands, it says how large, and the version it was taken hold of at, so that the
+        // server refuses it where the panel has changed since.
         self.send(ClientMessage::PlacePanel {
             panel,
             wall,
             slot,
             pose,
+            size: sized.map(|sized| sized.size),
+            revision: sized.map(|sized| sized.version),
         });
     }
 
@@ -14097,12 +14113,16 @@ mod tests {
                     wall: None,
                     slot: None,
                     pose: Some(pose),
+                    size: None,
+                    revision: None,
                 },
                 ClientMessage::PlacePanel {
                     panel: "panel-1".into(),
                     wall: Some("wall-1".into()),
                     slot: Some(3),
                     pose: None,
+                    size: None,
+                    revision: None,
                 },
                 ClientMessage::DismissPanel {
                     panel: "panel-2".into()

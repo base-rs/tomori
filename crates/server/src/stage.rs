@@ -715,6 +715,10 @@ struct Kept {
     /// as it floats there, so that moving it anywhere else, as a participant carrying it does, takes it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     anchor: Option<(String, Pose)>,
+    /// How large it floats, as a proportion of its own size, as a participant stretched or shrank it with both hands,
+    /// within [`tomori_protocol::FLOAT_SIZES`]: kept only while it floats, since a wall's slot sizes the panels in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<f32>,
 }
 
 impl Kept {
@@ -743,6 +747,9 @@ impl Kept {
             },
             Placed::Free { pose } => Place::Free { pose: *pose },
         };
+        let size = self
+            .size
+            .filter(|_| matches!(self.place, Placed::Free { .. }));
         let mut panel = Panel::new(
             self.id.clone(),
             self.content.title.clone(),
@@ -758,7 +765,8 @@ impl Kept {
         )
         .with_age(now.saturating_sub(self.created))
         .with_pinned(self.pinned)
-        .with_slug(self.content.slug.clone());
+        .with_slug(self.content.slug.clone())
+        .with_size(size);
         panel.code = self.content.code.clone();
         panel.image = self.content.image.clone();
         panel.diagram = self.content.diagram.clone();
@@ -1567,6 +1575,7 @@ impl Stage {
             arranged: false,
             published: None,
             anchor: None,
+            size: None,
         };
         self.put(walls, kept, to);
         self.bound(walls.environment);
@@ -1689,6 +1698,10 @@ impl Stage {
     /// newest to float, so the last to go.
     fn float(&mut self, walls: &Walls<'_>, mut kept: Kept, pose: Pose) {
         let room = FLOATING;
+        // Off a wall, it floats at its own size, as its slot no longer sizes it.
+        if !matches!(kept.place, Placed::Free { .. }) {
+            kept.size = None;
+        }
         kept.place = Placed::Free { pose };
         kept.arranged = false;
         kept.placed = self.tick();
@@ -2311,6 +2324,7 @@ impl Stage {
             panel.place = Placed::Free {
                 pose: pose.and_then(|pose| valid(&pose)).unwrap_or(before.pose),
             };
+            panel.size = None;
             panel.arranged = false;
             panel.placed = self.tick();
             self.list(environment, None).push(panel);
@@ -2352,6 +2366,7 @@ impl Stage {
                         .and_then(|pose| valid(&pose))
                         .unwrap_or(shown.pose),
                 };
+                panel.size = None;
                 panel.arranged = false;
                 panel.placed = tick;
             }
@@ -2412,6 +2427,7 @@ impl Stage {
                 kept.place = Placed::Free {
                     pose: valid(&pose).unwrap_or(wall.pose),
                 };
+                kept.size = None;
                 kept.arranged = false;
                 kept.placed = self.tick();
                 self.list(environment, None).push(kept);
@@ -2504,12 +2520,35 @@ impl Stage {
 
     /// Put the panel `panel` where `target` says in `walls`' environment. Returns whether that changed anything, or why it
     /// was refused.
+    #[cfg(test)]
     pub(crate) fn place(
         &mut self,
         walls: &Walls<'_>,
         panel: &str,
         target: Target,
     ) -> Result<bool, &'static str> {
+        self.place_sized(walls, panel, target, None)
+    }
+
+    /// Put the panel `panel` where `target` says in `walls`' environment, as [`Stage::place`] does, and, left floating,
+    /// `size` times as large as its own size, within [`tomori_protocol::FLOAT_SIZES`], as a participant stretched or
+    /// shrank it with both hands: without one, it keeps the size it floated at. Returns whether that changed anything,
+    /// or why it was refused.
+    pub(crate) fn place_sized(
+        &mut self,
+        walls: &Walls<'_>,
+        panel: &str,
+        target: Target,
+        size: Option<f32>,
+    ) -> Result<bool, &'static str> {
+        let size = match size {
+            Some(size) if !size.is_finite() => return Err("A panel's size must be a number."),
+            Some(size) => Some(size.clamp(
+                tomori_protocol::FLOAT_SIZES.0,
+                tomori_protocol::FLOAT_SIZES.1,
+            )),
+            None => None,
+        };
         let shown = |wall: &str| self.walls(walls).iter().any(|shown| shown.id == wall);
         let slots = |wall: &str| self.slots_of(walls, wall);
         let target = match target {
@@ -2594,10 +2633,23 @@ impl Stage {
                 Ok(true)
             }
             Target::Free(pose) => {
+                let was = kept
+                    .size
+                    .filter(|_| matches!(kept.place, Placed::Free { .. }));
                 let changed = pinned || kept.place != Placed::Free { pose };
                 self.float(walls, kept, pose);
+                // Sized after it floats, which leaves one floated off a wall its own size; its own size is kept as
+                // none, as a panel nobody stretched has.
+                let mut resized = false;
+                if let Some(size) = size
+                    && let Some(kept) = self.here_mut(walls.environment, panel)
+                {
+                    let size = Some(size).filter(|size| (size - 1.0).abs() > 1e-4);
+                    resized = was != size;
+                    kept.size = size;
+                }
                 self.settle(walls);
-                Ok(changed)
+                Ok(changed || resized)
             }
         }
     }
@@ -2909,6 +2961,9 @@ const KEY_TOLD_CHARS: usize = 48;
 /// environment is never handed another key than the one shown: the client cues it, and they look and choose again.
 pub(crate) const STALE_ROW: &str = "That row changed as you chose it; look again.";
 
+/// Why a size given with both hands was refused, the panel having changed since they took hold of it.
+pub(crate) const STALE_SIZE: &str = "That panel changed as you resized it; take hold of it again.";
+
 /// Why a participant's change to a wall is refused when the wall changed since the version they saw, as when another
 /// participant changed it meanwhile: the client cues it, and the projection sent again shows the wall as it is, so that
 /// they change it again from there rather than undo the other change.
@@ -3138,6 +3193,65 @@ mod tests {
         // Notices are kept with the stage.
         let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
         assert_eq!(kept, stage);
+    }
+
+    #[test]
+    fn a_panel_stretched_with_both_hands_floats_at_its_size_kept_with_the_stage_until_it_goes_onto_a_wall()
+     {
+        let mut stage = Stage::default();
+        let id = stage.project(&SKY, content("reply"), None, 0);
+        let size = |stage: &Stage| stage.view("s", &SKY, 0).panel(&id).map(|panel| panel.size);
+        // Left floating at a size, within the bounds a floating panel has.
+        assert_eq!(
+            stage.place_sized(&SKY, &id, Target::Free(pose(1.0, 1.0)), Some(1.5)),
+            Ok(true)
+        );
+        assert_eq!(size(&stage), Some(Some(1.5)));
+        // As large again is no change; larger than the most is the most, and nonsense is refused.
+        assert_eq!(
+            stage.place_sized(&SKY, &id, Target::Free(pose(1.0, 1.0)), Some(1.5)),
+            Ok(false)
+        );
+        stage
+            .place_sized(&SKY, &id, Target::Free(pose(1.0, 1.0)), Some(40.0))
+            .unwrap();
+        assert_eq!(size(&stage), Some(Some(tomori_protocol::FLOAT_SIZES.1)));
+        assert!(
+            stage
+                .place_sized(&SKY, &id, Target::Free(pose(1.0, 1.0)), Some(f32::NAN))
+                .is_err()
+        );
+        // Moved with one hand, it keeps its size; and the stage keeps it across a restart.
+        stage
+            .place(&SKY, &id, Target::Free(pose(2.0, 1.0)))
+            .unwrap();
+        assert_eq!(size(&stage), Some(Some(4.0)));
+        let kept: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
+        assert_eq!(kept, stage);
+        // At its own size, it says none.
+        stage
+            .place_sized(&SKY, &id, Target::Free(pose(2.0, 1.0)), Some(1.0))
+            .unwrap();
+        assert_eq!(size(&stage), Some(None));
+        stage
+            .place_sized(&SKY, &id, Target::Free(pose(2.0, 1.0)), Some(2.0))
+            .unwrap();
+        // Onto a wall, its slot sizes it; pulled off and left floating again, it is its own size.
+        stage
+            .place(&SKY, &id, Target::Slot(TOMORI_WALL.into(), 3))
+            .unwrap();
+        assert_eq!(size(&stage), Some(None));
+        stage
+            .place(&SKY, &id, Target::Free(pose(1.0, 1.0)))
+            .unwrap();
+        assert_eq!(size(&stage), Some(None));
+        // Its size is part of its structure, so that a change of it is a change of its version.
+        let before = stage.view("s", &SKY, 0).panel(&id).cloned().unwrap();
+        stage
+            .place_sized(&SKY, &id, Target::Free(pose(1.0, 1.0)), Some(2.0))
+            .unwrap();
+        let after = stage.view("s", &SKY, 0).panel(&id).cloned().unwrap();
+        assert!(!before.same_structure(&after));
     }
 
     #[test]
@@ -3939,6 +4053,7 @@ mod tests {
             arranged: false,
             published: None,
             anchor: None,
+            size: None,
         };
         // More hidden in other environments than the limit allows, the earliest placed in the second.
         for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {

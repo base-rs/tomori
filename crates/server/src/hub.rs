@@ -5085,6 +5085,8 @@ impl Hub {
                 wall,
                 slot,
                 pose,
+                size,
+                revision,
             } => {
                 let checked =
                     limits::check(&panel, limits::IDENTIFIER_BYTES, "panel").and_then(|()| {
@@ -5110,14 +5112,45 @@ impl Hub {
                 };
                 let environments = self.environments();
                 let record = state.space_mut(&space).expect("checked above");
+                // Stretched or shrunk with both hands, as a panel left floating, the change is refused where the panel
+                // changed since the version the participant saw as they took hold of it with the second hand, as by the
+                // agent rewriting it or another participant moving it, rather than lose that change. See
+                // `design/projection.md`.
+                let size = size.filter(|_| matches!(target, crate::stage::Target::Free(_)));
+                let stale = size.is_some()
+                    && revision.is_some_and(|seen| {
+                        record
+                            .versioned(&environments, crate::cards::unix_now())
+                            .panel(&panel)
+                            .is_some_and(|shown| shown.version != seen)
+                    });
                 let walls = environments.walls(&record.model.environment);
-                match record.stage.place(&walls, &panel, target) {
+                let placed = if stale {
+                    Err(crate::stage::STALE_SIZE)
+                } else {
+                    record.stage.place_sized(&walls, &panel, target, size)
+                };
+                match placed {
                     Ok(true) => {
                         state.touch_projection(&space);
                         deferred.push(Deferred::Keep);
                     }
                     // Already there, it is sent again, so that a client showing it elsewhere meanwhile puts it back.
                     Ok(false) => state.touch_projection(&space),
+                    // Refused as made against a version since changed, it names the panel, so that the client shows it as
+                    // the server has it, and the projection is sent again.
+                    Err(error) if stale => {
+                        state.send(
+                            participant,
+                            ServerMessage::Error {
+                                error: error.to_owned(),
+                                space: None,
+                                panel: Some(panel),
+                                wall: None,
+                            },
+                        );
+                        state.touch_projection(&space);
+                    }
                     Err(error) => state.error(participant, error),
                 }
             }

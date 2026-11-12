@@ -660,6 +660,7 @@ impl Stage {
             updated: None,
             placed: 0,
             anchor: None,
+            size: None,
             place: Placed::Free {
                 pose: Pose::default(),
             },

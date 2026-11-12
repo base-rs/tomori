@@ -1795,6 +1795,8 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
         wall: Some("tomori".into()),
         slot: Some(5),
         pose: None,
+        size: None,
+        revision: None,
     });
     eventually(|| (walls(&session)[0]["used"][1]["slot"] == 5).then_some(()));
     let floated = &move_panel(&build, "front Ada")["structuredContent"];
