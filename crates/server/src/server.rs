@@ -1550,7 +1550,9 @@ async fn run_restored<S: Timers>(
         }
         Ok(_) => None,
         Err(error) => {
-            log::debug!("Could not tell where space {id}'s session is now: {error}");
+            log::info!(
+                "Could not tell where space {id}'s session is now, so it is bound in {directory}: {error}"
+            );
             None
         }
     };

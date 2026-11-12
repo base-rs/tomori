@@ -1361,14 +1361,11 @@ impl SpaceModel {
 
     /// Take `directory`, which the backend reports as the one the session is in now, as the space's, as the agent
     /// names it, so that Tomori's tools are registered where the agent looks for them. A directory that is empty, not
-    /// absolute, or longer than [`limits::DIRECTORY_BYTES`] is ignored. Returns whether the space's directory changed.
-    /// See `design/mcp.md`.
-    pub fn follow_directory(&mut self, directory: &str) -> bool {
-        if !followed(directory) || self.directory == directory {
-            return false;
+    /// absolute, or longer than [`limits::DIRECTORY_BYTES`] is ignored. See `design/mcp.md`.
+    pub fn follow_directory(&mut self, directory: &str) {
+        if followed(directory) {
+            directory.clone_into(&mut self.directory);
         }
-        directory.clone_into(&mut self.directory);
-        true
     }
 
     /// Take `title`, which the backend reports as the session's own, as the space's title too, unless someone renamed
