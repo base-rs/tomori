@@ -20,7 +20,7 @@
 pub const OCCLUDING: f32 = 0.6;
 
 /// How far behind a backing its depth is written, in the depth buffer's units, from 0 at the near plane to 1 at the far.
-/// With every client's near plane at 5 cm and far plane at 50 m, a surface drawn later and less than about
+/// With every client's near plane at 5 cm (`tomori_scene::depth`), which decides it, whatever the far plane, a surface drawn later and less than about
 /// `TIE * distance² / 0.05` metres behind it, about 2% of its distance for each metre of it, is still drawn over it: 4 mm
 /// at arm's length, 2 cm at 1 m, and 11 cm at 2.3 m, as far as the Tomori wall, enough for a panel carried in one of its
 /// slots and the hint below it, which faces the eyes and so leans back under the panel seen from above. Further behind,
@@ -130,6 +130,38 @@ mod tests {
         // A wall's board, a curved wall's slots, a slot's outline and a label fading out do not.
         for alpha in [0.5, 0.45, 0.16, 0.0] {
             assert!(!occludes(alpha), "{alpha}");
+        }
+    }
+
+    /// Through the headset's own projection, in the depth buffer's 32-bit floats: a panel a couple of millimetres
+    /// before its wall's board is drawn in front of it, never fighting it, from arm's length to across a room; and
+    /// [`TIE`] reaches as far behind a backing as it says, 4 mm at arm's length, 2 cm at 1 m and 11 cm at 2.3 m.
+    #[test]
+    fn near_surfaces_keep_their_order_and_their_tie_through_the_headset_s_projection() {
+        use glam::Vec3;
+        use tomori_scene::scene::headset::{Fov, View, view_projection};
+        let clip = view_projection(&View {
+            pose: tomori_scene::controller::Pose {
+                position: [0.0, 1.6, 0.0],
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            },
+            fov: Fov {
+                left: -0.9,
+                right: 0.7,
+                down: -0.87,
+                up: 0.7,
+            },
+        });
+        let depth = |distance: f32| clip.project_point3(Vec3::new(0.2, 1.5, -distance)).z;
+        for distance in [0.3, 0.45, 1.0, 2.3, 4.0, 8.0] {
+            let (panel, board) = (depth(distance - 0.002), depth(distance));
+            assert!(panel < board, "{distance} m: {panel} and {board}");
+            assert!((0.0..1.0).contains(&panel));
+        }
+        for (distance, reach) in [(0.45, 0.004), (1.0, 0.02), (2.3, 0.11)] {
+            let tied = depth(distance) + TIE;
+            assert!(depth(distance + reach * 0.9) < tied, "{distance} m");
+            assert!(depth(distance + reach * 1.1) > tied, "{distance} m");
         }
     }
 }

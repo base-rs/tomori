@@ -228,7 +228,7 @@ pub fn head_pose(views: &[View; 2]) -> Mat4 {
     Mat4::from_rotation_translation(Quat::from_xyzw(x, y, z, w), (left + right) * 0.5)
 }
 
-/// An eye's view and projection: its asymmetric frustum, right-handed with -Z forward and WebGPU's depth from 0 to 1. wgpu's Vulkan backend handles the framebuffer Y convention itself.
+/// An eye's view and projection: its asymmetric frustum, right-handed with -Z forward and WebGPU's depth from 0 at [`crate::depth::NEAR`] to 1 at [`crate::depth::FAR`]. wgpu's Vulkan backend handles the framebuffer Y convention itself.
 pub fn view_projection(view: &View) -> Mat4 {
     let fov = view.fov;
     let (left, right, down, up) = (
@@ -237,7 +237,7 @@ pub fn view_projection(view: &View) -> Mat4 {
         fov.down.tan(),
         fov.up.tan(),
     );
-    let (near, far) = (0.05, 50.0);
+    let (near, far) = (crate::depth::NEAR, crate::depth::FAR);
     let projection = Mat4::from_cols(
         Vec4::new(2.0 / (right - left), 0.0, 0.0, 0.0),
         Vec4::new(0.0, 2.0 / (up - down), 0.0, 0.0),
@@ -1088,7 +1088,63 @@ mod tests {
             assert!((m.project_point3(Vec3::new(x, y, z)).x - expected).abs() < 0.0001);
         }
         assert!(m.project_point3(Vec3::new(0.0, 0.0, -0.05)).z.abs() < 0.0001);
-        assert!((m.project_point3(Vec3::new(0.0, 0.0, -50.0)).z - 1.0).abs() < 0.0001);
+        assert!((m.project_point3(Vec3::new(0.0, 0.0, -crate::depth::FAR)).z - 1.0).abs() < 0.0001);
+    }
+
+    /// The maintainer, turning their head in the farmyard, saw its farthest hills and trees blink in and out as the
+    /// 50 m far plane swept across them: what is off to the side of a planar far plane is cut nearer than what is
+    /// straight ahead. Whichever way an eye looks, what it sees as far away as any scenery, 300 m, three times the
+    /// farthest the farmyard's is from anywhere participants stand, is drawn within the depth range, at its edges and
+    /// corners as in its middle.
+    #[test]
+    fn an_eye_draws_the_farthest_scenery_whichever_way_it_looks() {
+        const SCENERY: f32 = 300.0;
+        let degrees = |value: f32| value.to_radians();
+        let fov = Fov {
+            left: degrees(-52.0),
+            right: degrees(41.0),
+            down: degrees(-50.0),
+            up: degrees(40.0),
+        };
+        for yaw in (0..24).map(|step| degrees(step as f32 * 15.0)) {
+            for pitch in [-60.0, -10.0, 0.0, 30.0, 80.0].map(degrees) {
+                for roll in [0.0, 0.4] {
+                    let facing = Quat::from_euler(glam::EulerRot::YXZ, yaw, pitch, roll);
+                    let position = Vec3::new(3.0, 1.6, -2.0);
+                    let view = View {
+                        pose: Pose {
+                            position: position.to_array(),
+                            orientation: facing.to_array(),
+                        },
+                        fov,
+                    };
+                    let clip = view_projection(&view);
+                    // Each way across the view, its middle, edges and corners, just inside them.
+                    for across in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                        for up in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+                            let tangent = |low: f32, high: f32, at: f32| {
+                                let t = (at * 0.999 + 1.0) * 0.5;
+                                low.tan() + (high.tan() - low.tan()) * t
+                            };
+                            let way = Vec3::new(
+                                tangent(fov.left, fov.right, across),
+                                tangent(fov.down, fov.up, up),
+                                -1.0,
+                            )
+                            .normalize();
+                            let point = position + facing * way * SCENERY;
+                            let ndc = clip.project_point3(point);
+                            assert!(
+                                (0.0..1.0).contains(&ndc.z)
+                                    && ndc.x.abs() <= 1.0
+                                    && ndc.y.abs() <= 1.0,
+                                "yaw {yaw}, pitch {pitch}, roll {roll}, ({across}, {up}): {ndc}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -250,7 +250,7 @@ impl Camera {
     }
 
     fn view_projection(&self, aspect: f32) -> Mat4 {
-        glam::camera::rh::proj::directx::perspective(60_f32.to_radians(), aspect, 0.05, 50.0)
+        tomori_scene::depth::perspective(60_f32.to_radians(), aspect)
             * glam::camera::rh::view::look_at_mat4(self.position(), CENTER, Vec3::Y)
     }
 

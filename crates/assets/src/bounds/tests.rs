@@ -11,25 +11,26 @@ use super::*;
 use crate::{Instance, Material, Mesh, Node, Pose, Transform};
 
 /// An eye's view and projection, as the headset makes them: an asymmetric frustum of tangents `(left, right, down, up)`,
-/// right-handed with −Z forward, WebGPU's depth from 0 to 1, between 5 cm and 50 m, at `position` facing `facing`.
+/// right-handed with −Z forward, WebGPU's depth from 0 to 1, between the headset's near and far planes, at `position`
+/// facing `facing`.
 pub(crate) fn eye(
     (left, right, down, up): (f32, f32, f32, f32),
     position: Vec3,
     facing: Quat,
 ) -> Mat4 {
-    let (near, far) = (0.05, 50.0);
-    let projection = Mat4::from_cols(
-        Vec4::new(2.0 / (right - left), 0.0, 0.0, 0.0),
-        Vec4::new(0.0, 2.0 / (up - down), 0.0, 0.0),
-        Vec4::new(
-            (right + left) / (right - left),
-            (up + down) / (up - down),
-            -far / (far - near),
-            -1.0,
-        ),
-        Vec4::new(0.0, 0.0, -(far * near) / (far - near), 0.0),
-    );
-    projection * Mat4::from_rotation_translation(facing, position).inverse()
+    use tomori_scene::scene::headset::{Fov, View, view_projection};
+    view_projection(&View {
+        pose: tomori_scene::controller::Pose {
+            position: position.to_array(),
+            orientation: facing.to_array(),
+        },
+        fov: Fov {
+            left: left.atan(),
+            right: right.atan(),
+            down: down.atan(),
+            up: up.atan(),
+        },
+    })
 }
 
 /// A Quest 3's eyes, about: 52° out, 41° in, 40° up and 50° down, 64 mm apart, 1.6 m up, looking 10° down and turned
@@ -59,10 +60,11 @@ fn scatter(index: u32) -> f32 {
     (mixed % 100_000) as f32 / 100_000.0
 }
 
-/// The point at `ndc` in `clip`'s view, at depth `depth` from its near plane, 0, to its far plane, 1.
+/// The point at `ndc` in `clip`'s view, at depth `depth` from its near plane, 0, to its far plane, 1, found in double
+/// precision, as single precision puts what is at a far plane 2 km away metres astray.
 fn unproject(clip: Mat4, ndc: Vec2, depth: f32) -> Vec3 {
-    let point = clip.inverse() * ndc.extend(depth).extend(1.0);
-    point.xyz() / point.w
+    let point = clip.as_dmat4().inverse() * ndc.extend(depth).extend(1.0).as_dvec4();
+    (point.xyz() / point.w).as_vec3()
 }
 
 #[test]
@@ -112,11 +114,13 @@ fn a_box_holds_its_points_and_moves_with_them() {
 fn a_frustum_sees_what_is_in_its_view_and_nothing_wholly_outside_it() {
     let [left, _] = eyes(0.0);
     let frustum = Frustum::new(left);
-    // Ahead of the eye, inside; behind it, beyond the far plane and far out to the side, outside.
+    // Ahead of the eye, inside, as far as the farthest scenery; behind it, beyond the far plane and far out to the side,
+    // outside.
     let ahead = Vec3::new(0.0, 1.4, -3.0);
     assert!(frustum.holds(ahead));
+    assert!(frustum.holds(Vec3::new(0.0, 1.6, -300.0)));
     assert!(!frustum.holds(Vec3::new(0.0, 1.6, 3.0)));
-    assert!(!frustum.holds(Vec3::new(0.0, 1.6, -60.0)));
+    assert!(!frustum.holds(Vec3::new(0.0, 1.6, -tomori_scene::depth::FAR * 1.1)));
     assert!(!frustum.holds(Vec3::new(-30.0, 1.6, -3.0)));
     let around = |middle: Vec3, half: f32| Aabb::new(middle - half, middle + half);
     assert!(frustum.sees(&around(ahead, 0.1)));
@@ -181,6 +185,26 @@ fn both_eyes_frustum_holds_everything_either_eye_sees_and_culls_what_neither_doe
         for side in [-1.0, 1.0] {
             let beside = Vec3::new(0.0, 1.6, 0.0) + facing * Vec3::new(side * 20.0, 0.0, -1.0);
             assert!(!both.sees(&Aabb::new(beside - 0.5, beside + 0.5)));
+        }
+    }
+    // What either eye sees as far away as any scenery, 300 m, off to its sides and corners as straight ahead, both eyes'
+    // frustum holds, whichever way they look, so that it is drawn rather than culled as the head turns.
+    for heading in (0..12).map(|step| step as f32 * std::f32::consts::FRAC_PI_6) {
+        let eyes = eyes(heading);
+        let both = Frustum::enclosing(&eyes);
+        for clip in &eyes {
+            for sample in 0..200u32 {
+                let at = |offset: u32| scatter(sample * 3 + offset + 500_000) * 1.98 - 0.99;
+                // Along the ray through that point of the view, from the near plane.
+                let ndc = Vec2::new(at(1), at(2));
+                let near = unproject(*clip, ndc, 0.0);
+                let point = near + (unproject(*clip, ndc, 0.5) - near).normalize() * 300.0;
+                let depth = clip.project_point3(point).z;
+                assert!(
+                    both.holds(point) && (0.0..1.0).contains(&depth),
+                    "heading {heading}: {point}, depth {depth}"
+                );
+            }
         }
     }
     // One view's frustum, enclosed alone, is that view's, a little loosened.
