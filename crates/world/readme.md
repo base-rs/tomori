@@ -26,7 +26,7 @@ world.cull();
 assert_eq!(world.seen(hills), [true]);
 ```
 
-`tomori-render` is to draw what it sees, and environments' sceneries to submit to it, as the plan's second stage goes on. Its requirements are in Tomori's [`design/rendering.md`](https://github.com/base-rs/tomori/blob/main/design/rendering.md), and the plan it belongs to in [`docs/proposals/rendering-architecture.md`](https://github.com/base-rs/tomori/blob/main/docs/proposals/rendering-architecture.md). The interface is 0.x.
+`tomori-render` draws what it sees, its own cubes and panels and what an environment's scenery submits through `Scenery::submit`, which it re-exports this crate for, as `tomori_render::world`. Its requirements are in Tomori's [`design/rendering.md`](https://github.com/base-rs/tomori/blob/main/design/rendering.md), and the plan it belongs to in [`docs/proposals/rendering-architecture.md`](https://github.com/base-rs/tomori/blob/main/docs/proposals/rendering-architecture.md). The interface is 0.x.
 
 ## See Also
 

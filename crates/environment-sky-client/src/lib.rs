@@ -53,6 +53,11 @@ pub struct Sky {
     clouds: clouds::Clouds,
     shadows: shadows::Shadows,
     lightmap: lightmap::Lightmap,
+    /// The box about the platform and shrine, the items they and the clouds are in the renderer's world once submitted,
+    /// and whether the eyes may see the platform and shrine, as last culled.
+    bounds: tomori_render::world::Aabb,
+    items: Option<(tomori_render::world::ItemId, tomori_render::world::ItemId)>,
+    shown: bool,
 }
 
 impl Sky {
@@ -107,6 +112,9 @@ impl Sky {
             })
         });
         let mesh = mesh::build();
+        let bounds = tomori_render::world::Aabb::from_points(
+            mesh.iter().map(|vertex| Vec3::from_array(vertex.position)),
+        );
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Sky static scenery"),
             contents: bytemuck::cast_slice(&mesh),
@@ -203,6 +211,9 @@ impl Sky {
             clouds: clouds::Clouds::new(device, queue, format, &layout, width, height, samples),
             shadows,
             lightmap,
+            bounds,
+            items: None,
+            shown: true,
         }
     }
 
@@ -256,15 +267,18 @@ impl Sky {
     /// clouds are composited separately after the application's opaque content.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
         pass.set_bind_group(0, &self.bindings[eye], &[]);
-        pass.set_pipeline(if self.reveal.is_some() {
-            &self.revealed_scenery
-        } else {
-            &self.scenery
-        });
-        pass.set_bind_group(1, &self.shadows.binding, &[]);
-        pass.set_bind_group(2, &self.lightmap.binding, &[]);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        // The platform and shrine, unless neither eye may see them.
+        if self.shown {
+            pass.set_pipeline(if self.reveal.is_some() {
+                &self.revealed_scenery
+            } else {
+                &self.scenery
+            });
+            pass.set_bind_group(1, &self.shadows.binding, &[]);
+            pass.set_bind_group(2, &self.lightmap.binding, &[]);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.draw(0..self.vertex_count, 0..1);
+        }
         // The sky after the platform and shrine, at the far plane, comparing `LessEqual` without writing depth, so that
         // it is shaded only where they do not cover it.
         pass.set_pipeline(&self.background);

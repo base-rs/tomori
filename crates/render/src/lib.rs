@@ -40,6 +40,10 @@ mod test_support;
 pub mod ui_panel;
 pub mod workspace_graphics;
 
+/// The render world, which the renderer and its sceneries submit what they draw to, and which culls it, so that a
+/// scenery need not depend on it itself. See `design/rendering.md`.
+pub use tomori_world as world;
+
 // The platform-neutral modules, from `tomori-client` and `tomori-scene`, under the paths this crate's own modules use.
 use tomori_client::server_choice;
 use tomori_scene::{

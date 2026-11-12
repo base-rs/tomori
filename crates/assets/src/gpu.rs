@@ -234,11 +234,21 @@ pub struct Batch {
     pieces: Vec<Piece>,
     /// Which pieces the placements' buffer holds now.
     shown: Vec<bool>,
+    /// Which pieces a cull would draw, and the placements written, kept between frames so that culling allocates
+    /// nothing.
+    wanted: Vec<bool>,
+    flat: Vec<Placed>,
     /// Where any piece may be drawn, or none if one of them may be drawn anywhere.
     bounds: Option<Aabb>,
 }
 
 impl Batch {
+    /// Where each piece placed, each primitive of each instance, may be drawn in the scene, or none for anywhere, in the
+    /// order [`Renderer::show`] takes which are seen in, as a render world culls them.
+    pub fn bounds(&self) -> impl ExactSizeIterator<Item = Option<Aabb>> + '_ {
+        self.pieces.iter().map(|piece| piece.bounds)
+    }
+
     /// What it draws in each eye as last placed or culled: its pieces drawn and culled, its draws and their triangles.
     pub fn tally(&self) -> Tally {
         let drawn = self.shown.iter().filter(|shown| **shown).count();
@@ -742,6 +752,8 @@ impl Renderer {
             calls: Vec::new(),
             pieces: Vec::new(),
             shown: Vec::new(),
+            wanted: Vec::new(),
+            flat: Vec::new(),
             bounds: Some(Aabb::EMPTY),
         }
     }
@@ -802,15 +814,29 @@ impl Renderer {
             Some(bounds.union(piece.bounds?))
         });
         batch.pieces = pieces;
-        self.write(queue, model, batch, vec![true; batch.pieces.len()]);
+        batch.wanted.clear();
+        batch.wanted.resize(batch.pieces.len(), true);
+        self.write(queue, model, batch);
     }
 
-    /// Write the pieces of `batch` that `shown` says into its placements' buffer, each primitive's together, and draw
+    /// Write the pieces of `batch` that it wants drawn into its placements' buffer, each primitive's together, and draw
     /// those.
-    fn write(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch, shown: Vec<bool>) {
-        let mut calls: Vec<Call> = Vec::new();
-        let mut flat = Vec::new();
-        for (piece, _) in batch.pieces.iter().zip(&shown).filter(|(_, shown)| **shown) {
+    fn write(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch) {
+        let Batch {
+            calls,
+            flat,
+            pieces,
+            wanted,
+            shown,
+            ..
+        } = batch;
+        calls.clear();
+        flat.clear();
+        for (piece, _) in pieces
+            .iter()
+            .zip(wanted.iter())
+            .filter(|(_, wanted)| **wanted)
+        {
             let at = flat.len() as u32;
             flat.push(piece.placed);
             match calls.last_mut() {
@@ -831,10 +857,9 @@ impl Renderer {
             }
         }
         if !flat.is_empty() {
-            queue.write_buffer(&batch.placed, 0, bytemuck::cast_slice(&flat));
+            queue.write_buffer(&batch.placed, 0, bytemuck::cast_slice(flat));
         }
-        batch.calls = calls;
-        batch.shown = shown;
+        shown.clone_from(wanted);
     }
 
     /// Draw only the instances of `batch`'s primitives that `frustum` may see, from the next pass, writing their
@@ -847,20 +872,51 @@ impl Renderer {
         batch: &mut Batch,
         frustum: Option<&Frustum>,
     ) -> Tally {
-        let shown: Vec<bool> = match frustum {
+        let Batch {
+            pieces,
+            wanted,
+            bounds,
+            ..
+        } = batch;
+        wanted.clear();
+        match frustum {
             // Nothing of it is in view at all.
-            Some(frustum) if batch.bounds.is_some_and(|bounds| !frustum.sees(&bounds)) => {
-                vec![false; batch.pieces.len()]
+            Some(frustum) if bounds.is_some_and(|bounds| !frustum.sees(&bounds)) => {
+                wanted.resize(pieces.len(), false);
             }
-            Some(frustum) => batch
-                .pieces
-                .iter()
-                .map(|piece| piece.bounds.is_none_or(|bounds| frustum.sees(&bounds)))
-                .collect(),
-            None => vec![true; batch.pieces.len()],
-        };
-        if shown != batch.shown {
-            self.write(queue, model, batch, shown);
+            Some(frustum) => wanted.extend(
+                pieces
+                    .iter()
+                    .map(|piece| piece.bounds.is_none_or(|bounds| frustum.sees(&bounds))),
+            ),
+            None => wanted.resize(pieces.len(), true),
+        }
+        self.redraw(queue, model, batch)
+    }
+
+    /// Draw only the pieces of `batch` that `seen` says, as a render world culled what [`Batch::bounds`] said of them,
+    /// from the next pass, writing their placements only when which are seen changes; or every one, should `seen` not
+    /// say of as many as it placed. What it then draws in each eye is its [`Batch::tally`].
+    pub fn show(
+        &self,
+        queue: &wgpu::Queue,
+        model: &GpuModel,
+        batch: &mut Batch,
+        seen: &[bool],
+    ) -> Tally {
+        batch.wanted.clear();
+        if seen.len() == batch.pieces.len() {
+            batch.wanted.extend_from_slice(seen);
+        } else {
+            batch.wanted.resize(batch.pieces.len(), true);
+        }
+        self.redraw(queue, model, batch)
+    }
+
+    /// Write `batch`'s placements again if it wants other pieces drawn than it does, and say what it then draws.
+    fn redraw(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch) -> Tally {
+        if batch.wanted != batch.shown {
+            self.write(queue, model, batch);
         }
         batch.tally()
     }

@@ -546,6 +546,18 @@ fn only_instances_the_eyes_may_see_are_drawn_and_closed_primitives_without_their
         );
         let kept = renderer.cull(&queue, &loose_gpu, &mut loose_batch, Some(&away));
         assert_eq!((kept.drawn, kept.culled), (1, 0));
+        assert_eq!(loose_batch.bounds().collect::<Vec<_>>(), [None]);
+        // Shown what a render world saw of its pieces' bounds, it draws the same as culling them itself.
+        let seen: Vec<bool> = batch
+            .bounds()
+            .map(|bounds| bounds.is_none_or(|bounds| frustum.sees(&bounds)))
+            .collect();
+        assert_eq!(seen.len(), 6);
+        assert_eq!(renderer.show(&queue, &gpu, &mut batch, &seen), culled);
+        assert_eq!(draw(&renderer, &batch), whole);
+        assert_eq!(renderer.show(&queue, &gpu, &mut batch, &seen), culled);
+        // Told of fewer pieces than it placed, as before a world has culled them, it draws them all.
+        assert_eq!(renderer.show(&queue, &gpu, &mut batch, &seen[..2]), all);
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

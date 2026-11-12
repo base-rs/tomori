@@ -4368,6 +4368,7 @@ dependencies = [
  "tomori-scene",
  "tomori-server",
  "tomori-text",
+ "tomori-world",
  "wgpu",
 ]
 
