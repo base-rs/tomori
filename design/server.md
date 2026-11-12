@@ -1,10 +1,10 @@
 # Server
 
-This describes the target design for the Rust server that replaces `bridge/`, and for the headset client, which uses it. The current Node bridge differs; changes to it are not reviewed against this document.
+This describes the Rust server, which replaced the legacy Node bridge in `bridge/`, and the headset client, which uses it. Changes to the bridge are not reviewed against this document.
 
 ## Requirement
 
-The PC server is a Rust program built on `base-http-server`, from `base-http` 0.4, running on `base-scheduler` 0.5's native backend, with TLS from `base-endpoint` 0.3 (see `crates.md`). It replaces the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed. The `tomori-server` executable is the default build of the `tomori-server` library's builder, on which other projects build servers of their own (see `builders.md`).
+The PC server is a Rust program built on `base-http-server`, from `base-http` 0.4, running on `base-scheduler` 0.5's native backend, with TLS from `base-endpoint` 0.3 (see `crates.md`). It replaced the Node bridge and owns spaces, agent backends, speech, live audio routing and the spectator feed. The `tomori-server` executable is the default build of the `tomori-server` library's builder, on which other projects build servers of their own (see `builders.md`).
 
 Each client keeps one long-lived, bidirectional streaming connection to the server. Control messages, events, microphone audio, speech audio and presence are framed over that connection; the server does not require per-action request routes for interactive traffic. Audio frames are self-contained (source, sequence and timing) so that their transport can change without affecting the layers above. Both ends detect a silent peer as described in `connection-liveness.md`. Every TCP connection, accepted by the server or opened by a client, disables Nagle's algorithm with `TCP_NODELAY`, so that small frames, such as speech audio and projection patches, are sent at once rather than held back for the peer's acknowledgement; a socket that refuses it is served without it.
 
