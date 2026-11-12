@@ -274,7 +274,7 @@ impl Room {
             home,
             audience,
             agent: SWARM_REACH,
-            floor: tomori_protocol::entourage::FLOOR + tomori_protocol::cluster::LOWEST,
+            floor: tomori_protocol::cluster::FLOOR + tomori_protocol::cluster::LOWEST,
             ceiling: None,
             extents: Vec::new(),
             walls: Vec::new(),

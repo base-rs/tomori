@@ -1586,7 +1586,7 @@ fn each_handle_stands_at_its_fixed_place_about_the_wall() {
 
 #[test]
 fn nothing_a_wall_shows_stands_in_the_floor_its_bar_and_row_raised_above_a_low_wall() {
-    let floor = tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+    let floor = tomori_protocol::cluster::FLOOR + FLOOR_CLEARANCE;
     let lock = LockControls {
         padlock: true,
         reset: true,

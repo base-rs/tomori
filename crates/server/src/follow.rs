@@ -10,7 +10,7 @@
 //! holds no I/O and no clock: the hub decides when the agent follows and asks this where. See
 //! `design/environments.md`.
 use tomori_environment::sightlines::Solid;
-use tomori_protocol::{Pose, Wall, entourage};
+use tomori_protocol::{Pose, Wall, cluster, entourage};
 
 use crate::stage::geometry::{boxes, rotate};
 
@@ -191,7 +191,7 @@ impl Scene {
         level: bool,
     ) -> Option<(f32, f32)> {
         match (&self.ground, floor) {
-            (None, _) => Some((eyes[1], entourage::FLOOR)),
+            (None, _) => Some((eyes[1], cluster::FLOOR)),
             (Some(ground), Some(floor)) => match ground.level_at(x, z, floor) {
                 Some(there) => Some((there + eyes[1] - floor, there)),
                 None if level && (raised(floor) || ground.off_level(x, z, floor)) => None,
@@ -228,9 +228,7 @@ impl Scene {
         match self.hover {
             Some(hover) => {
                 let face = eyes + RISE;
-                let hovering = (entourage::FLOOR + hover)
-                    .min(eyes + HIGHEST_ABOVE)
-                    .max(face);
+                let hovering = (cluster::FLOOR + hover).min(eyes + HIGHEST_ABOVE).max(face);
                 if hovering > face {
                     vec![hovering, face]
                 } else {
@@ -477,7 +475,7 @@ pub(crate) fn beside(head: &Pose, object: [f32; 3], scene: &Scene) -> Option<Pos
         }
     };
     let panels = scene.panels_near(eyes);
-    let floor = scene.underfoot(eyes).unwrap_or(entourage::FLOOR);
+    let floor = scene.underfoot(eyes).unwrap_or(cluster::FLOOR);
     let y = scene.beside_height(eyes[1], object[1], floor);
     DISTANCES
         .iter()
@@ -686,7 +684,7 @@ pub(crate) fn route(from: [f32; 3], to: [f32; 3], scene: &Scene) -> Route {
 /// as a deck or a terrace, beyond whose edge there is a drop; rather than the space's floor's own level, whose walkable
 /// ground is narrower than what is drawn about it, as a path through a meadow.
 fn raised(floor: f32) -> bool {
-    floor > entourage::FLOOR + ground::LEVEL
+    floor > cluster::FLOOR + ground::LEVEL
 }
 
 /// The waypoints over the ground tried between `from` and `to`, in order: above where it sets off, so that it rises

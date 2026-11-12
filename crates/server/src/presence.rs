@@ -1377,7 +1377,7 @@ pub(crate) fn before(head: &Pose) -> Pose {
     tomori_protocol::entourage::summoned(
         [px + x * away, py, pz + z * away],
         head.position,
-        tomori_protocol::entourage::FLOOR,
+        tomori_protocol::cluster::FLOOR,
     )
 }
 

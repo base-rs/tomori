@@ -722,7 +722,7 @@ impl Scene {
         }
         self.room.audience = self.audience;
         self.room.ceiling = (self.formation == tomori_protocol::cluster::Formation::Ring)
-            .then_some(tomori_protocol::entourage::FLOOR + tomori_protocol::cluster::RING_HIGHEST);
+            .then_some(tomori_protocol::cluster::FLOOR + tomori_protocol::cluster::RING_HIGHEST);
         self.room.extents = extents;
     }
 

@@ -365,7 +365,9 @@ mod tests {
     fn every_environment_s_status_wall_is_read_beneath_its_agent_from_where_participants_arrive_or_walked_up_to()
      {
         use tomori_environment::sightlines::{Solid, Spot, noticed, readable, seen};
-        use tomori_protocol::{Pose, TOMORI_WALL, Wall, WallKind, WallShape, entourage, wall};
+        use tomori_protocol::{
+            Pose, TOMORI_WALL, Wall, WallKind, WallShape, cluster, entourage, wall,
+        };
         let spot = |pose: Pose| Spot::new(pose.position, pose.yaw());
         let solids: Vec<Solid> = tomori_environment_farmyard::layout::solids()
             .into_iter()
@@ -440,7 +442,7 @@ mod tests {
                 "{id}"
             );
             assert!(
-                home.position[1] - entourage::ROW_HALF >= entourage::FLOOR + entourage::CLEARANCE,
+                home.position[1] - entourage::ROW_HALF >= cluster::FLOOR + entourage::CLEARANCE,
                 "{id}"
             );
             assert!((home.yaw() - agent.yaw()).sin().abs() < 1e-4, "{id}");

@@ -105,6 +105,9 @@ pub const NEAREST_ARC: f32 = crate::entourage::SUMMONED;
 pub const ROW_BELOW: f32 = 0.25;
 pub const ROW_APART: f32 = 0.85;
 
+/// The floor participants stand on, in a space's coordinates: home's, at its origin.
+pub const FLOOR: f32 = 0.0;
+
 /// The lowest any member of today's arc stands above the floor, in metres.
 pub const LOWEST: f32 = 0.3;
 
@@ -1188,12 +1191,11 @@ impl Cluster {
             let before = (*quarter).min(quarters - quarter);
             (side, before, *quarter >= 2 * count)
         });
-        let lowest = (self.point[1] - ROW_BELOW).max(crate::entourage::FLOOR + LOWEST);
+        let lowest = (self.point[1] - ROW_BELOW).max(FLOOR + LOWEST);
         let mut places = Vec::new();
         for row in 0..TRIES {
             let lift = lowest - self.point[1] + row as f32 * footprint.height;
-            let low_enough =
-                row == 0 || self.point[1] + lift <= crate::entourage::FLOOR + RING_HIGHEST + 1e-4;
+            let low_enough = row == 0 || self.point[1] + lift <= FLOOR + RING_HIGHEST + 1e-4;
             let rises = low_enough
                 && self.extent.is_none_or(|extent| {
                     lift - footprint.base + footprint.height <= extent.height / 2.0 + 1e-4
@@ -1393,8 +1395,7 @@ pub fn home_arc(point: [f32; 3], facing: [f32; 3], audience: [f32; 3], slot: usi
     // Further than the arc's own radius, its rows spread in proportion, as signs are drawn larger, so that no sign
     // reaches the member above it.
     let spread = (radius / ARC_RADIUS).max(1.0);
-    let y = (point[1] + (level as f32 * ROW_APART - ROW_BELOW) * spread)
-        .max(crate::entourage::FLOOR + LOWEST);
+    let y = (point[1] + (level as f32 * ROW_APART - ROW_BELOW) * spread).max(FLOOR + LOWEST);
     [
         audience[0] + direction[0] * radius,
         y,

@@ -694,12 +694,12 @@ impl Environment {
     /// one of its own, the space's own is not shown, and this is where it would stand. It never travels with the agent.
     ///
     /// ```
-    /// use tomori_protocol::{Pose, entourage};
+    /// use tomori_protocol::{Pose, cluster::FLOOR, entourage};
     /// use tomori_server::Environment;
     ///
     /// let pod = Pose::at([2.0, 1.6, -4.0]).facing_towards([0.0, 1.6, 0.0]);
     /// let observe = Environment::new("observe", "Observe").with_agent(pod);
-    /// assert_eq!(observe.tomori_wall_home(), Some(entourage::wall_beneath(&pod, entourage::FLOOR)));
+    /// assert_eq!(observe.tomori_wall_home(), Some(entourage::wall_beneath(&pod, FLOOR)));
     /// let stage = Pose::at([0.0, 1.2, -2.5]).facing_towards([0.0, 1.6, 0.0]);
     /// assert_eq!(observe.with_stage(stage).tomori_wall_home(), Some(stage));
     /// assert_eq!(Environment::new("plain", "Plain").tomori_wall_home(), None);
@@ -709,7 +709,7 @@ impl Environment {
             let agent = self.carried(self.agent.as_ref())?;
             crate::stage::valid(&tomori_protocol::entourage::wall_beneath(
                 &agent,
-                tomori_protocol::entourage::FLOOR,
+                tomori_protocol::cluster::FLOOR,
             ))
         })
     }
@@ -1580,7 +1580,7 @@ mod tests {
         let beneath = offered.walls("observe").tomori;
         assert_eq!(
             beneath,
-            tomori_protocol::entourage::wall_beneath(&pod, tomori_protocol::entourage::FLOOR)
+            tomori_protocol::entourage::wall_beneath(&pod, tomori_protocol::cluster::FLOOR)
         );
         assert_eq!(
             [beneath.position[0], beneath.position[2]],
@@ -1603,7 +1603,7 @@ mod tests {
         let default_agent = Pose::at(crate::stage::AGENT).facing_towards([0.0, 1.4, 0.0]);
         let default_beneath = tomori_protocol::entourage::wall_beneath(
             &default_agent,
-            tomori_protocol::entourage::FLOOR,
+            tomori_protocol::cluster::FLOOR,
         );
         let default = crate::stage::default_stage();
         assert!(

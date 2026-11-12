@@ -1794,7 +1794,7 @@ impl Editor {
                 let label = bar_label_for(input.controls, wall, input.rights);
                 let under = middle - up * size * HANDLE_REACH;
                 let low = under.y - hint_height(&label, under, input.viewer)
-                    < tomori_protocol::entourage::FLOOR + FLOOR_CLEARANCE;
+                    < tomori_protocol::cluster::FLOOR + FLOOR_CLEARANCE;
                 let (edge, side) = if *below && !low {
                     (under, -1.0)
                 } else {

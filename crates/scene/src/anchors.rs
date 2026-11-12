@@ -395,10 +395,10 @@ impl Arrangement {
     pub fn home_ring(&self) -> HomeRing {
         let ring = self.ring_about();
         let height = if self.ring.is_floor() {
-            tomori_protocol::entourage::FLOOR
+            tomori_protocol::cluster::FLOOR
         } else {
             (ring.centre.y - tomori_protocol::cluster::RING_BELOW)
-                .max(tomori_protocol::entourage::FLOOR)
+                .max(tomori_protocol::cluster::FLOOR)
         };
         HomeRing { height, ..ring }
     }
@@ -452,7 +452,7 @@ impl HomeRing {
         radius: FLOOR_RING,
         towards: Vec3::Z,
         sweep: std::f32::consts::TAU,
-        height: tomori_protocol::entourage::FLOOR,
+        height: tomori_protocol::cluster::FLOOR,
     };
 }
 
@@ -561,7 +561,7 @@ mod tests {
             ..Arrangement::default()
         };
         let floor = floating.home_ring();
-        assert_eq!(floor.height, tomori_protocol::entourage::FLOOR);
+        assert_eq!(floor.height, tomori_protocol::cluster::FLOOR);
         assert_eq!(floor.centre, Vec3::new(1.0, 5.3, -4.0));
         assert_eq!(floor.radius, FLOOR_RING);
         // Under the home, at the swarm's foot, about the same point.
@@ -596,7 +596,7 @@ mod tests {
             home: low,
             ..under.clone()
         };
-        assert_eq!(low.home_ring().height, tomori_protocol::entourage::FLOOR);
+        assert_eq!(low.home_ring().height, tomori_protocol::cluster::FLOOR);
         assert!(format!("{under:?}").contains("UnderHome"));
     }
 
