@@ -526,12 +526,10 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
     let quest = Client::patching_within(&hub, Access::open(), "quest", Some(headset));
     assert_eq!(kept(&quest), (headset, true));
     // A hostile one is held to the most.
-    let hostile = Limits::TODAY.with_frame_bytes(u32::MAX).with_projection(
-        u32::MAX,
-        u32::MAX,
-        u32::MAX,
-        u32::MAX,
-    );
+    let hostile = Limits::TODAY
+        .with_frame_bytes(u32::MAX)
+        .with_projection(u32::MAX, u32::MAX, u32::MAX, u32::MAX)
+        .with_volumes(u32::MAX, u32::MAX);
     let greedy = Client::patching_within(&hub, Access::open(), "greedy", Some(hostile));
     assert_eq!(kept(&greedy), (Limits::MOST, true));
     // One that states less is sent within that, but frames no shorter than every peer takes.

@@ -494,6 +494,8 @@ impl Publishing {
                 code: None,
                 slug: None,
                 image: None,
+                diagram: None,
+                warnings: Vec::new(),
             },
             chart,
             wall,

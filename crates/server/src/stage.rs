@@ -36,12 +36,14 @@ pub(crate) use beside::spot as beside_spot;
 pub(crate) use beside::{SIZE as BESIDE_SIZE, level_ahead};
 pub(crate) mod geometry;
 mod status;
+mod volume;
 
 pub use blocks::{
     BLOCK_BYTES, BODY_CHARS, BODY_LINES, clean_body, panels, slug, title as clean_title,
 };
 pub use code::Source;
 pub use image::without_image;
+pub use volume::{DIAGRAM_BYTES, within_volumes};
 pub(crate) use layouts::{LAYOUT_WALLS, Planned};
 pub use placement::Placement;
 pub(crate) use published::Change;
@@ -182,7 +184,7 @@ fn escaped(text: &str) -> usize {
 
 /// The most bytes of JSON `panel` takes, within a kilobyte of what it does, and a few bytes for each span of its code
 /// of a kind with a short name: its text as JSON writes it, which reading its bytes finds without writing it, its
-/// spans by their digits, its chart measured, and room for its keys, numbers and place at their longest.
+/// spans by their digits, its chart and diagram measured, and room for its keys, numbers and place at their longest.
 /// A projection whose panels' together is within a frame fits it, whatever it holds, without its JSON being measured:
 /// only one that may not fit is measured.
 fn most_bytes(panel: &Panel) -> usize {
@@ -237,7 +239,8 @@ fn most_bytes(panel: &Panel) -> usize {
         .iter()
         .map(|column| escaped(&column.title) + 48)
         .sum();
-    text + spans + chart + rows + columns + 768
+    let diagram = panel.diagram.as_ref().map_or(0, json_size);
+    text + spans + chart + rows + columns + diagram + 768
 }
 
 /// The most a projection's panels may take together, by [`most_bytes`], for its JSON to be measured to fit it to a
@@ -470,6 +473,12 @@ pub struct Content {
     pub slug: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<tomori_protocol::Image>,
+    /// For a volume, its diagram, as laid out; its body is the diagram's outline. See `design/diagrams.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagram: Option<Box<tomori_protocol::diagram::Diagram>>,
+    /// What reading a volume's block found wrong, which the agent is told as it is projected, and which is never kept.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 /// A panel found in a reply, as its block is read: its content, and, for a code panel, the code to highlight, which is
@@ -752,6 +761,7 @@ impl Kept {
         .with_slug(self.content.slug.clone());
         panel.code = self.content.code.clone();
         panel.image = self.content.image.clone();
+        panel.diagram = self.content.diagram.clone();
         panel.chart = self
             .published
             .as_ref()
@@ -1848,7 +1858,10 @@ impl Stage {
         if kept.published.is_some() {
             return Err(ENVIRONMENT_S);
         }
-        if kept.content.code.is_some() || kept.content.image.is_some() {
+        if kept.content.code.is_some()
+            || kept.content.image.is_some()
+            || kept.content.diagram.is_some()
+        {
             return Err("That panel has no checklist.");
         }
         let content = &mut kept.content;
@@ -2627,7 +2640,15 @@ impl Stage {
         line: Option<u32>,
         now: u64,
     ) -> Option<String> {
-        self.describe_at(walls, panel, (line, None, None), now)
+        self.describe_at(
+            walls,
+            panel,
+            Pointed {
+                line,
+                ..Pointed::default()
+            },
+            now,
+        )
     }
 
     /// As [`Self::describe`] says, of the panel pointed at on its row `row`, by the row's id, where the client named one:
@@ -2641,9 +2662,16 @@ impl Stage {
         &self,
         walls: &Walls<'_>,
         panel: &str,
-        (line, row, across): (Option<u32>, Option<&str>, Option<u16>),
+        at: Pointed<'_>,
         now: u64,
     ) -> Option<String> {
+        let Pointed {
+            line,
+            row,
+            across,
+            node,
+            edge,
+        } = at;
         let shown = self.view("", walls, now);
         let panel = shown.panel(panel)?;
         let updated = self
@@ -2655,9 +2683,16 @@ impl Stage {
             "image panel"
         } else if panel.chart.is_some() {
             "chart panel"
+        } else if panel.diagram.is_some() {
+            "diagram"
         } else {
             "panel"
         };
+        // On a volume, the node or edge pointed at, in the diagram it is in.
+        let part = panel
+            .diagram
+            .as_deref()
+            .and_then(|diagram| volume::part(diagram, node, edge));
         let named = if panel.title.is_empty() {
             let start = panel.body.lines().next().unwrap_or_default();
             format!(
@@ -2844,8 +2879,22 @@ impl Stage {
                 crate::space::one_line(item.text, blocks::META_VALUE_CHARS)
             ));
         }
-        Some(format!("{named} ({details})"))
+        match part {
+            Some((part, about)) => Some(format!("{part} in {named} ({details}; {about})")),
+            None => Some(format!("{named} ({details})")),
+        }
     }
+}
+
+/// Where on a panel a participant pointed, as their client named it: the line of its body a list item begins on, a
+/// list's row by its id, where across a chart's time axis, and a volume's node by its id or edge by its index.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Pointed<'a> {
+    pub line: Option<u32>,
+    pub row: Option<&'a str>,
+    pub across: Option<u16>,
+    pub node: Option<&'a str>,
+    pub edge: Option<u16>,
 }
 
 /// Why a participant's tick is refused when the panel changed since the version they saw: the client cues it, and the
@@ -2951,6 +3000,8 @@ mod tests {
             code: None,
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -4359,6 +4410,8 @@ mod tests {
             code: Some(Code::new(language, lines)),
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -4499,6 +4552,8 @@ mod tests {
             // The longest id, though only text panels are given one, so that the bound holds for either.
             slug: Some("a".repeat(blocks::ID_CHARS)),
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         };
         let declared: Vec<crate::EnvironmentWall> = (0..DECLARED_WALLS)
             .map(|index| pose(index as f32 - 3.0, -5.0).into())
@@ -4778,6 +4833,8 @@ mod tests {
             code: Some(Code::new("javascript", 240).with_spans(spans)),
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         };
         let mut stage = Stage::default();
         for _ in 0..WALL_SLOTS {
@@ -4843,6 +4900,8 @@ mod tests {
                 code: None,
                 slug: None,
                 image: None,
+                diagram: None,
+                warnings: Vec::new(),
             },
             None,
             0,
@@ -4861,6 +4920,8 @@ mod tests {
                 code: None,
                 slug: None,
                 image: None,
+                diagram: None,
+                warnings: Vec::new(),
             },
             None,
             0,
@@ -4917,6 +4978,8 @@ mod tests {
             code: None,
             slug: Some(slug.into()),
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -5233,6 +5296,8 @@ mod tests {
                 code: None,
                 slug: None,
                 image: None,
+                diagram: None,
+                warnings: Vec::new(),
             },
             None,
             0,

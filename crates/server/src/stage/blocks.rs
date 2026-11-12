@@ -98,6 +98,8 @@ enum Source {
     Panel(String),
     /// Another language's block, projected as a code panel: its first lines so far.
     Code(super::code::Lines),
+    /// A diagram block's text so far, projected as a volume.
+    Diagram(String),
     /// A panel block too large to be projected.
     Skipped,
 }
@@ -114,7 +116,7 @@ pub fn panels(text: &str) -> Vec<Found> {
         source: Source,
     }
     let mut found = Vec::new();
-    let (mut texts, mut codes) = (0, 0);
+    let (mut texts, mut codes, mut diagrams) = (0, 0, 0);
     let mut open: Option<Open> = None;
     // Each block is made into a panel only while the reply has room for one of its kind, so that a reply of many
     // blocks costs no more than one of a few.
@@ -126,6 +128,17 @@ pub fn panels(text: &str) -> Vec<Found> {
             Source::Code(lines) if codes < super::code::CODE_PER_REPLY => {
                 lines.content().inspect(|_| codes += 1)
             }
+            // A volume is one of the reply's panels, and at most two of them are.
+            Source::Diagram(source)
+                if texts < PANELS_PER_REPLY && diagrams < super::volume::DIAGRAMS_PER_REPLY =>
+            {
+                Content::parse_diagram(&source)
+                    .inspect(|_| {
+                        texts += 1;
+                        diagrams += 1;
+                    })
+                    .map(|(content, place)| Found::text(content).placed(place))
+            }
             _ => None,
         };
         found.extend(content);
@@ -136,14 +149,14 @@ pub fn panels(text: &str) -> Vec<Found> {
                 open = fence(line).map(|(marker, run, info)| Open {
                     marker,
                     run,
-                    source: if info
-                        .split_whitespace()
-                        .next()
-                        .is_some_and(|language| language.eq_ignore_ascii_case(LANGUAGE))
-                    {
-                        Source::Panel(String::new())
-                    } else {
-                        Source::Code(super::code::Lines::new(info))
+                    source: match info.split_whitespace().next() {
+                        Some(language) if language.eq_ignore_ascii_case(LANGUAGE) => {
+                            Source::Panel(String::new())
+                        }
+                        Some(language) if language.eq_ignore_ascii_case(super::volume::LANGUAGE) => {
+                            Source::Diagram(String::new())
+                        }
+                        _ => Source::Code(super::code::Lines::new(info)),
                     },
                 });
             }
@@ -159,6 +172,13 @@ pub fn panels(text: &str) -> Vec<Found> {
                     }
                 }
                 Source::Code(lines) => lines.push(line),
+                Source::Diagram(source) => {
+                    source.push_str(line);
+                    source.push('\n');
+                    if source.len() > super::volume::DIAGRAM_BYTES {
+                        block.source = Source::Skipped;
+                    }
+                }
                 Source::Skipped => {}
             },
         }
@@ -226,6 +246,41 @@ impl Content {
     /// The panel `source`, a panel block's text, describes, and where its `place` header says it goes, if it says
     /// anywhere the server knows; or `None` when it holds neither a title nor a body.
     pub fn parse_placed(source: &str) -> Option<(Self, Option<Placement>)> {
+        let header = Header::read(source, &[]);
+        let body = body(header.rest.iter().copied());
+        (!header.title.is_empty() || !body.is_empty()).then_some((
+            Self {
+                title: header.title,
+                body,
+                meta: header.meta,
+                code: None,
+                slug: header.id,
+                image: None,
+                diagram: None,
+                warnings: Vec::new(),
+            },
+            header.place,
+        ))
+    }
+}
+
+/// A block's header of `key: value` lines, ended by a line of `---`, and the lines after it: its title, id, place and
+/// metadata, and the value of each key a kind of block reads for itself, which is not metadata.
+pub(super) struct Header<'a> {
+    pub title: String,
+    pub id: Option<String>,
+    pub place: Option<Placement>,
+    pub meta: Vec<(String, String)>,
+    /// The first value of each key read apart, in the order asked for.
+    pub own: Vec<Option<String>>,
+    pub rest: Vec<&'a str>,
+    /// How many lines come before `rest`.
+    pub skipped: usize,
+}
+
+impl<'a> Header<'a> {
+    /// The header of `source`, reading `own`, in lower case, apart from metadata.
+    pub fn read(source: &'a str, own: &[&str]) -> Self {
         let lines: Vec<&str> = source.lines().collect();
         let header = lines
             .iter()
@@ -235,17 +290,20 @@ impl Content {
                     .iter()
                     .all(|line| line.trim().is_empty() || key_value(line).is_some())
             });
-        let (header, rest) = match header {
-            Some(end) => (&lines[..end], &lines[end + 1..]),
-            None => (&lines[..0], &lines[..]),
+        let (header, rest, skipped) = match header {
+            Some(end) => (&lines[..end], &lines[end + 1..], end + 1),
+            None => (&lines[..0], &lines[..], 0),
         };
         let mut title = String::new();
         let mut meta: Vec<(String, String)> = Vec::new();
         let mut place = None;
         let mut id = None;
+        let mut values: Vec<Option<String>> = vec![None; own.len()];
         for (key, value) in header.iter().filter_map(|line| key_value(line)) {
             let key = key.to_ascii_lowercase();
-            if key == "id" {
+            if let Some(index) = own.iter().position(|own| *own == key) {
+                values[index].get_or_insert_with(|| value.to_owned());
+            } else if key == "id" {
                 // The first a block gives decides, whether it is valid or not, and none is metadata.
                 id.get_or_insert_with(|| slug(value));
             } else if key == "place" {
@@ -264,18 +322,15 @@ impl Content {
                 }
             }
         }
-        let body = body(rest.iter().copied());
-        (!title.is_empty() || !body.is_empty()).then_some((
-            Self {
-                title,
-                body,
-                meta,
-                code: None,
-                slug: id.flatten(),
-                image: None,
-            },
-            place.flatten(),
-        ))
+        Self {
+            title,
+            id: id.flatten(),
+            place: place.flatten(),
+            meta,
+            own: values,
+            rest: rest.to_vec(),
+            skipped,
+        }
     }
 }
 
@@ -325,6 +380,8 @@ mod tests {
             code: None,
             slug: None,
             image: None,
+            diagram: None,
+            warnings: Vec::new(),
         }
     }
 
