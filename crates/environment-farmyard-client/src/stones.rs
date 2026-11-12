@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use glam::{Mat4, Vec2, Vec3};
 use tomori_environment_farmyard::beach;
+use tomori_environment_farmyard::random::noise;
 use tomori_physics::Placement;
 use tomori_scene::client_side::{Hand, Sound};
 
@@ -159,15 +160,6 @@ pub fn sound(water: bool, speed: f32) -> Sound {
         .map(|sample| sample * level)
         .collect();
     Sound::new(samples, RATE)
-}
-
-/// A fixed noise, the same every time, from `seed`.
-fn noise(seed: u32) -> impl FnMut() -> f32 {
-    let mut state = seed;
-    move || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
-    }
 }
 
 /// A clack: a few milliseconds of stone striking stone, two ringing tones in a burst of noise, gone in a tenth of a

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::behaviour::{Behaviour, Doing, facing, heading};
 use crate::chicken::Chicken;
 use crate::layout::{self, Footprint};
+use crate::random::mix;
 
 /// The fewest and most chickens in a flock.
 pub const FEWEST: usize = 3;
@@ -77,14 +78,6 @@ pub const ENTRIES: [Option<[f32; 3]>; 3] = [
     Some([-2.38, layout::COOP_FLOOR, -8.51]),
     None,
 ];
-
-/// The SplitMix64 finalizer, for numbers that are the same everywhere.
-fn mix(value: u64) -> u64 {
-    let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
 
 /// The seed of the flock in the space `space`: FNV-1a, the same in every build.
 pub fn seed(space: &str) -> u64 {

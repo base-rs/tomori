@@ -20,6 +20,7 @@ use tomori_environment_farmyard::chicken::{CLUCK, Chicken, SQUAWK};
 use tomori_environment_farmyard::cluck::{Cluck, RATE, rendered};
 use tomori_environment_farmyard::controller::ChickenController;
 use tomori_environment_farmyard::flock::{self, Event, Intent, MOST, PER_CHICKEN, State};
+use tomori_environment_farmyard::random::mix;
 use tomori_environment_farmyard::{beach, campsite};
 
 /// What the farmyard's scenery draws this frame: each chicken, posed and placed, each of the campsite's sticks and
@@ -38,14 +39,6 @@ pub const CLUCK_SLOT: u64 = 30_000;
 const CLUCK_CHANCE: f32 = 0.3;
 /// Clucks older than this, such as those a client joining late would hear of, are not heard.
 const LATE: u64 = 1_000;
-
-/// The SplitMix64 finalizer.
-fn mix(value: u64) -> u64 {
-    let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
 
 /// The farmyard's client side for one space.
 pub struct FarmyardClient {

@@ -21,6 +21,7 @@ use tomori_scene::pointing::{Ray, Shape};
 
 pub use crate::loose::{Loose, Shapes};
 use tomori_environment_farmyard::campsite::{self, Event, LOGS, Pose, STICKS, Shared};
+use tomori_environment_farmyard::random::{self, mix};
 
 /// How near the ray passes a stick to point at it, and how much nearer for each metre away, as a thin thing is hard to
 /// point at exactly from afar; and how near a hand comes to a stick's handle to take it.
@@ -562,14 +563,6 @@ impl Sticks {
     }
 }
 
-/// The SplitMix64 finalizer, for the crackles' chances.
-fn mix(value: u64) -> u64 {
-    let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
 /// How many crackles there are, each its own.
 const CRACKLES: usize = 4;
 
@@ -580,11 +573,7 @@ fn crackle(variant: usize, level: f32) -> Sound {
     let rendered = RENDERED.get_or_init(|| {
         (0..CRACKLES)
             .map(|variant| {
-                let mut state = 0x2545_f491_u32.wrapping_add(variant as u32 * 7919);
-                let mut noise = move || {
-                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                    (state >> 8) as f32 / (1u32 << 23) as f32 - 1.0
-                };
+                let mut noise = random::noise(0x2545_f491_u32.wrapping_add(variant as u32 * 7919));
                 let length = crate::stones::RATE as usize / 20;
                 let decay = 0.9985 - variant as f32 * 0.0003;
                 let mut low = 0.0f32;
