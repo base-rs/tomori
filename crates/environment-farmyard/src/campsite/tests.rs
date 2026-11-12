@@ -493,6 +493,10 @@ fn a_burnt_marshmallow_burns_on_out_of_the_heat_for_a_while_and_goes_out_or_unde
     assert_eq!(burns(10.0, BLACK, away, f32::NAN), 10.0);
     assert_eq!(burns(10.0, BLACK, away, -1.0), 10.0);
     assert_eq!(burns(f32::INFINITY, BLACK, away, 0.1), 0.0);
+    // Beyond a small fire's heat, it catches in a big one's, which reaches further.
+    let further = heart_at(1.0) + Vec3::X * 0.9;
+    assert_eq!(burns(0.0, BLACK, further, 0.1), 0.0);
+    assert_eq!(burns_at(0.0, BLACK, further, 0.1, 1.0), BURNS);
     assert_eq!(burns(BURNS * 2.0, BLACK, away, 0.0), BURNS);
 }
 
