@@ -261,7 +261,7 @@ pub const VIEWPOINTS: [(&str, &str, usize, f32); 2] = [
 
 /// How far from the waterfall rock's middle, towards the lookout, its anchor stands, and how high above its top: behind
 /// whoever stands on it facing the waterfall, so that whatever gathers there is beside them rather than before the fall,
-/// and within 20 m of where participants arrive, as every anchor is.
+/// and within 20 m of where participants arrive, as every anchor was before the upper terrace.
 const ROCK_ANCHOR: (f32, f32) = (1.6, 1.8);
 
 /// The trail's named anchors: its viewpoints, beyond the trail towards what they look at, facing it; the waterfall
