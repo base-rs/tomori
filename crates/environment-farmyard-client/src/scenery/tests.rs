@@ -9,7 +9,8 @@
 //! `TOMORI_FARMYARD_CAMPSITE_PREVIEW` saves the campsite from the lookout's log seat, a marshmallow toasting over its
 //! bonfire; `TOMORI_FARMYARD_BEACH_PREVIEW` a little dolmen of the beach's building stones on its shingle; and
 //! `TOMORI_FARMYARD_UPPER_TERRACE_PREVIEW` the waterfall from its rock, looking up, as `-1.png`, the upper falls from
-//! where one arrives on the terrace above it, as `-2.png`, and the yard from the terrace's flat rock, as `-3.png`.
+//! where one arrives on the terrace above it, as `-2.png`, down the stream from the upper pool to the waterfall's lip, as
+//! `-3.png`, the lip from beside the cairn, as `-4.png`, and the yard from the terrace's flat rock, as `-5.png`.
 use glam::{Mat4, Vec3};
 use tomori_render::test_gpu;
 
@@ -889,17 +890,30 @@ fn the_river_lies_in_its_channel_below_the_trail_and_the_waterfall_rock_stands_i
 }
 
 /// Where the upper terrace is seen from, as `(eye, target)`: on the waterfall rock, looking up at the waterfall that is
-/// the way up; where one arrives on the terrace, facing the upper falls; and sitting on its flat rock, looking out over
-/// the yard.
-fn upper_terrace_views() -> [(Vec3, Vec3); 3] {
+/// the way up; where one arrives on the terrace, facing the upper falls; on the terrace by the upper pool, looking down
+/// the stream to the waterfall's lip; by the cairn, looking down at the lip where the stream goes over; and sitting on
+/// its flat rock, looking out over the yard.
+fn upper_terrace_views() -> [(Vec3, Vec3); 5] {
     use tomori_environment_farmyard::terrace;
     let rock = layout::WATERFALL_ROCK + Vec3::Y * 1.6;
     let arrival = terrace::arrival() + Vec3::Y * 1.6;
     let (along, across) = terrace::SEAT;
     let seat = terrace::on_fall(along, across);
+    let on = |along: f32, across: f32, height: f32| {
+        let point = terrace::on_fall(along, across);
+        Vec3::new(point.x, height, point.y)
+    };
     [
         (rock, layout::WATERFALL_LIP + Vec3::Y * 0.5),
         (arrival, layout::UPPER_FALLS - Vec3::Y * 1.2),
+        (
+            on(28.4, 2.5, layout::TERRACE + 1.6),
+            on(23.5, -0.3, layout::CLIFF_TOP),
+        ),
+        (
+            on(24.6, 3.5, layout::TERRACE + 1.6),
+            on(23.7, 0.0, layout::CLIFF_TOP - 0.2),
+        ),
         (
             Vec3::new(seat.x, layout::TERRACE + 1.2, seat.y),
             layout::ARRIVAL + Vec3::Y * 0.5,
@@ -972,9 +986,9 @@ fn the_upper_terrace_stands_above_the_waterfall_with_its_own_falls_before_it() {
         let floor = about(&pictures[1], within(seen_at(views[1], underfoot)));
         assert!(floor > 0.5 && floor < falls, "{floor} {falls}");
         // From its flat rock, the yard is seen below the horizon, over the terrace's edge, drawn.
-        let seen = within(seen_at(views[2], layout::ARRIVAL));
+        let seen = within(seen_at(views[4], layout::ARRIVAL));
         assert!(seen.1 > 0.5, "{seen:?}");
-        assert!(about(&pictures[2], seen) > 0.0);
+        assert!(about(&pictures[4], seen) > 0.0);
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

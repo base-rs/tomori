@@ -141,15 +141,12 @@ fn from_stream(point: Vec2) -> (f32, f32) {
     (point.distance(lip + along * t), t)
 }
 
-/// How far either side of the waterfall's way the notch it leaves the cliff by is as low as its lip, and how far it
-/// rises to the terrace's ground.
-const NOTCH: [f32; 2] = [1.2, 2.2];
-
 /// How deep the stream's bed lies below its water, so that it is the waterfall's lip where it leaves; and how far from
-/// its middle its bed reaches and its banks rise to the terrace's ground, at the lip, as wide as the waterfall leaving
-/// it, and at the upper pool, narrower.
+/// its middle its bed reaches and its banks rise to the terrace's ground, at the lip and at the upper pool: its banks
+/// rising through its water's level at the edges of its water and the waterfall's top, 0.6 m from its middle, at the
+/// lip, and before them at the pool, so that the water's edges are beneath them.
 const STREAM_DEPTH: f32 = 0.08;
-const STREAM_BANKS: [[f32; 2]; 2] = [[0.9, 1.35], [0.3, 0.7]];
+const STREAM_BANKS: [[f32; 2]; 2] = [[0.42, 0.88], [0.3, 0.7]];
 
 /// How far above its water every bank's top stands at least, so that the water lies in a channel below the land, the
 /// trail and the yard, rather than above them.
@@ -250,19 +247,16 @@ pub fn ground(point: Vec2) -> f32 {
     let beyond = smoothstep(POOL_RADIUS + 0.6, RIM[2], pool);
     height = banked(height, nearest.y, distance, (BANKS, RIVER_DEPTH), beyond);
     // The mountain behind the waterfall: its cliff, from its foot to its lip, the terrace's ground at the top of the
-    // falls, but for the notch the water leaves by, as high as the cliff's top was before the terrace, so that the
-    // waterfall falls as it did; the upper cliff behind it and the knoll above that, falling away beyond into the ridge.
-    let (along, across) = on_the_fall(point);
+    // falls, the upper cliff behind it and the knoll above that, falling away beyond into the ridge.
+    let (_, across) = on_the_fall(point);
     let upper = smoothstep(layout::UPPER_CLIFF[0], layout::UPPER_CLIFF[1], radius)
         * (1.0 - smoothstep(4.0, 8.0, -across))
         * (1.0 - smoothstep(11.0, 14.0, across));
-    let notch = (1.0 - smoothstep(NOTCH[0], NOTCH[1], across.abs()))
-        * (1.0 - smoothstep(layout::CLIFF[1] + 1.1, layout::CLIFF[1] + 2.1, along));
     let level = TERRACE_GROUND + (layout::UPPER_TOP - TERRACE_GROUND) * upper;
-    let level = level + (layout::CLIFF_TOP - level) * notch;
     let height = height + (level - height).max(0.0) * mountain(point);
     // The upper pool's basin, and the stream's channel from it to the waterfall's lip, cut into the terrace's ground,
-    // whose banks stand as far above their water as the river's do.
+    // whose banks stand as far above their water as the river's do, and at the lip, its bed the cliff's top, so that the
+    // waterfall falls as it did.
     let cut = |height: f32, depth: f32, distance: f32, [bed, bank]: [f32; 2]| {
         let floor = layout::UPPER_POOL.y - depth;
         height.min(floor + (height - floor) * smoothstep(bed, bank, distance))
@@ -287,90 +281,144 @@ pub(crate) fn facing(shapes: &mut Shapes, corners: &[Vec3], outward: Vec3, color
     }
 }
 
-/// The patch of the mountain about the stream and the upper pool, along the waterfall's way from just behind its lip to
-/// the upper cliff's foot, and across it either side, which the foothills' rings are too coarse to draw: drawn finely
-/// from [`ground`] instead ([`patch`]), a little above it, the foothills' own corners on the waterfall's way within it
-/// sunk beneath it ([`SUNK_BENEATH`]).
-pub const PATCH: [[f32; 2]; 2] = [
-    [layout::CLIFF[1] + 0.15, layout::UPPER_CLIFF[0]],
-    [-2.0, 1.9],
-];
-/// How many cells the patch is drawn in, along the waterfall's way and across it.
-const PATCH_CELLS: [usize; 2] = [20, 14];
-/// How far above [`ground`] the patch is drawn, so that the foothills beneath it never show through it.
-const PATCH_LIFT: f32 = 0.04;
-/// How far the foothills' corners beneath the patch sink below the ground there, so that the foothills' coarse faces lie
-/// beneath it: those on the waterfall's way, where the stream and the upper pool are cut, far enough that the faces
-/// either side of them do too; the rest within it less, and those along the waterfall's lip, whose faces are the cliff's
-/// below the patch's edge, a little, so little that it shows nowhere beside it.
-const SUNK_BENEATH: [f32; 3] = [0.6, 0.3, 0.1];
+/// The foothills' cells drawn finely, about the stream and the upper pool, which the rings are too coarse to draw: those
+/// from the waterfall's lip, [`layout::CLIFF`]'s top, to the upper cliff's, [`layout::UPPER_CLIFF`]'s, by their rings
+/// in [`RINGS`], and from [`FINE_SEGMENTS`] segments either side of the waterfall's way. Each is cut into
+/// [`FINE_ROWS`] rows, by its ring, and [`FINE_COLUMNS`] columns, whose corners are on [`ground`]; the cells beside
+/// them take the corners along the edge they share, so that the ground is one surface, closed along every seam.
+pub const FINE_RINGS: std::ops::Range<usize> = 8..13;
+/// How many segments either side of the waterfall's way are drawn finely.
+pub const FINE_SEGMENTS: usize = 2;
+/// How many rows each ring of [`FINE_RINGS`] is cut into, about 30 cm each, and how many columns each segment, about
+/// 25 to 30 cm each.
+const FINE_ROWS: [usize; 5] = [5, 5, 7, 4, 4];
+const FINE_COLUMNS: usize = 6;
 
-/// How far the foothills' corner at `point` sinks beneath the patch: on the waterfall's way, behind its lip and short of
-/// the upper cliff, the most; about it, to the patch's edges, less; along the lip, a little; and nowhere else.
-fn sunk_beneath(point: Vec2) -> f32 {
-    let (along, across) = on_the_fall(point);
-    let [[first, last], [left, right]] = PATCH;
-    let beneath = (left - 0.1..=right + 0.1).contains(&across);
-    if across.abs() < 0.9 && along > layout::CLIFF[1] + 0.5 && along < layout::UPPER_CLIFF[0] - 0.5
-    {
-        SUNK_BENEATH[0]
-    } else if beneath && (first..=last + 0.1).contains(&along) {
-        SUNK_BENEATH[1]
-    } else if beneath && (first - 0.3..first).contains(&along) {
-        SUNK_BENEATH[2]
+/// The segment of [`SEGMENTS`] the waterfall's way runs along, round the rings.
+fn waterfall_segment() -> usize {
+    (layout::WATERFALL_AZIMUTH / TAU * SEGMENTS as f32)
+        .round()
+        .rem_euclid(SEGMENTS as f32) as usize
+}
+
+/// Whether the foothills' cell from `ring` and `segment` is drawn finely.
+pub fn fine(ring: usize, segment: usize) -> bool {
+    let from = (waterfall_segment() + SEGMENTS - FINE_SEGMENTS) % SEGMENTS;
+    FINE_RINGS.contains(&ring) && (segment + SEGMENTS - from) % SEGMENTS < FINE_SEGMENTS * 2
+}
+
+/// How many rows the fine cells from `ring` are cut into.
+fn fine_rows(ring: usize) -> usize {
+    FINE_ROWS[ring - FINE_RINGS.start]
+}
+
+/// The corner `row` of the way from ring `ring` to the next and `column` of the way round from segment `segment` to the
+/// next, of the fine cells: a corner of the rings' own where it is one, and otherwise on [`ground`], across its cell
+/// from its corners, along their edges as they run straight. Found the same, to the bit, from either cell beside it.
+fn fine_corner(ring: usize, row: usize, segment: usize, column: usize) -> Vec3 {
+    let (ring, row) = if row > 0 && row == fine_rows(ring) {
+        (ring + 1, 0)
     } else {
-        0.0
+        (ring, row)
+    };
+    let (segment, column) = if column == FINE_COLUMNS {
+        ((segment + 1) % SEGMENTS, 0)
+    } else {
+        (segment, column)
+    };
+    let next = (segment + 1) % SEGMENTS;
+    let round = column as f32 / FINE_COLUMNS as f32;
+    let point = match (row, column) {
+        (0, 0) => return vertex(ring, segment),
+        (0, _) => vertex(ring, segment).lerp(vertex(ring, next), round),
+        _ => {
+            let out = row as f32 / fine_rows(ring) as f32;
+            let near = vertex(ring, segment).lerp(vertex(ring, next), round);
+            let far = vertex(ring + 1, segment).lerp(vertex(ring + 1, next), round);
+            if column == 0 {
+                vertex(ring, segment).lerp(vertex(ring + 1, segment), out)
+            } else {
+                near.lerp(far, out)
+            }
+        }
+    };
+    Vec3::new(point.x, ground(Vec2::new(point.x, point.z)), point.z)
+}
+
+/// The triangles the foothills' cell from `ring` and `segment` is drawn in: its rows and columns, if it is drawn finely;
+/// one beside those, a fan taking in the fine corners along the edge it shares with them; and any other, the two of
+/// [`cell`].
+fn cell_triangles(ring: usize, segment: usize) -> Vec<[Vec3; 3]> {
+    let next = (segment + 1) % SEGMENTS;
+    if fine(ring, segment) {
+        let rows = fine_rows(ring);
+        return (0..rows)
+            .flat_map(|row| (0..FINE_COLUMNS).map(move |column| (row, column)))
+            .flat_map(|(row, column)| {
+                let corner = |row: usize, column: usize| fine_corner(ring, row, segment, column);
+                let [a, b, c, d] = [
+                    corner(row, column),
+                    corner(row, column + 1),
+                    corner(row + 1, column + 1),
+                    corner(row + 1, column),
+                ];
+                if (row + column) % 2 == 0 {
+                    [[a, d, c], [a, c, b]]
+                } else {
+                    [[a, d, b], [b, d, c]]
+                }
+            })
+            .collect();
     }
-}
-
-/// The corner of the patch `along` and `across` its cells, on [`ground`], a little above it.
-fn patch_corner(along: usize, across: usize) -> Vec3 {
-    let [[first, last], [left, right]] = PATCH;
-    let [rows, columns] = PATCH_CELLS;
-    let (outward, side) = fall_axes();
-    let point = BACKDROP_CENTRE
-        + outward * (first + (last - first) * along as f32 / rows as f32)
-        + side * (left + (right - left) * across as f32 / columns as f32);
-    Vec3::new(point.x, ground(point) + PATCH_LIFT, point.y)
-}
-
-/// The two triangles the patch's cell `along` and `across` is cut into.
-fn patch_cell(along: usize, across: usize) -> [[Vec3; 3]; 2] {
     let [a, b, c, d] = [
-        patch_corner(along, across),
-        patch_corner(along + 1, across),
-        patch_corner(along + 1, across + 1),
-        patch_corner(along, across + 1),
+        vertex(ring, segment),
+        vertex(ring, next),
+        vertex(ring + 1, next),
+        vertex(ring + 1, segment),
     ];
-    [[a, b, c], [a, c, d]]
-}
-
-/// The patch's triangles, each as drawn: stone by the water and bush, as the mountain about it; none is steep enough to
-/// be rock.
-pub fn patch() -> Vec<[Vec3; 3]> {
-    let [rows, columns] = PATCH_CELLS;
-    (0..rows)
-        .flat_map(|along| (0..columns).flat_map(move |across| patch_cell(along, across)))
-        .collect()
-}
-
-/// How high the patch is drawn at `point`, from its triangle there, or `None` beyond it.
-fn patch_height(point: Vec2) -> Option<f32> {
-    let [[first, last], [left, right]] = PATCH;
-    let [rows, columns] = PATCH_CELLS;
-    let (along, across) = on_the_fall(point);
-    let row = (along - first) / (last - first) * rows as f32;
-    let column = (across - left) / (right - left) * columns as f32;
-    if !(0.0..=rows as f32).contains(&row) || !(0.0..=columns as f32).contains(&column) {
-        return None;
+    let previous = (segment + SEGMENTS - 1) % SEGMENTS;
+    // Its corners in order round it, from the start of the edge it shares with fine cells, along that edge's fine
+    // corners, then round the rest.
+    let shared: Option<Vec<Vec3>> = if ring > 0 && fine(ring - 1, segment) {
+        let along = (1..FINE_COLUMNS).map(|column| fine_corner(ring, 0, segment, column));
+        Some([a].into_iter().chain(along).chain([b, c, d]).collect())
+    } else if fine(ring, next) {
+        let up = (1..fine_rows(ring)).map(|row| fine_corner(ring, row, next, 0));
+        Some([b].into_iter().chain(up).chain([c, d, a]).collect())
+    } else if ring + 1 < RINGS.len() - 1 && fine(ring + 1, segment) {
+        let back = (1..FINE_COLUMNS)
+            .rev()
+            .map(|column| fine_corner(ring + 1, 0, segment, column));
+        Some([c].into_iter().chain(back).chain([d, a, b]).collect())
+    } else if fine(ring, previous) {
+        let down = (1..fine_rows(ring))
+            .rev()
+            .map(|row| fine_corner(ring, row, segment, 0));
+        Some([d].into_iter().chain(down).chain([a, b, c]).collect())
+    } else {
+        None
+    };
+    match shared {
+        // Fanned from its last corner, which is beside the shared edge's start, so that the fan stays within the cell.
+        Some(corners) => {
+            let apex = corners[corners.len() - 1];
+            corners[..corners.len() - 1]
+                .windows(2)
+                .map(|pair| [apex, pair[0], pair[1]])
+                .collect()
+        }
+        None => cell((ring, segment), [a, b, c, d]).to_vec(),
     }
-    let (row, column) = (
-        (row as usize).min(rows - 1),
-        (column as usize).min(columns - 1),
-    );
-    patch_cell(row, column)
-        .into_iter()
-        .find_map(|corners| on(&corners, point))
+}
+
+/// The foothills' triangles, each cell's in turn, as drawn, found once.
+pub fn foothills_triangles() -> &'static [Vec<[Vec3; 3]>] {
+    static CELLS: std::sync::OnceLock<Vec<Vec<[Vec3; 3]>>> = std::sync::OnceLock::new();
+    CELLS.get_or_init(|| {
+        (0..RINGS.len() - 1)
+            .flat_map(|ring| (0..SEGMENTS).map(move |segment| cell_triangles(ring, segment)))
+            .collect()
+    })
 }
 
 /// How high the triangle `corners` is at `point`, seen from above, if it is over it.
@@ -386,7 +434,7 @@ fn on([a, b, c]: &[Vec3; 3], point: Vec2) -> Option<f32> {
 
 /// The point of the foothills' ground on ring `ring` of [`RINGS`], at segment `segment` of [`SEGMENTS`] round it: on
 /// [`ground`], level with the meadow, [`MEADOW`], on the first ring, and a little rough further out, but along the river
-/// and on the mountain behind the waterfall, and sunk beneath the patch about the stream and the upper pool.
+/// and on the mountain behind the waterfall.
 fn vertex(ring: usize, segment: usize) -> Vec3 {
     let radius = RINGS[ring];
     let point = BACKDROP_CENTRE + way(segment as f32 / SEGMENTS as f32 * TAU) * radius;
@@ -397,7 +445,7 @@ fn vertex(ring: usize, segment: usize) -> Vec3 {
     let height = if ring == 0 {
         MEADOW
     } else {
-        ground(point) + jitter * rough - sunk_beneath(point)
+        ground(point) + jitter * rough
     };
     Vec3::new(point.x, height, point.y)
 }
@@ -422,104 +470,94 @@ pub fn meadow() -> Vec<Vec3> {
 }
 
 /// How high the foothills' ground is drawn at `point`, from its triangle there, which follows [`ground`] only at its
-/// corners, or the patch's about the stream and the upper pool, which is drawn over it; `None` within the meadow inside
-/// the first ring, or beyond the last.
+/// corners, finely about the stream and the upper pool; `None` within the meadow inside the first ring, or beyond the
+/// last.
 pub fn drawn_ground(point: Vec2) -> Option<f32> {
-    patch_height(point).or_else(|| foothills_ground(point))
-}
-
-/// How high the foothills' own ground is drawn at `point`, from its triangle there, beneath the patch too.
-fn foothills_ground(point: Vec2) -> Option<f32> {
     let offset = point - BACKDROP_CENTRE;
     let radius = offset.length();
     let ring = RINGS.windows(2).position(|pair| radius <= pair[1])?;
     let azimuth = offset.x.atan2(-offset.y).rem_euclid(TAU);
     let segment = (azimuth / TAU * SEGMENTS as f32) as usize;
     // Its cell, or, since a cell's edges are chords inside its rings, one beside it.
+    let cells = foothills_triangles();
     let rings = ring.saturating_sub(1)..=(ring + 1).min(RINGS.len() - 2);
     rings
         .flat_map(|ring| [SEGMENTS - 1, 0, 1].map(move |step| (ring, (segment + step) % SEGMENTS)))
-        .flat_map(|(ring, segment)| {
-            let next = (segment + 1) % SEGMENTS;
-            let corners = [
-                vertex(ring, segment),
-                vertex(ring, next),
-                vertex(ring + 1, next),
-                vertex(ring + 1, segment),
-            ];
-            cell((ring, segment), corners)
-        })
-        .find_map(|corners| on(&corners, point))
+        .flat_map(|(ring, segment)| &cells[ring * SEGMENTS + segment])
+        .find_map(|corners| on(corners, point))
 }
 
-/// The foothills' ground as it is drawn: each of its cells' two triangles, ring by ring and segment by segment, with
-/// the ring and segment of its cell.
+/// The foothills' ground as it is drawn: each of its cells' triangles, ring by ring and segment by segment, with the
+/// ring and segment of its cell, finely about the stream and the upper pool ([`foothills_triangles`]).
 pub fn ground_triangles() -> Vec<((usize, usize), [Vec3; 3])> {
-    let grid: Vec<Vec<Vec3>> = (0..RINGS.len())
-        .map(|ring| (0..SEGMENTS).map(|segment| vertex(ring, segment)).collect())
-        .collect();
-    let mut triangles = Vec::with_capacity((RINGS.len() - 1) * SEGMENTS * 2);
-    for ring in 0..RINGS.len() - 1 {
-        for segment in 0..SEGMENTS {
-            let next = (segment + 1) % SEGMENTS;
-            let (a, b) = (grid[ring][segment], grid[ring][next]);
-            let (c, d) = (grid[ring + 1][next], grid[ring + 1][segment]);
-            for corners in cell((ring, segment), [a, b, c, d]) {
-                triangles.push(((ring, segment), corners));
-            }
-        }
-    }
-    triangles
+    foothills_triangles()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, triangles)| {
+            triangles
+                .iter()
+                .map(move |corners| ((index / SEGMENTS, index % SEGMENTS), *corners))
+        })
+        .collect()
 }
 
 /// The foothills' ground, a ring of flat triangles from just beyond the fence to the ridge: pasture near the yard,
 /// native bush on the foothills, grey shingle along the river and about the pool, and rock where it is steep, as at
-/// the waterfall's cliff; and, where the beach is, its own triangles cut along the beach's outline, the part within
+/// the waterfall's cliff; about the stream and the upper pool, stone in their channel and basin and bush beyond, each
+/// face a shade of its own; and, where the beach is, its own triangles cut along the beach's outline, the part within
 /// it the beach's shingle ([`crate::beach::shingle`]).
 fn foothills(shapes: &mut Shapes) {
     let beach = crate::beach::outline();
-    for (index, ((ring, segment), corners)) in ground_triangles().into_iter().enumerate() {
-        let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
-        let normal = (corners[1] - corners[0])
-            .cross(corners[2] - corners[0])
-            .normalize();
-        let at = Vec2::new(middle.x, middle.z);
-        let radius = at.distance(BACKDROP_CENTRE);
-        let wet = layout::nearest_river(at).1 < RIVER_HALF_WIDTH + 2.4
-            || at.distance(Vec2::new(POOL.x, POOL.z)) < POOL_RADIUS + 0.8;
-        let color = if normal.y.abs() < 0.6 {
-            colors::ROCK
-        } else if wet {
-            colors::SHINGLE
-        } else if radius < 19.0 + scatter(((ring * SEGMENTS + segment) * 2) as u32) * 4.0 {
-            palette::GRASS
-        } else {
-            colors::BUSH
-        };
-        let (within, beyond) = crate::shapes::cut(&corners, &beach);
-        for part in beyond {
-            facing(shapes, &part, Vec3::Y, color);
+    let mut index = 0;
+    for (cell, triangles) in foothills_triangles().iter().enumerate() {
+        let (ring, segment) = (cell / SEGMENTS, cell % SEGMENTS);
+        let fine = fine(ring, segment);
+        for (part, corners) in triangles.iter().enumerate() {
+            index += 1;
+            let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
+            let normal = (corners[1] - corners[0])
+                .cross(corners[2] - corners[0])
+                .normalize();
+            let at = Vec2::new(middle.x, middle.z);
+            let radius = at.distance(BACKDROP_CENTRE);
+            let wet = layout::nearest_river(at).1 < RIVER_HALF_WIDTH + 2.4
+                || at.distance(Vec2::new(POOL.x, POOL.z)) < POOL_RADIUS + 0.8;
+            // About the stream and the upper pool, told by the middle of the cell of rows and columns it is half of, so
+            // that the stone's edge runs along the cells' edges rather than to and fro across them.
+            let stream = fine && {
+                let pair = &triangles[part - part % 2..part - part % 2 + 2];
+                let quad = pair.iter().flatten().sum::<Vec3>() / 6.0;
+                let upper = Vec2::new(quad.x, quad.z)
+                    .distance(Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z));
+                quad.y < TERRACE_GROUND - 0.06 || upper < layout::UPPER_POOL_RADIUS + 0.25
+            };
+            let shade = 0.92 + scatter((cell * 64 + part) as u32 + 19_000) * 0.16;
+            let color = if normal.y.abs() < 0.6 {
+                colors::ROCK
+            } else if stream {
+                colors::SHINGLE * shade
+            } else if fine {
+                colors::BUSH * shade
+            } else if wet {
+                colors::SHINGLE
+            } else if radius < 19.0 + scatter(((ring * SEGMENTS + segment) * 2) as u32) * 4.0 {
+                palette::GRASS
+            } else {
+                colors::BUSH
+            };
+            let (within, beyond) = crate::shapes::cut(corners, &beach);
+            for part in beyond {
+                facing(shapes, &part, Vec3::Y, color);
+            }
+            if let Some(part) = within {
+                facing(
+                    shapes,
+                    &part,
+                    Vec3::Y,
+                    crate::beach::shingle(index as u32),
+                );
+            }
         }
-        if let Some(part) = within {
-            facing(
-                shapes,
-                &part,
-                Vec3::Y,
-                crate::beach::shingle(index as u32 + 1),
-            );
-        }
-    }
-    // The patch about the stream and the upper pool, over the foothills' corners sunk beneath it, none of it steep.
-    for (index, corners) in patch().into_iter().enumerate() {
-        let middle = (corners[0] + corners[1] + corners[2]) / 3.0;
-        let at = Vec2::new(middle.x, middle.z);
-        let pool = at.distance(Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z));
-        let wet = middle.y < layout::UPPER_POOL.y + 0.2
-            || pool < layout::UPPER_POOL_RADIUS + 0.4
-            || from_stream(at).0 < 0.9;
-        let color = if wet { colors::SHINGLE } else { colors::BUSH };
-        let shade = 0.92 + scatter(index as u32 + 19_000) * 0.16;
-        facing(shapes, &corners, Vec3::Y, color * shade);
     }
 }
 

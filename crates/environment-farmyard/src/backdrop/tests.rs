@@ -361,14 +361,16 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
     assert!(highest > layout::CLIFF_TOP && highest < layout::CLIFF_TOP + 0.1);
     assert!((lowest - POOL.y).abs() < 0.05);
     for point in &falling {
-        // In front of the cliff's face, which it falls down, but where it comes over the lip, above the cliff's top.
+        // In front of the cliff's face, which it falls down, but where it comes over the lip, above the cliff's top as it
+        // is drawn, its edges behind the lip beneath the stream's banks, a little.
         let (along, _) = by_waterfall(Vec2::new(point.position.x, point.position.z));
+        let drawn = drawn_ground(Vec2::new(point.position.x, point.position.z)).unwrap();
         if point.position.y < layout::CLIFF_TOP {
             assert!(along < layout::CLIFF[1] - 0.25, "{point:?}");
+        } else if along > layout::CLIFF[1] && point.flow.x.abs() == 1.0 {
+            assert!(point.position.y > drawn - 0.12, "{point:?}");
         } else {
-            assert!(
-                point.position.y > super::ground(Vec2::new(point.position.x, point.position.z))
-            );
+            assert!(point.position.y > drawn, "{point:?}");
         }
         assert!(point.flow.y >= 0.0);
     }
@@ -396,47 +398,121 @@ fn the_waterfall_falls_from_its_cliff_into_its_pool_which_feeds_the_river_downhi
 }
 
 #[test]
-fn the_patch_about_the_stream_and_the_upper_pool_is_drawn_over_the_foothills_beneath_it() {
-    // Every 10 cm of it, the foothills' own ground lies beneath it, and it follows the ground, a little above it, within
-    // the reach of its cells' corners.
-    let [[first, last], [left, right]] = PATCH;
-    let (outward, side) = fall_axes();
-    let mut sampled = 0;
-    for along in 0..((last - first) * 10.0) as i32 {
-        for across in 0..((right - left) * 10.0) as i32 {
-            let point = BACKDROP_CENTRE
-                + outward * (first + along as f32 * 0.1 + 0.05)
-                + side * (left + across as f32 * 0.1 + 0.05);
-            let drawn = drawn_ground(point).unwrap();
-            let beneath = foothills_ground(point).unwrap();
-            assert!(beneath < drawn + 1e-3, "{point} {drawn} {beneath}");
+fn the_foothills_are_one_closed_surface_drawn_finely_about_the_stream_and_the_upper_pool() {
+    // The fine cells run from the waterfall's lip to the upper cliff's top, either side of the waterfall's way.
+    assert_eq!(RINGS[FINE_RINGS.start], layout::CLIFF[1]);
+    assert_eq!(RINGS[FINE_RINGS.end], layout::UPPER_CLIFF[1]);
+    let lip = Vec2::new(layout::WATERFALL_LIP.x, layout::WATERFALL_LIP.z);
+    let upper = Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z);
+    let (outward, right) = fall_axes();
+    for point in [lip + outward * 0.1, upper, upper + outward * 1.3] {
+        for side in [-1.5, 0.0, 1.5] {
+            let at = point + right * side;
+            let offset = at - BACKDROP_CENTRE;
+            let ring = RINGS
+                .iter()
+                .rposition(|ring| *ring <= offset.length())
+                .unwrap();
+            let azimuth = offset.x.atan2(-offset.y).rem_euclid(TAU);
             assert!(
-                (drawn - super::ground(point)).abs() < 0.2,
+                fine(ring, (azimuth / TAU * SEGMENTS as f32) as usize),
+                "{at}"
+            );
+        }
+    }
+    // Every edge of every triangle, the fine cells', the cells' beside them and the rest, is shared by exactly two,
+    // corner to corner, to the bit, but those along the first ring and the last, its outer boundary: so that the ground,
+    // the stream's bed and banks, the upper pool's basin and the cliffs about them meet along every seam, no corner of one
+    // in the middle of another's edge, and nothing is missing.
+    let key = |point: Vec3| point.to_array().map(f32::to_bits);
+    let mut edges: std::collections::HashMap<_, usize> = std::collections::HashMap::new();
+    let triangles: Vec<[Vec3; 3]> = foothills_triangles().iter().flatten().copied().collect();
+    for triangle in &triangles {
+        let area = (triangle[1] - triangle[0])
+            .cross(triangle[2] - triangle[0])
+            .length();
+        assert!(area > 1e-4, "{triangle:?}");
+        for index in 0..3 {
+            let (from, to) = (key(triangle[index]), key(triangle[(index + 1) % 3]));
+            *edges
+                .entry(if from < to { (from, to) } else { (to, from) })
+                .or_default() += 1;
+        }
+    }
+    let boundary = |point: [u32; 3]| {
+        let radius =
+            Vec2::new(f32::from_bits(point[0]), f32::from_bits(point[2])).distance(BACKDROP_CENTRE);
+        (radius - RINGS[0]).abs() < 1e-3 || (radius - RINGS[RINGS.len() - 1]).abs() < 1e-3
+    };
+    let mut open = 0;
+    for ((from, to), count) in &edges {
+        if boundary(*from) && boundary(*to) {
+            assert_eq!(*count, 1);
+            open += 1;
+        } else {
+            assert_eq!(
+                *count,
+                2,
+                "{:?} {:?}",
+                from.map(f32::from_bits),
+                to.map(f32::from_bits)
+            );
+        }
+    }
+    assert_eq!(open, SEGMENTS * 2);
+    // The fine cells' corners are on the ground, finely enough to draw the stream's channel and the pool's basin.
+    let cells: Vec<_> = (0..RINGS.len() - 1)
+        .flat_map(|ring| (0..SEGMENTS).map(move |segment| (ring, segment)))
+        .filter(|(ring, segment)| fine(*ring, *segment))
+        .collect();
+    assert_eq!(cells.len(), FINE_RINGS.len() * FINE_SEGMENTS * 2);
+    for (ring, segment) in cells {
+        for corner in foothills_triangles()[ring * SEGMENTS + segment]
+            .iter()
+            .flatten()
+        {
+            let ground = super::ground(Vec2::new(corner.x, corner.z));
+            assert!((corner.y - ground).abs() < 1e-4, "{corner} {ground}");
+        }
+    }
+    // Every 10 cm about the stream and the upper pool, the ground drawn follows the ground within 10 cm, on its steepest
+    // banks.
+    let mut sampled = 0;
+    for along in 0..56 {
+        for across in -15..=15 {
+            let point = BACKDROP_CENTRE
+                + outward * (layout::CLIFF[1] + 0.3 + along as f32 * 0.1)
+                + right * (across as f32 * 0.1);
+            let drawn = drawn_ground(point).unwrap();
+            assert!(
+                (drawn - super::ground(point)).abs() < 0.1,
                 "{point} {drawn}"
             );
             sampled += 1;
         }
     }
-    assert!(sampled > 2000);
-    // None of it is steep enough to be drawn as rock, as the foothills' faces steeper than 53° are.
-    for [a, b, c] in patch() {
-        assert!((b - a).cross(c - a).normalize().y.abs() > 0.6);
-    }
-    // Its water: the upper pool's surface over its basin about its middle, and the stream's over its bed, as drawn.
-    let pool = Vec2::new(layout::UPPER_POOL.x, layout::UPPER_POOL.z);
-    assert!(drawn_ground(pool).unwrap() < layout::UPPER_POOL.y - 0.15);
+    assert!(sampled > 1500);
+    // Its water: the upper pool's surface over its basin about its middle, and the stream's over its bed, as drawn,
+    // and the edges of the stream's water and of the waterfall's top beneath its banks, or within a few centimetres of
+    // them at the lip, as wide as they are.
+    assert!(drawn_ground(upper).unwrap() < layout::UPPER_POOL.y - 0.15);
     let foot = Vec2::new(layout::UPPER_FALLS_FOOT.x, layout::UPPER_FALLS_FOOT.z);
-    assert!(
-        drawn_ground(foot).unwrap() < layout::UPPER_POOL.y,
-        "{}",
-        drawn_ground(foot).unwrap()
-    );
-    for along in [24.6, 25.5, 26.5] {
+    assert!(drawn_ground(foot).unwrap() < layout::UPPER_POOL.y);
+    for along in [23.6, 24.6, 25.5, 26.5, 27.2] {
         let at = BACKDROP_CENTRE + outward * along;
         assert!(
-            drawn_ground(at).unwrap() < layout::UPPER_POOL.y - 0.02,
+            drawn_ground(at).unwrap() < layout::UPPER_POOL.y - 0.05,
             "{along}"
         );
+        for side in [-0.6, 0.6] {
+            let edge = drawn_ground(at + right * side).unwrap();
+            assert!(edge > layout::UPPER_POOL.y - 0.05, "{along} {side} {edge}");
+            let beyond = drawn_ground(at + right * side * 1.25).unwrap();
+            assert!(
+                beyond > layout::UPPER_POOL.y + 0.02,
+                "{along} {side} {beyond}"
+            );
+        }
     }
 }
 
@@ -476,8 +552,11 @@ fn the_sounds_are_named_where_the_waterfall_the_pool_the_river_and_the_bush_are(
                 .count();
             assert!(near >= 3, "{at}: {near}");
         } else {
-            // On the water.
-            assert!(super::ground(Vec2::new(at.x, at.z)) < at.y, "{name} {at}");
+            // On the water, above the ground as it is drawn.
+            assert!(
+                drawn_ground(Vec2::new(at.x, at.z)).unwrap() < at.y,
+                "{name} {at}"
+            );
         }
     }
 }
@@ -599,7 +678,7 @@ fn the_ranges_ring_the_horizon_bluer_and_hazier_with_distance_the_highest_under_
 
 #[test]
 fn the_backdrop_is_modest_for_the_quest() {
-    // Under the budget, about 17.6 thousand triangles, which the scenery draws in eleven draws: the foothills, one for
+    // Under the budget, about 18.8 thousand triangles, which the scenery draws in eleven draws: the foothills, one for
     // each kind of plant with all its instances but the tree ferns, which the ferns draw, the river's stones, all
     // instances of one, the upper terrace's among them, the waterfall rock, the trail, the upper terrace, the water,
     // above the waterfall too, and the ranges; and the stations' plaques, five small draws of text.
@@ -607,7 +686,7 @@ fn the_backdrop_is_modest_for_the_quest() {
     assert_eq!(
         triangles,
         Triangles {
-            foothills: 3632,
+            foothills: 4312,
             plants: 10_862,
             ranges: 1184,
             water: 253,
@@ -618,7 +697,7 @@ fn the_backdrop_is_modest_for_the_quest() {
         },
         "the counts the documentation gives"
     );
-    assert_eq!(triangles.total(), 18_148);
+    assert_eq!(triangles.total(), 18_828);
     assert_eq!(stones().len(), 51);
     assert!(triangles.total() < BUDGET);
     // Each kind of plant is a few dozen to a little over a hundred triangles, drawn once for all its instances, but the
