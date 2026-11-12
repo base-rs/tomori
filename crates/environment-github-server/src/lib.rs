@@ -153,7 +153,7 @@ impl FromStr for Repository {
                 name: name.to_owned(),
             }),
             _ => Err(format!(
-                "--github-repository needs OWNER/NAME, such as ioquatix/tomori, not {text:?}"
+                "--github-repository needs OWNER/NAME, such as base-rs/tomori, not {text:?}"
             )),
         }
     }

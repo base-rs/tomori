@@ -2,18 +2,18 @@
 
 ## Status
 
-**Done.** November 2026. The main branch requires 100% region coverage, with exclusions per file rather than per crate. The requirement and the current list of excluded files are in `design/testing.md`, which takes precedence over this document. The rest of this document is the proposal from [PR #111](https://github.com/ioquatix/tomori/pull/111), with its decisions and outcome added, kept for its reasoning. It covered [#55](https://github.com/ioquatix/tomori/issues/55), now closed, and touched stage 3 of [#73](https://github.com/ioquatix/tomori/issues/73), the server and headset builders.
+**Done.** November 2026. The main branch requires 100% region coverage, with exclusions per file rather than per crate. The requirement and the current list of excluded files are in `design/testing.md`, which takes precedence over this document. The rest of this document is the proposal from [PR #111](https://github.com/base-rs/tomori/pull/111), with its decisions and outcome added, kept for its reasoning. It covered [#55](https://github.com/base-rs/tomori/issues/55), now closed, and touched stage 3 of [#73](https://github.com/base-rs/tomori/issues/73), the server and headset builders.
 
 **Built:**
 
-- **File exclusions in Bake:** `bake-test` 0.3.5 reads `[[package.metadata.bake.test.coverage.exclude]]` entries, each with a required reason, and lists every excluded file with its size ([#130](https://github.com/ioquatix/tomori/pull/130)).
-- **The gate:** every crate covered to 100% ([#131](https://github.com/ioquatix/tomori/pull/131), [#135](https://github.com/ioquatix/tomori/pull/135), [#136](https://github.com/ioquatix/tomori/pull/136)), then made required through the Test workflow's `test-result`, with `design/testing.md` recording it ([#137](https://github.com/ioquatix/tomori/pull/137), which landed #130–#136).
-- **Deterministic CI:** coverage that no longer depends on timing or races ([#142](https://github.com/ioquatix/tomori/pull/142), [#165](https://github.com/ioquatix/tomori/pull/165), [#177](https://github.com/ioquatix/tomori/pull/177)).
+- **File exclusions in Bake:** `bake-test` 0.3.5 reads `[[package.metadata.bake.test.coverage.exclude]]` entries, each with a required reason, and lists every excluded file with its size ([#130](https://github.com/base-rs/tomori/pull/130)).
+- **The gate:** every crate covered to 100% ([#131](https://github.com/base-rs/tomori/pull/131), [#135](https://github.com/base-rs/tomori/pull/135), [#136](https://github.com/base-rs/tomori/pull/136)), then made required through the Test workflow's `test-result`, with `design/testing.md` recording it ([#137](https://github.com/base-rs/tomori/pull/137), which landed #130–#136).
+- **Deterministic CI:** coverage that no longer depends on timing or races ([#142](https://github.com/base-rs/tomori/pull/142), [#165](https://github.com/base-rs/tomori/pull/165), [#177](https://github.com/base-rs/tomori/pull/177)).
 
 **Changed from the proposal, as decided later:**
 
 - **Files, not crates.** The maintainer revised decisions 1 and 2 on #111: a crate lists specific files in its own `Cargo.toml`, each with a required reason, rather than excluding a whole crate, so `tomori-quest` never depends on a private, untested shell crate. Untestable device calls go into a dedicated file, with the logic around them kept elsewhere and covered. `#[coverage(off)]` is unstable and `cfg(coverage)` changes what is built, so neither is used. This answers decision 5 and open question 1. The sections below on crate-level exclusion and splitting off an excluded shell describe the option that was not taken.
-- **The list has changed since the [outcome](#outcome).** The client split ([#132](https://github.com/ioquatix/tomori/pull/132)) moved the excluded files into `tomori-client-quest`, `tomori-client-desktop` and `tomori-client-spectator`, and the server process is now covered, leaving out only `exit.rs`, which ends the process with `_exit`. `design/testing.md` holds the current list.
+- **The list has changed since the [outcome](#outcome).** The client split ([#132](https://github.com/base-rs/tomori/pull/132)) moved the excluded files into `tomori-client-quest`, `tomori-client-desktop` and `tomori-client-spectator`, and the server process is now covered, leaving out only `exit.rs`, which ends the process with `_exit`. `design/testing.md` holds the current list.
 - **The shell's name and the desktop window** (open question 2) were settled by the client split: the headset is `tomori-client-quest`, and the desktop window and spectator have crates of their own.
 
 **Open:**
@@ -39,7 +39,7 @@ A file is a finer boundary than a crate, so the headset did not have to be split
 
 That is 1,855 regions, about 1.5% of the workspace, under the 3,600 this proposal estimated. Every one of the other 120,989 measured regions runs, and Bake leaves out the 161 inside `unreachable!`. With #137, the Test workflow runs the gate on stable Rust, the main branch requires it through `test-result`, `coverage.yml` is gone, and `design/testing.md` records the requirement.
 
-The work is in [#130](https://github.com/ioquatix/tomori/pull/130) (Bake 0.3.5 and the exclusions), [#131](https://github.com/ioquatix/tomori/pull/131) (the headset), [#135](https://github.com/ioquatix/tomori/pull/135) (the server and discovery), [#136](https://github.com/ioquatix/tomori/pull/136) (the OpenCode backend, speech, client and bake) and [#137](https://github.com/ioquatix/tomori/pull/137) (making the gate required). Reaching 100% found these bugs, each fixed with a regression test:
+The work is in [#130](https://github.com/base-rs/tomori/pull/130) (Bake 0.3.5 and the exclusions), [#131](https://github.com/base-rs/tomori/pull/131) (the headset), [#135](https://github.com/base-rs/tomori/pull/135) (the server and discovery), [#136](https://github.com/base-rs/tomori/pull/136) (the OpenCode backend, speech, client and bake) and [#137](https://github.com/base-rs/tomori/pull/137) (making the gate required). Reaching 100% found these bugs, each fixed with a regression test:
 - a Markdown hard break and a double space after a task marker;
 - `tomori discover` running a space's backend and its participant count together;
 - the pause between spoken segments following only a segment that produced no audio;
@@ -68,7 +68,7 @@ From discussion with the maintainer, on this proposal's pull request:
 
 1. **Any crate may be excluded, published or not,** with a required, non-empty reason. The coverage report always names each excluded crate and shows its size. The headset shell will probably be published, because #73 stage 3 turns it into a builder that other projects use.
 2. **There is no size cap,** but exclusion is a last resort, not a convenience. A crate is excluded only where testing it is genuinely impractical in CI: it needs a headset, a display or audio hardware. The default answer to uncovered code is to write tests.
-3. **Crate names** come from the environment framework ([#97](https://github.com/ioquatix/tomori/issues/97)): `tomori-scene` for the shared scene state and frame step, and `tomori-render` for the renderers.
+3. **Crate names** come from the environment framework ([#97](https://github.com/base-rs/tomori/issues/97)): `tomori-scene` for the shared scene state and frame step, and `tomori-render` for the renderers.
 4. **The frame step** shares only what is genuinely common between the headset and the desktop window, such as turning input into state, the conversation and the shared panels. It doesn't force one UX: the desktop and Quest interfaces may diverge. Platform-specific behaviour lives in covered, per-platform logic modules behind a narrow interface. Only the raw device calls stay in the shell.
 5. **Not decided:** changing Bake's coverage task, in base-rs's `bake-test`, to read the exclusion metadata. The headset's restructuring goes ahead first, since it pays off on its own.
 
@@ -462,7 +462,7 @@ That is within the ~3,600 regions the analysis found truly beyond CI, and about 
 
 **Order of the split.** One pull request each, every one leaving the tree green:
 
-1. Draw the device boundary inside `tomori-quest`: extract the shared frame step and each platform's logic from `xr::run` and `desktop_participant::State::frame` into covered modules, with tests, leaving the device files as thin calls. This is the only step that changes behaviour-bearing code, and the one with the most value even if nothing else follows. Started in [#119](https://github.com/ioquatix/tomori/pull/119).
+1. Draw the device boundary inside `tomori-quest`: extract the shared frame step and each platform's logic from `xr::run` and `desktop_participant::State::frame` into covered modules, with tests, leaving the device files as thin calls. This is the only step that changes behaviour-bearing code, and the one with the most value even if nothing else follows. Started in [#119](https://github.com/base-rs/tomori/pull/119).
 2. Move the renderers into `tomori-render`.
 3. Move the scene logic into `tomori-scene`. `tomori-quest` is now the shell.
 4. Add the exclusion metadata to `tomori-quest`, if `bake-test` supports it by then (decision 5).
@@ -485,7 +485,7 @@ That is within the ~3,600 regions the analysis found truly beyond CI, and about 
 | 1 | Run the GPU tests on lavapipe in the coverage job | Tomori | Done |
 | 2 | Server-side tests: `tomori-server`, `tomori-backend-opencode`, `tomori-speech`, `tomori-discovery` and the small crates, with the speech models fetched and cached in CI | Tomori | Mostly done; the workspace is at about 91% |
 | 3 | `bake-test` 0.4: the exclusion metadata, measuring only the workspace, the summary; the guidance in `base-project-testing` and `context/testing.md` | base-rs `bake-test`, `base-project` | Not decided (decision 5) |
-| 4 | The `tomori-quest` split, in the four pull requests above, then the remaining tests of the scene logic | Tomori | The first pull request is [#119](https://github.com/ioquatix/tomori/pull/119). Lines up with #73's builders and `design/clients.md`. This is where most of the remaining `tomori-quest` gap closes |
+| 4 | The `tomori-quest` split, in the four pull requests above, then the remaining tests of the scene logic | Tomori | The first pull request is [#119](https://github.com/base-rs/tomori/pull/119). Lines up with #73's builders and `design/clients.md`. This is where most of the remaining `tomori-quest` gap closes |
 | 5 | Make the gate required | Tomori | When the workspace passes. See below |
 
 **Stage 5, making the gate required:**

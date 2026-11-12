@@ -20,4 +20,4 @@ What each keeps:
 
 ## CJK beyond JIS X 0208
 
-JIS X 0208's kanji cover nearly all everyday Japanese. Chinese and Korean, and Japanese kanji outside it, are not bundled: the full Noto Sans CJK is 16 MB a weight, against about 1.5 MB for this subset. Such characters are drawn as `?`. Language packs ([#103](https://github.com/ioquatix/tomori/issues/103)) can load more on demand: a face for the space's language fetched from the server and cached by its hash, or, on Android, the system's own `/system/fonts/NotoSansCJK-Regular.ttc` where it has one, appended to the faces after these.
+JIS X 0208's kanji cover nearly all everyday Japanese. Chinese and Korean, and Japanese kanji outside it, are not bundled: the full Noto Sans CJK is 16 MB a weight, against about 1.5 MB for this subset. Such characters are drawn as `?`. Language packs ([#103](https://github.com/base-rs/tomori/issues/103)) can load more on demand: a face for the space's language fetched from the server and cached by its hash, or, on Android, the system's own `/system/fonts/NotoSansCJK-Regular.ttc` where it has one, appended to the faces after these.

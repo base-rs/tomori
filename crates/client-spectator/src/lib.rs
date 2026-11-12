@@ -3,7 +3,7 @@
 
 //! The Tomori spectator: a read-only view of a live space that follows a participant, for OBS and calls, in a borderless window, as a PipeWire video source without a window, or both. See `design/spectator.md`.
 //!
-//! The `tomori-spectator` executable runs it, drawing Tomori's own environments, [`app::sceneries`], behind the default `app` feature; `tomori --spectator…` runs it too, drawing the build's. Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
+//! The `tomori-spectator` executable runs it, drawing Tomori's own environments, [`app::sceneries`], behind the default `app` feature; `tomori --spectator…` runs it too, drawing the build's. Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).
 #[cfg(feature = "app")]
 pub mod app;
 mod child_process;

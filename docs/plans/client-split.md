@@ -2,13 +2,13 @@
 
 ## Status
 
-**Done, and released in [v0.2.0](https://github.com/ioquatix/tomori/releases/tag/v0.2.0).** November 2026. The binding requirements are in `design/clients.md`, `design/crates.md`, `design/builders.md` and `design/android-release.md`, which take precedence over this document. The maintainer's decisions on the open questions are recorded under [Decisions](#decisions), and what the first phase changed from this plan under [Progress](#progress). The rest of this document is the plan from [PR #132](https://github.com/ioquatix/tomori/pull/132), kept for its reasoning.
+**Done, and released in [v0.2.0](https://github.com/base-rs/tomori/releases/tag/v0.2.0).** November 2026. The binding requirements are in `design/clients.md`, `design/crates.md`, `design/builders.md` and `design/android-release.md`, which take precedence over this document. The maintainer's decisions on the open questions are recorded under [Decisions](#decisions), and what the first phase changed from this plan under [Progress](#progress). The rest of this document is the plan from [PR #132](https://github.com/base-rs/tomori/pull/132), kept for its reasoning.
 
 **Built:**
 
-- **Phase 1, steps 1–5:** housekeeping ([#138](https://github.com/ioquatix/tomori/pull/138)); the rename to `tomori-client-quest` ([#139](https://github.com/ioquatix/tomori/pull/139)); `tomori-scene` ([#144](https://github.com/ioquatix/tomori/pull/144)); `tomori-render` ([#150](https://github.com/ioquatix/tomori/pull/150)); `tomori-client-desktop` and `tomori-client-spectator`, with a `tomori-spectator` executable ([#160](https://github.com/ioquatix/tomori/pull/160)); the scenery contract, the builder and `examples/headset` ([#161](https://github.com/ioquatix/tomori/pull/161)); and the connection moved into `tomori-client` behind a `Session` ([#174](https://github.com/ioquatix/tomori/pull/174)).
-- **Phase 2, steps 6–8:** the application ID `com.codeotaku.tomori` and reusable Android packaging, with `examples/headset` packaged in CI ([#163](https://github.com/ioquatix/tomori/pull/163)); the client crates made ready to publish ([#164](https://github.com/ioquatix/tomori/pull/164)); and the signed headset APK attached to each GitHub Release by bake-cargo's release artifacts workflow ([#166](https://github.com/ioquatix/tomori/pull/166)).
-- **The release:** v0.2.0 ([#178](https://github.com/ioquatix/tomori/pull/178)), with the crates on crates.io and `tomori-0.2.0.apk` on the GitHub Release.
+- **Phase 1, steps 1–5:** housekeeping ([#138](https://github.com/base-rs/tomori/pull/138)); the rename to `tomori-client-quest` ([#139](https://github.com/base-rs/tomori/pull/139)); `tomori-scene` ([#144](https://github.com/base-rs/tomori/pull/144)); `tomori-render` ([#150](https://github.com/base-rs/tomori/pull/150)); `tomori-client-desktop` and `tomori-client-spectator`, with a `tomori-spectator` executable ([#160](https://github.com/base-rs/tomori/pull/160)); the scenery contract, the builder and `examples/headset` ([#161](https://github.com/base-rs/tomori/pull/161)); and the connection moved into `tomori-client` behind a `Session` ([#174](https://github.com/base-rs/tomori/pull/174)).
+- **Phase 2, steps 6–8:** the application ID `com.codeotaku.tomori` and reusable Android packaging, with `examples/headset` packaged in CI ([#163](https://github.com/base-rs/tomori/pull/163)); the client crates made ready to publish ([#164](https://github.com/base-rs/tomori/pull/164)); and the signed headset APK attached to each GitHub Release by bake-cargo's release artifacts workflow ([#166](https://github.com/base-rs/tomori/pull/166)).
+- **The release:** v0.2.0 ([#178](https://github.com/base-rs/tomori/pull/178)), with the crates on crates.io and `tomori-0.2.0.apk` on the GitHub Release.
 
 **Changed from the plan, as decided later:**
 
@@ -16,17 +16,17 @@
 - **The application ID** is `com.codeotaku.tomori` (decision 5), not `io.github.ioquatix.tomori` as the steps below say.
 - **The release APK** is built unsigned from the release commit and signed on a runner of its own by bake-cargo's release artifacts workflow (`release-artifacts.yml`), rather than by an `apk` job in `publish.yml` as step 8 proposes.
 - **`test_gpu`** is now in `tomori-render`, which Sky's tests use as a development dependency, rather than staying in Sky as Progress says.
-- **No seats.** Progress says the connection hands the scene the other participants' heads "so that it places their voices on its seats". Since [#185](https://github.com/ioquatix/tomori/pull/185), voices are placed at each participant's head in the space's shared coordinates, with no seats.
+- **No seats.** Progress says the connection hands the scene the other participants' heads "so that it places their voices on its seats". Since [#185](https://github.com/base-rs/tomori/pull/185), voices are placed at each participant's head in the space's shared coordinates, with no seats.
 
 **Open:**
 
-- **Environments' client halves** in the builder wait for the shared environment interface, [#75](https://github.com/ioquatix/tomori/issues/75), as do Sky depending on `tomori-render` rather than through an adapter. The rest of #73's stage 3 is tracked there.
-- [#56](https://github.com/ioquatix/tomori/issues/56), separating the spectator and the shared scene model from the Quest crate, is done by #144 and #160 but is still open.
+- **Environments' client halves** in the builder wait for the shared environment interface, [#75](https://github.com/base-rs/tomori/issues/75), as do Sky depending on `tomori-render` rather than through an adapter. The rest of #73's stage 3 is tracked there.
+- [#56](https://github.com/base-rs/tomori/issues/56), separating the spectator and the shared scene model from the Quest crate, is done by #144 and #160 but is still open.
 
 This covers:
 
-- [#56](https://github.com/ioquatix/tomori/issues/56): separate the spectator client and the shared scene model from the Quest crate.
-- The headset half of [#73](https://github.com/ioquatix/tomori/issues/73) stage 3:
+- [#56](https://github.com/base-rs/tomori/issues/56): separate the spectator client and the shared scene model from the Quest crate.
+- The headset half of [#73](https://github.com/base-rs/tomori/issues/73) stage 3:
   - the headset as a library, with a builder that registers environments' client halves and sceneries;
   - reusable Android packaging;
   - the headset APK as a release artifact.

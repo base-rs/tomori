@@ -2,15 +2,15 @@
 
 ## Status
 
-**Stage 1 is built; stages 2 and 3 are open.** November 2026. The binding requirements are in `design/wrist-transcript.md`, `design/hand-menu.md`, `design/interaction.md` and `design/feedback.md`, which take precedence over this document. The rest of this document is the proposal as it was put to the user, from [PR #89](https://github.com/ioquatix/tomori/pull/89), kept for its reasoning; it was written before stage 1, and its references to the code describe `main` at that time.
+**Stage 1 is built; stages 2 and 3 are open.** November 2026. The binding requirements are in `design/wrist-transcript.md`, `design/hand-menu.md`, `design/interaction.md` and `design/feedback.md`, which take precedence over this document. The rest of this document is the proposal as it was put to the user, from [PR #89](https://github.com/base-rs/tomori/pull/89), kept for its reasoning; it was written before stage 1, and its references to the code describe `main` at that time.
 
 **Built:**
 
-- **The recording card** on the left controller, with the server's utterance limit in `Welcome`, and the local-space panel renderer with depth and translucency ([#104](https://github.com/ioquatix/tomori/pull/104)).
-- **The right wrist's transcript:** speaker colours, grouped turns, Markdown-lite, tool chips, the request card with a button per choice, the queue with removal and undo, and detaching with the right grip ([#105](https://github.com/ioquatix/tomori/pull/105)).
-- **The status pill** in place of the floating panel, and the hand menu's header, Space section, participant swatches and Y pin ([#106](https://github.com/ioquatix/tomori/pull/106)). #104 and #105 landed on `main` through #106, which was stacked on them.
-- **Later fixes:** the recording card saying when the server is transcribing ([#162](https://github.com/ioquatix/tomori/pull/162)); one palm-up gesture for both hands ([#140](https://github.com/ioquatix/tomori/pull/140)); the hand menu's text ([#169](https://github.com/ioquatix/tomori/pull/169)); pointing at its rows by their rectangles ([#171](https://github.com/ioquatix/tomori/pull/171)); and keeping them still while a mode is pointed at ([#173](https://github.com/ioquatix/tomori/pull/173)).
-- **From the later stages:** haptics for recording, the 30 s and 10 s limit, requests and choices came with the audio and haptics proposal's stage 1 ([#107](https://github.com/ioquatix/tomori/pull/107), landed through [#109](https://github.com/ioquatix/tomori/pull/109)); antialiased Unicode text from a glyph atlas came with [#176](https://github.com/ioquatix/tomori/pull/176), under [#146](https://github.com/ioquatix/tomori/issues/146).
+- **The recording card** on the left controller, with the server's utterance limit in `Welcome`, and the local-space panel renderer with depth and translucency ([#104](https://github.com/base-rs/tomori/pull/104)).
+- **The right wrist's transcript:** speaker colours, grouped turns, Markdown-lite, tool chips, the request card with a button per choice, the queue with removal and undo, and detaching with the right grip ([#105](https://github.com/base-rs/tomori/pull/105)).
+- **The status pill** in place of the floating panel, and the hand menu's header, Space section, participant swatches and Y pin ([#106](https://github.com/base-rs/tomori/pull/106)). #104 and #105 landed on `main` through #106, which was stacked on them.
+- **Later fixes:** the recording card saying when the server is transcribing ([#162](https://github.com/base-rs/tomori/pull/162)); one palm-up gesture for both hands ([#140](https://github.com/base-rs/tomori/pull/140)); the hand menu's text ([#169](https://github.com/base-rs/tomori/pull/169)); pointing at its rows by their rectangles ([#171](https://github.com/base-rs/tomori/pull/171)); and keeping them still while a mode is pointed at ([#173](https://github.com/base-rs/tomori/pull/173)).
+- **From the later stages:** haptics for recording, the 30 s and 10 s limit, requests and choices came with the audio and haptics proposal's stage 1 ([#107](https://github.com/base-rs/tomori/pull/107), landed through [#109](https://github.com/base-rs/tomori/pull/109)); antialiased Unicode text from a glyph atlas came with [#176](https://github.com/base-rs/tomori/pull/176), under [#146](https://github.com/base-rs/tomori/issues/146).
 
 **Decided since the proposal.** The user asked to "just let it make decisions", so stage 1 took the recommended answer to each [open question](#open-questions-for-you), as #104 records, with these changes:
 
@@ -19,14 +19,14 @@
 3. Y pins the left menu open at its Space section until Y or B.
 4. The right grip detaches and reattaches the transcript.
 5. A person's colour is the same on every headset, from their public handle.
-6. "More on the panel." was left alone. Replies are now spoken in full by default ([#94](https://github.com/ioquatix/tomori/pull/94)), so it is said only in a space chosen brief.
+6. "More on the panel." was left alone. Replies are now spoken in full by default ([#94](https://github.com/base-rs/tomori/pull/94)), so it is said only in a space chosen brief.
 7. Hand tracking is read-only at first.
 
 **Open:**
 
-- **Structured facts:** `Message.speaker` and `Message.tools`, a "speaking now" highlight, replaying a chosen reply, and a timeline of events: [#190](https://github.com/ioquatix/tomori/issues/190).
-- **Avatars** in participants' colours: [#191](https://github.com/ioquatix/tomori/issues/191).
-- **Hands:** poking, pinch-scrolling and pinch-to-talk with hand tracking. No issue yet; [#78](https://github.com/ioquatix/tomori/issues/78) covers input routing in environments.
+- **Structured facts:** `Message.speaker` and `Message.tools`, a "speaking now" highlight, replaying a chosen reply, and a timeline of events: [#190](https://github.com/base-rs/tomori/issues/190).
+- **Avatars** in participants' colours: [#191](https://github.com/base-rs/tomori/issues/191).
+- **Hands:** poking, pinch-scrolling and pinch-to-talk with hand tracking. No issue yet; [#78](https://github.com/base-rs/tomori/issues/78) covers input routing in environments.
 - **The queue:** reordering and merging entries (`MoveQueued`), shared with the interaction proposal's stage 3. No issue yet.
 - **Smaller deferrals from stage 1:** several pending requests as "1 of 3", smooth scrolling, the `LIVE` badge following the microphone's level, and tuning sizes and angles on the headset. No issue yet.
 

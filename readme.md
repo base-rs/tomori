@@ -21,7 +21,7 @@ Each space is bound to one environment, chosen when it is created and the same f
 A first experiment of the GitHub environment proposed in [docs/proposals/github-and-code-environments.md](docs/proposals/github-and-code-environments.md): start the server with `--github-repository OWNER/NAME`, and an owner can change a space to **GitHub** from the hand menu's **Space** section. Its cards, the repository's open issues and pull requests, start in an inbox front left of you. Point at one with the right ray to highlight it, squeeze the right grip to pick it up and carry it along the ray, and let go to put it down, or over the inbox to put it back. Everyone in the space sees where cards are put, and the server keeps that with the space. Point at a card as you press **X** to ask the agent about it. The server reads GitHub, read-only, with the token in `GITHUB_TOKEN` or else from `gh auth token`, and never sends it to the headset or the agent:
 
 ```sh
-cargo run -p tomori-server-app --bin tomori-server -- --backend opencode --github-repository ioquatix/tomori
+cargo run -p tomori-server-app --bin tomori-server -- --backend opencode --github-repository base-rs/tomori
 ```
 
 Nothing is changed on GitHub, and only participants see the cards; see [design/github.md](design/github.md).
@@ -597,11 +597,11 @@ See [releases.md](releases.md) for the full release history.
 
 ## See Also
 
-- [tomori](https://github.com/ioquatix/tomori) — A conversational spatial workspace for people and agents, built with OpenXR and wgpu<!-- bake-readme:package -->
+- [tomori](https://github.com/base-rs/tomori) — A conversational spatial workspace for people and agents, built with OpenXR and wgpu<!-- bake-readme:package -->
 
 ## Contributing
 
-Please open an issue or pull request on [GitHub](https://github.com/ioquatix/tomori).
+Please open an issue or pull request on [GitHub](https://github.com/base-rs/tomori).
 
 ### Agent Context
 

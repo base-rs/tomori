@@ -54,7 +54,7 @@ Send control messages with `Client::send`, or from other threads through `Client
 - **Microphone:** create a `Microphone` with the client's `Sender` and the capture sample rate, and `push` captured samples from the audio thread. `set_gate` chooses whether others hear the participant live; `begin` and `end` send a push-to-talk utterance for the agent, and `cancel` abandons it. Its utterances ask for `ServerMessage::TranscriptProgress`, which says from the end of each until its transcript whether the server is transcribing it or waiting to.
 - **Playback:** create a `playback::Player` from the receiver `take_audio` returns, `prepare` it at the device's rate, `render` it from the output device's callback in mono or stereo (`playback::Layout`), and control it from the application through its `PlayerControl`. It mixes participants and agent speech with a jitter buffer per source. For stereo, give it the listener and each source's position with `PlayerControl::set_scene`, about once a frame, and it places each voice where it is. `PlayerControl::play` plays a synthesized sound cue (`playback::Earcon`) from a `playback::Direction`, and `set_silenced` silences playback while the microphone records push-to-talk.
 
-The [`connect` example](https://github.com/ioquatix/tomori/blob/main/crates/client/examples/connect.rs) is a complete console client.
+The [`connect` example](https://github.com/base-rs/tomori/blob/main/crates/client/examples/connect.rs) is a complete console client.
 
 ## A connection for a session
 
@@ -110,7 +110,7 @@ impl Bot {
 - **The microphone:** `Action::BeginUtterance(Utterance::new(id, generation))` and `Action::EndUtterance` record push-to-talk for the agent, and `Action::StartLive` and `Action::StopLive` the live microphone, each for the connection generation that `Report::Generation` gave. `Utterance::answering` makes the words the answer to a question's field instead.
 - **Every action, in every state:** the connection carries out each action whatever state it is in. One that needs a connection it does not have fails with a report, such as `Report::Failed` for a message or `Report::MicrophoneFailed` for the microphone, or is ignored and logged where nothing failed that the participant should see.
 - **Feedback:** `feedback()` is the participant's cues and vibrations: the frame loop reports pointing and choosing to it and takes its vibrations, and the connection plays its sound cues. `Session::observe` tells it, once a frame, what waits for the participant; by default, nothing does.
-- **Voices:** `listen(participants, place)` places each other participant's voice once a frame, and `send_presence` reports this participant's head, controllers and hands to the others. The requirements the client follows are in [`design/server.md`](https://github.com/ioquatix/tomori/blob/main/design/server.md), [`design/live-audio.md`](https://github.com/ioquatix/tomori/blob/main/design/live-audio.md) and [`design/security.md`](https://github.com/ioquatix/tomori/blob/main/design/security.md).
+- **Voices:** `listen(participants, place)` places each other participant's voice once a frame, and `send_presence` reports this participant's head, controllers and hands to the others. The requirements the client follows are in [`design/server.md`](https://github.com/base-rs/tomori/blob/main/design/server.md), [`design/live-audio.md`](https://github.com/base-rs/tomori/blob/main/design/live-audio.md) and [`design/security.md`](https://github.com/base-rs/tomori/blob/main/design/security.md).
 
 ## Types that grow
 
