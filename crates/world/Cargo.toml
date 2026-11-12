@@ -1,0 +1,16 @@
+[package]
+name = "tomori-world"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tomori's render world, free of GPU code: what is drawn each frame, with its bounds, layers, lights and views, and what the eyes may see of it"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "rendering", "culling", "bvh", "xr"]
+categories = ["rendering", "game-development"]
+
+[dependencies]
+glam = "0.33"
+# Boxes and frustums, without drawing models on the GPU.
+tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
