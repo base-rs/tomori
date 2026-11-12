@@ -330,51 +330,66 @@ fn a_state_or_event_at_the_ends_of_the_clock_is_shown_without_overflowing() {
 }
 
 #[test]
-fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_the_grip() {
-    use tomori_environment_farmyard::campsite::{self, Campsite, Pose, Stick};
-    use tomori_scene::client_side::{Grab, Hand, Phase};
+fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_either_grip() {
+    use tomori_environment_farmyard::campsite::{self, Pose};
+    use tomori_physics::message::{Holding, Update as Changed};
+    use tomori_physics::{Held, Precision};
+    use tomori_scene::client_side::{Grab, Hand, Phase, Side};
     let epoch = Instant::now();
     let mut client = FarmyardClient::new("space-1", Some(chicken()), epoch);
-    // The farmyard's state, the flock and the sticks together, as its server side shares it.
+    // The farmyard's state, the flock and the sticks together, as its server side shares it, the sticks settled on their
+    // log.
     let flock = Flock::new(flock::seed("space-1"), chicken(), 5_000);
-    let state = tomori_environment_farmyard::side::state(
-        &flock,
-        &Campsite::new(),
-        &Default::default(),
-        5_000,
-    );
+    let sticks = tomori_environment_farmyard::side::Sticks::new(epoch).shared();
+    let state =
+        tomori_environment_farmyard::side::state(&flock, &sticks, &Default::default(), 5_000);
     let state = Update::State(Payload::new(serde_json::from_str(&state).unwrap()));
     let output = client.update(Input::new(vec![state], epoch));
     assert_eq!(drawn(&output).sticks.len(), campsite::STICKS);
-    // A hand at a stick's handle reaches it, and the ray along it points at it, before any hen.
-    let racked = Pose::racked(0);
+    // A hand at a stick's handle reaches it, and the ray down onto it points at it, before any hen.
+    let body = sticks.sticks.bodies[0].at.placement(Precision::Rest);
+    let racked = Pose::of(&body);
     let handle = racked.butt + racked.along * campsite::HOLD;
     assert_eq!(client.within_reach(handle).as_deref(), Some("stick-0"));
     let ray = Ray::new(racked.middle() + Vec3::Y, Vec3::NEG_Y).unwrap();
     assert_eq!(client.pick(&ray).unwrap().object, "stick-0");
-    // Taken with the grip, by a participant, the server side is asked for it.
+    // Taken with the left grip, by a participant, the server side is asked for its body, as a stone's is.
     let hand = Hand::new(
         handle,
         glam::Quat::from_rotation_arc(Vec3::NEG_Z, racked.along),
     );
     let output = client.update(
         Input::new(Vec::new(), epoch)
-            .with_grab(Some(Grab::new("stick-0", hand, Phase::Began)))
+            .with_left_grab(Some(
+                Grab::new("stick-0", hand, Phase::Began).of(Side::Left),
+            ))
             .as_participant(Some(4)),
     );
+    let take = &output.intents[0].value()["take"];
+    assert_eq!(take["body"], campsite::body(0));
     assert_eq!(
-        output.intents[0].value(),
-        &serde_json::json!({"grab": 0, "epoch": 0})
+        (take["epoch"].clone(), take["hand"].clone()),
+        (0.into(), "left".into())
     );
-    // Another's stick, as the server side announces it, is drawn in their hand.
+    // Another's stick, as the server side announces it, is drawn in their hand, by its handle.
     let event = campsite::Event {
         clock: 5_100,
-        stick: 3,
-        now: Stick {
-            epoch: 1,
-            held: Some(7),
-            ..Stick::default()
+        sticks: Changed {
+            holding: vec![Holding {
+                body: campsite::body(3),
+                epoch: 1,
+                held: Some(Held {
+                    by: 7,
+                    hand: tomori_physics::Side::Right,
+                    offset: campsite::grip().encoded(Precision::Rest),
+                }),
+            }],
+            ..Default::default()
         },
+        toast: vec![campsite::Toasted {
+            body: campsite::body(3),
+            toast: campsite::BROWN,
+        }],
     };
     let theirs = Hand::new(Vec3::new(-4.0, 1.2, -14.0), glam::Quat::IDENTITY);
     let output = client.update(
@@ -386,17 +401,22 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_the_g
         )
         .with_hands(vec![(7, theirs)]),
     );
-    assert_eq!(
-        drawn(&output).sticks[3].transform,
-        Pose::held(theirs.position, theirs.orientation).transform()
+    let shown = &drawn(&output).sticks[3];
+    let held = Pose::held(theirs.position, theirs.orientation);
+    assert!(
+        shown
+            .transform
+            .transform_point3(Vec3::ZERO)
+            .distance(held.butt)
+            < 1e-3
     );
+    assert_eq!(shown.shade, campsite::shade(campsite::BROWN));
 }
 
 #[test]
 fn the_beach_s_stones_come_with_the_farmyard_s_state_and_are_taken_with_either_grip_and_heard_landing()
  {
     use tomori_environment_farmyard::beach;
-    use tomori_environment_farmyard::campsite::Campsite;
     use tomori_physics::message::{Landed, Update as Changed};
     use tomori_scene::client_side::{Grab, Hand, Phase, Side};
     let epoch = Instant::now();
@@ -408,7 +428,8 @@ fn the_beach_s_stones_come_with_the_farmyard_s_state_and_are_taken_with_either_g
         .at
         .placement(tomori_physics::Precision::Rest)
         .position;
-    let state = tomori_environment_farmyard::side::state(&flock, &Campsite::new(), &stones, 5_000);
+    let state =
+        tomori_environment_farmyard::side::state(&flock, &Default::default(), &stones, 5_000);
     let state = Update::State(Payload::new(serde_json::from_str(&state).unwrap()));
     let output = client.update(Input::new(vec![state], epoch));
     assert_eq!(drawn(&output).stones.len(), beach::STONES);

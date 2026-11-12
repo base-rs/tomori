@@ -2,10 +2,9 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The farmyard's server side: it owns the flock of each space bound to the farmyard, moves it on by the farmyard's
-//! clock, the time since it started, takes participants' notices, keeps the campsite's marshmallow sticks, taking
-//! participants' grabs, toasting and letting go, simulates the beach's stones, taking participants' taking and letting
-//! go of them, and shares every change with the clients in the space, with the clock, through the environment state
-//! channel. Behind the crate's `side` feature, which builds the physics engine that only a server needs. See
+//! clock, the time since it started, takes participants' notices, simulates the campsite's marshmallow sticks and the
+//! beach's stones, taking participants' taking and letting go of them and toasting the marshmallows held in the fire's
+//! heat, and shares every change with the clients in the space, with the clock, through the environment state channel. Behind the crate's `side` feature, which builds the physics engine that only a server needs. See
 //! `design/farmyard.md`.
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -14,10 +13,10 @@ use tomori_environment::{
     Action, Around, Error, Object, Outcome, Parameter, Result, ServerSide, Space, Zone,
 };
 
-use crate::campsite::{self, Campsite};
 use crate::chicken::Chicken;
 use crate::flock::{Event, Flock, Intent, PECKS, seed};
 pub use shingle::Shingle;
+pub use sticks::Sticks;
 
 /// How long the side waits for an intent before moving the flock on, and how often it describes the chickens to the
 /// space's agent.
@@ -42,7 +41,9 @@ pub fn actions() -> Vec<Action> {
     ]
 }
 
+pub mod loose;
 pub mod shingle;
+pub mod sticks;
 
 /// The zone before the coop, whose occupancy the side is told: a cylinder 2 m about the ramp's foot, from the ground to
 /// 2.5 m up, which a participant standing there enters and the arrival, 5 m off, is outside; someone coming to it for
@@ -84,12 +85,12 @@ fn json(value: impl serde::Serialize) -> String {
 /// and the beach's stones beside it, which a client from before them ignores.
 pub fn state(
     flock: &Flock,
-    campsite: &Campsite,
+    campsite: &crate::campsite::Shared,
     stones: &tomori_physics::message::State,
     clock: u64,
 ) -> String {
     let mut state = serde_json::to_value(flock.state(clock)).expect("the flock's state is JSON");
-    state["sticks"] = serde_json::to_value(campsite.shared().sticks).expect("the sticks are JSON");
+    state["campsite"] = serde_json::to_value(campsite).expect("the sticks are JSON");
     state["stones"] = serde_json::to_value(stones).expect("the stones are JSON");
     json(state)
 }
@@ -161,12 +162,13 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
     let Some(chicken) = chicken else {
         return Err(Error::new("The farmyard's chickens could not be loaded."));
     };
-    // The beach's stones settled first, so that the flock's clock begins once they have.
+    // The beach's stones and the campsite's sticks settled first, so that the flock's clock begins once they have.
     let mut shingle = Shingle::new(Instant::now());
+    let mut sticks = Sticks::new(Instant::now());
     let clock = move || start.elapsed().as_millis() as u64;
     // Shared with the inspector, which the server asks on a thread of its own; held only briefly on either side.
     let shared = Arc::new(Mutex::new(Flock::new(seed(space.id()), chicken, clock())));
-    let camp = Arc::new(Mutex::new(Campsite::new()));
+    let camp = Arc::new(Mutex::new(sticks.report()));
     let stones = Arc::new(Mutex::new(shingle.shared()));
     let (inspected, inspected_camp, inspected_stones) =
         (shared.clone(), camp.clone(), stones.clone());
@@ -187,12 +189,7 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         Ok(flock.inspect(reference, clock()).map(json))
     });
     let flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
-    space.share(state(
-        &flock,
-        &camp.lock().unwrap_or_else(PoisonError::into_inner),
-        &shingle.shared(),
-        clock(),
-    ))?;
+    space.share(state(&flock, &sticks.shared(), &shingle.shared(), clock()))?;
     drop(flock);
     let mut pace = Pace::new(Instant::now());
     space.declare_actions(actions())?;
@@ -204,8 +201,6 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
         let mut changes = Vec::new();
         let intent = space.next_intent(TICK);
         let mut flock = shared.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut campsite = camp.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut sticks = Vec::new();
         if let Some(acted) = intent.as_ref().and_then(|intent| intent.acted()) {
             // The server checked the action against what the side declared: only peck, with a whole number of pecks.
             let pecks = serde_json::from_str::<serde_json::Value>(acted.parameters())
@@ -225,10 +220,11 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                 changes.extend(flock.glance(clock()));
             }
         } else if let Some(intent) = intent {
-            if shingle.ask(intent.participant(), intent.payload(), &space.presence()) {
-                // The stones' changes are said below, with the rest of what moved.
-            } else if let Ok(asked) = serde_json::from_str::<campsite::Intent>(intent.payload()) {
-                sticks.extend(campsite.ask(intent.participant(), asked, clock()));
+            let presence = space.presence();
+            if sticks.ask(intent.participant(), intent.payload(), &presence)
+                || shingle.ask(intent.participant(), intent.payload(), &presence)
+            {
+                // What changed of the sticks and the stones is said below, with the rest of what moved.
             } else {
                 match serde_json::from_str::<Intent>(intent.payload()) {
                     Ok(asked) => changes.extend(flock.ask(intent.participant(), asked, clock())),
@@ -236,14 +232,15 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                 }
             }
         }
-        // A stick whose holder has left goes back on its log, and an empty space tidies itself after a while.
-        sticks.extend(campsite.sweep(space.present().as_deref(), clock()));
-        // A stone whose holder has left, or gone quiet, is let go where their hand was; then the stones move on.
-        let presence = space.presence();
-        shingle.sweep(space.present().as_deref(), &presence, Instant::now());
+        // A stick or a stone whose holder has left, or gone quiet, is let go where their hand was, and an empty space
+        // puts its sticks back after a while; then the sticks toast and move on, and the stones move on.
+        let (present, presence) = (space.present(), space.presence());
+        sticks.sweep(present.as_deref(), &presence, Instant::now());
+        shingle.sweep(present.as_deref(), &presence, Instant::now());
+        let camped = sticks.update(&presence, Instant::now(), clock());
         let moved = shingle.update(Instant::now());
         changes.extend(flock.update(clock()));
-        // Each change, the flock's and then the sticks', announced with the state it leaves.
+        // Each change, the flock's, the sticks' and then the stones', announced with the state it leaves.
         let mut events: Vec<String> = changes
             .into_iter()
             .map(|(chicken, behaviour)| {
@@ -254,13 +251,11 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                 })
             })
             .collect();
-        events.extend(sticks.into_iter().map(|stick| {
-            json(campsite::Event {
-                clock: clock(),
-                stick,
-                now: campsite.sticks()[stick].clone(),
-            })
-        }));
+        let campsite = sticks.shared();
+        if let Some(camped) = camped {
+            events.push(json(camped));
+            *camp.lock().unwrap_or_else(PoisonError::into_inner) = sticks.report();
+        }
         let shared = shingle.shared();
         if let Some(moved) = moved {
             events.push(json(Stones {
@@ -297,7 +292,7 @@ pub fn run(space: &Space, chicken: Option<Arc<Chicken>>, start: Instant) -> Resu
                     .with_reference(reference)
                     .at(at.to_array()),
             );
-            objects.extend(campsite.describe().into_iter().map(
+            objects.extend(sticks.report().describe().into_iter().map(
                 |(id, reference, description, at)| {
                     let object = Object::new(id, description).with_reference(reference);
                     match at {

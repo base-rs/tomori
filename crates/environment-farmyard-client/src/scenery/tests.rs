@@ -879,16 +879,29 @@ pub(crate) fn campsite_view() -> (Vec3, Vec3) {
 /// The campsite's sticks as its client side shows them: on their log, but the second, held over the fire by someone
 /// else, its marshmallow toasted golden.
 fn campsite_sticks() -> Vec<crate::campsite::Shown> {
-    use tomori_environment_farmyard::campsite::{self, Shared, Stick};
+    use tomori_environment_farmyard::campsite;
+    use tomori_physics::Precision;
+    use tomori_physics::message::{Held, Shared, State};
     let mut sticks = crate::campsite::Sticks::new();
-    let mut shared = vec![Stick::default(); campsite::STICKS];
-    shared[1] = Stick {
-        epoch: 1,
-        toast: campsite::GOLDEN + 0.05,
-        held: Some(5),
-        lying: None,
-    };
-    sticks.share(Shared { sticks: shared });
+    let bodies = (0..campsite::STICKS)
+        .map(|index| Shared {
+            body: campsite::body(index),
+            epoch: (index == 1) as u32,
+            at: campsite::home(index).encoded(Precision::Rest),
+            moving: false,
+            held: (index == 1).then_some(Held {
+                by: 5,
+                hand: tomori_physics::Side::Right,
+                offset: campsite::grip().encoded(Precision::Rest),
+            }),
+        })
+        .collect();
+    let mut toast = vec![0.0; campsite::STICKS];
+    toast[1] = campsite::GOLDEN + 0.05;
+    sticks.share(&campsite::Shared {
+        sticks: State { bodies },
+        toast,
+    });
     let along = Vec3::new(0.5, -0.2, -0.85).normalize();
     let hand = campsite::heart() + Vec3::Y * 0.12
         - along * (campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD);
@@ -896,7 +909,7 @@ fn campsite_sticks() -> Vec<crate::campsite::Shown> {
         hand,
         glam::Quat::from_rotation_arc(Vec3::NEG_Z, along),
     );
-    sticks.shown(&[(5, hand)])
+    sticks.shown(&[(5, hand)], &[], std::time::Instant::now(), 0)
 }
 
 #[test]

@@ -3,8 +3,8 @@
 
 //! The farmyard's client side, for one space: the flock as its server side shares it, each chicken with its controller,
 //! moved on by the farmyard's clock, which it reads from the server's messages; the campsite's marshmallow sticks, which
-//! a participant takes with the grip and toasts over the fire; the beach's stones, which a participant takes with either
-//! grip, carries, throws and stacks; what the ray points at; the notices it asks for as a participant points at a
+//! a participant takes with either grip, toasts over the fire and puts back; the beach's stones, which a participant
+//! takes with either grip, carries, throws and stacks; what the ray points at; the notices it asks for as a participant points at a
 //! chicken and looks away; the clucks, clacks and splashes it hears; and what its scenery draws.
 use std::sync::Arc;
 use std::time::Instant;
@@ -114,10 +114,7 @@ impl FarmyardClient {
         };
         if let Some(state) = state {
             // The campsite's sticks beside the flock, none in a state from before them or one that cannot be read.
-            self.sticks.share(
-                serde_json::from_value::<campsite::Shared>(state.value().clone())
-                    .unwrap_or_default(),
-            );
+            self.sticks.share(&campsite::shared(state.value()));
             // And the beach's stones, none in a state from before them.
             self.stones.share(&beach::shared(state.value()));
             let Ok(state) = serde_json::from_value::<State>(state.value().clone()) else {
@@ -145,7 +142,9 @@ impl FarmyardClient {
                 return;
             }
             if let Ok(event) = serde_json::from_value::<campsite::Event>(event.value().clone()) {
-                self.sticks.changed(event);
+                let now = self.clock(now).unwrap_or(event.clock);
+                let landed = self.sticks.changed(&event, now);
+                self.landed.extend(landed);
                 return;
             }
             let Ok(event) = serde_json::from_value::<Event>(event.value().clone()) else {
@@ -295,11 +294,13 @@ impl ClientSide for FarmyardClient {
         for intent in self.point(input.pointed, input.head, input.now) {
             output = output.with_intent(intent);
         }
-        // The campsite's sticks: the one this participant takes, holds and lets go, and every one where it is drawn.
-        for intent in self
-            .sticks
-            .update(input.grab.as_ref(), input.participant, input.now)
-        {
+        // The campsite's sticks: those this participant takes with either hand, toasts and lets go.
+        for intent in self.sticks.update(
+            input.grab.iter().chain(&input.left_grab),
+            input.participant,
+            input.now,
+            clock,
+        ) {
             output = output.with_intent(tomori_protocol::Payload::new(
                 serde_json::to_value(intent).expect("an intent is JSON"),
             ));
@@ -321,13 +322,16 @@ impl ClientSide for FarmyardClient {
         let stones = self
             .stones
             .shown(&input.hands, &input.left_hands, input.now, clock);
+        let sticks = self
+            .sticks
+            .shown(&input.hands, &input.left_hands, input.now, clock);
         output.drawing(Arc::new(Drawn {
             chickens: self
                 .controllers
                 .iter()
                 .map(|controller| controller.instance().clone())
                 .collect(),
-            sticks: self.sticks.shown(&input.hands),
+            sticks,
             stones,
         }))
     }

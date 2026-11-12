@@ -6,16 +6,20 @@
 //! sticks leaning over that log towards the fire, which participants take with the grip, carry, toast over the fire and
 //! put down again. See the crate's `context/campsite.md`.
 //!
-//! Its sticks follow the authority of the physics proposal's first stage (`docs/proposals/physics-and-stacking.md`):
-//! whoever holds a stick controls it, every client drawing it from their hand, which presence already brings, and
-//! saying how toasted it is; let go, the farmyard's server side decides where it rests, straight down onto what is
-//! below it, or back on its log with a fresh marshmallow, and owns it at rest. [`Campsite`] is that side's part, and
-//! [`Stick`], [`Intent`] and [`Event`] what it shares, is asked and announces.
+//! Its sticks are loose bodies of `tomori-physics`, as the beach's stones are, the physics proposal's second stage
+//! (`docs/proposals/physics-and-stacking.md`): each the convex hull of its rod and its marshmallow ([`hull`],
+//! [`bodies`]), taken and let go with either hand as any body is, whoever holds one controlling it, every client
+//! drawing it from their hand; let go, the farmyard's server side simulates it, in a world of the campsite's own
+//! ([`colliders`], [`waters`], [`settings`]), so that it falls, rolls and rests, or floats in the pool, and puts it
+//! back on its log where it does not stay ([`goes_back`]). The side toasts the marshmallow of a stick held in the fire's
+//! heat from where the holder's hand holds it ([`toasted`]), and shares how toasted each is ([`Shared`], [`Event`]).
 use std::f32::consts::TAU;
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use tomori_assets::{Limits, Material, Mesh, Model, Node, Transform};
+use tomori_physics::message::{State, Update};
+use tomori_physics::{Body, Placement, Settings, Static, Water};
 
 use crate::backdrop::{self, facing};
 use crate::layout;
@@ -78,21 +82,17 @@ pub struct Pose {
 
 impl Pose {
     /// A stick held in a hand at `hand`, turned by `turn`, as a controller's grip pose is: along the hand's −Z, as a
-    /// fist holds a stick pointing forward, [`HOLD`] from its butt.
+    /// fist holds a stick pointing forward, [`HOLD`] from its butt, as [`grip`] holds its body.
     pub fn held(hand: Vec3, turn: Quat) -> Self {
-        let along = (turn * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z);
-        Self {
-            butt: hand - along * HOLD,
-            along,
-        }
+        Self::of(&Placement::new(hand, turn.normalize()).then(&grip()))
     }
 
-    /// A stick lying as `lying` says.
-    pub fn lying(lying: &Lying) -> Self {
-        let along = Vec3::new(lying.yaw.sin(), 0.0, -lying.yaw.cos());
+    /// The stick whose body is placed at `placement`: its body's middle is the stick's, and its −Z runs from its butt
+    /// to its tip.
+    pub fn of(placement: &Placement) -> Self {
         Self {
-            butt: Vec3::from(lying.at) - along * STICK_LENGTH * 0.5,
-            along,
+            butt: placement.transform_point(Vec3::Z * STICK_LENGTH * 0.5),
+            along: (placement.rotation * Vec3::NEG_Z).normalize_or(Vec3::NEG_Z),
         }
     }
 
@@ -104,7 +104,7 @@ impl Pose {
         // Across the log, level, towards the fire.
         let to_fire = FIRE - middle;
         let towards = (to_fire - along * to_fire.dot(along)).normalize();
-        let spread = (index as f32 - (STICKS as f32 - 1.0) * 0.5) * 0.27;
+        let spread = (index as f32 - (STICKS as f32 - 1.0) * 0.5) * 0.2;
         // Its butt back from the seat's middle, on the ground, its shaft leaning at the angle that lays it on the log,
         // touching it, rather than through it: the log's axis as far from the shaft as their radii together.
         let back = 0.6;
@@ -134,12 +134,7 @@ impl Pose {
         self.butt + self.along * (STICK_LENGTH * 0.5)
     }
 
-    /// Its heading about the vertical, from −Z towards +X, as [`Lying::yaw`] says it.
-    pub fn yaw(&self) -> f32 {
-        self.along.x.atan2(-self.along.z)
-    }
-
-    /// Where the stick's model, which runs from its butt at the origin along −Z, is placed.
+    /// Where the stick's model, which runs from its butt at the origin along −Z, is placed, unturned about its length.
     pub fn transform(&self) -> Mat4 {
         Mat4::from_rotation_translation(Quat::from_rotation_arc(Vec3::NEG_Z, self.along), self.butt)
     }
@@ -239,87 +234,243 @@ pub fn burning(toast: f32, at: Vec3) -> bool {
     toast >= BLACK && heat(at) > 0.0
 }
 
-/// A stick lying where it was let go: the middle of its length, and its heading about the vertical, from −Z towards +X.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Lying {
-    pub at: [f32; 3],
-    pub yaw: f32,
+/// How far toasting `toast` goes at `at` in `seconds`, as the side computes it from where the holder's hand holds the
+/// stick, and the holder's client foresees it from where it draws it: by the fire's [`heat`] there, at most to 1.
+pub fn toasted(toast: f32, at: Vec3, seconds: f32) -> f32 {
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.0)
+    } else {
+        0.0
+    };
+    (toast + TOAST_RATE * heat(at) * seconds).clamp(0.0, 1.0)
 }
 
-/// A marshmallow stick, as everyone in the space is told of it: its epoch, which each taking and letting go raises, and
-/// which every intent about it names, so that two taking it at once are told apart; how toasted its marshmallow is;
-/// who holds it, by their number, if anyone does; and where it lies, if it was let go anywhere but on its log.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Stick {
-    pub epoch: u32,
-    pub toast: f32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lying: Option<Lying>,
+/// The sticks are bodies of `tomori-physics`, of a world of the campsite's own, numbered from this, so that they are
+/// told apart from the beach's stones in what participants ask.
+pub const FIRST_STICK: u32 = 100;
+
+/// The number of stick `index`'s body.
+pub fn body(index: usize) -> u32 {
+    FIRST_STICK + index as u32
 }
 
-impl Stick {
-    /// Where it is when nobody holds it: lying where it was let go, or on its log, as stick `index`.
-    pub fn resting(&self, index: usize) -> Pose {
-        match &self.lying {
-            Some(lying) => Pose::lying(lying),
-            None => Pose::racked(index),
-        }
+/// Which stick body `body` is, if it is one.
+pub fn index(body: u32) -> Option<usize> {
+    body.checked_sub(FIRST_STICK)
+        .map(|index| index as usize)
+        .filter(|index| *index < STICKS)
+}
+
+/// How dense a stick is, with its marshmallow, in kilograms a cubic metre: dry wood, lighter than water, so that one
+/// let go in the pool floats; and its friction and how much it bounces.
+pub const DENSITY: f32 = 600.0;
+pub const FRICTION: f32 = 0.7;
+pub const RESTITUTION: f32 = 0.1;
+
+/// The corners of a ring of `sides` about a length running `along`, at `at`, of `radius`, as the campsite's logs and
+/// the stick's model draw their rings.
+fn ring(along: Vec3, at: Vec3, radius: f32, sides: u32) -> Vec<Vec3> {
+    let side = along.any_orthonormal_vector();
+    let up = along.cross(side);
+    (0..sides)
+        .map(|index| {
+            let angle = index as f32 / sides as f32 * TAU;
+            at + (side * angle.cos() + up * angle.sin()) * radius
+        })
+        .collect()
+}
+
+/// How many sides a stick's rod and its marshmallow have, alike and turned alike, so that the faces of its hull between
+/// them are of four corners, on which it lies still, rather than slivers it rocks on.
+pub const STICK_SIDES: u32 = 6;
+
+/// The points of a stick's hull, about its middle, its butt towards +Z and its tip towards −Z: the corners of its
+/// rod's ends and of its marshmallow's, as its model draws them, so that it collides as it is drawn, its rod lying no
+/// more than the marshmallow's few millimetres more than its own above what it rests on.
+pub fn hull() -> Vec<Vec3> {
+    let half = STICK_LENGTH * 0.5;
+    let (length, radius) = MARSHMALLOW;
+    let middle = Vec3::NEG_Z * (half - MARSHMALLOW_INSET);
+    [
+        (Vec3::Z * half, STICK_RADIUS),
+        (Vec3::NEG_Z * half, STICK_RADIUS),
+        (middle + Vec3::Z * length * 0.5, radius),
+        (middle - Vec3::Z * length * 0.5, radius),
+    ]
+    .into_iter()
+    .flat_map(|(at, radius)| ring(Vec3::NEG_Z, at, radius, STICK_SIDES))
+    .collect()
+}
+
+impl Pose {
+    /// Where the body of the stick this is is placed, as [`Pose::of`] reads it, turned about its length as `roll`.
+    pub fn placement(&self, roll: f32) -> Placement {
+        Placement::new(
+            self.middle(),
+            Quat::from_rotation_arc(Vec3::NEG_Z, self.along) * Quat::from_rotation_z(roll),
+        )
     }
+}
 
-    /// Whether it is on its log with a fresh marshmallow, nobody holding it.
-    pub fn fresh(&self) -> bool {
-        self.held.is_none() && self.lying.is_none() && self.toast == 0.0
+/// Where stick `index` begins, leaning on its log, as [`Pose::racked`] lays it: which the side settles, and to which a
+/// stick put back goes.
+pub fn home(index: usize) -> Placement {
+    Pose::racked(index).placement(0.3)
+}
+
+/// Where a hand holds a stick's body, by its handle, [`HOLD`] from its butt, along the hand's −Z, as a fist holds a
+/// stick pointing forward, whether it reached for it or pulled it along the ray.
+pub fn grip() -> Placement {
+    Placement::at(Vec3::new(0.0, 0.0, HOLD - STICK_LENGTH * 0.5))
+}
+
+/// Where the stick's model, which runs from its butt at the origin along −Z, is drawn for its body at `placement`.
+pub fn drawn(placement: &Placement) -> Mat4 {
+    placement.matrix() * Mat4::from_translation(Vec3::Z * STICK_LENGTH * 0.5)
+}
+
+/// The sticks as bodies, each of dry wood, leaning on its log.
+pub fn bodies() -> Vec<Body> {
+    (0..STICKS)
+        .map(|index| {
+            Body::convex(body(index), hull())
+                .with_density(DENSITY)
+                .with_friction(FRICTION)
+                .with_restitution(RESTITUTION)
+                .at(home(index))
+        })
+        .collect()
+}
+
+/// How far from [`FIRE`] what the sticks rest on reaches, taking in the pool below the campsite; beyond, a stick thrown
+/// is lost, and goes back on its log at once.
+pub const REGION: f32 = 13.0;
+
+/// The corners of the ring of a log seat at `middle`, along `along`, of `radius`, at its end `end`, -1 or 1, as it is
+/// drawn, on chocks.
+fn log_ends((middle, along, length, radius): (Vec3, Vec2, f32, f32)) -> Vec<Vec3> {
+    let along = Vec3::new(along.x, 0.0, along.y);
+    let centre = middle + Vec3::Y * (radius + 0.04);
+    [-0.5f32, 0.5]
+        .into_iter()
+        .flat_map(|end| ring(along, centre + along * length * end, radius, 8))
+        .collect()
+}
+
+/// What the sticks rest on: the ground about the fire, the trail's track and the campsite's clearing, as they are drawn,
+/// and the pool's bed, one grid of heights; both log seats; the ring of stones about the fire; and the bonfire.
+pub fn colliders() -> Vec<Static> {
+    let fire = Vec2::new(FIRE.x, FIRE.z);
+    let spacing = 0.5;
+    let columns = (REGION * 2.0 / spacing) as usize + 1;
+    let corner = fire - Vec2::splat(REGION);
+    let heights: Vec<f32> = (0..columns * columns)
+        .map(|index| {
+            let point =
+                corner + Vec2::new((index % columns) as f32, (index / columns) as f32) * spacing;
+            let ground = backdrop::drawn_ground(point).unwrap_or(backdrop::MEADOW);
+            if trail::from_middle(point) < trail::HALF {
+                ground.max(trail::LIFT)
+            } else if point.distance(fire) < CLEARING {
+                ground.max(trail::CLEARING_HEIGHT)
+            } else {
+                ground
+            }
+        })
+        .collect();
+    // One surface, the clearing's height in it, rather than the clearing's own triangles over it, which a stick lying
+    // across both would creep on as they disagree by a millimetre.
+    let mut colliders = vec![Static::heights(corner, spacing, columns, &heights)];
+    for log in [trail::seat(), seat()] {
+        colliders.push(Static::convex(log_ends(log)));
+    }
+    colliders.extend((0..PIT_STONES).map(|stone| {
+        let (base, top) = pit_stone(stone);
+        Static::convex(base.into_iter().chain(top).collect())
+    }));
+    colliders.push(Static::convex(bonfire().into_iter().flatten().collect()));
+    colliders
+}
+
+/// How long a stick rests in the pool before it goes back on its log, in milliseconds, as a stone does in the river.
+pub const RETURNS: u64 = crate::beach::RETURNS;
+
+/// The pool below the campsite, in which a stick let go floats, and from which, once it has rested there a while, it
+/// goes back on its log.
+pub fn waters() -> Vec<Water> {
+    let outline = (0..16)
+        .map(|step| {
+            let turn = step as f32 / 16.0 * TAU;
+            Vec2::new(layout::POOL.x, layout::POOL.z)
+                + Vec2::new(turn.cos(), turn.sin()) * layout::POOL_RADIUS
+        })
+        .collect();
+    vec![Water::below(layout::POOL.y, outline).returning(RETURNS)]
+}
+
+/// How the campsite's world simulates: as `tomori-physics` does by default, a stick lost beyond its region going back
+/// on its log.
+pub fn settings() -> Settings {
+    Settings {
+        home: Vec3::new(FIRE.x, 0.0, FIRE.z),
+        lost_beyond: REGION,
+        ..Settings::default()
     }
 }
 
-/// What the farmyard shares of the campsite, in its state beside the flock's: every stick, in order.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Shared {
-    #[serde(default)]
-    pub sticks: Vec<Stick>,
+/// How near where it began, leaning on its log, a stick at rest is back on its log, fresh.
+pub const RACKED: f32 = 0.03;
+
+/// How long a stick put back by its log glides onto it, and one left where it does not stay glides back, in
+/// milliseconds.
+pub const PUT_BACK: u64 = 600;
+pub const TIDIED: u64 = 1_500;
+
+/// How fast a stick may be let go, at most, in metres a second, to be put back on its log when let go by it, rather
+/// than thrown from beside it.
+pub const GENTLY: f32 = 1.0;
+
+/// Whether a stick with its middle at `middle` is by its log, where one let go gently is put back on it.
+pub fn by_its_log(middle: Vec3) -> bool {
+    let (seat, ..) = seat();
+    Vec2::new(middle.x, middle.z).distance(Vec2::new(seat.x, seat.z)) < BACK
 }
 
-/// A stick that changed, as the side sends it to everyone in the space: the farmyard's clock, which stick, and what it
-/// is now.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Event {
-    pub clock: u64,
-    pub stick: usize,
-    pub now: Stick,
+/// Whether a stick with its middle at `middle` floats in the pool, from which it goes back on its log once it has rested
+/// there for [`RETURNS`].
+pub fn in_pool(middle: Vec3) -> bool {
+    waters().iter().any(|water| water.contains(middle))
 }
 
-/// What a participant asks of the campsite: to take a stick, as their grip closes on it, at the epoch they saw; to say
-/// how toasted the marshmallow they hold is; or to let it go, as drawn in their hand, with how toasted it is. Each
-/// names the stick and its epoch, and only its holder's are taken but the first.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum Intent {
-    Grab {
-        grab: usize,
-        epoch: u32,
-    },
-    Toast {
-        toast: usize,
-        epoch: u32,
-        level: f32,
-    },
-    Release {
-        release: usize,
-        epoch: u32,
-        level: f32,
-        at: [f32; 3],
-        yaw: f32,
-    },
+/// Whether a stick resting at `at` goes back on its log with a fresh marshmallow: by its log, its middle there; in the
+/// fire, which takes it, any of it within the ring of stones; or carried off, its middle beyond [`DROP_REACH`] of the
+/// fire; but for one floating in the pool, which goes back after a while.
+pub fn goes_back(at: &Placement) -> bool {
+    let middle = at.position;
+    if in_pool(middle) {
+        return false;
+    }
+    let pose = Pose::of(at);
+    let flat = |point: Vec3| Vec2::new(point.x, point.z);
+    let fire = flat(FIRE);
+    let (butt, tip) = (flat(pose.butt), flat(pose.tip()));
+    let way = tip - butt;
+    let along = ((fire - butt).dot(way) / way.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    let nearest = (butt + way * along).distance(fire);
+    let distance = flat(middle).distance(fire);
+    !(distance.is_finite() && nearest.is_finite())
+        || nearest < PIT
+        || distance < INTO_FIRE
+        || distance > DROP_REACH
+        || by_its_log(middle)
 }
 
 /// How long the space is empty before the campsite tidies itself, every stick back on its log with a fresh marshmallow:
-/// an hour, in milliseconds.
-pub const TIDY: u64 = 60 * 60 * 1000;
+/// an hour.
+pub const TIDY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// How far from [`FIRE`], across the ground, a stick let go may lie: beyond it, as when carried off along the trail, it
-/// goes back on its log.
+/// How far from [`FIRE`], across the ground, a stick may come to rest: beyond it, as when carried off along the trail,
+/// it goes back on its log.
 pub const DROP_REACH: f32 = 5.0;
 
 /// How near its log's middle, across the ground, the middle of a stick let go goes back on its log, and how near the
@@ -327,257 +478,37 @@ pub const DROP_REACH: f32 = 5.0;
 pub const BACK: f32 = 0.75;
 pub const INTO_FIRE: f32 = PIT + 0.15;
 
-/// How much toasting the side takes as a holder says, beyond what [`TOAST_RATE`] could have done since they last said,
-/// for messages that arrive unevenly.
-const TOAST_SLACK: f32 = 0.03;
-
-/// Whether `point` lies on the log seat from `middle` along `along`, `length` long, of `radius`, across the ground.
-fn on_log(point: Vec2, (middle, along, length, radius): (Vec3, Vec2, f32, f32)) -> bool {
-    let offset = point - Vec2::new(middle.x, middle.z);
-    offset.dot(along).abs() <= length * 0.5 && offset.perp_dot(along).abs() <= radius
+/// How toasted a stick's marshmallow is, as the side says it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Toasted {
+    pub body: u32,
+    pub toast: f32,
 }
 
-/// The height of whatever is beneath `point`, across the ground, that a stick let go there comes to rest on: the top of
-/// either log seat, the trail's track or the campsite's clearing, or the meadow; or `None` where it does not rest, in
-/// the fire, by its log, inside the fence or too far away, when it goes back on its log.
-pub fn beneath(point: Vec2) -> Option<f32> {
-    let fire = Vec2::new(FIRE.x, FIRE.z);
-    let (middle, ..) = seat();
-    if !point.is_finite()
-        || point.distance(fire) > DROP_REACH
-        || point.distance(fire) < INTO_FIRE
-        || point.distance(Vec2::new(middle.x, middle.z)) < BACK
-        || layout::FENCE.grown(0.3).contains(point)
-    {
-        return None;
-    }
-    let mut height = backdrop::ground(point);
-    if trail::from_middle(point) < trail::HALF {
-        height = height.max(trail::LIFT);
-    } else if point.distance(fire) < CLEARING {
-        height = height.max(trail::CLEARING_HEIGHT);
-    }
-    for log in [trail::seat(), seat()] {
-        if on_log(point, log) {
-            height = height.max(seat_top(log.3));
-        }
-    }
-    Some(height)
+/// What the farmyard shares of the campsite, in its state beside the flock's, as `campsite`: every stick's body, and
+/// how toasted each is, in order.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Shared {
+    #[serde(default)]
+    pub sticks: State,
+    #[serde(default)]
+    pub toast: Vec<f32>,
 }
 
-/// Where a stick let go with its middle at `at`, heading `yaw`, comes to rest: straight down, lying level, on whatever
-/// is beneath its middle, keeping its heading; or `None`, back on its log, where [`beneath`] says it does not rest.
-pub fn rest(at: [f32; 3], yaw: f32) -> Option<Lying> {
-    let point = Vec2::new(at[0], at[2]);
-    let height = beneath(point)?;
-    let yaw = if yaw.is_finite() { yaw } else { 0.0 };
-    Some(Lying {
-        at: [point.x, height + STICK_RADIUS, point.y],
-        yaw,
-    })
+/// The campsite as the farmyard shares it, in its state, or none in a state from before its sticks were bodies.
+pub fn shared(state: &serde_json::Value) -> Shared {
+    serde_json::from_value(state["campsite"].clone()).unwrap_or_default()
 }
 
-/// The campsite as the farmyard's server side keeps it: every stick, when each holder last said how toasted their
-/// marshmallow is, and since when the space has been empty, if it is.
-#[derive(Clone, Debug)]
-pub struct Campsite {
-    sticks: Vec<Stick>,
-    toasted: Vec<u64>,
-    empty: Option<u64>,
-}
-
-impl Default for Campsite {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Campsite {
-    /// The campsite with every stick on its log, fresh.
-    pub fn new() -> Self {
-        Self {
-            sticks: vec![Stick::default(); STICKS],
-            toasted: vec![0; STICKS],
-            empty: None,
-        }
-    }
-
-    pub fn sticks(&self) -> &[Stick] {
-        &self.sticks
-    }
-
-    /// What it shares.
-    pub fn shared(&self) -> Shared {
-        Shared {
-            sticks: self.sticks.clone(),
-        }
-    }
-
-    /// The toasting the holder of stick `index` says, `level`, at `now`, as the side takes it: no less than it was, and
-    /// no more than the fire could have toasted it since they last said.
-    fn toasted(&mut self, index: usize, level: f32, now: u64) -> f32 {
-        let was = self.sticks[index].toast;
-        let since = now.saturating_sub(self.toasted[index]) as f32 / 1000.0;
-        self.toasted[index] = now;
-        if !level.is_finite() {
-            return was;
-        }
-        level
-            .min(was + TOAST_RATE * since + TOAST_SLACK)
-            .clamp(was, 1.0)
-    }
-
-    /// Stick `index` back on its log, with a fresh marshmallow, nobody holding it.
-    fn rack(&mut self, index: usize) {
-        let stick = &mut self.sticks[index];
-        stick.epoch = stick.epoch.wrapping_add(1);
-        stick.held = None;
-        stick.lying = None;
-        stick.toast = 0.0;
-    }
-
-    /// Do what `participant` asks, at `now` on the farmyard's clock, if the side takes it, returning the stick it
-    /// changed: a grab of a stick nobody holds at the epoch they saw, by someone holding no other; and the holder's
-    /// toasting and letting go, at the epoch their grab made. Anything else, as a second grab of a stick just taken, is
-    /// refused, changing nothing, so that the first grab to arrive wins.
-    pub fn ask(&mut self, participant: u32, intent: Intent, now: u64) -> Option<usize> {
-        let index = match intent {
-            Intent::Grab { grab, .. } => grab,
-            Intent::Toast { toast, .. } => toast,
-            Intent::Release { release, .. } => release,
-        };
-        let holding = self
-            .sticks
-            .iter()
-            .any(|stick| stick.held == Some(participant));
-        let stick = self.sticks.get(index)?;
-        match intent {
-            Intent::Grab { epoch, .. } => {
-                if stick.held.is_some() || stick.epoch != epoch || holding {
-                    return None;
-                }
-                let stick = &mut self.sticks[index];
-                stick.epoch = stick.epoch.wrapping_add(1);
-                stick.held = Some(participant);
-                self.toasted[index] = now;
-            }
-            Intent::Toast { epoch, level, .. } => {
-                if stick.held != Some(participant) || stick.epoch != epoch {
-                    return None;
-                }
-                let toast = self.toasted(index, level, now);
-                if toast == self.sticks[index].toast {
-                    return None;
-                }
-                self.sticks[index].toast = toast;
-            }
-            Intent::Release {
-                epoch,
-                level,
-                at,
-                yaw,
-                ..
-            } => {
-                if stick.held != Some(participant) || stick.epoch != epoch {
-                    return None;
-                }
-                let toast = self.toasted(index, level, now);
-                match rest(at, yaw) {
-                    Some(lying) => {
-                        let stick = &mut self.sticks[index];
-                        stick.epoch = stick.epoch.wrapping_add(1);
-                        stick.held = None;
-                        stick.lying = Some(lying);
-                        stick.toast = toast;
-                    }
-                    None => self.rack(index),
-                }
-            }
-        }
-        Some(index)
-    }
-
-    /// Look at who is in the space, `present`, by their numbers, as the server last said, at `now`: a stick held by
-    /// someone no longer there goes back on its log, fresh, and once nobody has been there for [`TIDY`], every stick
-    /// does. Returns the sticks it changed. Nothing changes while the server has not said who is there.
-    pub fn sweep(&mut self, present: Option<&[u32]>, now: u64) -> Vec<usize> {
-        let Some(present) = present else {
-            return Vec::new();
-        };
-        let mut changed: Vec<usize> = (0..self.sticks.len())
-            .filter(|index| {
-                self.sticks[*index]
-                    .held
-                    .is_some_and(|holder| !present.contains(&holder))
-            })
-            .collect();
-        for index in &changed {
-            self.rack(*index);
-        }
-        if present.is_empty() {
-            let since = *self.empty.get_or_insert(now);
-            if now.saturating_sub(since) >= TIDY {
-                for index in 0..self.sticks.len() {
-                    if !self.sticks[index].fresh() {
-                        self.rack(index);
-                        changed.push(index);
-                    }
-                }
-            }
-        } else {
-            self.empty = None;
-        }
-        changed
-    }
-
-    /// What the space's agent is told of the campsite: the bonfire, and each stick, how toasted its marshmallow is and
-    /// where it is, each with its identity, reference and where it stands, but a stick in someone's hand, which only
-    /// their presence says.
-    pub fn describe(&self) -> Vec<(String, String, String, Option<Vec3>)> {
-        let mut objects = vec![(
-            "bonfire".to_owned(),
-            "campsite/bonfire".to_owned(),
-            "the campsite's bonfire, crackling in its ring of stones beside the pool lookout's log seat".to_owned(),
-            Some(heart()),
-        )];
-        objects.extend(self.sticks.iter().enumerate().map(|(index, stick)| {
-            let place = match (stick.held, &stick.lying) {
-                (Some(_), _) => "held by someone",
-                (None, Some(_)) => "lying where it was put down",
-                (None, None) => "leaning on the log by the fire",
-            };
-            (
-                format!("stick-{index}"),
-                format!("campsite/stick-{index}"),
-                format!("a marshmallow on a stick, {}, {place}", looks(stick.toast)),
-                stick
-                    .held
-                    .is_none()
-                    .then(|| stick.resting(index).marshmallow()),
-            )
-        }));
-        objects
-    }
-
-    /// The details of what it describes as `reference`, for the space's agent: the bonfire, or a stick, how toasted
-    /// it is, who holds it, by their number, and where it rests.
-    pub fn inspect(&self, reference: &str) -> Option<serde_json::Value> {
-        if reference == "campsite/bonfire" {
-            return Some(serde_json::json!({
-                "kind": "bonfire",
-                "at": heart().to_array(),
-            }));
-        }
-        let index: usize = reference.strip_prefix("campsite/stick-")?.parse().ok()?;
-        let stick = self.sticks.get(index)?;
-        Some(serde_json::json!({
-            "kind": "marshmallow stick",
-            "toast": stick.toast,
-            "looks": looks(stick.toast),
-            "held_by": stick.held,
-            "on_its_log": stick.held.is_none() && stick.lying.is_none(),
-        }))
-    }
+/// What changed of the campsite, as the side sends it to everyone in the space: the farmyard's clock, what changed of
+/// the sticks' bodies, and how toasted those whose toasting changed are now. A client from before reads it as neither
+/// a chicken's nor a stone's, and ignores it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Event {
+    pub clock: u64,
+    pub sticks: Update,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toast: Vec<Toasted>,
 }
 
 /// The solids of the campsite, which the agent, walls and panels keep clear of, as `(least, greatest)` corners: the
@@ -710,6 +641,58 @@ pub fn clearing() -> Vec<Vec3> {
         .collect()
 }
 
+/// Where the middle of stone `stone` of the fire's ring stands, on the ground.
+fn pit_middle(stone: u32) -> Vec3 {
+    let turn = stone as f32 / PIT_STONES as f32 * TAU + scatter(stone + 9800) * 0.2;
+    FIRE + Vec3::new(turn.sin(), 0.0, turn.cos()) * PIT
+}
+
+/// The corners of stone `stone` of the fire's ring, a low-poly boulder of five sides: those of its base, on the
+/// clearing, and of its top, which it is drawn and collided from.
+fn pit_stone(stone: u32) -> (Vec<Vec3>, Vec<Vec3>) {
+    let lift = trail::CLEARING_HEIGHT;
+    let turn = stone as f32 / PIT_STONES as f32 * TAU + scatter(stone + 9800) * 0.2;
+    let at = pit_middle(stone);
+    let size = 0.13 + scatter(stone + 9810) * 0.06;
+    let sides = 5;
+    let base: Vec<Vec3> = (0..sides)
+        .map(|side| {
+            let yaw = turn + side as f32 / sides as f32 * TAU;
+            let reach = size * 0.5 * (0.8 + scatter(stone * 7 + side + 9820) * 0.4);
+            at + Vec3::new(yaw.sin() * reach, lift, yaw.cos() * reach)
+        })
+        .collect();
+    let height = size * (0.55 + scatter(stone + 9830) * 0.25);
+    let top = base
+        .iter()
+        .map(|corner| {
+            let inset = at + (*corner - at) * 0.55;
+            Vec3::new(inset.x, lift + height, inset.z)
+        })
+        .collect();
+    (base, top)
+}
+
+/// The bonfire's logs, five leaning together over the embers, their feet on the ash, and two laid across beneath them,
+/// each from one end to the other.
+fn bonfire() -> Vec<[Vec3; 2]> {
+    let mut logs: Vec<[Vec3; 2]> = (0..5u32)
+        .map(|index| {
+            let turn = index as f32 / 5.0 * TAU + 0.4;
+            let way = Vec3::new(turn.sin(), 0.0, turn.cos());
+            let foot = FIRE + way * 0.27 + Vec3::Y * 0.03;
+            let top = FIRE + way * 0.03 + Vec3::Y * (0.5 + scatter(index + 9850) * 0.08);
+            [foot, top]
+        })
+        .collect();
+    logs.extend([0.9f32, 2.6].into_iter().map(|turn| {
+        let way = Vec3::new(turn.sin(), 0.0, turn.cos());
+        let middle = FIRE + Vec3::Y * 0.06;
+        [middle - way * 0.26, middle + way * 0.26]
+    }));
+    logs
+}
+
 /// The campsite's clearing, the fire's ring of stones, the ash in its pit, the second log seat and its chocks, and the
 /// logs of the bonfire, the charred and the plain, in `shapes`, and its embers, which glow, in `embers`.
 fn build(shapes: &mut Shapes, embers: &mut Shapes) {
@@ -729,63 +712,30 @@ fn build(shapes: &mut Shapes, embers: &mut Shapes) {
     );
     // The ring of stones, each a low-poly boulder, set about the pit.
     for stone in 0..PIT_STONES {
-        let turn = stone as f32 / PIT_STONES as f32 * TAU + scatter(stone + 9800) * 0.2;
-        let at = FIRE + Vec3::new(turn.sin(), 0.0, turn.cos()) * PIT;
-        let size = 0.13 + scatter(stone + 9810) * 0.06;
-        let sides = 5;
-        let base: Vec<Vec3> = (0..sides)
-            .map(|side| {
-                let yaw = turn + side as f32 / sides as f32 * TAU;
-                let reach = size * 0.5 * (0.8 + scatter(stone * 7 + side + 9820) * 0.4);
-                at + Vec3::new(yaw.sin() * reach, lift, yaw.cos() * reach)
-            })
-            .collect();
-        let height = size * (0.55 + scatter(stone + 9830) * 0.25);
-        let top: Vec<Vec3> = base
-            .iter()
-            .map(|corner| {
-                let inset = at + (*corner - at) * 0.55;
-                Vec3::new(inset.x, lift + height, inset.z)
-            })
-            .collect();
+        let (base, top) = pit_stone(stone);
+        let sides = base.len();
+        let height = top[0].y - lift;
+        let at = pit_middle(stone);
         let color = colors::STONE * (0.85 + scatter(stone + 9840) * 0.3);
-        let middle = at + Vec3::Y * (lift + height * 0.5);
-        for side in 0..sides as usize {
-            let next = (side + 1) % sides as usize;
+        let middle = at + Vec3::Y * (height * 0.5);
+        for side in 0..sides {
+            let next = (side + 1) % sides;
             let corners = [base[side], base[next], top[next], top[side]];
             let outward = corners.iter().copied().sum::<Vec3>() / 4.0 - middle;
             facing(shapes, &corners, outward, color * 0.85);
         }
         facing(shapes, &top, Vec3::Y, color);
     }
-    // The bonfire: five logs leaning together over the embers, their feet on the ash, charred towards the middle.
-    for index in 0..5u32 {
-        let turn = index as f32 / 5.0 * TAU + 0.4;
-        let way = Vec3::new(turn.sin(), 0.0, turn.cos());
-        let foot = FIRE + way * 0.27 + Vec3::Y * 0.03;
-        let top = FIRE + way * 0.03 + Vec3::Y * (0.5 + scatter(index + 9850) * 0.08);
-        log(
-            shapes,
-            (foot, top),
-            0.04,
-            5,
-            (palette::BARK * 0.9, colors::CHARRED),
-        );
-    }
-    // Two logs laid across beneath them, burning through.
-    for (index, turn) in [0.9f32, 2.6].into_iter().enumerate() {
-        let way = Vec3::new(turn.sin(), 0.0, turn.cos());
-        let middle = FIRE + Vec3::Y * 0.06;
-        log(
-            shapes,
-            (middle - way * 0.26, middle + way * 0.26),
-            0.05,
-            5,
-            (
-                colors::CHARRED * (1.0 + index as f32 * 0.4),
-                colors::CHARRED,
-            ),
-        );
+    // The bonfire: five logs leaning together over the embers, their feet on the ash, charred towards the middle, and
+    // two laid across beneath them, burning through.
+    for (index, ends) in bonfire().into_iter().enumerate() {
+        let (radius, colors) = if index < 5 {
+            (0.04, (palette::BARK * 0.9, colors::CHARRED))
+        } else {
+            let shade = 1.0 + (index - 5) as f32 * 0.4;
+            (0.05, (colors::CHARRED * shade, colors::CHARRED))
+        };
+        log(shapes, (ends[0], ends[1]), radius, 5, colors);
     }
     // The embers: a glowing bed in the pit, and coals among the logs' feet.
     embers.disc(
@@ -855,7 +805,7 @@ pub fn stick() -> Model {
         &mut wood,
         (Vec3::ZERO, Vec3::NEG_Z * STICK_LENGTH),
         STICK_RADIUS,
-        5,
+        STICK_SIDES,
         (palette::WOOD * 1.1, palette::WEATHERED),
     );
     let (length, radius) = MARSHMALLOW;
@@ -869,7 +819,13 @@ pub fn stick() -> Model {
     for shade in 0..SHADES {
         let mut marshmallow = Shapes::new();
         let colour = colour(shade);
-        log(&mut marshmallow, span, radius, 7, (colour, colour * 1.08));
+        log(
+            &mut marshmallow,
+            span,
+            radius,
+            STICK_SIDES,
+            (colour, colour * 1.08),
+        );
         nodes.push(Node::new(shade_node(shade), Transform::IDENTITY).with_mesh(meshes.len()));
         meshes.push(Mesh::new(shade_node(shade), vec![marshmallow.primitive(0)]));
     }
