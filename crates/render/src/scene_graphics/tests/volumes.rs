@@ -68,7 +68,9 @@ fn projected(reply: &str) -> (tomori_protocol::Projection, Wall) {
     });
     session.reply(reply);
     let projection = client.wait_for(|message| match message {
-        ServerMessage::Projection { projection } if !projection.panels.is_empty() => Some(projection.clone()),
+        ServerMessage::Projection { projection } if !projection.panels.is_empty() => {
+            Some(projection.clone())
+        }
         _ => None,
     });
     (*projection, added)
@@ -78,11 +80,15 @@ fn projected(reply: &str) -> (tomori_protocol::Projection, Wall) {
 /// beside Ada as the server placed it, from where she stands, and in a wall's slot as a relief, from in front of it.
 #[test]
 fn a_volume_floats_as_the_server_placed_it_and_stands_in_a_slot_as_a_relief() {
-    let (projection, added) = projected(&format!("Here is how it fits together.\n\n{ARCHITECTURE}"));
+    let (projection, added) =
+        projected(&format!("Here is how it fits together.\n\n{ARCHITECTURE}"));
     let volume = projection.panels[0].clone();
     let diagram = volume.diagram.as_ref().expect("a volume, sent its diagram");
     assert_eq!(diagram.nodes.len(), 10);
-    assert!(matches!(volume.place, Place::Free { .. }), "floating beside Ada, looking at no wall");
+    assert!(
+        matches!(volume.place, Place::Free { .. }),
+        "floating beside Ada, looking at no wall"
+    );
     let mut slotted = volume.clone();
     slotted.place = Place::Wall {
         wall: added.id.clone(),
@@ -109,7 +115,12 @@ fn a_volume_floats_as_the_server_placed_it_and_stands_in_a_slot_as_a_relief() {
         let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
         renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
         let mut panels = Panels::new(&device, &renderer);
-        let lens = glam::camera::rh::proj::directx::perspective(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+        let lens = glam::camera::rh::proj::directx::perspective(
+            1.1,
+            WIDTH as f32 / HEIGHT as f32,
+            0.05,
+            50.0,
+        );
         let volume_at = match &volume.place {
             Place::Free { pose } => Vec3::from_array(pose.position),
             _ => unreachable!("floating, as asserted above"),
@@ -140,7 +151,13 @@ fn a_volume_floats_as_the_server_placed_it_and_stands_in_a_slot_as_a_relief() {
             let mut conversation = joined();
             show_projection(&mut conversation, vec![added.clone()], vec![shown]);
             let mut step = Step::default();
-            let frame = step.update(&senses, &mut conversation, &mut felt(), Instant::now(), 0.01);
+            let frame = step.update(
+                &senses,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                0.01,
+            );
             assert_eq!(frame.volumes.len(), 1);
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             counts.push(renderer.volume_counts());
@@ -160,7 +177,10 @@ fn a_volume_floats_as_the_server_placed_it_and_stands_in_a_slot_as_a_relief() {
         crate::test_support::preview("TOMORI_VOLUME_PREVIEW", &sheet);
         // Drawn, within the budget, none left out.
         for (triangles, left_out) in &counts {
-            assert!(*triangles > 500 && *triangles <= crate::solids::TRIANGLES, "{triangles}");
+            assert!(
+                *triangles > 500 && *triangles <= crate::solids::TRIANGLES,
+                "{triangles}"
+            );
             assert_eq!(*left_out, 0);
         }
         // The hub's teal sphere shows in both.

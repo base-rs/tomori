@@ -22,7 +22,13 @@ fn each_solid_is_a_unit_mesh_of_few_triangles_lit_by_its_normals() {
         let vertices = mesh(solid);
         assert_eq!(vertices.len(), triangles * 3, "{solid:?}");
         for vertex in &vertices {
-            assert!(vertex.position.iter().all(|value| value.abs() <= 0.5 + 1e-5), "{solid:?}");
+            assert!(
+                vertex
+                    .position
+                    .iter()
+                    .all(|value| value.abs() <= 0.5 + 1e-5),
+                "{solid:?}"
+            );
             let normal = Vec3::from_array(vertex.normal);
             assert!((normal.length() - 1.0).abs() < 1e-4, "{solid:?}");
         }
@@ -66,7 +72,9 @@ fn typical() -> Diagram {
         diagram.nodes.push(node);
     }
     for index in 0..40u16 {
-        diagram.edges.push(Edge::new(index % 30, (index * 7 + 1) % 30));
+        diagram
+            .edges
+            .push(Edge::new(index % 30, (index * 7 + 1) % 30));
     }
     diagram.extent = [900, 750, 200];
     diagram
@@ -77,7 +85,8 @@ fn drawn(diagram: &Diagram, count: usize) -> Vec<Drawn> {
     (0..count)
         .map(|index| Drawn {
             mesh: mesh.clone(),
-            model: Mat4::from_translation(Vec3::X * index as f32) * Mat4::from_scale(Vec3::splat(0.001)),
+            model: Mat4::from_translation(Vec3::X * index as f32)
+                * Mat4::from_scale(Vec3::splat(0.001)),
             focus: None,
             time: 0.5,
         })
@@ -100,7 +109,10 @@ fn a_frame_s_solids_are_drawn_within_the_budget_at_the_headset_s_limits() {
         assert!(one <= TRIANGLES, "{one}");
         solids.update(&queue, &drawn(&largest(), 16));
         let (triangles, left_out) = solids.counts();
-        assert!(triangles <= TRIANGLES && left_out > 0, "{triangles} {left_out}");
+        assert!(
+            triangles <= TRIANGLES && left_out > 0,
+            "{triangles} {left_out}"
+        );
         // A frame of no volumes draws none.
         solids.update(&queue, &[]);
         assert_eq!(solids.counts(), (0, 0));

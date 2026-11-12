@@ -463,7 +463,11 @@ impl Renderer {
 
     /// The frame's volumes, whose solids are drawn among the opaque bodies, within their budget. See
     /// `design/diagrams.md`.
-    pub fn update_volumes(&mut self, queue: &wgpu::Queue, volumes: &[tomori_scene::projection::volume::Drawn]) {
+    pub fn update_volumes(
+        &mut self,
+        queue: &wgpu::Queue,
+        volumes: &[tomori_scene::projection::volume::Drawn],
+    ) {
         self.solids.update(queue, volumes);
     }
 

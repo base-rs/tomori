@@ -136,7 +136,9 @@ fn hashed(id: &str) -> Spot {
 /// Rows and columns in the order written, as near square as they come, each a pitch apart.
 fn grid(graph: &Graph) -> Vec<Spot> {
     let count = graph.len();
-    let columns = (1..).find(|columns| columns * columns >= count).unwrap_or(1);
+    let columns = (1..)
+        .find(|columns| columns * columns >= count)
+        .unwrap_or(1);
     let pitch = graph.pitch();
     (0..count)
         .map(|index| {
@@ -155,8 +157,8 @@ fn grid(graph: &Graph) -> Vec<Spot> {
 fn place(diagram: &mut Diagram, graph: &Graph, spots: &[Spot], mut via: Vec<Vec<Spot>>) {
     via.resize(diagram.edges.len(), Vec::new());
     // Parallel edges, either way between one pair, the second and later curved out to alternate sides.
-    for index in 0..diagram.edges.len() {
-        let (from, to) = (usize::from(diagram.edges[index].from), usize::from(diagram.edges[index].to));
+    for (index, edge) in diagram.edges.iter().enumerate() {
+        let (from, to) = (usize::from(edge.from), usize::from(edge.to));
         let earlier = diagram.edges[..index]
             .iter()
             .filter(|edge| {
@@ -171,7 +173,9 @@ fn place(diagram: &mut Diagram, graph: &Graph, spots: &[Spot], mut via: Vec<Vec<
             let along = [0, 1, 2].map(|axis| b[axis] - a[axis]);
             // Sideways across the edge, in the plane facing the viewer where it can be.
             let side = normalised(cross(along, [0.0, 0.0, 1.0])).unwrap_or([0.0, 1.0, 0.0]);
-            let offset = PARALLEL_MM * (earlier.div_ceil(2)) as f64 * if earlier % 2 == 1 { 1.0 } else { -1.0 };
+            let offset = PARALLEL_MM
+                * (earlier.div_ceil(2)) as f64
+                * if earlier % 2 == 1 { 1.0 } else { -1.0 };
             via[index] = vec![[0, 1, 2].map(|axis| middle[axis] + side[axis] * offset)];
         }
     }
@@ -225,7 +229,8 @@ fn place(diagram: &mut Diagram, graph: &Graph, spots: &[Spot], mut via: Vec<Vec<
         return;
     }
     let middle = [0, 1, 2].map(|axis| (low[axis] + high[axis]) / 2.0);
-    let point = |spot: Spot| -> Point { [0, 1, 2].map(|axis| millimetres(spot[axis] - middle[axis])) };
+    let point =
+        |spot: Spot| -> Point { [0, 1, 2].map(|axis| millimetres(spot[axis] - middle[axis])) };
     for (node, spot) in diagram.nodes.iter_mut().zip(spots) {
         node.at = point(*spot);
     }
@@ -256,7 +261,9 @@ fn thinned(via: Vec<Spot>) -> Vec<Spot> {
 
 /// `value` in whole millimetres, within what a point holds.
 fn millimetres(value: f64) -> i16 {
-    value.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
+    value
+        .round()
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16
 }
 
 fn cross(a: Spot, b: Spot) -> Spot {

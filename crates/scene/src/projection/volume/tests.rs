@@ -31,7 +31,10 @@ fn edge(from: u16, to: u16, style: Style, direction: Arrow) -> Edge {
 }
 
 fn counted(instances: &[Instance], solid: Solid) -> usize {
-    instances.iter().filter(|instance| instance.solid == solid).count()
+    instances
+        .iter()
+        .filter(|instance| instance.solid == solid)
+        .count()
 }
 
 #[test]
@@ -84,7 +87,11 @@ fn every_shape_is_a_solid_and_every_edge_style_and_arrow_is_drawn() {
 #[test]
 fn groups_are_trays_floors_and_frames_with_their_labels() {
     let mut drawn = diagram(&[("a", Shape::Box, [0, 0, 0])], Vec::new());
-    for (id, kind) in [("t", GroupKind::Cluster), ("f", GroupKind::Layer), ("c", GroupKind::Container)] {
+    for (id, kind) in [
+        ("t", GroupKind::Cluster),
+        ("f", GroupKind::Layer),
+        ("c", GroupKind::Container),
+    ] {
         let mut group = Group::new(id, "");
         group.kind = kind;
         group.low = [-100, -100, -100];
@@ -108,7 +115,10 @@ fn a_volume_is_moved_by_its_model_and_its_focus_dims_what_is_not_joined_to_the_n
             ("b", Shape::Sphere, [0, 0, 0]),
             ("c", Shape::Sphere, [200, 0, 0]),
         ],
-        vec![edge(0, 1, Style::Solid, Arrow::None), edge(1, 2, Style::Solid, Arrow::None)],
+        vec![
+            edge(0, 1, Style::Solid, Arrow::None),
+            edge(1, 2, Style::Solid, Arrow::None),
+        ],
     );
     let mesh = Arc::new(Mesh::new(&drawn));
     // A millimetre to a millimetre of the scene, turned a quarter about the vertical and a metre up.
@@ -124,7 +134,11 @@ fn a_volume_is_moved_by_its_model_and_its_focus_dims_what_is_not_joined_to_the_n
     let mut instances = Vec::new();
     volume.instances(&mut instances);
     let a = instances[0];
-    assert!((a.position - Vec3::new(0.0, 1.0, 0.2)).length() < 1e-4, "{:?}", a.position);
+    assert!(
+        (a.position - Vec3::new(0.0, 1.0, 0.2)).length() < 1e-4,
+        "{:?}",
+        a.position
+    );
     assert!((a.scale - Vec3::splat(0.06)).length() < 1e-5);
     assert_eq!(volume, volume.clone());
     // Focused on a, b and the edge between them stay bright; c and its edge dim.
@@ -153,18 +167,25 @@ fn a_volume_is_moved_by_its_model_and_its_focus_dims_what_is_not_joined_to_the_n
     assert_eq!(mesh.card(9, model, Vec3::ZERO), None);
     let mut detailed = drawn.clone();
     detailed.nodes[0].detail = "What it does".into();
-    let card = Mesh::new(&detailed).card(0, model, Vec3::new(5.0, 1.0, 0.0)).unwrap();
+    let card = Mesh::new(&detailed)
+        .card(0, model, Vec3::new(5.0, 1.0, 0.0))
+        .unwrap();
     assert!(card.canvas.unwrap().rows.len() == 2);
 }
 
 #[test]
 fn the_ray_meets_the_nearest_node_or_an_edge_within_reach() {
     let drawn = diagram(
-        &[("a", Shape::Sphere, [-200, 0, 0]), ("b", Shape::Box, [200, 0, 0]), ("c", Shape::Box, [200, 0, -150])],
+        &[
+            ("a", Shape::Sphere, [-200, 0, 0]),
+            ("b", Shape::Box, [200, 0, 0]),
+            ("c", Shape::Box, [200, 0, -150]),
+        ],
         vec![edge(0, 1, Style::Solid, Arrow::Forward)],
     );
     let mesh = Mesh::new(&drawn);
-    let model = Mat4::from_translation(Vec3::new(0.0, 1.5, -1.0)) * Mat4::from_scale(Vec3::splat(0.001));
+    let model =
+        Mat4::from_translation(Vec3::new(0.0, 1.5, -1.0)) * Mat4::from_scale(Vec3::splat(0.001));
     let from = |x: f32| Ray::new(Vec3::new(x, 1.5, 0.0), -Vec3::Z).unwrap();
     // Straight at a, about a metre away less its radius; at b, which hides c behind it.
     let (met, distance) = mesh.hit(model, &from(-0.2)).unwrap();
@@ -176,7 +197,13 @@ fn the_ray_meets_the_nearest_node_or_an_edge_within_reach() {
     assert_eq!(mesh.hit(model, &from(0.0 + 0.012)).unwrap().0, Met::Edge(0));
     assert_eq!(mesh.hit(model, &from(0.6)), None);
     // Pointed away, it meets nothing behind it.
-    assert_eq!(mesh.hit(model, &Ray::new(Vec3::new(-0.2, 1.5, 0.0), Vec3::Z).unwrap()), None);
+    assert_eq!(
+        mesh.hit(
+            model,
+            &Ray::new(Vec3::new(-0.2, 1.5, 0.0), Vec3::Z).unwrap()
+        ),
+        None
+    );
     // Along an edge, as from its end, the edge is met at its start.
     let along = Ray::new(Vec3::new(-0.5, 1.5, -1.0), Vec3::X).unwrap();
     assert!(mesh.hit(model, &along).is_some());
@@ -186,12 +213,25 @@ fn the_ray_meets_the_nearest_node_or_an_edge_within_reach() {
 #[test]
 fn a_volume_fits_its_slot_and_floats_as_large_as_its_diagram_within_bounds() {
     let mut drawn = diagram(&[("a", Shape::Box, [0, 0, 0])], Vec::new());
-    let panel = Panel::new("panel-1", "Renderer", "", Place::Free { pose: Pose::default() });
+    let panel = Panel::new(
+        "panel-1",
+        "Renderer",
+        "",
+        Place::Free {
+            pose: Pose::default(),
+        },
+    );
     let cells = super::super::Cells::STANDARD;
-    assert_eq!(fit(&panel, &drawn, Fit::Slot(cells)), (cells.columns, cells.body));
+    assert_eq!(
+        fit(&panel, &drawn, Fit::Slot(cells)),
+        (cells.columns, cells.body)
+    );
     // Floating, 600 by 400 mm, a little wider than 30 columns and 15 rows.
     let (columns, rows) = fit(&panel, &drawn, Fit::Text);
-    assert!((34..=38).contains(&columns) && (17..=19).contains(&rows), "{columns} {rows}");
+    assert!(
+        (34..=38).contains(&columns) && (17..=19).contains(&rows),
+        "{columns} {rows}"
+    );
     // Tiny, it grows to the least; huge, it shrinks to the most; never wider than its rows allow.
     drawn.extent = [10, 10, 10];
     let (columns, rows) = fit(&panel, &drawn, Fit::Text);
@@ -204,7 +244,10 @@ fn a_volume_fits_its_slot_and_floats_as_large_as_its_diagram_within_bounds() {
     let back = slotted.transform_point3(Vec3::new(0.0, 0.0, -1000.0));
     let front = slotted.transform_point3(Vec3::new(0.0, 0.0, 1000.0));
     let (_, height) = super::super::sized(cells.columns, cells.body);
-    assert!(back.z >= STAND_OFF - 1e-4 && front.z - back.z <= height / 2.0, "{back} {front}");
+    assert!(
+        back.z >= STAND_OFF - 1e-4 && front.z - back.z <= height / 2.0,
+        "{back} {front}"
+    );
     let floating = placed(&panel, &drawn, Fit::Text);
     assert!(floating.transform_point3(Vec3::new(0.0, 0.0, -1000.0)).z >= STAND_OFF - 1e-4);
     // Its face: dark in a slot, faint floating, its title first.
@@ -221,14 +264,20 @@ fn labels_are_drawn_smaller_with_the_volume_down_to_their_least() {
     let small = label_scale(Mat4::from_scale(Vec3::splat(0.0001)));
     assert!((full - LABEL_PIXEL / PIXEL).abs() < 1e-6);
     assert!((small - LEAST_LABEL * LABEL_PIXEL / PIXEL).abs() < 1e-6);
-    assert_eq!(point_along(&[Vec3::ZERO, Vec3::ZERO, Vec3::X], 0.5), Vec3::X * 0.5);
+    assert_eq!(
+        point_along(&[Vec3::ZERO, Vec3::ZERO, Vec3::X], 0.5),
+        Vec3::X * 0.5
+    );
     assert_eq!(point_along(&[Vec3::ZERO, Vec3::X], 5.0), Vec3::X);
     assert_eq!(Solid::ALL.len(), 7);
     // More nodes than are labelled: the largest are.
     let nodes: Vec<(String, Shape, [i16; 3])> = (0..40)
         .map(|index| (format!("n{index}"), Shape::Box, [index as i16 * 100, 0, 0]))
         .collect();
-    let named: Vec<(&str, Shape, [i16; 3])> = nodes.iter().map(|(id, shape, at)| (id.as_str(), *shape, *at)).collect();
+    let named: Vec<(&str, Shape, [i16; 3])> = nodes
+        .iter()
+        .map(|(id, shape, at)| (id.as_str(), *shape, *at))
+        .collect();
     let mut many = diagram(&named, Vec::new());
     many.nodes[39].size = 5;
     let mesh = Mesh::new(&many);
@@ -253,14 +302,24 @@ mod projector {
                 ("b", Shape::Box, [0, 0, 0]),
                 ("c", Shape::Sphere, [200, 0, 0]),
             ],
-            vec![edge(0, 1, Style::Solid, Arrow::Forward), edge(1, 2, Style::Solid, Arrow::Forward)],
+            vec![
+                edge(0, 1, Style::Solid, Arrow::Forward),
+                edge(1, 2, Style::Solid, Arrow::Forward),
+            ],
         );
         drawn.nodes[1].detail = "In the middle".into();
-        let panel = Panel::new("panel-1", "Line", "- a\n- b\n- c", Place::Free { pose }).with_diagram(drawn);
+        let panel = Panel::new("panel-1", "Line", "- a\n- b\n- c", Place::Free { pose })
+            .with_diagram(drawn);
         (Projection::new("s", "sky").with_panels(vec![panel]), pose)
     }
 
-    fn input(projection: Option<&Projection>, ray: Option<Ray>, trigger: bool, left: Hold, now: Instant) -> Input<'_> {
+    fn input(
+        projection: Option<&Projection>,
+        ray: Option<Ray>,
+        trigger: bool,
+        left: Hold,
+        now: Instant,
+    ) -> Input<'_> {
         Input {
             projection,
             ray,
@@ -285,7 +344,8 @@ mod projector {
     /// Where `point`, in the volume's own millimetres, stands in the scene.
     fn world(projection: &Projection, pose: Pose, point: Vec3) -> Vec3 {
         let panel = &projection.panels[0];
-        let model = crate::board::model(&pose).unwrap() * placed(panel, panel.diagram.as_ref().unwrap(), Fit::Text);
+        let model = crate::board::model(&pose).unwrap()
+            * placed(panel, panel.diagram.as_ref().unwrap(), Fit::Text);
         model.transform_point3(point)
     }
 
@@ -294,7 +354,8 @@ mod projector {
     }
 
     #[test]
-    fn pointing_at_a_volume_names_its_node_or_edge_with_either_hand_and_the_trigger_focuses_on_a_node() {
+    fn pointing_at_a_volume_names_its_node_or_edge_with_either_hand_and_the_trigger_focuses_on_a_node()
+     {
         let (projection, pose) = floating();
         let mut projector = Projector::default();
         let now = Instant::now();
@@ -307,7 +368,10 @@ mod projector {
             ..Hold::default()
         };
         let output = projector.update(input(Some(&projection), at_a, false, left, now));
-        assert_eq!(output.pointed.as_ref().map(|(id, ..)| id.as_str()), Some("panel-1"));
+        assert_eq!(
+            output.pointed.as_ref().map(|(id, ..)| id.as_str()),
+            Some("panel-1")
+        );
         assert_eq!(output.part, Some(Part::Node("a".into())));
         assert_eq!(output.left.part, Some(Part::Edge(1)));
         assert_eq!(output.volumes.len(), 1);
@@ -333,7 +397,13 @@ mod projector {
         projector.update(input(Some(&projection), off, true, Hold::default(), now));
         assert_eq!(projector.focus(), None);
         // Time moves the flows on.
-        let later = projector.update(input(Some(&projection), None, false, Hold::default(), now + Duration::from_secs(1)));
+        let later = projector.update(input(
+            Some(&projection),
+            None,
+            false,
+            Hold::default(),
+            now + Duration::from_secs(1),
+        ));
         assert!(later.volumes[0].time >= 1.0);
     }
 
@@ -353,7 +423,10 @@ mod projector {
         diagram.nodes.truncate(1);
         diagram.edges.clear();
         let changed = projector.update(input(Some(&fewer), None, false, Hold::default(), now));
-        assert!(!Arc::ptr_eq(&first.volumes[0].mesh, &changed.volumes[0].mesh));
+        assert!(!Arc::ptr_eq(
+            &first.volumes[0].mesh,
+            &changed.volumes[0].mesh
+        ));
         assert_eq!(projector.focus(), None);
         // A text panel in its place, or no projection at all, draws no volume.
         projector.update(input(Some(&projection), at_b, true, Hold::default(), now));
@@ -364,7 +437,12 @@ mod projector {
         assert_eq!(projector.focus(), None);
         projector.update(input(Some(&projection), None, false, Hold::default(), now));
         projector.update(input(Some(&projection), at_b, true, Hold::default(), now));
-        assert!(projector.update(input(None, None, false, Hold::default(), now)).volumes.is_empty());
+        assert!(
+            projector
+                .update(input(None, None, false, Hold::default(), now))
+                .volumes
+                .is_empty()
+        );
         assert_eq!(projector.focus(), None);
     }
 }

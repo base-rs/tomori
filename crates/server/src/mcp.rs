@@ -1647,71 +1647,71 @@ async fn show_image(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Resul
 /// The `show_diagram` tool's definition. See `design/diagrams.md`.
 fn show_diagram_tool() -> Value {
     json!({
-            "name": "show_diagram",
-            "description": "Show how a system is organised, in 3D, as a volume, a panel with depth, for everyone in your space: its parts as nodes, how they connect as edges, and groups of them, never coordinates, which Tomori lays out. Use it for organisation, flows and dependencies, keeping it under about thirty nodes. Give nodes, edges and groups, or source, the body of a diagram block. Warnings come back at once: fix what they name by showing it again with the same id, which updates it where it is and keeps its layout as far as it can. Someone pointing at a node or an edge names it to you. Say in a sentence what it shows.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "A short title, on one line." },
-                    "id": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Your own id for it, 1 to 32 letters, digits, - and _, by which a later call or diagram block updates it." },
-                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for show_image; by default, where whoever asked was looking, if near enough, or else beside them." },
-                    "layout": { "type": "string", "maxLength": 64, "description": "layered with down, up, right, left or away, for anything with a direction, or force, for anything without; by default layered down." },
-                    "nodes": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string", "maxLength": 32, "description": "Letters, digits, -, _ and ." },
-                                "label": { "type": "string", "maxLength": 256 },
-                                "shape": { "type": "string", "enum": ["box", "sphere", "cylinder", "prism", "diamond", "card"] },
-                                "colour": { "type": "string", "maxLength": 16, "description": "teal, amber, blue, violet, green, red, grey or white." },
-                                "size": { "type": "integer", "minimum": 1, "maximum": 5, "description": "How important it is, drawn as large; by default 1." },
-                                "detail": { "type": "string", "maxLength": 1024, "description": "A line shown on pointing." },
-                                "ref": { "type": "string", "maxLength": 256, "description": "Your pointer back to what it stands for, such as a path, told you when it is pointed at." },
-                                "group": { "type": "string", "maxLength": 32, "description": "The id of the group it is in." },
-                            },
-                            "required": ["id"],
+        "name": "show_diagram",
+        "description": "Show how a system is organised, in 3D, as a volume, a panel with depth, for everyone in your space: its parts as nodes, how they connect as edges, and groups of them, never coordinates, which Tomori lays out. Use it for organisation, flows and dependencies, keeping it under about thirty nodes. Give nodes, edges and groups, or source, the body of a diagram block. Warnings come back at once: fix what they name by showing it again with the same id, which updates it where it is and keeps its layout as far as it can. Someone pointing at a node or an edge names it to you. Say in a sentence what it shows.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "maxLength": SHOWN_TEXT_BYTES, "description": "A short title, on one line." },
+                "id": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Your own id for it, 1 to 32 letters, digits, - and _, by which a later call or diagram block updates it." },
+                "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES, "description": "Where it goes, as for show_image; by default, where whoever asked was looking, if near enough, or else beside them." },
+                "layout": { "type": "string", "maxLength": 64, "description": "layered with down, up, right, left or away, for anything with a direction, or force, for anything without; by default layered down." },
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "maxLength": 32, "description": "Letters, digits, -, _ and ." },
+                            "label": { "type": "string", "maxLength": 256 },
+                            "shape": { "type": "string", "enum": ["box", "sphere", "cylinder", "prism", "diamond", "card"] },
+                            "colour": { "type": "string", "maxLength": 16, "description": "teal, amber, blue, violet, green, red, grey or white." },
+                            "size": { "type": "integer", "minimum": 1, "maximum": 5, "description": "How important it is, drawn as large; by default 1." },
+                            "detail": { "type": "string", "maxLength": 1024, "description": "A line shown on pointing." },
+                            "ref": { "type": "string", "maxLength": 256, "description": "Your pointer back to what it stands for, such as a path, told you when it is pointed at." },
+                            "group": { "type": "string", "maxLength": 32, "description": "The id of the group it is in." },
                         },
+                        "required": ["id"],
                     },
-                    "edges": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "from": { "type": "string", "maxLength": 32 },
-                                "to": { "type": "string", "maxLength": 32 },
-                                "label": { "type": "string", "maxLength": 256 },
-                                "style": { "type": "string", "enum": ["solid", "dashed", "dotted", "thick", "flow"], "description": "flow moves from its from to its to." },
-                                "direction": { "type": "string", "enum": ["forward", "back", "both", "none"] },
-                                "colour": { "type": "string", "maxLength": 16 },
-                                "weight": { "type": "integer", "minimum": 1, "maximum": 3 },
-                            },
-                            "required": ["from", "to"],
-                        },
-                    },
-                    "groups": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string", "maxLength": 32 },
-                                "label": { "type": "string", "maxLength": 256 },
-                                "kind": { "type": "string", "enum": ["cluster", "layer", "container"] },
-                                "parent": { "type": "string", "maxLength": 32, "description": "The id of an earlier group it is in." },
-                            },
-                            "required": ["id"],
-                        },
-                    },
-                    "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges and groups, a diagram block's body, as a Mermaid flowchart's: a[Box], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, and @{ size: 3, colour: teal, detail: \"…\" }." },
                 },
+                "edges": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": { "type": "string", "maxLength": 32 },
+                            "to": { "type": "string", "maxLength": 32 },
+                            "label": { "type": "string", "maxLength": 256 },
+                            "style": { "type": "string", "enum": ["solid", "dashed", "dotted", "thick", "flow"], "description": "flow moves from its from to its to." },
+                            "direction": { "type": "string", "enum": ["forward", "back", "both", "none"] },
+                            "colour": { "type": "string", "maxLength": 16 },
+                            "weight": { "type": "integer", "minimum": 1, "maximum": 3 },
+                        },
+                        "required": ["from", "to"],
+                    },
+                },
+                "groups": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "maxLength": 32 },
+                            "label": { "type": "string", "maxLength": 256 },
+                            "kind": { "type": "string", "enum": ["cluster", "layer", "container"] },
+                            "parent": { "type": "string", "maxLength": 32, "description": "The id of an earlier group it is in." },
+                        },
+                        "required": ["id"],
+                    },
+                },
+                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges and groups, a diagram block's body, as a Mermaid flowchart's: a[Box], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, and @{ size: 3, colour: teal, detail: \"…\" }." },
             },
-            "annotations": {
-                "readOnlyHint": false,
-                "destructiveHint": false,
-                "idempotentHint": true,
-                "openWorldHint": false,
-            },
-        })
+        },
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false,
+        },
+    })
 }
 
 /// The `show_diagram` tool: a volume of the diagram its arguments describe, as nodes, edges and groups or as a block's
@@ -1730,9 +1730,10 @@ fn show_diagram(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Va
     let id = shown_text(arguments, "id")?;
     let slug = match id.trim() {
         "" => None,
-        id => Some(crate::stage::slug(id).ok_or(
-            "An id is 1 to 32 letters, digits, - and _, such as renderer.",
-        )?),
+        id => Some(
+            crate::stage::slug(id)
+                .ok_or("An id is 1 to 32 letters, digits, - and _, such as renderer.")?,
+        ),
     };
     let place = shown_text(arguments, "place")?;
     let place = (!place.trim().is_empty())
@@ -1751,7 +1752,9 @@ fn show_diagram(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Va
     {
         match Layout::parse(layout) {
             Some(layout) => diagram.layout = layout,
-            None => warnings.push(format!("\"{layout}\" is not a layout; laid out layered down")),
+            None => warnings.push(format!(
+                "\"{layout}\" is not a layout; laid out layered down"
+            )),
         }
     }
     if diagram.nodes.is_empty() {

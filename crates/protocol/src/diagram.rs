@@ -425,7 +425,10 @@ impl Attributes {
             }
             "shape" => {
                 let shape = shape(value).ok_or_else(|| {
-                    format!("\"{}\" is not a shape: a box, sphere, cylinder, prism, diamond or card", clean(value))
+                    format!(
+                        "\"{}\" is not a shape: a box, sphere, cylinder, prism, diamond or card",
+                        clean(value)
+                    )
                 })?;
                 self.shape.get_or_insert(shape);
             }
@@ -449,7 +452,12 @@ impl Attributes {
             "ref" | "reference" => {
                 self.reference.get_or_insert_with(|| value.to_owned());
             }
-            other => return Err(format!("\"{}\" is not an attribute of a node", clean(other))),
+            other => {
+                return Err(format!(
+                    "\"{}\" is not an attribute of a node",
+                    clean(other)
+                ));
+            }
         }
         Ok(())
     }
@@ -660,7 +668,9 @@ impl Builder {
             .find(|known| {
                 // Ids that differ only in the number they end with, as leaf1 and leaf2, are not misspellings.
                 let stem = |id: &str| id.trim_end_matches(|c: char| c.is_ascii_digit()).len();
-                edits(known, id) <= 2 && known.len().min(id.len()) > 2 && known[..stem(known)] != id[..stem(id)]
+                edits(known, id) <= 2
+                    && known.len().min(id.len()) > 2
+                    && known[..stem(known)] != id[..stem(id)]
             })
             .cloned()
     }
@@ -815,11 +825,11 @@ impl Builder {
                 ),
             });
         }
-        for ((count, first), (kind, most)) in self.over.iter().zip([
-            ("nodes", NODES),
-            ("edges", EDGES),
-            ("groups", GROUPS),
-        ]) {
+        for ((count, first), (kind, most)) in
+            self.over
+                .iter()
+                .zip([("nodes", NODES), ("edges", EDGES), ("groups", GROUPS)])
+        {
             if *count > 0 {
                 warnings.push(Warning {
                     line: None,
@@ -913,12 +923,8 @@ impl Diagram {
                     GroupKind::Cluster
                 })
             });
-            let parent = text(group, "parent").and_then(|parent| {
-                builder
-                    .groups
-                    .iter()
-                    .position(|group| group.id == parent)
-            });
+            let parent = text(group, "parent")
+                .and_then(|parent| builder.groups.iter().position(|group| group.id == parent));
             builder.group(
                 &id,
                 &text(group, "label").unwrap_or_else(|| id.clone()),

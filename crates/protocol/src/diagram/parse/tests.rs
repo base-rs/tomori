@@ -72,7 +72,11 @@ fn edges_take_every_style_arrow_and_label_form() {
 fn chains_and_ampersands_make_an_edge_for_each_pair() {
     let (diagram, warnings) = parse("a & b --> c --> d & e\n");
     assert!(warnings.is_empty());
-    let pairs: Vec<(u16, u16)> = diagram.edges.iter().map(|edge| (edge.from, edge.to)).collect();
+    let pairs: Vec<(u16, u16)> = diagram
+        .edges
+        .iter()
+        .map(|edge| (edge.from, edge.to))
+        .collect();
     assert_eq!(pairs, [(0, 2), (1, 2), (2, 3), (2, 4)]);
 }
 
@@ -83,15 +87,24 @@ fn attributes_classes_and_comments() {
     );
     let hub = &diagram.nodes[0];
     // The first of each attribute is kept: its own before its class's.
-    assert_eq!((hub.size, hub.colour, hub.shape), (4, Colour::Amber, Shape::Sphere));
+    assert_eq!(
+        (hub.size, hub.colour, hub.shape),
+        (4, Colour::Amber, Shape::Sphere)
+    );
     assert_eq!(hub.detail, "Spaces, under one lock");
     assert_eq!(hub.reference, "crates/server");
     assert_eq!(hub.label, "Hub");
     let leaf = &diagram.nodes[1];
-    assert_eq!((leaf.size, leaf.colour, leaf.shape), (1, Colour::Teal, Shape::Prism));
+    assert_eq!(
+        (leaf.size, leaf.colour, leaf.shape),
+        (1, Colour::Teal, Shape::Prism)
+    );
     assert_eq!(
         texts(&warnings),
-        ["line 6: \"ghost\" is not a node", "line 7: \"missing\" is not a class"]
+        [
+            "line 6: \"ghost\" is not a node",
+            "line 7: \"missing\" is not a class"
+        ]
     );
 }
 
@@ -101,7 +114,11 @@ fn subgraphs_group_their_nodes_nested_as_they_are_written() {
         "subgraph scene [tomori-scene]\n  kind: container\n  direction LR\n  step((Frame step))\n  subgraph inner[\"Inner\"]\n    faces --> shapes\n  end\nend\nsubgraph Loose\nx\nend\nsubgraph [Only a label]\nend\noutside --> step\n",
     );
     assert!(warnings.is_empty(), "{warnings:?}");
-    let ids: Vec<&str> = diagram.groups.iter().map(|group| group.id.as_str()).collect();
+    let ids: Vec<&str> = diagram
+        .groups
+        .iter()
+        .map(|group| group.id.as_str())
+        .collect();
     assert_eq!(ids, ["scene", "inner", "Loose", "group-4"]);
     assert_eq!(diagram.groups[0].kind, GroupKind::Container);
     assert_eq!(diagram.groups[0].label, "tomori-scene");
@@ -109,7 +126,13 @@ fn subgraphs_group_their_nodes_nested_as_they_are_written() {
     assert_eq!(diagram.groups[3].label, "Only a label");
     let group = |id: &str| diagram.nodes[diagram.node(id).unwrap()].group;
     assert_eq!(
-        [group("step"), group("faces"), group("shapes"), group("x"), group("outside")],
+        [
+            group("step"),
+            group("faces"),
+            group("shapes"),
+            group("x"),
+            group("outside")
+        ],
         [Some(0), Some(1), Some(1), Some(2), None]
     );
 }
@@ -117,15 +140,28 @@ fn subgraphs_group_their_nodes_nested_as_they_are_written() {
 #[test]
 fn a_first_line_or_direction_says_the_layout() {
     let (diagram, _) = parse("flowchart LR\na --> b\n");
-    assert_eq!(diagram.layout, Layout::Layered { direction: Rank::Right });
+    assert_eq!(
+        diagram.layout,
+        Layout::Layered {
+            direction: Rank::Right
+        }
+    );
     let (diagram, _) = parse("%% comment first\ngraph\ndirection BT\n");
-    assert_eq!(diagram.layout, Layout::Layered { direction: Rank::Up });
+    assert_eq!(
+        diagram.layout,
+        Layout::Layered {
+            direction: Rank::Up
+        }
+    );
     // Not on a later line, where it is not read.
     let (diagram, warnings) = parse("a\nflowchart TD\n");
     assert_eq!(diagram.layout, Layout::default());
     assert_eq!(texts(&warnings), ["line 2: cannot read \"TD\" as an edge"]);
     let (_, warnings) = parse("direction sideways\n");
-    assert_eq!(texts(&warnings), ["line 1: \"sideways\" is not a direction"]);
+    assert_eq!(
+        texts(&warnings),
+        ["line 1: \"sideways\" is not a direction"]
+    );
 }
 
 #[test]
@@ -184,15 +220,22 @@ fn links_are_read_by_their_characters() {
 
 #[test]
 fn quoted_text_keeps_its_commas() {
-    assert_eq!(split_unquoted("a: \"x, y\", b: z", ','), ["a: \"x, y\"", " b: z"]);
+    assert_eq!(
+        split_unquoted("a: \"x, y\", b: z", ','),
+        ["a: \"x, y\"", " b: z"]
+    );
     assert_eq!(unquoted("\"quoted\""), "quoted");
     assert_eq!(unquoted("\"half"), "\"half");
-    assert_eq!(subgraph("[Label]"), ("Label".to_owned(), "Label".to_owned()));
+    assert_eq!(
+        subgraph("[Label]"),
+        ("Label".to_owned(), "Label".to_owned())
+    );
 }
 
 #[test]
 fn the_first_label_of_an_edge_is_kept() {
-    let (diagram, warnings) = parse("flowchart sideways\na -->|first| b : second\nc -- third -->|fourth| d\n");
+    let (diagram, warnings) =
+        parse("flowchart sideways\na -->|first| b : second\nc -- third -->|fourth| d\n");
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(diagram.layout, Layout::default());
     assert_eq!(diagram.edges[0].label, "first");

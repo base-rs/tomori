@@ -6521,7 +6521,12 @@ impl Hub {
                     (content, to, placed)
                 })
                 .collect();
-            for ((id, updated), content) in record.stage.project_placed(&walls, placed, now).into_iter().zip(&warned) {
+            for ((id, updated), content) in record
+                .stage
+                .project_placed(&walls, placed, now)
+                .into_iter()
+                .zip(&warned)
+            {
                 // What was wrong with a volume's block, the agent is told before the next words.
                 if let Some(note) = content.warned(&id) {
                     notes.push((id.clone(), note));
@@ -7156,8 +7161,14 @@ impl Hub {
                 let (diagrams, limits) = state
                     .connections
                     .get(&connection)
-                    .map_or((false, Limits::TODAY), |record| (record.diagrams, record.limits));
-                if projection.panels.iter().any(|panel| panel.diagram.is_some()) {
+                    .map_or((false, Limits::TODAY), |record| {
+                        (record.diagrams, record.limits)
+                    });
+                if projection
+                    .panels
+                    .iter()
+                    .any(|panel| panel.diagram.is_some())
+                {
                     let mut plain = (*projection).clone();
                     plain.panels = crate::stage::within_volumes(plain.panels, diagrams, &limits);
                     projection = Arc::new(plain);

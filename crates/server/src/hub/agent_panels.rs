@@ -504,7 +504,9 @@ impl Hub {
             .cloned()
             .ok_or("A code panel cannot be updated in place: project a new one.")?;
         if content.diagram.is_some() {
-            return Err("A diagram is updated with show_diagram, or a diagram block, of its id.".to_owned());
+            return Err(
+                "A diagram is updated with show_diagram, or a diagram block, of its id.".to_owned(),
+            );
         }
         // Changed since the version the agent read, the update is refused, rather than tick another item than it named.
         let current = projection.panel(&id).expect("a panel found").version;

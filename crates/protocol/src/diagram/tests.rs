@@ -41,13 +41,25 @@ fn a_diagram_has_a_compact_wire_format_and_reads_newer_values_as_defaults() {
     assert_eq!(newer.layout, Layout::Unknown);
     assert_eq!(newer.nodes[0].shape, Shape::Box);
     assert_eq!(newer.nodes[0].colour, Colour::Grey);
-    assert_eq!((newer.edges[0].style, newer.edges[0].direction), (Style::Solid, Arrow::Forward));
+    assert_eq!(
+        (newer.edges[0].style, newer.edges[0].direction),
+        (Style::Solid, Arrow::Forward)
+    );
     assert_eq!(newer.groups[0].kind, GroupKind::Cluster);
-    let rank: Layout = serde_json::from_value(serde_json::json!({"kind": "layered", "direction": "diagonal"})).unwrap();
+    let rank: Layout =
+        serde_json::from_value(serde_json::json!({"kind": "layered", "direction": "diagonal"}))
+            .unwrap();
     assert_eq!(rank, Layout::default());
     // A panel is a volume with one, and its body is the outline.
-    let panel = Panel::new("panel-1", "Renderer", diagram.outline(), Place::Free { pose: Pose::default() })
-        .with_diagram(diagram.clone());
+    let panel = Panel::new(
+        "panel-1",
+        "Renderer",
+        diagram.outline(),
+        Place::Free {
+            pose: Pose::default(),
+        },
+    )
+    .with_diagram(diagram.clone());
     assert!(panel.same_structure(&panel.clone()));
     let mut moved = panel.clone();
     moved.diagram.as_mut().unwrap().nodes[0].at = [5, 5, 5];
@@ -57,12 +69,42 @@ fn a_diagram_has_a_compact_wire_format_and_reads_newer_values_as_defaults() {
 #[test]
 fn layouts_are_named_as_blocks_and_the_tool_name_them() {
     for (text, layout) in [
-        ("layered", Layout::Layered { direction: Rank::Down }),
-        ("layered up", Layout::Layered { direction: Rank::Up }),
-        ("layered left", Layout::Layered { direction: Rank::Left }),
-        ("layered away", Layout::Layered { direction: Rank::Away }),
-        ("TD", Layout::Layered { direction: Rank::Down }),
-        ("RL", Layout::Layered { direction: Rank::Left }),
+        (
+            "layered",
+            Layout::Layered {
+                direction: Rank::Down,
+            },
+        ),
+        (
+            "layered up",
+            Layout::Layered {
+                direction: Rank::Up,
+            },
+        ),
+        (
+            "layered left",
+            Layout::Layered {
+                direction: Rank::Left,
+            },
+        ),
+        (
+            "layered away",
+            Layout::Layered {
+                direction: Rank::Away,
+            },
+        ),
+        (
+            "TD",
+            Layout::Layered {
+                direction: Rank::Down,
+            },
+        ),
+        (
+            "RL",
+            Layout::Layered {
+                direction: Rank::Left,
+            },
+        ),
         ("radial", Layout::Radial { hub: None }),
         ("Force", Layout::Force),
         ("grid", Layout::Grid),
@@ -115,16 +157,34 @@ fn attributes_keep_the_first_of_each_and_name_what_they_cannot_set() {
     ] {
         assert_eq!(super::shape(name), Some(shape));
     }
-    for (name, kind) in [("layer", GroupKind::Layer), ("container", GroupKind::Container), ("cluster", GroupKind::Cluster)] {
+    for (name, kind) in [
+        ("layer", GroupKind::Layer),
+        ("container", GroupKind::Container),
+        ("cluster", GroupKind::Cluster),
+    ] {
         assert_eq!(group_kind(name), Some(kind));
     }
-    for (name, style) in [("solid", Style::Solid), ("dashed", Style::Dashed), ("dotted", Style::Dotted), ("thick", Style::Thick), ("flow", Style::Flow)] {
+    for (name, style) in [
+        ("solid", Style::Solid),
+        ("dashed", Style::Dashed),
+        ("dotted", Style::Dotted),
+        ("thick", Style::Thick),
+        ("flow", Style::Flow),
+    ] {
         assert_eq!(super::style(name), Some(style));
     }
-    for (name, direction) in [("forward", Arrow::Forward), ("back", Arrow::Back), ("both", Arrow::Both), ("none", Arrow::None)] {
+    for (name, direction) in [
+        ("forward", Arrow::Forward),
+        ("back", Arrow::Back),
+        ("both", Arrow::Both),
+        ("none", Arrow::None),
+    ] {
         assert_eq!(arrow(name), Some(direction));
     }
-    assert_eq!((super::style("wavy"), arrow("up"), group_kind("ring")), (None, None, None));
+    assert_eq!(
+        (super::style("wavy"), arrow("up"), group_kind("ring")),
+        (None, None, None)
+    );
 }
 
 #[test]
@@ -147,7 +207,12 @@ fn the_tool_s_json_is_read_as_a_block_is_warning_of_what_it_names_that_is_not_th
         ]
     }))
     .unwrap();
-    assert_eq!(diagram.layout, Layout::Layered { direction: Rank::Right });
+    assert_eq!(
+        diagram.layout,
+        Layout::Layered {
+            direction: Rank::Right
+        }
+    );
     assert_eq!(diagram.groups[0].kind, GroupKind::Container);
     assert_eq!(diagram.groups[1].parent, Some(0));
     assert_eq!(diagram.nodes[0].group, Some(0));
@@ -181,14 +246,22 @@ fn the_tool_s_json_is_read_as_a_block_is_warning_of_what_it_names_that_is_not_th
     assert_eq!(diagram.layout, Layout::Force);
     assert_eq!(
         texts(&warnings),
-        ["\"a\" is not a node; made a box called a", "\"b\" is not a node; made a box called b"]
+        [
+            "\"a\" is not a node; made a box called a",
+            "\"b\" is not a node; made a box called b"
+        ]
     );
-    let (diagram, warnings) = Diagram::from_json(&serde_json::json!({"layout": "spiral", "nodes": [{"id": "a", "size": 2}]})).unwrap();
+    let (diagram, warnings) = Diagram::from_json(
+        &serde_json::json!({"layout": "spiral", "nodes": [{"id": "a", "size": 2}]}),
+    )
+    .unwrap();
     assert_eq!(diagram.layout, Layout::default());
     assert_eq!(diagram.nodes[0].size, 2);
     assert_eq!(
         texts(&warnings),
-        ["\"spiral\" is not a layout: layered with down, up, right, left or away, radial, force or grid; laid out layered down"]
+        [
+            "\"spiral\" is not a layout: layered with down, up, right, left or away, radial, force or grid; laid out layered down"
+        ]
     );
     assert_eq!(
         Diagram::from_json(&serde_json::json!({"nodes": {"id": "a"}})),
@@ -221,13 +294,39 @@ fn bounds_keep_what_fits_in_the_order_written_and_count_the_rest() {
             .all(|edge| usize::from(edge.from) < NODES && usize::from(edge.to) < NODES)
     );
     let texts = texts(&warnings);
-    assert!(texts.contains(&"the edge from n2 to itself is left out".to_owned()), "{texts:?}");
-    assert!(texts.iter().any(|text| text.ends_with("edges left out: at most 4 between one pair of nodes")));
-    assert!(texts.contains(&"nodes 65 to 70 left out: at most 64".to_owned()), "{texts:?}");
-    assert!(texts.iter().any(|text| text.starts_with("edges 129 to ")), "{texts:?}");
-    assert!(texts.contains(&"groups 13 to 17 left out: at most 12".to_owned()), "{texts:?}");
-    assert!(texts.iter().any(|text| text.ends_with("group \"d\" nested 4 deep: its members put in \"c\"")), "{texts:?}");
-    let many: Vec<Warning> = warnings.iter().cycle().take(WARNINGS + 3).cloned().collect();
+    assert!(
+        texts.contains(&"the edge from n2 to itself is left out".to_owned()),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.ends_with("edges left out: at most 4 between one pair of nodes"))
+    );
+    assert!(
+        texts.contains(&"nodes 65 to 70 left out: at most 64".to_owned()),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.starts_with("edges 129 to ")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.contains(&"groups 13 to 17 left out: at most 12".to_owned()),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.ends_with("group \"d\" nested 4 deep: its members put in \"c\"")),
+        "{texts:?}"
+    );
+    let many: Vec<Warning> = warnings
+        .iter()
+        .cycle()
+        .take(WARNINGS + 3)
+        .cloned()
+        .collect();
     assert_eq!(told(&many).lines().count(), WARNINGS + 1);
 }
 
@@ -266,16 +365,29 @@ fn a_client_draws_a_diagram_within_bounds_whatever_it_is_sent() {
     let diagram = Diagram {
         layout: Layout::Force,
         nodes,
-        edges: vec![edge.clone(), Edge::new(0, 90), Edge::new(2, 2)].into_iter().chain(std::iter::repeat_n(edge, 200)).collect(),
+        edges: vec![edge.clone(), Edge::new(0, 90), Edge::new(2, 2)]
+            .into_iter()
+            .chain(std::iter::repeat_n(edge, 200))
+            .collect(),
         groups,
         extent: [u16::MAX, 10, 10],
     }
     .bounded();
-    assert_eq!((diagram.nodes.len(), diagram.edges.len(), diagram.groups.len()), (NODES, EDGES, GROUPS));
+    assert_eq!(
+        (
+            diagram.nodes.len(),
+            diagram.edges.len(),
+            diagram.groups.len()
+        ),
+        (NODES, EDGES, GROUPS)
+    );
     assert_eq!((diagram.nodes[0].size, diagram.nodes[1].size), (1, SIZES));
     assert_eq!(diagram.nodes[0].group, None);
     assert_eq!(diagram.nodes[0].label.chars().count(), LABEL_CHARS + 1);
-    assert_eq!((diagram.groups[0].parent, diagram.groups[2].parent), (None, Some(1)));
+    assert_eq!(
+        (diagram.groups[0].parent, diagram.groups[2].parent),
+        (None, Some(1))
+    );
     assert_eq!(diagram.edges[0].via.len(), WAYPOINTS);
     assert_eq!(diagram.edges[0].weight, WEIGHTS);
     assert_eq!(diagram.extent[0], EXTENT_MM);
@@ -285,7 +397,10 @@ fn a_client_draws_a_diagram_within_bounds_whatever_it_is_sent() {
 #[test]
 fn edges_are_named_by_their_ends_and_label() {
     let (diagram, _) = parse("a[Frame step] --> b[faces] : panels changed\nb <-- c\nc --- a\n");
-    assert_eq!(diagram.edge_name(0).as_deref(), Some("Frame step → faces: panels changed"));
+    assert_eq!(
+        diagram.edge_name(0).as_deref(),
+        Some("Frame step → faces: panels changed")
+    );
     assert_eq!(diagram.edge_name(1).as_deref(), Some("faces ← c"));
     assert_eq!(diagram.edge_name(2).as_deref(), Some("c → Frame step"));
     assert_eq!(diagram.edge_name(3), None);
@@ -319,7 +434,9 @@ fn builder_groups_by_id_and_names_its_kind() {
 
 #[test]
 fn a_block_warns_of_a_node_named_close_to_another_and_the_outline_names_its_groups() {
-    let (diagram, warnings) = parse("octree((Octree))@{ size: 2, }\nrenderer --> octre\nsubgraph s [Scene]\nrenderer <-- leaf\nend\n");
+    let (diagram, warnings) = parse(
+        "octree((Octree))@{ size: 2, }\nrenderer --> octre\nsubgraph s [Scene]\nrenderer <-- leaf\nend\n",
+    );
     assert_eq!(
         texts(&warnings),
         ["line 2: \"octre\" is not a node; made a box called octre (did you mean octree?)"]
@@ -330,17 +447,33 @@ fn a_block_warns_of_a_node_named_close_to_another_and_the_outline_names_its_grou
         "- Octree\n- octre\n\n**Scene**\n- renderer\n- leaf\n\n**Edges**\n- renderer → octre\n- renderer ← leaf"
     );
     // A label that is not text, such as a list, is none.
-    let (diagram, _) = Diagram::from_json(&serde_json::json!({"nodes": [{"id": "a", "label": ["A"], "size": 2}]})).unwrap();
-    assert_eq!((diagram.nodes[0].label.as_str(), diagram.nodes[0].size), ("a", 2));
+    let (diagram, _) =
+        Diagram::from_json(&serde_json::json!({"nodes": [{"id": "a", "label": ["A"], "size": 2}]}))
+            .unwrap();
     assert_eq!(
-        serde_json::to_value(crate::Resource::volume_at("panel-7", Some("octree"), Some(2))).unwrap(),
+        (diagram.nodes[0].label.as_str(), diagram.nodes[0].size),
+        ("a", 2)
+    );
+    assert_eq!(
+        serde_json::to_value(crate::Resource::volume_at(
+            "panel-7",
+            Some("octree"),
+            Some(2)
+        ))
+        .unwrap(),
         serde_json::json!({"kind": "panel", "panel": "panel-7", "node": "octree", "edge": 2})
     );
 }
 
 #[test]
 fn what_cannot_be_named_is_left_out_quietly() {
-    assert_eq!(told(&[Warning { line: Some(2), text: "x".into() }]), "line 2: x");
+    assert_eq!(
+        told(&[Warning {
+            line: Some(2),
+            text: "x".into()
+        }]),
+        "line 2: x"
+    );
     // An id too long to be a node's makes no edge.
     let long = "n".repeat(ID_BYTES + 1);
     let (diagram, warnings) = parse(&format!("a --> {long}\n"));
@@ -351,7 +484,8 @@ fn what_cannot_be_named_is_left_out_quietly() {
         serde_json::json!({"kind": "radial", "hub": "hub"}),
         serde_json::json!({"kind": "force"}),
     ] {
-        let (diagram, warnings) = Diagram::from_json(&serde_json::json!({"layout": layout})).unwrap();
+        let (diagram, warnings) =
+            Diagram::from_json(&serde_json::json!({"layout": layout})).unwrap();
         assert!(warnings.is_empty());
         assert_ne!(diagram.layout, Layout::default());
     }

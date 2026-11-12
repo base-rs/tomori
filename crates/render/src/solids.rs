@@ -46,7 +46,11 @@ fn sphere() -> Vec<Vertex> {
     let at = |ring: usize, segment: usize| {
         let polar = std::f32::consts::PI * ring as f32 / RINGS as f32;
         let around = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
-        glam::Vec3::new(polar.sin() * around.cos(), polar.cos(), polar.sin() * around.sin())
+        glam::Vec3::new(
+            polar.sin() * around.cos(),
+            polar.cos(),
+            polar.sin() * around.sin(),
+        )
     };
     let mut vertices = Vec::new();
     for ring in 0..RINGS {
@@ -130,7 +134,11 @@ fn diamond() -> Vec<Vertex> {
                 let normal = glam::Vec3::new(x, y, z);
                 let corners = [glam::Vec3::X * x, glam::Vec3::Y * y, glam::Vec3::Z * z];
                 // Wound the same way seen from outside, whichever octant.
-                let order = if x * y * z > 0.0 { [0, 1, 2] } else { [0, 2, 1] };
+                let order = if x * y * z > 0.0 {
+                    [0, 1, 2]
+                } else {
+                    [0, 2, 1]
+                };
                 for index in order {
                     vertices.push(vertex(corners[index], normal));
                 }
@@ -194,7 +202,11 @@ impl Solids {
         for volume in volumes {
             self.staged.clear();
             volume.instances(&mut self.staged);
-            let cost: usize = self.staged.iter().map(|instance| triangles(instance.solid)).sum();
+            let cost: usize = self
+                .staged
+                .iter()
+                .map(|instance| triangles(instance.solid))
+                .sum();
             if total + cost > TRIANGLES || kept.len() + self.staged.len() > MOST_SOLIDS {
                 left_out += 1;
                 continue;

@@ -141,14 +141,22 @@ const NODE_EDGES: usize = 8;
 /// is called, such as `node "Octree" (id octree)` or `edge "Renderer → Octree: queries" (edge 3)`, and what it says of
 /// it, its shape, group, edges, detail and reference, or its style, every piece of text in quotes and cleaned onto one
 /// line, as it is the agent's own and may be from what it read. `None` where it names neither.
-pub(crate) fn part(diagram: &Diagram, node: Option<&str>, edge: Option<u16>) -> Option<(String, String)> {
+pub(crate) fn part(
+    diagram: &Diagram,
+    node: Option<&str>,
+    edge: Option<u16>,
+) -> Option<(String, String)> {
     use tomori_protocol::diagram::{Shape, Style};
     let clean = |text: &str, limit: usize| crate::space::one_line(text, limit);
     let group = |group: Option<u8>| {
         group
             .and_then(|group| diagram.groups.get(usize::from(group)))
             .map(|group| {
-                let label = if group.label.is_empty() { &group.id } else { &group.label };
+                let label = if group.label.is_empty() {
+                    &group.id
+                } else {
+                    &group.label
+                };
                 format!(", in group \"{}\"", clean(label, 32))
             })
             .unwrap_or_default()
@@ -186,7 +194,10 @@ pub(crate) fn part(diagram: &Diagram, node: Option<&str>, edge: Option<u16>) -> 
             .collect();
         if !edges.is_empty() {
             let more = edges.len().saturating_sub(NODE_EDGES);
-            about.push_str(&format!("; edges: {}", edges[..edges.len().min(NODE_EDGES)].join(", ")));
+            about.push_str(&format!(
+                "; edges: {}",
+                edges[..edges.len().min(NODE_EDGES)].join(", ")
+            ));
             if more > 0 {
                 about.push_str(&format!(" and {more} more"));
             }

@@ -4,7 +4,10 @@
 //! A `diagram` block's body, shaped like a Mermaid flowchart, a line at a time: nodes with their shapes from their
 //! brackets, `@{ … }` attributes, edges with their styles and labels, `subgraph … end` groups, `classDef` and `class`,
 //! and `%%` comments. A line that cannot be read is skipped, saying so, and the rest read. See `design/diagrams.md`.
-use super::{Arrow, Attributes, Builder, Diagram, EdgeDraft, GroupKind, Layout, Shape, Style, Warning, clean, group_kind};
+use super::{
+    Arrow, Attributes, Builder, Diagram, EdgeDraft, GroupKind, Layout, Shape, Style, Warning,
+    clean, group_kind,
+};
 
 /// The diagram `body`, a `diagram` block's body after its header, describes, and what was left out or changed reading
 /// it, each with its line, counted from 1 within `body`.
@@ -78,7 +81,8 @@ impl Reader {
                 .map(|_| ())
                 .ok_or_else(|| "end without a subgraph to end".to_owned()),
             "direction" if self.open.is_empty() => {
-                let layout = Layout::parse(rest).ok_or_else(|| format!("\"{}\" is not a direction", clean(rest)))?;
+                let layout = Layout::parse(rest)
+                    .ok_or_else(|| format!("\"{}\" is not a direction", clean(rest)))?;
                 self.builder.set_layout(layout);
                 Ok(())
             }
@@ -86,7 +90,10 @@ impl Reader {
             "direction" => Ok(()),
             "kind:" => {
                 let kind = group_kind(rest).ok_or_else(|| {
-                    format!("\"{}\" is not a kind of group: a cluster, layer or container", clean(rest))
+                    format!(
+                        "\"{}\" is not a kind of group: a cluster, layer or container",
+                        clean(rest)
+                    )
                 })?;
                 let group = self.group().ok_or("kind: outside a subgraph")?;
                 self.builder.group_kind(group, kind);
@@ -106,7 +113,11 @@ impl Reader {
                     .rsplit_once(char::is_whitespace)
                     .ok_or("class needs nodes and a class")?;
                 let line = self.line_number();
-                for node in nodes.split(',').map(str::trim).filter(|node| !node.is_empty()) {
+                for node in nodes
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|node| !node.is_empty())
+                {
                     self.given.push((node.to_owned(), name.to_owned(), line));
                 }
                 Ok(())
@@ -215,13 +226,20 @@ impl Reader {
                 Some((_, attributes, _)) if self.builder.has_node(&node) => {
                     self.builder.node(&node, attributes.clone(), None);
                 }
-                Some(_) => self.builder.warn(format!("\"{}\" is not a node", clean(&node))),
-                None => self.builder.warn(format!("\"{}\" is not a class", clean(&class))),
+                Some(_) => self
+                    .builder
+                    .warn(format!("\"{}\" is not a node", clean(&node))),
+                None => self
+                    .builder
+                    .warn(format!("\"{}\" is not a class", clean(&class))),
             }
         }
         if !self.open.is_empty() {
             self.builder.line = None;
-            self.builder.warn(format!("{} subgraph left open, ended at the end", self.open.len()));
+            self.builder.warn(format!(
+                "{} subgraph left open, ended at the end",
+                self.open.len()
+            ));
         }
         self.builder.finish()
     }
@@ -340,7 +358,8 @@ impl<'a> Cursor<'a> {
         let mut end = 0;
         while end < bytes.len()
             && (word(bytes[end])
-                || (matches!(bytes[end], b'-' | b'.') && bytes.get(end + 1).is_some_and(|next| word(*next))))
+                || (matches!(bytes[end], b'-' | b'.')
+                    && bytes.get(end + 1).is_some_and(|next| word(*next))))
         {
             end += 1;
         }
@@ -360,7 +379,10 @@ impl<'a> Cursor<'a> {
             attributes: None,
             class: None,
         };
-        if let Some((open, close, shape)) = BRACKETS.iter().find(|(open, ..)| self.rest().starts_with(open)) {
+        if let Some((open, close, shape)) = BRACKETS
+            .iter()
+            .find(|(open, ..)| self.rest().starts_with(open))
+        {
             self.at += open.len();
             let label = self
                 .until(close)

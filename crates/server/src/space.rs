@@ -5171,10 +5171,17 @@ mod tests {
         let space = model();
         let describe = |panel: &str, at: crate::stage::Pointed<'_>| {
             (panel == "panel-1").then(|| {
-                let across = at.across.map_or(String::new(), |across| format!(" at {across}"));
+                let across = at
+                    .across
+                    .map_or(String::new(), |across| format!(" at {across}"));
                 let node = at.node.map_or(String::new(), |node| format!(" on {node}"));
-                let edge = at.edge.map_or(String::new(), |edge| format!(" along {edge}"));
-                format!("panel \"Status\"{}{across}{node}{edge}", at.row.unwrap_or_default())
+                let edge = at
+                    .edge
+                    .map_or(String::new(), |edge| format!(" along {edge}"));
+                format!(
+                    "panel \"Status\"{}{across}{node}{edge}",
+                    at.row.unwrap_or_default()
+                )
             })
         };
         let panel = tomori_protocol::Resource::panel("panel-1");

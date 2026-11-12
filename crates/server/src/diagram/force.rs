@@ -26,13 +26,17 @@ pub(super) fn lay_out(graph: &Graph, before: &[Option<Spot>]) -> Vec<Spot> {
     let mut spots: Vec<Spot> = (0..count)
         .map(|node| {
             before[node].unwrap_or_else(|| {
-                let near: Vec<Spot> = neighbours[node].iter().filter_map(|other| before[*other]).collect();
+                let near: Vec<Spot> = neighbours[node]
+                    .iter()
+                    .filter_map(|other| before[*other])
+                    .collect();
                 let jitter = hashed(&graph.ids[node]);
                 if near.is_empty() {
                     jitter.map(|value| value * spread)
                 } else {
                     [0, 1, 2].map(|axis| {
-                        near.iter().map(|spot| spot[axis]).sum::<f64>() / near.len() as f64 + jitter[axis] * unit / 2.0
+                        near.iter().map(|spot| spot[axis]).sum::<f64>() / near.len() as f64
+                            + jitter[axis] * unit / 2.0
                     })
                 }
             })
@@ -53,7 +57,8 @@ pub(super) fn lay_out(graph: &Graph, before: &[Option<Spot>]) -> Vec<Spot> {
                 let direction = normalised(apart).unwrap_or_else(|| {
                     let a = hashed(&graph.ids[node]);
                     let b = hashed(&graph.ids[other]);
-                    normalised([a[0] - b[0], a[1] - b[1], a[2] - b[2] + 1e-3]).unwrap_or([1.0, 0.0, 0.0])
+                    normalised([a[0] - b[0], a[1] - b[1], a[2] - b[2] + 1e-3])
+                        .unwrap_or([1.0, 0.0, 0.0])
                 });
                 for axis in 0..3 {
                     sum[axis] += weight * (spots[other][axis] + ideal * direction[axis]);
@@ -84,27 +89,37 @@ fn distances(graph: &Graph) -> Vec<Vec<f64>> {
     let count = graph.len();
     let neighbours = graph.neighbours();
     let mut hops = vec![vec![usize::MAX; count]; count];
-    for start in 0..count {
-        hops[start][start] = 0;
+    for (start, from) in hops.iter_mut().enumerate() {
+        from[start] = 0;
         let mut queue = vec![start];
         let mut at = 0;
         while at < queue.len() {
             let node = queue[at];
             at += 1;
             for &next in &neighbours[node] {
-                if hops[start][next] == usize::MAX {
-                    hops[start][next] = hops[start][node] + 1;
+                if from[next] == usize::MAX {
+                    from[next] = from[node] + 1;
                     queue.push(next);
                 }
             }
         }
     }
-    let furthest = hops.iter().flatten().filter(|hops| **hops != usize::MAX).max().copied().unwrap_or(0);
+    let furthest = hops
+        .iter()
+        .flatten()
+        .filter(|hops| **hops != usize::MAX)
+        .max()
+        .copied()
+        .unwrap_or(0);
     (0..count)
         .map(|a| {
             (0..count)
                 .map(|b| {
-                    let mut distance = if hops[a][b] == usize::MAX { furthest + 1 } else { hops[a][b] } as f64;
+                    let mut distance = if hops[a][b] == usize::MAX {
+                        furthest + 1
+                    } else {
+                        hops[a][b]
+                    } as f64;
                     match (graph.groups[a], graph.groups[b]) {
                         (Some(x), Some(y)) if x == y => distance = distance.min(2.0),
                         (Some(_), _) | (_, Some(_)) => distance = distance.max(2.0),
@@ -150,7 +165,10 @@ pub(super) fn separate(graph: &Graph, spots: &mut [Spot]) {
 pub(super) fn turned(spots: &mut [Spot]) {
     let count = spots.len() as f64;
     let middle = [0, 1, 2].map(|axis| spots.iter().map(|spot| spot[axis]).sum::<f64>() / count);
-    let centred: Vec<Spot> = spots.iter().map(|spot| [0, 1, 2].map(|axis| spot[axis] - middle[axis])).collect();
+    let centred: Vec<Spot> = spots
+        .iter()
+        .map(|spot| [0, 1, 2].map(|axis| spot[axis] - middle[axis]))
+        .collect();
     let mut covariance = [[0.0; 3]; 3];
     for spot in &centred {
         for row in 0..3 {
@@ -162,7 +180,11 @@ pub(super) fn turned(spots: &mut [Spot]) {
     let principal = |matrix: &[[f64; 3]; 3], start: Spot| {
         let mut vector = start;
         for _ in 0..64 {
-            let next = [0, 1, 2].map(|row| (0..3).map(|column| matrix[row][column] * vector[column]).sum::<f64>());
+            let next = [0, 1, 2].map(|row| {
+                (0..3)
+                    .map(|column| matrix[row][column] * vector[column])
+                    .sum::<f64>()
+            });
             match normalised(next) {
                 Some(next) => vector = next,
                 None => break,
@@ -173,7 +195,11 @@ pub(super) fn turned(spots: &mut [Spot]) {
     let first = principal(&covariance, [1.0, 0.3, 0.1]);
     // Without the first axis's share, the next.
     let along: f64 = (0..3)
-        .map(|row| (0..3).map(|column| first[row] * covariance[row][column] * first[column]).sum::<f64>())
+        .map(|row| {
+            (0..3)
+                .map(|column| first[row] * covariance[row][column] * first[column])
+                .sum::<f64>()
+        })
         .sum();
     let mut deflated = covariance;
     for row in 0..3 {
@@ -184,10 +210,12 @@ pub(super) fn turned(spots: &mut [Spot]) {
     let second = principal(&deflated, [0.1, 1.0, 0.3]);
     // Square to the first, in case the deflation left a little of it.
     let dot: f64 = (0..3).map(|axis| second[axis] * first[axis]).sum();
-    let second = normalised([0, 1, 2].map(|axis| second[axis] - dot * first[axis])).unwrap_or([0.0, 1.0, 0.0]);
+    let second = normalised([0, 1, 2].map(|axis| second[axis] - dot * first[axis]))
+        .unwrap_or([0.0, 1.0, 0.0]);
     let third = cross(first, second);
     let mut axes = [first, second, third];
-    let project = |spot: &Spot, axis: &Spot| (0..3).map(|index| spot[index] * axis[index]).sum::<f64>();
+    let project =
+        |spot: &Spot, axis: &Spot| (0..3).map(|index| spot[index] * axis[index]).sum::<f64>();
     if let Some(start) = centred.first() {
         if project(start, &axes[0]) > 0.0 {
             axes[0] = axes[0].map(|value| -value);

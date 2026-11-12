@@ -2267,7 +2267,9 @@ impl Step {
                     (_, _, _, Some(crate::projection::Part::Edge(edge))) => {
                         tomori_protocol::Resource::volume_at(panel, None, Some(edge))
                     }
-                    (_, _, Some(across), None) => tomori_protocol::Resource::chart_at(panel, across),
+                    (_, _, Some(across), None) => {
+                        tomori_protocol::Resource::chart_at(panel, across)
+                    }
                     (Some(line), Some(row), ..) => {
                         tomori_protocol::Resource::panel_row(panel, line, row)
                     }

@@ -43,7 +43,6 @@ pub use blocks::{
 };
 pub use code::Source;
 pub use image::without_image;
-pub use volume::{DIAGRAM_BYTES, within_volumes};
 pub(crate) use layouts::{LAYOUT_WALLS, Planned};
 pub use placement::Placement;
 pub(crate) use published::Change;
@@ -51,6 +50,7 @@ pub(crate) use published::Change;
 pub(crate) use published::PUBLISHED;
 pub use published::Publishing;
 pub(crate) use published::Row;
+pub use volume::{DIAGRAM_BYTES, within_volumes};
 
 use std::collections::{BTreeMap, BTreeSet};
 

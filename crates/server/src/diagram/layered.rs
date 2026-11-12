@@ -25,7 +25,11 @@ struct Item {
 
 /// Each node's spot, oriented for `direction`, and each edge's waypoints, from its `from` to its `to`, laid out from
 /// where `before` says each node stood, where it did.
-pub(super) fn lay_out(graph: &Graph, direction: Rank, before: &[Option<Spot>]) -> (Vec<Spot>, Vec<Vec<Spot>>) {
+pub(super) fn lay_out(
+    graph: &Graph,
+    direction: Rank,
+    before: &[Option<Spot>],
+) -> (Vec<Spot>, Vec<Vec<Spot>>) {
     let count = graph.len();
     let flows = acyclic(graph);
     let ranks = ranked(count, &flows);
@@ -117,7 +121,11 @@ pub(super) fn lay_out(graph: &Graph, direction: Rank, before: &[Option<Spot>]) -
     for layer in &mut layers {
         let first = |group: Option<usize>, index: usize, layer: &[usize]| {
             group
-                .and_then(|group| layer.iter().position(|item| items[*item].group == Some(group)))
+                .and_then(|group| {
+                    layer
+                        .iter()
+                        .position(|item| items[*item].group == Some(group))
+                })
                 .unwrap_or(index)
         };
         let mut keyed: Vec<(usize, usize, usize)> = layer
@@ -140,7 +148,10 @@ pub(super) fn lay_out(graph: &Graph, direction: Rank, before: &[Option<Spot>]) -
             spots[item] = [rank as f64 * pitch * 1.4, across, row * pitch * 1.2];
         }
     }
-    let spots: Vec<Spot> = spots.into_iter().map(|spot| oriented(direction, spot)).collect();
+    let spots: Vec<Spot> = spots
+        .into_iter()
+        .map(|spot| oriented(direction, spot))
+        .collect();
     let via = graph
         .written
         .iter()

@@ -7918,10 +7918,10 @@ mod patches;
 mod placing;
 #[path = "hub_tests/proximity.rs"]
 mod proximity;
-#[path = "hub_tests/volumes.rs"]
-mod volumes;
 #[path = "hub_tests/timers.rs"]
 mod timers;
+#[path = "hub_tests/volumes.rs"]
+mod volumes;
 #[path = "hub_tests/walking.rs"]
 mod walking;
 #[path = "hub_tests/watching.rs"]

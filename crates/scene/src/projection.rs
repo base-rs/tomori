@@ -2093,7 +2093,9 @@ impl Projector {
                 .and_then(|((panel, model, fit, ..), ray)| {
                     let (met, _) = self.meet(panel, model, fit, &ray)?;
                     Some(match met {
-                        volume::Met::Node(node) => Part::Node(panel.diagram.as_ref()?.nodes.get(node)?.id.clone()),
+                        volume::Met::Node(node) => {
+                            Part::Node(panel.diagram.as_ref()?.nodes.get(node)?.id.clone())
+                        }
                         volume::Met::Edge(edge) => Part::Edge(u16::try_from(edge).ok()?),
                     })
                 });
@@ -2105,7 +2107,10 @@ impl Projector {
             if pressed
                 && self.held[side].is_none()
                 && let (Some((panel, ..)), Some(Part::Node(node))) = (pointed, &told[side].part)
-                && let Some(index) = panel.diagram.as_ref().and_then(|diagram| diagram.node(node))
+                && let Some(index) = panel
+                    .diagram
+                    .as_ref()
+                    .and_then(|diagram| diagram.node(node))
             {
                 let focus = (panel.id.clone(), index);
                 self.focus = (self.focus.as_ref() != Some(&focus)).then_some(focus);
@@ -2836,7 +2841,9 @@ impl Projector {
 
     /// The node this participant focuses on, by its volume's identity and its index, if any.
     pub fn focus(&self) -> Option<(&str, usize)> {
-        self.focus.as_ref().map(|(panel, node)| (panel.as_str(), *node))
+        self.focus
+            .as_ref()
+            .map(|(panel, node)| (panel.as_str(), *node))
     }
 
     /// The faces of `panel`, which stands, and so has them.

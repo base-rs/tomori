@@ -12,14 +12,15 @@ fn laid(body: &str, previous: Option<&Diagram>) -> (Diagram, Vec<String>) {
     (diagram, warnings.iter().map(ToString::to_string).collect())
 }
 
-fn at<'a>(diagram: &'a Diagram, id: &str) -> [f64; 3] {
+fn at(diagram: &Diagram, id: &str) -> [f64; 3] {
     diagram.nodes[diagram.node(id).unwrap()].at.map(f64::from)
 }
 
 /// Where each of `ids` stands about their middle, so that a change that moves them all together moves none.
 fn relative(diagram: &Diagram, ids: &[&str]) -> Vec<[f64; 3]> {
     let spots: Vec<[f64; 3]> = ids.iter().map(|id| at(diagram, id)).collect();
-    let middle = [0, 1, 2].map(|axis| spots.iter().map(|spot| spot[axis]).sum::<f64>() / spots.len() as f64);
+    let middle =
+        [0, 1, 2].map(|axis| spots.iter().map(|spot| spot[axis]).sum::<f64>() / spots.len() as f64);
     spots
         .iter()
         .map(|spot| [0, 1, 2].map(|axis| spot[axis] - middle[axis]))
@@ -39,7 +40,10 @@ fn a_layered_layout_is_golden_ranked_down_with_its_cycle_broken() {
     let spots: Vec<[i16; 3]> = diagram.nodes.iter().map(|node| node.at).collect();
     // Ranked a, then b and c beside each other, then d, top to bottom; the edge back up to a reversed for ranking, its
     // waypoint beside them, so that it passes them by.
-    assert_eq!(spots, [[15, 168, 0], [-105, 0, 0], [15, 0, 0], [15, -168, 0]]);
+    assert_eq!(
+        spots,
+        [[15, 168, 0], [-105, 0, 0], [15, 0, 0], [15, -168, 0]]
+    );
     assert_eq!(diagram.edges[4].via, [[135, 0, 0]]);
     assert_eq!(diagram.extent, [350, 476, 140]);
     // Every node's middle within the extent, about the volume's middle.
@@ -74,16 +78,27 @@ fn ranks_go_the_way_the_layout_says() {
     let line = |direction: &str| {
         let (diagram, _) = laid(&format!("flowchart {direction}\na --> b\n"), None);
         let (a, b) = (at(&diagram, "a"), at(&diagram, "b"));
-        [b[0] - a[0], b[1] - a[1], b[2] - a[2]].map(|value: f64| if value.abs() < 0.5 { 0.0 } else { value.signum() })
+        [b[0] - a[0], b[1] - a[1], b[2] - a[2]].map(|value: f64| {
+            if value.abs() < 0.5 {
+                0.0
+            } else {
+                value.signum()
+            }
+        })
     };
     assert_eq!(line("TD"), [0.0, -1.0, 0.0]);
     assert_eq!(line("BT"), [0.0, 1.0, 0.0]);
     assert_eq!(line("LR"), [1.0, 0.0, 0.0]);
     assert_eq!(line("RL"), [-1.0, 0.0, 0.0]);
     let (mut diagram, _) = parse("a --> b\n");
-    diagram.layout = tomori_protocol::diagram::Layout::Layered { direction: Rank::Away };
+    diagram.layout = tomori_protocol::diagram::Layout::Layered {
+        direction: Rank::Away,
+    };
     lay_out(&mut diagram, None);
-    assert!(at(&diagram, "b")[2] < at(&diagram, "a")[2], "away is into the volume");
+    assert!(
+        at(&diagram, "b")[2] < at(&diagram, "a")[2],
+        "away is into the volume"
+    );
     // An edge whose arrow points back flows from its to.
     let (diagram, _) = laid("a <-- b\n", None);
     assert!(at(&diagram, "b")[1] > at(&diagram, "a")[1]);
@@ -91,9 +106,13 @@ fn ranks_go_the_way_the_layout_says() {
 
 #[test]
 fn a_wide_rank_folds_into_rows_in_depth() {
-    let body: String = (0..12).map(|index| format!("root --> leaf{index}\n")).collect();
+    let body: String = (0..12)
+        .map(|index| format!("root --> leaf{index}\n"))
+        .collect();
     let (diagram, _) = laid(&body, None);
-    let depths: Vec<i16> = (0..12).map(|index| diagram.nodes[diagram.node(&format!("leaf{index}")).unwrap()].at[2]).collect();
+    let depths: Vec<i16> = (0..12)
+        .map(|index| diagram.nodes[diagram.node(&format!("leaf{index}")).unwrap()].at[2])
+        .collect();
     let mut rows = depths.clone();
     rows.sort();
     rows.dedup();
@@ -105,7 +124,10 @@ fn a_wide_rank_folds_into_rows_in_depth() {
 
 #[test]
 fn long_edges_pass_through_the_ranks_they_cross() {
-    let (diagram, _) = laid("a --> b\nb --> c\nc --> d\nd --> e\ne --> f\nf --> g\na --> g\ng --> a\n", None);
+    let (diagram, _) = laid(
+        "a --> b\nb --> c\nc --> d\nd --> e\ne --> f\nf --> g\na --> g\ng --> a\n",
+        None,
+    );
     let long = &diagram.edges[6];
     assert_eq!(long.via.len(), WAYPOINTS, "thinned to the most an edge has");
     // From its from towards its to, ranked down.
@@ -130,14 +152,20 @@ fn edges_between_one_pair_are_curved_apart() {
 #[test]
 fn a_small_edit_to_a_layered_diagram_keeps_each_rank_in_order() {
     let (before, _) = laid(PIPELINE, None);
-    let (after, _) = laid(&format!("{PIPELINE}hub --> speech\nspeech --> listener\n"), Some(&before));
+    let (after, _) = laid(
+        &format!("{PIPELINE}hub --> speech\nspeech --> listener\n"),
+        Some(&before),
+    );
     let ids = ["headset", "listener", "hub", "stage", "backend", "opencode"];
     let was = relative(&before, &ids);
     let now = relative(&after, &ids);
     let pitch = 180.0;
     for (index, id) in ids.iter().enumerate() {
         let (was, now) = (was[index], now[index]);
-        assert!(apart(was, now) < pitch, "{id} moved from {was:?} to {now:?}");
+        assert!(
+            apart(was, now) < pitch,
+            "{id} moved from {was:?} to {now:?}"
+        );
     }
     // stage stood left of backend, and still does.
     assert_eq!(
@@ -174,9 +202,18 @@ fn a_small_edit_to_a_force_diagram_moves_little() {
         }
     }
     // It is widest across, then tallest, and shallowest in depth.
-    let spread = |axis: usize| before.nodes.iter().map(|node| f64::from(node.at[axis]).powi(2)).sum::<f64>();
+    let spread = |axis: usize| {
+        before
+            .nodes
+            .iter()
+            .map(|node| f64::from(node.at[axis]).powi(2))
+            .sum::<f64>()
+    };
     let spreads = [spread(0), spread(1), spread(2)];
-    assert!(spreads[0] >= spreads[1] && spreads[1] >= spreads[2], "{spreads:?}");
+    assert!(
+        spreads[0] >= spreads[1] && spreads[1] >= spreads[2],
+        "{spreads:?}"
+    );
 }
 
 #[test]
@@ -186,19 +223,33 @@ fn groups_stand_together_and_their_boxes_hold_their_members() {
         None,
     );
     for (index, group) in diagram.groups.iter().enumerate() {
-        for node in diagram.nodes.iter().filter(|node| node.group.map(usize::from) == Some(index)) {
+        for node in diagram
+            .nodes
+            .iter()
+            .filter(|node| node.group.map(usize::from) == Some(index))
+        {
             for axis in 0..3 {
-                let (node, group, at) = (&node.id, &group.id, (group.low[axis], node.at[axis], group.high[axis]));
+                let (node, group, at) = (
+                    &node.id,
+                    &group.id,
+                    (group.low[axis], node.at[axis], group.high[axis]),
+                );
                 assert!(at.0 < at.1 && at.1 < at.2, "{node} in {group}");
             }
         }
     }
     // The outer group holds the inner one.
     let (outer, inner) = (&diagram.groups[0], &diagram.groups[1]);
-    assert!((0..3).all(|axis| outer.low[axis] <= inner.low[axis] && inner.high[axis] <= outer.high[axis]));
+    assert!(
+        (0..3)
+            .all(|axis| outer.low[axis] <= inner.low[axis] && inner.high[axis] <= outer.high[axis])
+    );
     // A group of no nodes has an empty box at the middle; so does a diagram of nothing.
     let (diagram, _) = laid("subgraph empty\nend\na\n", None);
-    assert_eq!((diagram.groups[0].low, diagram.groups[0].high), ([0; 3], [0; 3]));
+    assert_eq!(
+        (diagram.groups[0].low, diagram.groups[0].high),
+        ([0; 3], [0; 3])
+    );
     let mut empty = Diagram::default();
     lay_out(&mut empty, None);
     assert_eq!(empty.extent, [0; 3]);
@@ -220,9 +271,14 @@ fn force_keeps_a_group_together_and_apart_from_others() {
 #[test]
 fn radial_comes_later_and_grid_lays_out_in_order() {
     let (mut diagram, _) = parse("a --> b\nb --> c\n");
-    diagram.layout = tomori_protocol::diagram::Layout::Radial { hub: Some("a".into()) };
+    diagram.layout = tomori_protocol::diagram::Layout::Radial {
+        hub: Some("a".into()),
+    };
     let warnings = lay_out(&mut diagram, None);
-    assert_eq!(warnings[0].text, "radial layout comes in a later version: laid out by force");
+    assert_eq!(
+        warnings[0].text,
+        "radial layout comes in a later version: laid out by force"
+    );
     diagram.layout = tomori_protocol::diagram::Layout::Unknown;
     assert_eq!(lay_out(&mut diagram, None).len(), 1);
     let (mut diagram, _) = parse("a\nb\nc\nd\ne\n");
@@ -277,7 +333,11 @@ fn force_lays_out_one_node_parts_what_overlaps_and_turns_a_line_flat() {
     let mut line = vec![[0.0, 0.0, 300.0], [0.0, 0.0, 0.0], [0.0, 0.0, -300.0]];
     force::turned(&mut line);
     assert!(line[0][0] < -299.0 && line[2][0] > 299.0, "{line:?}");
-    assert!(line.iter().all(|spot| spot[1].abs() < 1e-6 && spot[2].abs() < 1e-6), "{line:?}");
+    assert!(
+        line.iter()
+            .all(|spot| spot[1].abs() < 1e-6 && spot[2].abs() < 1e-6),
+        "{line:?}"
+    );
     // At one spot, they stay there.
     let mut one = vec![[5.0; 3]; 2];
     force::turned(&mut one);
@@ -287,7 +347,10 @@ fn force_lays_out_one_node_parts_what_overlaps_and_turns_a_line_flat() {
 #[test]
 fn a_layered_layout_laid_out_again_across_keeps_its_ranks_order() {
     let (before, _) = laid("flowchart LR\nhub --> a\nhub --> b\nhub --> c\n", None);
-    let (after, _) = laid("flowchart LR\nhub --> new\nhub --> a\nhub --> b\nhub --> c\n", Some(&before));
+    let (after, _) = laid(
+        "flowchart LR\nhub --> new\nhub --> a\nhub --> b\nhub --> c\n",
+        Some(&before),
+    );
     let y = |diagram: &Diagram, id: &str| at(diagram, id)[1];
     // Down the rank in the order they stood, the new one among them where its edge draws it.
     assert!(y(&after, "a") > y(&after, "b") && y(&after, "b") > y(&after, "c"));

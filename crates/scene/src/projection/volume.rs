@@ -202,7 +202,9 @@ impl Mesh {
             // From surface to surface.
             let last = path.len() - 1;
             let start = (path[1] - path[0]).try_normalize().unwrap_or(Vec3::X);
-            let end = (path[last] - path[last - 1]).try_normalize().unwrap_or(Vec3::X);
+            let end = (path[last] - path[last - 1])
+                .try_normalize()
+                .unwrap_or(Vec3::X);
             path[0] += start * from.1;
             path[last] -= end * to.1;
             let colour = edge.colour.map_or(EDGE, rgb);
@@ -266,7 +268,11 @@ impl Mesh {
                     position: Vec3::new(middle.x, low.y, middle.z),
                     scale: Vec3::new(
                         size.x,
-                        if group.kind == GroupKind::Layer { 10.0 } else { 5.0 },
+                        if group.kind == GroupKind::Layer {
+                            10.0
+                        } else {
+                            5.0
+                        },
                         size.z,
                     ),
                     basis: Mat3::IDENTITY,
@@ -274,7 +280,11 @@ impl Mesh {
                     owner: Owner::Group,
                 }),
             }
-            let text = if group.label.is_empty() { &group.id } else { &group.label };
+            let text = if group.label.is_empty() {
+                &group.id
+            } else {
+                &group.label
+            };
             labels.push(Label {
                 canvas: Arc::new(label(text, None, DIM, 0.6)),
                 at: Vec3::new(low.x, high.y, high.z),
@@ -287,7 +297,8 @@ impl Mesh {
         for index in order.into_iter().take(NODE_LABELS) {
             let node = &diagram.nodes[index];
             let (at, radius) = nodes[index];
-            let detail = (node.shape == Shape::Card && !node.detail.is_empty()).then_some(node.detail.as_str());
+            let detail = (node.shape == Shape::Card && !node.detail.is_empty())
+                .then_some(node.detail.as_str());
             labels.push(Label {
                 canvas: Arc::new(label(&node.label, detail, BRIGHT, 0.85)),
                 at: at + Vec3::Y * (radius + 18.0),
@@ -397,7 +408,11 @@ impl Mesh {
             let at = model.transform_point3(label.at);
             sheets.push(Sheet {
                 canvas: Some(label.canvas.clone()),
-                model: Some(crate::recording::facing(at, Vec3::new(viewer.x, at.y, viewer.z), scale)),
+                model: Some(crate::recording::facing(
+                    at,
+                    Vec3::new(viewer.x, at.y, viewer.z),
+                    scale,
+                )),
             });
         }
     }
@@ -415,7 +430,8 @@ impl Mesh {
             Owner::Node(node) => {
                 node == focus
                     || self.diagram.edges.iter().any(|edge| {
-                        joined(edge) && (usize::from(edge.from) == node || usize::from(edge.to) == node)
+                        joined(edge)
+                            && (usize::from(edge.from) == node || usize::from(edge.to) == node)
                     })
             }
             Owner::Edge(edge) => joined(&self.diagram.edges[edge]),
@@ -445,17 +461,29 @@ impl Mesh {
     pub fn instances(&self, model: Mat4, focus: Option<usize>, time: f32, out: &mut Vec<Instance>) {
         let (scale, rotation, translation) = model.to_scale_rotation_translation();
         let turn = Mat3::from_quat(rotation);
-        let mut push = |solid: Solid, position: Vec3, size: Vec3, basis: Mat3, colour: [f32; 3], lit: bool| {
-            out.push(Instance {
-                solid,
-                position: rotation * (position * scale) + translation,
-                scale: size * scale,
-                basis: turn * basis,
-                colour: if lit { colour } else { colour.map(|channel| channel * DIMMED) },
-            });
-        };
+        let mut push =
+            |solid: Solid, position: Vec3, size: Vec3, basis: Mat3, colour: [f32; 3], lit: bool| {
+                out.push(Instance {
+                    solid,
+                    position: rotation * (position * scale) + translation,
+                    scale: size * scale,
+                    basis: turn * basis,
+                    colour: if lit {
+                        colour
+                    } else {
+                        colour.map(|channel| channel * DIMMED)
+                    },
+                });
+            };
         for part in &self.parts {
-            push(part.solid, part.position, part.scale, part.basis, part.colour, self.lit(part.owner, focus));
+            push(
+                part.solid,
+                part.position,
+                part.scale,
+                part.basis,
+                part.colour,
+                self.lit(part.owner, focus),
+            );
         }
         for &edge in &self.flows {
             let (path, colour) = &self.edges[edge];
@@ -495,13 +523,25 @@ fn label_scale(model: Mat4) -> f32 {
 /// A label's canvas: `text`, bold in `colour`, and below it, for a card or a focus, `detail` on up to three rows, on a
 /// backing of `opacity`.
 fn label(text: &str, detail: Option<&str>, colour: [f32; 4], opacity: f32) -> Canvas {
-    let columns = text.chars().count().clamp(1, tomori_protocol::diagram::LABEL_CHARS + 1);
+    let columns = text
+        .chars()
+        .count()
+        .clamp(1, tomori_protocol::diagram::LABEL_CHARS + 1);
     let detail_rows = detail.map_or(Vec::new(), |detail| {
-        let mut rows = wrap(&[Span::new(detail, TextStyle::plain(DIM))], 28, Wrap::default());
+        let mut rows = wrap(
+            &[Span::new(detail, TextStyle::plain(DIM))],
+            28,
+            Wrap::default(),
+        );
         rows.truncate(3);
         rows
     });
-    let columns = detail_rows.iter().map(Vec::len).chain([columns]).max().unwrap_or(1);
+    let columns = detail_rows
+        .iter()
+        .map(Vec::len)
+        .chain([columns])
+        .max()
+        .unwrap_or(1);
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = (3, 2);
     canvas.background = [0.02, 0.035, 0.06, opacity];
@@ -512,7 +552,14 @@ fn label(text: &str, detail: Option<&str>, colour: [f32; 4], opacity: f32) -> Ca
 }
 
 /// The tubes of an edge along `path`, of `radius`, drawn in `style`: one a segment, or its dashes or dots.
-fn tubes(path: &[Vec3], style: Style, radius: f32, colour: [f32; 3], owner: Owner, parts: &mut Vec<Part>) {
+fn tubes(
+    path: &[Vec3],
+    style: Style,
+    radius: f32,
+    colour: [f32; 3],
+    owner: Owner,
+    parts: &mut Vec<Part>,
+) {
     let tube = |from: Vec3, to: Vec3, parts: &mut Vec<Part>| {
         let length = (to - from).length();
         parts.push(Part {
@@ -531,7 +578,11 @@ fn tubes(path: &[Vec3], style: Style, radius: f32, colour: [f32; 3], owner: Owne
             let dash = step * DASH_MM.0 / (DASH_MM.0 + DASH_MM.1);
             let mut at = 0.0;
             while at < length {
-                tube(point_along(path, at), point_along(path, (at + dash).min(length)), parts);
+                tube(
+                    point_along(path, at),
+                    point_along(path, (at + dash).min(length)),
+                    parts,
+                );
                 at += step;
             }
         }
@@ -559,7 +610,9 @@ fn tubes(path: &[Vec3], style: Style, radius: f32, colour: [f32; 3], owner: Owne
 }
 
 fn path_length(path: &[Vec3]) -> f32 {
-    path.windows(2).map(|pair| (pair[1] - pair[0]).length()).sum()
+    path.windows(2)
+        .map(|pair| (pair[1] - pair[0]).length())
+        .sum()
 }
 
 /// The point `distance` along `path`, held to its ends.
@@ -585,7 +638,11 @@ fn middle_of(path: &[Vec3]) -> Vec3 {
 fn passing(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3) -> (f32, f32) {
     let segment = b - a;
     let across = origin - a;
-    let (dd, ss, ds) = (direction.dot(direction), segment.dot(segment), direction.dot(segment));
+    let (dd, ss, ds) = (
+        direction.dot(direction),
+        segment.dot(segment),
+        direction.dot(segment),
+    );
     let (da, sa) = (direction.dot(across), segment.dot(across));
     let denominator = dd * ss - ds * ds;
     // Parallel, the segment's start stands for it.
@@ -670,7 +727,8 @@ pub fn placed(panel: &Panel, diagram: &Diagram, fit: Fit) -> Mat4 {
         scale = scale.min(area.1 / 2.0 / extent[2]);
     }
     let depth = extent[2] * scale;
-    Mat4::from_translation(middle + Vec3::Z * (depth / 2.0 + STAND_OFF)) * Mat4::from_scale(Vec3::splat(scale))
+    Mat4::from_translation(middle + Vec3::Z * (depth / 2.0 + STAND_OFF))
+        * Mat4::from_scale(Vec3::splat(scale))
 }
 
 /// A volume as a frame draws it: what it draws, kept across frames, from its own millimetres into the scene, the node

@@ -61,7 +61,8 @@ pub const DESKTOP_LIMITS: tomori_protocol::Limits = tomori_protocol::Limits::TOD
         tomori_protocol::WALL_SLOTS * (1 + 16 + 12),
         2 * tomori_protocol::PROJECTION_FLOATING,
         2 * tomori_protocol::PROJECTION_PANELS,
-    );
+    )
+    .with_volumes(16, 1024);
 
 /// The longest instructions an owner gives a space, as the server limits them.
 const INSTRUCTIONS_BYTES: usize = 4096;

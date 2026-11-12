@@ -40,7 +40,11 @@ impl Client {
 fn volumes(client: &Client) -> (Vec<Panel>, Vec<Panel>) {
     let panels = client.projection().panels;
     (
-        panels.iter().filter(|panel| panel.diagram.is_some()).cloned().collect(),
+        panels
+            .iter()
+            .filter(|panel| panel.diagram.is_some())
+            .cloned()
+            .collect(),
         panels,
     )
 }
@@ -78,7 +82,10 @@ fn a_diagram_block_projects_a_volume_laid_out_on_the_server_and_its_outline_for_
     let volume = &shown[0];
     assert_eq!(volume.title, "How a frame is drawn");
     assert_eq!(volume.slug.as_deref(), Some("renderer"));
-    assert_eq!(volume.meta, [tomori_protocol::Meta::new("source", "the code")]);
+    assert_eq!(
+        volume.meta,
+        [tomori_protocol::Meta::new("source", "the code")]
+    );
     let diagram = volume.diagram.as_ref().unwrap();
     assert_eq!(diagram.nodes.len(), 4);
     assert!(diagram.extent.iter().all(|side| *side > 0));
@@ -87,7 +94,11 @@ fn a_diagram_block_projects_a_volume_laid_out_on_the_server_and_its_outline_for_
     assert!(at("xr")[1] > at("step")[1]);
     // Its body is its outline, which an older client, sent no diagram, shows, as does one that draws too few nodes.
     assert!(volume.body.contains("**tomori-scene**\n- Frame step"));
-    assert!(volume.body.contains("- client-quest → Frame step: eyes and input"));
+    assert!(
+        volume
+            .body
+            .contains("- client-quest → Frame step: eyes and input")
+    );
     for client in [&old, &few] {
         let (none, panels) = volumes(client);
         assert!(none.is_empty());
@@ -98,7 +109,8 @@ fn a_diagram_block_projects_a_volume_laid_out_on_the_server_and_its_outline_for_
 }
 
 #[test]
-fn a_block_with_the_id_of_a_volume_updates_it_where_it_stands_and_the_agent_is_told_what_was_wrong() {
+fn a_block_with_the_id_of_a_volume_updates_it_where_it_stands_and_the_agent_is_told_what_was_wrong()
+{
     let (hub, _jobs) = hub_waiting();
     let (space, commands) = idle(&hub);
     let ada = Client::drawing_volumes(&hub, "ada", 16, 1024);
@@ -107,25 +119,60 @@ fn a_block_with_the_id_of_a_volume_updates_it_where_it_stands_and_the_agent_is_t
     let (before, _) = volumes(&ada);
     // A node added, with a misspelt edge and a layout Tomori does not know.
     let grown = BLOCK
-        .replace("renderer --> xr\n", "renderer --> xr\nfaces --> atlas[(Glyph atlas)]\nrender --> atlas\n")
+        .replace(
+            "renderer --> xr\n",
+            "renderer --> xr\nfaces --> atlas[(Glyph atlas)]\nrender --> atlas\n",
+        )
         .replace("layout: layered down", "layout: spiral");
     reply(&hub, &space, "m2", &grown);
     let (after, panels) = volumes(&ada);
     assert_eq!(panels.len(), 1, "updated, not projected again");
     assert_eq!(after[0].id, before[0].id);
-    let (was, now) = (before[0].diagram.as_ref().unwrap(), after[0].diagram.as_ref().unwrap());
+    let (was, now) = (
+        before[0].diagram.as_ref().unwrap(),
+        after[0].diagram.as_ref().unwrap(),
+    );
     assert_eq!(now.nodes.len(), 6);
     // What stood before keeps its order across the rank.
-    let x = |diagram: &tomori_protocol::diagram::Diagram, id: &str| diagram.nodes[diagram.node(id).unwrap()].at[0];
-    assert_eq!(x(was, "xr") <= x(was, "renderer"), x(now, "xr") <= x(now, "renderer"));
-    assert!(after[0].meta.iter().any(|meta| meta.key == "warnings" && meta.value == "2"));
+    let x = |diagram: &tomori_protocol::diagram::Diagram, id: &str| {
+        diagram.nodes[diagram.node(id).unwrap()].at[0]
+    };
+    assert_eq!(
+        x(was, "xr") <= x(was, "renderer"),
+        x(now, "xr") <= x(now, "renderer")
+    );
+    assert!(
+        after[0]
+            .meta
+            .iter()
+            .any(|meta| meta.key == "warnings" && meta.value == "2")
+    );
     // The agent is told before the next words, by the block's own lines.
-    let notes = hub.lock().space(&space).unwrap().model.notes().iter().map(|note| note.to_string()).collect::<Vec<_>>();
+    let notes = hub
+        .lock()
+        .space(&space)
+        .unwrap()
+        .model
+        .notes()
+        .iter()
+        .map(|note| note.to_string())
+        .collect::<Vec<_>>();
     assert_eq!(notes.len(), 1);
     let note = &notes[0];
-    assert!(note.starts_with("Tomori showed the diagram \"How a frame is drawn\" (id renderer, panel-"), "{note}");
-    assert!(note.contains("line 16: 'render' is not a node; made a box called render (did you mean renderer?)"), "{note}");
-    assert!(note.contains("layout 'spiral' is not one Tomori knows"), "{note}");
+    assert!(
+        note.starts_with("Tomori showed the diagram \"How a frame is drawn\" (id renderer, panel-"),
+        "{note}"
+    );
+    assert!(
+        note.contains(
+            "line 16: 'render' is not a node; made a box called render (did you mean renderer?)"
+        ),
+        "{note}"
+    );
+    assert!(
+        note.contains("layout 'spiral' is not one Tomori knows"),
+        "{note}"
+    );
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
     let text = &prompt.text;
     assert!(prompt.text.contains("[Tomori showed the diagram"), "{text}");
@@ -134,7 +181,10 @@ fn a_block_with_the_id_of_a_volume_updates_it_where_it_stands_and_the_agent_is_t
 #[test]
 fn show_diagram_projects_a_volume_and_answers_with_its_warnings_at_once() {
     let (hub, _jobs) = hub_waiting();
-    hub.serve_tools(tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:1/mcp"));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
     let (space, _commands) = idle(&hub);
     let ada = Client::drawing_volumes(&hub, "ada", 16, 1024);
     ada.join(&space);
@@ -164,7 +214,10 @@ fn show_diagram_projects_a_volume_and_answers_with_its_warnings_at_once() {
     );
     assert!(result["size"][0].as_f64().unwrap() > 0.1);
     let (shown, _) = volumes(&ada);
-    assert_eq!(shown[0].diagram.as_ref().unwrap().layout, tomori_protocol::diagram::Layout::Force);
+    assert_eq!(
+        shown[0].diagram.as_ref().unwrap().layout,
+        tomori_protocol::diagram::Layout::Force
+    );
     // Shown again by its id, from a block's body, it is updated where it is.
     let answer = call(
         &hub,
@@ -174,15 +227,28 @@ fn show_diagram_projects_a_volume_and_answers_with_its_warnings_at_once() {
     let result = &answer["structuredContent"];
     assert_eq!(result["updated"], true);
     assert_eq!(result["panel"], shown[0].id);
-    assert_eq!(result["warnings"], json!(["\"spiral\" is not a layout; laid out layered down"]));
+    assert_eq!(
+        result["warnings"],
+        json!(["\"spiral\" is not a layout; laid out layered down"])
+    );
     assert!(result["next"].as_str().unwrap().contains("fix them"));
-    let answer = call(&hub, "show_diagram", json!({"source": "a --> b", "layout": "LR", "place": "wall status wall"}));
+    let answer = call(
+        &hub,
+        "show_diagram",
+        json!({"source": "a --> b", "layout": "LR", "place": "wall status wall"}),
+    );
     assert_eq!(answer["structuredContent"]["warnings"], json!([]));
     // Refused: a diagram of nothing, a bad id, a place Tomori does not know, one too large, or an argument it does not
     // take.
     for (arguments, error) in [
-        (json!({"source": "%% nothing"}), "A diagram needs at least one node."),
-        (json!({"id": "not an id!", "source": "a"}), "An id is 1 to 32 letters, digits, - and _, such as renderer."),
+        (
+            json!({"source": "%% nothing"}),
+            "A diagram needs at least one node.",
+        ),
+        (
+            json!({"id": "not an id!", "source": "a"}),
+            "An id is 1 to 32 letters, digits, - and _, such as renderer.",
+        ),
         (json!({"nodes": {"id": "a"}}), "nodes must be a list."),
     ] {
         let answer = call(&hub, "show_diagram", arguments);
@@ -203,22 +269,44 @@ fn show_diagram_projects_a_volume_and_answers_with_its_warnings_at_once() {
     let answer = call(&hub, "panels", json!({"panel": shown[0].id}));
     let read = &answer["structuredContent"]["panels"][0];
     assert_eq!(read["kind"], "diagram");
-    assert_eq!((read["node_count"].as_u64(), read["edge_count"].as_u64()), (Some(3), Some(2)));
-    let answer = call(&hub, "update_panel", json!({"panel": shown[0].id, "title": "Renamed"}));
-    assert_eq!(answer["content"][0]["text"], "A diagram is updated with show_diagram, or a diagram block, of its id.");
+    assert_eq!(
+        (read["node_count"].as_u64(), read["edge_count"].as_u64()),
+        (Some(3), Some(2))
+    );
+    let answer = call(
+        &hub,
+        "update_panel",
+        json!({"panel": shown[0].id, "title": "Renamed"}),
+    );
+    assert_eq!(
+        answer["content"][0]["text"],
+        "A diagram is updated with show_diagram, or a diagram block, of its id."
+    );
     let large: Vec<Value> = (0..300)
         .map(|index| json!({"id": format!("n{index}"), "detail": "x".repeat(100)}))
         .collect();
     let answer = call(&hub, "show_diagram", json!({"nodes": large}));
-    assert!(answer["content"][0]["text"].as_str().unwrap().starts_with("A diagram is at most 16 KiB"));
-    let answer = call(&hub, "show_diagram", json!({"nodes": [{"id": "a", "fill": "#fff"}]}));
+    assert!(
+        answer["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("A diagram is at most 16 KiB")
+    );
+    let answer = call(
+        &hub,
+        "show_diagram",
+        json!({"nodes": [{"id": "a", "fill": "#fff"}]}),
+    );
     assert_eq!(answer["isError"], true);
 }
 
 #[test]
 fn show_diagram_is_refused_without_a_space_bound_to_its_session() {
     let (hub, _jobs) = hub_waiting();
-    hub.serve_tools(tomori_backend::ToolServer::new("tomori", "http://127.0.0.1:1/mcp"));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
     let answer = call(&hub, "show_diagram", json!({"source": "a"}));
     assert_eq!(answer["isError"], true);
 }
@@ -248,5 +336,10 @@ fn pointing_at_a_node_or_an_edge_names_it_to_the_agent_with_each_hand() {
         "{text}"
     );
     assert!(prompt.text.contains("; sphere, in group \"tomori-scene\"; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{text}");
-    assert!(prompt.text.contains("edge \"Frame step → projection::faces: panels changed\" (edge 1) in diagram"), "{text}");
+    assert!(
+        prompt.text.contains(
+            "edge \"Frame step → projection::faces: panels changed\" (edge 1) in diagram"
+        ),
+        "{text}"
+    );
 }

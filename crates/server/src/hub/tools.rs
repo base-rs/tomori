@@ -393,7 +393,8 @@ impl Hub {
             None => None,
         };
         let said = to.is_some();
-        let to = to.unwrap_or_else(|| crate::presence::by_default(origin.as_ref(), &projection, &solids));
+        let to = to
+            .unwrap_or_else(|| crate::presence::by_default(origin.as_ref(), &projection, &solids));
         let previous = content
             .slug
             .as_deref()

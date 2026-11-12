@@ -153,7 +153,9 @@ pub fn panels(text: &str) -> Vec<Found> {
                         Some(language) if language.eq_ignore_ascii_case(LANGUAGE) => {
                             Source::Panel(String::new())
                         }
-                        Some(language) if language.eq_ignore_ascii_case(super::volume::LANGUAGE) => {
+                        Some(language)
+                            if language.eq_ignore_ascii_case(super::volume::LANGUAGE) =>
+                        {
                             Source::Diagram(String::new())
                         }
                         _ => Source::Code(super::code::Lines::new(info)),

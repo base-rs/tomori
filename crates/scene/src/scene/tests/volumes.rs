@@ -24,7 +24,8 @@ fn words_begun_pointing_at_a_volume_name_the_node_or_edge_the_ray_meets() {
     }
     diagram.edges.push(Edge::new(0, 1));
     diagram.extent = [600, 300, 200];
-    let panel = Panel::new("panel-1", "Pair", "- A\n- B", Place::Free { pose }).with_diagram(diagram.clone());
+    let panel = Panel::new("panel-1", "Pair", "- A\n- B", Place::Free { pose })
+        .with_diagram(diagram.clone());
     conversation.apply(tomori_client::Event::Message(ServerMessage::Projection {
         projection: Box::new(
             tomori_protocol::Projection::new(SPACE, "sky")
@@ -38,7 +39,11 @@ fn words_begun_pointing_at_a_volume_name_the_node_or_edge_the_ray_meets() {
     let mut step = Step::default();
     let now = Instant::now();
     let mut named = Vec::new();
-    for point in [Vec3::new(-200.0, 0.0, 0.0), Vec3::ZERO, Vec3::new(0.0, -120.0, -100.0)] {
+    for point in [
+        Vec3::new(-200.0, 0.0, 0.0),
+        Vec3::ZERO,
+        Vec3::new(0.0, -120.0, -100.0),
+    ] {
         let at = model.transform_point3(point);
         let senses = Senses {
             beam: true,
