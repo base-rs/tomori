@@ -177,6 +177,19 @@ fn an_environments_common_and_server_crates_build_no_renderer() {
     assert!(checked > 0, "no environment's common crate was found");
 }
 
+/// The render world is free of GPU code, so that a server, an environment's common crate and the tests that check culling on CI can build it without one, as `design/rendering.md` requires.
+#[test]
+fn the_render_world_builds_no_renderer() {
+    let rendering: Vec<String> = tree("tomori-world", "normal,build", &["--all-features"])
+        .into_iter()
+        .filter(|dependency| RENDERING.contains(&dependency.as_str()))
+        .collect();
+    assert!(
+        rendering.is_empty(),
+        "tomori-world depends on {rendering:?}"
+    );
+}
+
 #[test]
 fn no_core_crate_depends_on_an_environment_or_an_app() {
     let mut checked = 0;

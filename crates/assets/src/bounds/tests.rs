@@ -216,6 +216,57 @@ fn both_eyes_frustum_holds_everything_either_eye_sees_and_culls_what_neither_doe
     // No view, or one that cannot be inverted, holds everything.
     assert!(Frustum::enclosing(&[]).holds(Vec3::splat(1e6)));
     assert!(Frustum::enclosing(&[left, Mat4::ZERO]).holds(Vec3::splat(1e6)));
+    // More views than a frame has are enclosed alike, each eye's corners within.
+    let many: Vec<Mat4> = (0..6)
+        .map(|step| eyes(step as f32 * 0.2)[step % 2])
+        .collect();
+    let all = Frustum::enclosing(&many);
+    for clip in &many {
+        assert!(all.holds(unproject(*clip, Vec2::new(0.9, -0.9), 0.3)));
+    }
+    assert_eq!(
+        Frustum::enclosing(&many[..2]),
+        Frustum::enclosing(&[many[0], many[1]])
+    );
+}
+
+#[test]
+fn a_frustum_carried_into_other_coordinates_holds_what_it_held_there() {
+    let eyes = eyes(0.7);
+    let both = Frustum::enclosing(&eyes);
+    assert_eq!(both.planes().len(), 6);
+    // A scenery's coordinates, carried into the eyes' by a turn, a scale and a move.
+    let carriage = Mat4::from_scale_rotation_translation(
+        Vec3::splat(1.5),
+        Quat::from_rotation_y(0.4),
+        Vec3::new(3.0, -0.2, 1.0),
+    );
+    let carried = both.transformed(carriage);
+    for sample in 0..2_000u32 {
+        let at = |offset: u32| scatter(sample * 5 + offset + 700_000);
+        let point = Vec3::new(at(1) * 60.0 - 30.0, at(2) * 10.0 - 3.0, at(3) * 60.0 - 30.0);
+        assert_eq!(
+            carried.holds(point),
+            both.holds(carriage.transform_point3(point)),
+            "{point}"
+        );
+    }
+    // A box of the scenery's that the eyes see there is seen, and one behind them is not.
+    let ahead = carriage
+        .inverse()
+        .transform_point3(Vec3::new(0.0, 1.5, -4.0));
+    assert!(carried.sees(&Aabb::new(ahead - 0.1, ahead + 0.1)));
+    let behind = carriage
+        .inverse()
+        .transform_point3(Vec3::new(0.0, 1.5, 4.0));
+    assert!(!carried.sees(&Aabb::new(behind - 0.1, behind + 0.1)));
+    // Carried by nothing, it is itself, and one that holds everything still does.
+    assert_eq!(both.transformed(Mat4::IDENTITY), both);
+    assert!(
+        Frustum::enclosing(&[])
+            .transformed(carriage)
+            .holds(Vec3::splat(1e6))
+    );
 }
 
 /// A skinned arm, as `pose`'s tests make it, placed at `transform`.

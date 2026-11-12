@@ -127,8 +127,26 @@ impl Frustum {
     /// must be to hold them all, so that its apex lies behind the eyes, where their outer planes meet. Nothing any of the
     /// views sees is outside it. With no views, or one whose corners cannot be found, it holds everything.
     pub fn enclosing(clips: &[Mat4]) -> Self {
-        let mut corners = Vec::with_capacity(clips.len() * 8);
-        for clip in clips {
+        // As many views as a frame has, both eyes' or one, are found without allocating, once a frame.
+        const FEW: usize = 4;
+        if clips.len() <= FEW {
+            let mut corners = [Vec3::ZERO; 8 * FEW];
+            let mut views = [Self { planes: EVERYWHERE }; FEW];
+            Self::enclosing_within(
+                clips,
+                &mut corners[..8 * clips.len()],
+                &mut views[..clips.len()],
+            )
+        } else {
+            let mut corners = vec![Vec3::ZERO; 8 * clips.len()];
+            let mut views = vec![Self { planes: EVERYWHERE }; clips.len()];
+            Self::enclosing_within(clips, &mut corners, &mut views)
+        }
+    }
+
+    /// [`Frustum::enclosing`], with room for `clips`' corners and their own frustums.
+    fn enclosing_within(clips: &[Mat4], corners: &mut [Vec3], views: &mut [Frustum]) -> Self {
+        for (index, clip) in clips.iter().enumerate() {
             let inverse = clip.inverse();
             for corner in 0..8 {
                 let ndc = Vec4::new(
@@ -141,13 +159,14 @@ impl Frustum {
                 if !point.is_finite() || point.w.abs() <= f32::EPSILON {
                     return Self { planes: EVERYWHERE };
                 }
-                corners.push(point.xyz() / point.w);
+                corners[index * 8 + corner] = point.xyz() / point.w;
             }
+            views[index] = Frustum::new(*clip);
         }
         if corners.is_empty() {
             return Self { planes: EVERYWHERE };
         }
-        let views: Vec<Frustum> = clips.iter().map(|clip| Frustum::new(*clip)).collect();
+        let (corners, views) = (&*corners, &*views);
         let planes = std::array::from_fn(|side| {
             views
                 .iter()
@@ -167,6 +186,22 @@ impl Frustum {
                 .map_or(Vec4::W, |(plane, _)| plane)
         });
         Self { planes }
+    }
+
+    /// Its six planes, `(normal, d)`, each holding what is inside it on the side where `normal · point + d ≥ 0`: left,
+    /// right, bottom, top, near and far.
+    pub fn planes(&self) -> &[Vec4; 6] {
+        &self.planes
+    }
+
+    /// The same frustum in the coordinates that `transform` carries into these, as a scenery's are carried into the
+    /// space's: a point `p` there is inside it exactly when `transform * p` is inside this one. Its planes are scaled
+    /// as `transform` scales, which changes nothing it holds.
+    pub fn transformed(&self, transform: Mat4) -> Self {
+        let transpose = transform.transpose();
+        Self {
+            planes: self.planes.map(|plane| transpose * plane),
+        }
     }
 
     /// Whether any of `bounds` may be seen: false only when the box is wholly outside one of its planes. A box that is
