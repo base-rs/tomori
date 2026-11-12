@@ -36,7 +36,7 @@ type Hook = Box<dyn FnOnce(Server) -> Server>;
 /// }
 /// ```
 ///
-/// Environments here are what the server knows of them today: an identifier, label and version offered to clients, their layer of a space's instructions, and their server sides. Their data sources and tools, planned in [#83](https://github.com/ioquatix/tomori/issues/83) and [#82](https://github.com/ioquatix/tomori/issues/82), will be registered here too once Tomori has them.
+/// Environments here are what the server knows of them today: an identifier, label and version offered to clients, their layer of a space's instructions, and their server sides. Their data sources and tools, planned in [#83](https://github.com/base-rs/tomori/issues/83) and [#82](https://github.com/base-rs/tomori/issues/82), will be registered here too once Tomori has them.
 pub struct Builder {
     /// The program's name, which its usage gives: `tomori-server` unless [`Builder::program_name`] gives another.
     program: String,

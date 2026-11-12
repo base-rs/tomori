@@ -2,7 +2,7 @@
 
 Copyright, 2026, by Hinoki Maple Williams.
 
-`chicken.glb`, the chicken and its traffic cone, modelled, textured and animated (its walk, its confused head tilt and its startled sprint) by Hinoki Maple Williams, and its `.blend` sources, `chickenwalkcycleanim.blend`, `chickenDLconfused.blend` and `chickensprintcycleanim.blend`, in Tomori's repository at `crates/environment-farmyard/assets/source` (https://github.com/ioquatix/tomori/tree/main/crates/environment-farmyard/assets/source), are licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0).
+`chicken.glb`, the chicken and its traffic cone, modelled, textured and animated (its walk, its confused head tilt and its startled sprint) by Hinoki Maple Williams, and its `.blend` sources, `chickenwalkcycleanim.blend`, `chickenDLconfused.blend` and `chickensprintcycleanim.blend`, in Tomori's repository at `crates/environment-farmyard/assets/source` (https://github.com/base-rs/tomori/tree/main/crates/environment-farmyard/assets/source), are licensed under the Creative Commons Attribution 4.0 International License (CC BY 4.0).
 
 You may share and adapt them for any purpose, including commercially, provided that you give appropriate credit to Hinoki Maple Williams, provide a link to the license, and indicate if changes were made. To view a copy of the license, visit https://creativecommons.org/licenses/by/4.0/; its full legal code is at https://creativecommons.org/licenses/by/4.0/legalcode.
 

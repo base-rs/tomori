@@ -1,6 +1,6 @@
 # `tomori-prometheus`
 
-A generic Prometheus data source for [Tomori](https://github.com/ioquatix/tomori) environments' server sides: a blocking client for the Prometheus HTTP API's instant and range queries, with an endpoint and a renewable bearer token that the application supplies and that never reach clients, bounds on time and size, typed results with explicit timestamps, and a label filter that keeps only the labels a server side may pass on to clients or the agent.
+A generic Prometheus data source for [Tomori](https://github.com/base-rs/tomori) environments' server sides: a blocking client for the Prometheus HTTP API's instant and range queries, with an endpoint and a renewable bearer token that the application supplies and that never reach clients, bounds on time and size, typed results with explicit timestamps, and a label filter that keeps only the labels a server side may pass on to clients or the agent.
 
 ## Usage
 
@@ -59,9 +59,9 @@ fn authorization(source: &dyn TokenSource) -> Result<String, String> {
 assert_eq!(authorization(&Token::new("a-token").unwrap()).unwrap(), "Bearer a-token");
 ```
 
-[Using the Prometheus Source](context/usage.md) describes the client's configuration, its errors and the PromQL helpers. Its requirements are in Tomori's [`design/data-sources.md`](https://github.com/ioquatix/tomori/blob/main/design/data-sources.md). The interface is 0.x, and grows with Tomori's data sources ([#83](https://github.com/ioquatix/tomori/issues/83)).
+[Using the Prometheus Source](context/usage.md) describes the client's configuration, its errors and the PromQL helpers. Its requirements are in Tomori's [`design/data-sources.md`](https://github.com/base-rs/tomori/blob/main/design/data-sources.md). The interface is 0.x, and grows with Tomori's data sources ([#83](https://github.com/base-rs/tomori/issues/83)).
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-environment`](https://crates.io/crates/tomori-environment), the interface of the server sides that read data sources.

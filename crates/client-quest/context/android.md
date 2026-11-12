@@ -1,6 +1,6 @@
 # Packaging a Headset Build for the Quest
 
-A headset build of your own, made with `tomori::Builder` (see `design/builders.md` in Tomori's repository), is packaged as an APK of its own with [`cargo-apk`](https://crates.io/crates/cargo-apk) 0.10, which Tomori uses for its own. It has its own application ID, label, icon and assets, and installs beside Tomori's own app, `com.codeotaku.tomori`, without changing Tomori's source. [`examples/headset`](https://github.com/ioquatix/tomori/tree/main/examples/headset) is such a build, and Tomori's CI packages it.
+A headset build of your own, made with `tomori::Builder` (see `design/builders.md` in Tomori's repository), is packaged as an APK of its own with [`cargo-apk`](https://crates.io/crates/cargo-apk) 0.10, which Tomori uses for its own. It has its own application ID, label, icon and assets, and installs beside Tomori's own app, `com.codeotaku.tomori`, without changing Tomori's source. [`examples/headset`](https://github.com/base-rs/tomori/tree/main/examples/headset) is such a build, and Tomori's CI packages it.
 
 ## The crate
 
@@ -26,7 +26,7 @@ fn android_main(app: tomori::AndroidApp) {
 
 ## The manifest
 
-`cargo-apk` reads `[package.metadata.android]` only from the package it builds, so the build has a copy of [`tomori-client-quest`'s](https://github.com/ioquatix/tomori/blob/main/crates/client-quest/Cargo.toml), from `[package.metadata.android]` to the end, and changes only what is its own:
+`cargo-apk` reads `[package.metadata.android]` only from the package it builds, so the build has a copy of [`tomori-client-quest`'s](https://github.com/base-rs/tomori/blob/main/crates/client-quest/Cargo.toml), from `[package.metadata.android]` to the end, and changes only what is its own:
 
 ```toml
 [package.metadata.android]
@@ -58,7 +58,7 @@ Keep the rest as Tomori's: the OpenXR and Oculus features, permissions and queri
 - **Version:** `cargo-apk` sets `versionName` and `versionCode` from the package's version.
 - **Intent extras and log tag:** these belong to the framework, not the app, so they are the same for every build: `tomori.server`, `tomori.name`, `tomori.token`, `tomori.msaa` and `tomori.echo_test`, and the logcat tag `tomori`.
 
-`tomori_render::LICENSE_NOTICES` lists each licence notice by its path beneath `assets/`, `controllers/LICENSE.md`, `licenses/basisu-LICENSE.txt` and `licenses/fonts-LICENSE.txt`, with its text, so that a test of the build's own fails once its copies drift from the `tomori-render` it builds with. The simplest is below; the example's [`tests/assets.rs`](https://github.com/ioquatix/tomori/blob/main/examples/headset/tests/assets.rs) also reports a file in `licenses` that is no notice, and tests that its check fails for copies that drift, since its own assets are links that cannot:
+`tomori_render::LICENSE_NOTICES` lists each licence notice by its path beneath `assets/`, `controllers/LICENSE.md`, `licenses/basisu-LICENSE.txt` and `licenses/fonts-LICENSE.txt`, with its text, so that a test of the build's own fails once its copies drift from the `tomori-render` it builds with. The simplest is below; the example's [`tests/assets.rs`](https://github.com/base-rs/tomori/blob/main/examples/headset/tests/assets.rs) also reports a file in `licenses` that is no notice, and tests that its check fails for copies that drift, since its own assets are links that cannot:
 
 ```rust
 #[test]
@@ -73,7 +73,7 @@ fn the_assets_carry_tomori_renders_licence_notices() {
 
 ## Building
 
-Tomori's [`scripts/android.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/android.sh) builds, installs and runs any package with such a manifest. It reads the application ID, the APK's name and the loader's folder from `cargo metadata`, so it needs `jq`, and fetches the loader into that folder, checked against its published SHA-256, with [`scripts/fetch-loader.sh`](https://github.com/ioquatix/tomori/blob/main/scripts/fetch-loader.sh), when it is missing:
+Tomori's [`scripts/android.sh`](https://github.com/base-rs/tomori/blob/main/scripts/android.sh) builds, installs and runs any package with such a manifest. It reads the application ID, the APK's name and the loader's folder from `cargo metadata`, so it needs `jq`, and fetches the loader into that folder, checked against its published SHA-256, with [`scripts/fetch-loader.sh`](https://github.com/base-rs/tomori/blob/main/scripts/fetch-loader.sh), when it is missing:
 
 ```sh
 bash scripts/android.sh --package tomori-example-headset build

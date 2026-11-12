@@ -1,6 +1,6 @@
 # `tomori-security`
 
-Authentication, tokens, pairing and certificate pinning for [Tomori](https://github.com/ioquatix/tomori), shared by the Tomori server and its clients.
+Authentication, tokens, pairing and certificate pinning for [Tomori](https://github.com/base-rs/tomori), shared by the Tomori server and its clients.
 
 ## Usage
 
@@ -12,9 +12,9 @@ A client pins the server's self-signed certificate by its `Fingerprint`, and bui
 
 The `issue` feature adds the server's side: the `TokenStore`, which issues, lists, revokes and authenticates tokens, and the server's `ServerCertificate`. Authenticators report who a connection is, as a `Principal`, never what it may do; the server keeps roles against principals.
 
-Most clients use [`tomori-client`](https://crates.io/crates/tomori-client), which applies tokens and pinning itself. The model is described in [`design/security.md`](https://github.com/ioquatix/tomori/blob/main/design/security.md).
+Most clients use [`tomori-client`](https://crates.io/crates/tomori-client), which applies tokens and pinning itself. The model is described in [`design/security.md`](https://github.com/base-rs/tomori/blob/main/design/security.md).
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-client`](https://crates.io/crates/tomori-client) and [`tomori-server`](https://crates.io/crates/tomori-server), which use it.

@@ -1,6 +1,6 @@
 # `tomori-scene`
 
-The platform-neutral [Tomori](https://github.com/ioquatix/tomori) client: the frame step that the headset and the desktop window share, with each platform's own logic, the conversation with a server, arrival, the hand menu, the transcript, pointing, travel (the locomotion an environment declares and the participant's rig), the swarm and its workers, standing where an environment's anchors and worker placement put them, the avatar a space's backend names in place of the swarm (`avatar::Avatar`), haptic and spatial audio logic, and the panels' layout. The conversation is the `Session` that [`tomori-client`](https://crates.io/crates/tomori-client)'s `Connection` carries out, so the connection, the microphone and speaker traits and the feedback model are that crate's.
+The platform-neutral [Tomori](https://github.com/base-rs/tomori) client: the frame step that the headset and the desktop window share, with each platform's own logic, the conversation with a server, arrival, the hand menu, the transcript, pointing, travel (the locomotion an environment declares and the participant's rig), the swarm and its workers, standing where an environment's anchors and worker placement put them, the avatar a space's backend names in place of the swarm (`avatar::Avatar`), haptic and spatial audio logic, and the panels' layout. The conversation is the `Session` that [`tomori-client`](https://crates.io/crates/tomori-client)'s `Connection` carries out, so the connection, the microphone and speaker traits and the feedback model are that crate's.
 
 It depends on no rendering, windowing or platform audio crate, so it builds for every client target, including `aarch64-linux-android`; a test checks that with `cargo tree`.
 
@@ -18,10 +18,10 @@ An object it picks may also take the right stick, with `Picked::handles(client_s
 
 The `testing` feature adds a microphone and a speaker without hardware, and a TLS test server with scripted agent sessions, for other crates' tests.
 
-Its interfaces change with the environment framework ([#75](https://github.com/ioquatix/tomori/issues/75), [#77](https://github.com/ioquatix/tomori/issues/77)).
+Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-client`](https://crates.io/crates/tomori-client), the connection to a server that carries out the conversation.
 - [`tomori-render`](https://crates.io/crates/tomori-render), which draws its frames.

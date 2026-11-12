@@ -2,30 +2,30 @@
 
 ## Status
 
-**Stage 1 is mostly built; stages 2 to 4 are mostly open.** November 2026. What was built is a requirement in `design/speech.md`, `design/spaces.md`, `design/interaction.md`, `design/live-audio.md` and others, which take precedence over this document. The rest of this document is the proposal from [PR #65](https://github.com/ioquatix/tomori/pull/65), kept for its reasoning; it was written before stage 1, and its audit describes `main` at that time.
+**Stage 1 is mostly built; stages 2 to 4 are mostly open.** November 2026. What was built is a requirement in `design/speech.md`, `design/spaces.md`, `design/interaction.md`, `design/live-audio.md` and others, which take precedence over this document. The rest of this document is the proposal from [PR #65](https://github.com/base-rs/tomori/pull/65), kept for its reasoning; it was written before stage 1, and its audit describes `main` at that time.
 
 **Built:**
 
-- **Hearing it again** ([#67](https://github.com/ioquatix/tomori/pull/67)): the server keeps the latest two replies, a participant who was away or absent hears the latest from its start on returning, the right stick click replays and the left stick click mutes, the headset reports engagement from its session state and `XR_EXT_user_presence`, and the brief speech setting.
-- **Seeing what went wrong** ([#68](https://github.com/ioquatix/tomori/pull/68)): B never denies, cancels or leaves without a hold; problems on a line of their own; the queue strip with cancel and undo; modes and speech chosen from a list with descriptions; questions answered by voice; and a world-anchored panel with lazy follow.
-- **Attention across spaces** ([#66](https://github.com/ioquatix/tomori/pull/66)), from the companion proposal (`attention.md`, PR #62) that this one aligns with.
+- **Hearing it again** ([#67](https://github.com/base-rs/tomori/pull/67)): the server keeps the latest two replies, a participant who was away or absent hears the latest from its start on returning, the right stick click replays and the left stick click mutes, the headset reports engagement from its session state and `XR_EXT_user_presence`, and the brief speech setting.
+- **Seeing what went wrong** ([#68](https://github.com/base-rs/tomori/pull/68)): B never denies, cancels or leaves without a hold; problems on a line of their own; the queue strip with cancel and undo; modes and speech chosen from a list with descriptions; questions answered by voice; and a world-anchored panel with lazy follow.
+- **Attention across spaces** ([#66](https://github.com/base-rs/tomori/pull/66)), from the companion proposal (`attention.md`, PR #62) that this one aligns with.
 - **From the later stages:**
-  - The controller-anchored interface (`controller-ui.md`, PR #89; [#104](https://github.com/ioquatix/tomori/pull/104)–[#106](https://github.com/ioquatix/tomori/pull/106)) replaced the panel with a status pill, and the conversation surface with a transcript on the right wrist with turns, Markdown-lite and request cards with a button per choice. Its status lists the later fixes.
-  - Haptics and sound cues ([#107](https://github.com/ioquatix/tomori/pull/107), landed through #109).
-  - Pointing inside a space: at a worker as a prototype ([#98](https://github.com/ioquatix/tomori/pull/98)), and shared attention stage 1, where what a participant points at as their words begin reaches the agent before them ([#175](https://github.com/ioquatix/tomori/pull/175), under [#81](https://github.com/ioquatix/tomori/issues/81)).
-  - Unicode text from a glyph atlas ([#176](https://github.com/ioquatix/tomori/pull/176)).
+  - The controller-anchored interface (`controller-ui.md`, PR #89; [#104](https://github.com/base-rs/tomori/pull/104)–[#106](https://github.com/base-rs/tomori/pull/106)) replaced the panel with a status pill, and the conversation surface with a transcript on the right wrist with turns, Markdown-lite and request cards with a button per choice. Its status lists the later fixes.
+  - Haptics and sound cues ([#107](https://github.com/base-rs/tomori/pull/107), landed through #109).
+  - Pointing inside a space: at a worker as a prototype ([#98](https://github.com/base-rs/tomori/pull/98)), and shared attention stage 1, where what a participant points at as their words begin reaches the agent before them ([#175](https://github.com/base-rs/tomori/pull/175), under [#81](https://github.com/base-rs/tomori/issues/81)).
+  - Unicode text from a glyph atlas ([#176](https://github.com/base-rs/tomori/pull/176)).
 
 **Decided since the proposal:**
 
 - **Catch-up** (question 1): a returning participant hears the latest reply from its start and stays behind live speech until a pause, rather than jumping to live with a notice (`design/speech.md`).
-- **Brief speech** (question 2) was made the default at first, then the user asked for replies in full by default ([#94](https://github.com/ioquatix/tomori/pull/94)); brief stays a space's choice. The agent's own instructions ask it to reply briefly instead ([#93](https://github.com/ioquatix/tomori/pull/93)).
+- **Brief speech** (question 2) was made the default at first, then the user asked for replies in full by default ([#94](https://github.com/base-rs/tomori/pull/94)); brief stays a space's choice. The agent's own instructions ask it to reply briefly instead ([#93](https://github.com/base-rs/tomori/pull/93)).
 - **Visitors** (questions 12 and 13) always hear live speech, never catch up, and may not ask for replays (`design/security.md`).
 - **Engagement and attention.** The proposal suggested that the attention proposal's reply level should mean no participant was *engaged*. Instead, engagement decides only who hears speech live and who catches up: a participant who is away is still in the space, so what happens meanwhile raises no attention for them (`design/spaces.md`).
 - **The panel** became the status pill and the wrist transcript rather than a world-anchored conversation surface (question 10), as the controller-anchored interface decided.
 
 **Open:**
 
-- **Stage 2:** structured speakers and tool calls, the timeline, per-message replay and a "while you were away" summary ([#190](https://github.com/ioquatix/tomori/issues/190)); avatars from presence ([#191](https://github.com/ioquatix/tomori/issues/191)); hold to confirm for persistent grants; capacitive labels on the controllers. No issue yet for the last two.
+- **Stage 2:** structured speakers and tool calls, the timeline, per-message replay and a "while you were away" summary ([#190](https://github.com/base-rs/tomori/issues/190)); avatars from presence ([#191](https://github.com/base-rs/tomori/issues/191)); hold to confirm for persistent grants; capacitive labels on the controllers. No issue yet for the last two.
 - **Stage 3:** reordering, merging and batching queued entries (question 3), push-to-talk for Tomori's own voice commands (question 5), hand-tracking pointing and poking, and per-participant "heard up to" cursors over the retained history. No issue yet.
 - **Stage 4:** incremental history instead of full snapshots, paging beyond the 50 kept messages, and agent summaries on request. No issue yet.
 - **Deferred from stage 1:** the stillness heuristic for presence, Android pause and resume, measuring how quickly the Quest reports removal, and speaking a list as its first items. No issue yet.

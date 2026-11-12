@@ -22,14 +22,14 @@ Read-only checks of the crates.io API on 2026-11-03, each a `GET` of `https://cr
 - To be published: `tomori-protocol`, `tomori-client`, `tomori-discovery`, `tomori-security`, `tomori-backend`, `tomori-backend-opencode`, `tomori-speech`, `tomori-server` and `tomori-environment-sky`, which a check on 2026-11-05 found still free (HTTP 404, with `serde` returning 200); and `tomori-scene`, `tomori-render`, `tomori-client-desktop`, `tomori-client-spectator` and `tomori-client-quest`, which a check later on 2026-11-05 found free too.
 - `tomori-environment`, the interface of an environment's server side, which a check on 2026-11-07 found still free (HTTP 404), is to be published too.
 - `tomori-prometheus`, a generic Prometheus data source for environments' server sides, which a check on 2026-11-09 found free (HTTP 404, with `serde` returning 200), is to be published too.
-- Planned in [#97](https://github.com/ioquatix/tomori/issues/97): `tomori-physics`.
+- Planned in [#97](https://github.com/base-rs/tomori/issues/97): `tomori-physics`.
 - The bare name `tomori`, which no package uses: the headset's library and executable are named `tomori`, but its package is `tomori-client-quest`.
 
 None of these names has been reserved or published. Recheck them before the first publication; this is not a trademark or wider availability check. An earlier check, on 2026-10-28, found `tomori` free too.
 
 ## Scope
 
-The public repository uses `ioquatix/tomori`. Technical names now match:
+The public repository uses `base-rs/tomori`. Technical names now match:
 
 - Rust packages: `tomori-` followed by the crate's role, such as `tomori-protocol` and `tomori-server`, in folders under `crates/` without the prefix, such as `crates/protocol`. Rust paths use the crate names, such as `tomori_protocol::ClientMessage`.
 - Headset and desktop application: package `tomori-client-quest` (in `crates/client-quest`); its library and executable are `tomori`.

@@ -1,6 +1,6 @@
 # `tomori-protocol`
 
-The wire protocol shared by [Tomori](https://github.com/ioquatix/tomori) clients and the Tomori server: the control messages each side sends, the binary audio frames, and the framing that carries both over one long-lived duplex connection.
+The wire protocol shared by [Tomori](https://github.com/base-rs/tomori) clients and the Tomori server: the control messages each side sends, the binary audio frames, and the framing that carries both over one long-lived duplex connection.
 
 ## Usage
 
@@ -29,10 +29,10 @@ let frame = decoder.next_frame()?.expect("a whole frame");
 assert_eq!(frame.to_client_message()?, hello);
 ```
 
-Most applications use [`tomori-client`](https://crates.io/crates/tomori-client), which keeps the connection, reconnects and handles keepalive, rather than framing messages themselves. The protocol is described in [`design/server.md`](https://github.com/ioquatix/tomori/blob/main/design/server.md).
+Most applications use [`tomori-client`](https://crates.io/crates/tomori-client), which keeps the connection, reconnects and handles keepalive, rather than framing messages themselves. The protocol is described in [`design/server.md`](https://github.com/base-rs/tomori/blob/main/design/server.md).
 
 ## See Also
 
-- [Tomori](https://github.com/ioquatix/tomori), the conversational spatial workspace these crates belong to.
+- [Tomori](https://github.com/base-rs/tomori), the conversational spatial workspace these crates belong to.
 - [`tomori-client`](https://crates.io/crates/tomori-client), the client connection built on this protocol.
 - [`tomori-server`](https://crates.io/crates/tomori-server), the server that speaks it.
