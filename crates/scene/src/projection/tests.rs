@@ -3343,7 +3343,7 @@ fn the_tomori_wall_folds_travels_and_unfolds_with_its_panels_and_takes_none_mean
             .map(|sheet| sheet.model.unwrap())
     };
     let before = drawn_at(&output, "Panel a").unwrap();
-    // The agent is summoned and the server stands its wall 3 m to the right: it folds where it stood.
+    // An older server, the agent summoned, stands its wall 3 m to the right: it folds where it stood.
     let mut moved = shown.clone();
     let travel_spot = Pose::upright_facing([3.0, 0.52, 0.0], [0.0, 0.52, 0.0]);
     moved.walls[0].pose = travel_spot;
