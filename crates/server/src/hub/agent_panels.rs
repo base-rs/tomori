@@ -553,10 +553,12 @@ impl Hub {
                 &environments,
                 placement,
                 0,
-                origin.as_ref(),
-                &people,
-                &projection,
-                &record.panel_solids(&environments),
+                super::anchors::Surroundings {
+                    asker: origin.as_ref(),
+                    people: &people,
+                    projection: &projection,
+                    solids: &record.panel_solids(&environments),
+                },
             )?),
             None => None,
         };

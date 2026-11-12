@@ -1266,11 +1266,16 @@ fn metres(arguments: Arguments<'_>, widths: bool) -> Result<crate::hub::tools::M
     })
 }
 
+/// The columns and rows, scale and curve a wall's tool's arguments ask for: each left out, `None`.
+struct WallLayout {
+    grid: (Option<u32>, Option<u32>),
+    scale: Option<f32>,
+    /// `Some(None)` for a radius of 0, flat.
+    radius: Option<Option<f32>>,
+}
+
 /// The columns, rows, scale and curve `arguments` ask for: each left out, `None`; a radius of 0, flat.
-#[allow(clippy::type_complexity)]
-fn wall_layout(
-    arguments: Arguments<'_>,
-) -> Result<((Option<u32>, Option<u32>), Option<f32>, Option<Option<f32>>), String> {
+fn wall_layout(arguments: Arguments<'_>) -> Result<WallLayout, String> {
     let count = |name: &str| -> Result<Option<u32>, String> {
         match arguments.get(name) {
             None | Some(Value::Null) => Ok(None),
@@ -1284,7 +1289,11 @@ fn wall_layout(
     let grid = (count("columns")?, count("rows")?);
     let radius =
         optional_number(arguments, "radius")?.map(|radius| (radius != 0.0).then_some(radius));
-    Ok((grid, optional_number(arguments, "scale")?, radius))
+    Ok(WallLayout {
+        grid,
+        scale: optional_number(arguments, "scale")?,
+        radius,
+    })
 }
 
 /// The `set_wall` tool.
@@ -1292,7 +1301,11 @@ fn set_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value,
     let wall = text(arguments, "wall")?;
     crate::limits::check(wall, crate::limits::IDENTIFIER_BYTES, "wall")?;
     let place = optional_identifier(arguments, "place")?;
-    let (grid, scale, radius) = wall_layout(arguments)?;
+    let WallLayout {
+        grid,
+        scale,
+        radius,
+    } = wall_layout(arguments)?;
     let change = crate::stage::WallChange {
         grid: None,
         scale,
@@ -1314,18 +1327,16 @@ fn set_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value,
         reset: flag(arguments, "reset")?,
         requested_by: requested_by(arguments)?,
     };
-    hub.agent_set_wall(
-        session,
-        wall,
+    let request = crate::hub::tools::WallRequest {
         change,
         grid,
-        metres(arguments, true)?,
+        metres: metres(arguments, true)?,
         place,
         joining,
         lock,
-        version(arguments.get("version"), "wall")?,
-    )
-    .map(structured)
+        version: version(arguments.get("version"), "wall")?,
+    };
+    hub.agent_set_wall(session, wall, request).map(structured)
 }
 
 /// The `contexts` and `set_context` tools' definitions, apart from the rest so that the list's macro stays within its
@@ -1459,7 +1470,11 @@ fn new_layout(
     widths: bool,
 ) -> Result<(crate::stage::Layout, Option<f32>, bool), String> {
     let flat = crate::stage::Layout::FLAT;
-    let ((columns, rows), scale, radius) = wall_layout(arguments)?;
+    let WallLayout {
+        grid: (columns, rows),
+        scale,
+        radius,
+    } = wall_layout(arguments)?;
     let mut aspect = optional_aspect(arguments)?.flatten();
     let sized = scale.is_some();
     let mut scale = scale.unwrap_or(flat.scale);

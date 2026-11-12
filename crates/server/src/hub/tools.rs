@@ -360,10 +360,12 @@ impl Hub {
                 &environments,
                 place,
                 0,
-                origin.as_ref(),
-                &people,
-                &projection,
-                &solids,
+                super::anchors::Surroundings {
+                    asker: origin.as_ref(),
+                    people: &people,
+                    projection: &projection,
+                    solids: &solids,
+                },
             )?,
             None => crate::presence::by_default(origin.as_ref(), &projection, &solids),
         };
@@ -421,10 +423,12 @@ impl Hub {
                 &environments,
                 place,
                 0,
-                origin.as_ref(),
-                &people,
-                &projection,
-                &solids,
+                super::anchors::Surroundings {
+                    asker: origin.as_ref(),
+                    people: &people,
+                    projection: &projection,
+                    solids: &solids,
+                },
             )?),
             None => None,
         };
@@ -691,10 +695,12 @@ impl Hub {
             &environments,
             &placement,
             0,
-            origin.as_ref(),
-            &people,
-            &projection,
-            &record.panel_solids(&environments),
+            super::anchors::Surroundings {
+                asker: origin.as_ref(),
+                people: &people,
+                projection: &projection,
+                solids: &record.panel_solids(&environments),
+            },
         )?;
         let pinned = projection.panel(&id).is_some_and(|shown| shown.pinned);
         // The panel was found in this view, under the same lock, so it is here to move.
@@ -729,24 +735,24 @@ impl Hub {
     }
 
     /// Change the wall `wall` names in the space bound to `session`, as its agent asked: a wall by its identity or name,
-    /// or the one someone is looking at or nearest. Its `columns` and `rows`, each kept where not given, the size of its
-    /// slots and their shape, or else the `metres` they make it or its slots, and its curve as `change` says, and,
-    /// for an added wall, `place`, `front [NAME]`, stands it in front of someone. Everyone in the space sees it at once,
-    /// a notice on the Tomori wall says what changed, and it is kept and logged. Returns the wall as it is now, and
-    /// whether that changed it. See `design/projection.md`.
-    #[allow(clippy::too_many_arguments)]
+    /// or the one someone is looking at or nearest, as `request` says. Everyone in the space sees it at once, a notice
+    /// on the Tomori wall says what changed, and it is kept and logged. Returns the wall as it is now, and whether that
+    /// changed it. See `design/projection.md`.
     pub(crate) fn agent_set_wall(
         &self,
         session: &str,
         wall: &str,
-        mut change: crate::stage::WallChange,
-        (columns, rows): (Option<u32>, Option<u32>),
-        metres: Metres,
-        place: Option<&str>,
-        joining: Option<Joining>,
-        lock: Lock<'_>,
-        version: Option<u64>,
+        request: WallRequest<'_>,
     ) -> Result<Value, String> {
+        let WallRequest {
+            mut change,
+            grid: (columns, rows),
+            metres,
+            place,
+            joining,
+            lock,
+            version,
+        } = request;
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         // Locking, unlocking and putting back change what everyone else may do with a wall, so only an owner asks.
@@ -1563,6 +1569,21 @@ fn wall_place(
         wall.scale(),
         wall.size().1,
     ))
+}
+
+/// What `set_wall` asks of a wall: its `grid`, columns and rows, each kept where not given; the size of its slots and
+/// their shape, or else the `metres` they make it or its slots, and its curve, as `change` says; for an added wall,
+/// `place`, `front [NAME]`, standing it in front of someone, or `joining`, attaching it to another; its `lock`; and the
+/// `version` of it the agent read, if it gave one.
+#[derive(Debug)]
+pub(crate) struct WallRequest<'a> {
+    pub change: crate::stage::WallChange,
+    pub grid: (Option<u32>, Option<u32>),
+    pub metres: Metres,
+    pub place: Option<&'a str>,
+    pub joining: Option<Joining>,
+    pub lock: Lock<'a>,
+    pub version: Option<u64>,
 }
 
 /// What `set_wall` asks of a wall's lock: to lock or unlock it, or, with `reset`, to put an environment's own wall

@@ -182,8 +182,9 @@ impl By {
     }
 }
 
-/// An action handed to a side, waiting for its answer outside the hub's lock.
-pub(crate) struct Acting {
+/// An action the agent took: in which space, on what, by its id, of which environment, by its id and label, with which
+/// parameters, on whose word.
+struct Taken {
     space: String,
     id: String,
     environment: String,
@@ -191,6 +192,11 @@ pub(crate) struct Acting {
     action: String,
     parameters: Map<String, Value>,
     by: By,
+}
+
+/// An action handed to a side, waiting for its answer outside the hub's lock.
+pub(crate) struct Acting {
+    taken: Taken,
     handed: Handed,
 }
 
@@ -322,13 +328,15 @@ impl Hub {
             .ambient
             .noted(&acted_on);
         Ok(Acting {
-            space,
-            id: crate::space::inspectable(&current, reference),
-            environment: current,
-            label,
-            action: action.to_owned(),
-            parameters,
-            by,
+            taken: Taken {
+                space,
+                id: crate::space::inspectable(&current, reference),
+                environment: current,
+                label,
+                action: action.to_owned(),
+                parameters,
+                by,
+            },
             handed,
         })
     }
@@ -337,16 +345,7 @@ impl Hub {
     /// the action time-out; then note what was done, and for whom, on the space's status wall, log it, and tell the
     /// agent.
     pub(crate) async fn take_action(&self, acting: Acting) -> Result<Value, String> {
-        let Acting {
-            space,
-            id,
-            environment,
-            label,
-            action,
-            parameters,
-            by,
-            handed,
-        } = acting;
+        let Acting { taken, handed } = acting;
         let timeout = *self.act_timeout.read().expect("never left poisoned");
         let (sender, receiver) = async_channel::bounded(1);
         let (inbox, ticket) = (handed.inbox.clone(), handed.ticket);
@@ -380,7 +379,16 @@ impl Hub {
                 ),
             ),
         };
-        self.acted(&space, &id, &label, &action, &by, said, message.as_deref());
+        self.acted(&taken, said, message.as_deref());
+        let Taken {
+            space,
+            id,
+            environment,
+            action,
+            parameters,
+            by,
+            ..
+        } = taken;
         Ok(json!({
             "space": space,
             "id": id,
@@ -399,19 +407,17 @@ impl Hub {
         }))
     }
 
-    /// The action `action` on `id` was `said`, done, refused or not answered, with the side's `message`, for `by`: a
-    /// notice on the space's status wall says so, replacing the last, kept, and the log.
-    #[allow(clippy::too_many_arguments)]
-    fn acted(
-        &self,
-        space: &str,
-        id: &str,
-        label: &str,
-        action: &str,
-        by: &By,
-        said: &str,
-        message: Option<&str>,
-    ) {
+    /// The action `taken` was `said`, done, refused or not answered, with the side's `message`: a notice on the space's
+    /// status wall says so, replacing the last, kept, and the log.
+    fn acted(&self, taken: &Taken, said: &str, message: Option<&str>) {
+        let Taken {
+            space,
+            id,
+            label,
+            action,
+            by,
+            ..
+        } = taken;
         let whom = match by {
             By::Asked(requester) => format!("as {} asked", requester.name),
             By::Spoke(speaker) => format!("as {speaker} spoke"),
