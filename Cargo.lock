@@ -396,9 +396,9 @@ dependencies = [
 
 [[package]]
 name = "bake-releases"
-version = "0.3.10"
+version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8afa510a7ef7b02aa070a7715473ac5e3835b57d13c7312a59f48f0ab04e3686"
+checksum = "c9995082bef1cf14572bffba6d76b913b8cbfe526985a6958793d289728f2892"
 dependencies = [
  "bake",
  "base-markdown",
@@ -4054,6 +4054,7 @@ name = "tomori-bake"
 version = "0.0.0"
 dependencies = [
  "bake",
+ "bake-releases",
  "base-project",
  "serde_json",
  "tempfile",
