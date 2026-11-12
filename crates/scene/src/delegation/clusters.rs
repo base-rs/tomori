@@ -676,6 +676,28 @@ fn workers_stand_in_a_ring_about_the_agent_s_home_on_its_ring_the_sides_first_an
     // The first two stand at the agent's sides, right and then left, as seen from home.
     let first = own(&scene);
     assert!(first["w00"].0[0] > 1.0 && first["w01"].0[0] < -1.0);
+    // Every sign of the ring is drawn at one size, the ring's own, so that each layer's stand at one height.
+    assert!(cluster.sign_size().is_some());
+    assert!(
+        scene
+            .stations()
+            .iter()
+            .all(|station| station.valid() && station.size == cluster.sign_size())
+    );
+    // A worker is pointed at by its sign, straight above it, as by its flock, from outside the ring.
+    let side = scene
+        .stations()
+        .iter()
+        .find(|station| station.id == "w00")
+        .unwrap()
+        .clone();
+    let sign =
+        Vec3::from_array(side.position) + Vec3::Y * ((SIGN_LIFT + SIGN_TOP) * side.drawn() / 2.0);
+    let outward = (sign - crate::swarm::CENTER).with_y(0.0).normalize();
+    assert_eq!(
+        scene.point(Ray::new(sign + outward * 1.5, -outward)),
+        Some("w00")
+    );
     // In a ring, which holds only so many, gaps close as the client seats its workers itself: the last of many left
     // stands in a slot of its own at full size, where the first stood.
     let mut last = workers(30);

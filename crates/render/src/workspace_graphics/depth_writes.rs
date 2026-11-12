@@ -61,6 +61,8 @@ fn items() -> Vec<(&'static str, Vec<Vertex>)> {
         opacity: 1.0,
         scale: 1.0,
         more: 0,
+        size: None,
+        highlighted: false,
     };
     let mut panel = station_panel(&station, station.position, State::Running, None);
     panel.pixel = 0.02;
@@ -352,6 +354,8 @@ fn a_sign_before_a_translucent_wall_shows_the_wall_about_its_corners_and_blends_
             opacity: 1.0,
             scale: 1.0,
             more: 0,
+            size: None,
+            highlighted: false,
         };
         let workspace = Workspace {
             nodes: vec![crate::delegation::Node {

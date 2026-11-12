@@ -21,8 +21,9 @@
 //!    **"+N more"** sign there.
 //!
 //! An anchor may choose its [`Formation`] instead: a **ring**, its members evenly about the point on a circle
-//! [`RING`] from it, the agent's at `home`, the sides first as seen from its audience, in rows up from a little below
-//! the point to [`RING_HIGHEST`], then compact, then the "+N more" sign ([`Step::Ring`]). The arc is the default.
+//! [`RING`] from it, the agent's at `home`, the sides first as seen from its audience, in layers up from a little below
+//! the point to [`RING_HIGHEST`], each layer's signs at one height above its swarms and below the next layer's, then
+//! compact, then the "+N more" sign ([`Step::Ring`]). The arc is the default.
 //!
 //! At `home`, the point is the agent's own, kept for it while it is away, so that workers stand either side of it. The
 //! steps depend only on the anchor, its audience and the span it is laid out for, the highest slot taken, kept a slot
@@ -115,9 +116,9 @@ pub const COLUMNS: usize = 8;
 /// looks at it, reaches another; the radius of the home ring drawn on the floor where the home anchor is a ring.
 pub const RING: f32 = 1.4;
 
-/// The highest a ring's rows above its first stand, their middles above the floor, in metres: so that every sign is read
-/// and pointed at from the floor about it, not over a head, and stands below a coop's roof or a notice board's top
-/// rather than over them; two rows at full size and three compact about a home at the swarm's usual height.
+/// The highest a ring's layers above its first stand, their middles above the floor, in metres: so that every sign is
+/// read and pointed at from the floor about it, not over a head, and stands below a coop's roof or a notice board's top
+/// rather than over them; two layers at full size and three compact about a home at the swarm's usual height.
 pub const RING_HIGHEST: f32 = 2.5;
 
 /// The least and the most of its ring an anchor's ring may take, in degrees, about the way it faces.
@@ -738,6 +739,24 @@ impl Cluster {
         (self.formation == Formation::Ring).then_some(RING)
     }
 
+    /// How much larger than one within [`ARC_RADIUS`] of whoever watches every sign of its ring is drawn, where it
+    /// stands in one: one size for the whole ring, as a sign at its nearest place to them is drawn, 1 there or nearer
+    /// and in proportion beyond, so that the signs of one layer stand at one height, a footprint apart, and never reach
+    /// one another or the layer above. Its places and layers are spaced by it.
+    pub fn sign_size(&self) -> Option<f32> {
+        (self.formation == Formation::Ring).then(|| {
+            let distance =
+                (self.audience[0] - self.point[0]).hypot(self.audience[2] - self.point[2]);
+            ((distance - RING) / ARC_RADIUS).max(1.0)
+        })
+    }
+
+    /// Its members' footprint as drawn at `scale` of their size, and in a ring as large as its signs are drawn.
+    fn drawn(&self, scale: f32) -> Footprint {
+        self.footprint
+            .scaled(scale * self.sign_size().unwrap_or(1.0))
+    }
+
     /// Whether it holds only so many in slots of their own, gathering the rest into its "+N more" sign: in room, or in a
     /// ring; without either, today's arc holds any number.
     pub fn bounded(&self) -> bool {
@@ -989,7 +1008,7 @@ impl Cluster {
     /// The box, aligned with the axes, that the member in `slot` takes, facing whoever it gathers about.
     /// In a ring, whose members are seen from every side, it is the box it takes turned any way about its upright.
     pub fn reach(&self, slot: &Slot) -> ([f32; 3], [f32; 3]) {
-        let footprint = self.footprint.scaled(slot.scale);
+        let footprint = self.drawn(slot.scale);
         let [x, y, z] = slot.position;
         let (dx, dz) = (self.audience[0] - x, self.audience[2] - z);
         let length = dx.hypot(dz);
@@ -1041,7 +1060,7 @@ impl Cluster {
     /// Whether a member standing at `position`, drawn at `scale`, facing whoever it gathers about, stands within
     /// `extent`.
     fn within(&self, extent: &Extent, position: [f32; 3], scale: f32) -> bool {
-        let footprint = self.footprint.scaled(scale);
+        let footprint = self.drawn(scale);
         let [x, y, z] = self.unplace(position);
         // Turned from the cluster's facing towards whoever it gathers about, it reaches further across and along.
         let (dx, dz) = (
@@ -1129,13 +1148,15 @@ impl Cluster {
     }
 
     /// The slots of its ring at `scale`, in order: on the circle [`RING`] about the point, as many as stand a
-    /// footprint's reach, turned any way, apart along it, evenly; in rows up from [`ROW_BELOW`] below the point, never
-    /// nearer the floor than [`LOWEST`], a footprint's height apart, each place straight above the one below, so that a
-    /// room clear about the first row is clear about every row, as many as its room's height holds, those above the
-    /// first no higher than [`RING_HIGHEST`]; and in each row, those within its sweep about the way it faces, the sides
-    /// first as seen from its audience, then nearer before further, right before left, each within its room.
+    /// footprint's reach, turned any way, apart along it, evenly, as large as its signs are drawn
+    /// ([`Self::sign_size`]); in layers up from [`ROW_BELOW`] below the point, never nearer the floor than [`LOWEST`], a
+    /// footprint's height apart, each layer's swarms at one height and their signs at one height above them, below the
+    /// next layer's swarms, each place straight above the one below, so that a room clear about the first layer is
+    /// clear about every layer, as many as its room's height holds, those above the first no higher than
+    /// [`RING_HIGHEST`]; and in each layer, those within its sweep about the way it faces, the sides first as seen from
+    /// its audience, then nearer before further, right before left, each within its room.
     fn ring(&self, scale: f32) -> Vec<[f32; 3]> {
-        let footprint = self.footprint.scaled(scale);
+        let footprint = self.drawn(scale);
         let reach = footprint.width.hypot(footprint.depth);
         let count = (std::f32::consts::TAU / (2.0 * (reach / (2.0 * RING)).min(1.0).asin()))
             .floor()
