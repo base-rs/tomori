@@ -86,6 +86,8 @@ Each hand's ray is resolved against the same things, and each hand's trigger and
 - while its palm is up showing the hand menu or the transcript;
 - while the controller is not tracked.
 
+As built, a hidden ray still meets the teleport pads and targets on the floor, as the pad stood on, and, for the grip alone, the environment's objects that take it, as a stone dropped at one's feet (see `design/interaction.md`).
+
 The right ray is subject to the same rule. Its plain 1 m beam becomes the stub, which also tidies the single-handed view. If that proves too quiet on the headset, the right ray could stay at 1 m, but the symmetric rule is recommended.
 
 **Highlight and hover.** Each ray highlights what it meets. Two rays on one thing highlight it once. The hover tick is felt on the hand whose ray moved onto it, not always the right (`feedback.md` changes to say "the hand that pointed").

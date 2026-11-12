@@ -16,6 +16,8 @@ use tomori_protocol::Payload;
 use crate::channel::Update;
 use crate::pointing::{PRESS, PULL, RELEASE, Ray};
 
+/// Which hand: the left or the right.
+pub use tomori_client::feedback::Hand as Side;
 /// A sound an environment makes at a place in the scene, as the mixer plays it.
 pub use tomori_client::playback::Sound;
 
@@ -54,10 +56,15 @@ pub struct Input<'a> {
     /// A squeeze of the right grip that took an object of its, by the object's identity, from its beginning to its end,
     /// with the hand that holds it each frame: see [`Actions::GRAB`], [`ClientSide::within_reach`] and [`Grab`].
     pub grab: Option<Grab>,
+    /// The same of the left grip, which takes an object of its within reach of the left hand, where nothing of Tomori's
+    /// takes the squeeze, as while the left palm shows the hand menu.
+    pub left_grab: Option<Grab>,
     /// The right hands of the others in the space, by their numbers, as their presence last said, in the environment's
     /// own coordinates: so that what one of them holds is drawn in their hand, where they hold it, with nothing more
     /// sent. A participant whose presence says no right hand, as the desktop's does not, is not among them.
     pub hands: Vec<(u32, Hand)>,
+    /// The others' left hands, likewise.
+    pub left_hands: Vec<(u32, Hand)>,
     /// This participant's own number, which the server knows them by, as the others' hands and the server side's
     /// intents do; `None` for a visitor, who holds nothing, and outside a space.
     pub participant: Option<u32>,
@@ -76,7 +83,9 @@ impl<'a> Input<'a> {
             right_stick: Vec2::ZERO,
             scroll: None,
             grab: None,
+            left_grab: None,
             hands: Vec::new(),
+            left_hands: Vec::new(),
             participant: None,
         }
     }
@@ -125,6 +134,23 @@ impl<'a> Input<'a> {
         self
     }
 
+    /// This input, with the left grip on an object, if any.
+    pub fn with_left_grab(mut self, grab: Option<Grab>) -> Self {
+        self.left_grab = grab;
+        self
+    }
+
+    /// This input, with the others' left hands, `hands`, by their numbers.
+    pub fn with_left_hands(mut self, hands: Vec<(u32, Hand)>) -> Self {
+        self.left_hands = hands;
+        self
+    }
+
+    /// The grips on objects of its this frame, the right's then the left's.
+    pub fn grabs(&self) -> impl Iterator<Item = &Grab> {
+        self.grab.iter().chain(&self.left_grab)
+    }
+
     /// This input, for the participant numbered `participant`, if they take part.
     pub fn as_participant(mut self, participant: Option<u32>) -> Self {
         self.participant = participant;
@@ -149,18 +175,19 @@ impl Hand {
     }
 }
 
-/// The right grip on an object that takes it ([`Actions::GRAB`]), or within reach of the hand
+/// A grip on an object that takes it ([`Actions::GRAB`]), or within reach of the hand
 /// ([`ClientSide::within_reach`]): the object it took, by its identity, which it keeps until the grip is let go,
-/// wherever the hand goes; the hand that holds it, this frame; and where in the squeeze it is, `Began` once as the grip
+/// wherever the hand goes; the hand that holds it, this frame; where in the squeeze it is, `Began` once as the grip
 /// closes on it, `Changed` each frame after while it is held, and `Ended` once as it is let go, focus is lost or the
-/// space is left, with the hand as it was let go. A client side draws what is held from the hand, every frame, so that
-/// it never lags it, and decides what letting go does.
+/// space is left, with the hand as it was let go; and which grip it is, the right's unless it says. A client side draws
+/// what is held from the hand, every frame, so that it never lags it, and decides what letting go does.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Grab {
     pub object: String,
     pub hand: Hand,
     pub phase: Phase,
+    pub side: Side,
 }
 
 impl Grab {
@@ -169,7 +196,14 @@ impl Grab {
             object: object.into(),
             hand,
             phase,
+            side: Side::Right,
         }
+    }
+
+    /// This grip, of the hand `side`.
+    pub fn of(mut self, side: Side) -> Self {
+        self.side = side;
+        self
     }
 }
 
@@ -518,9 +552,10 @@ pub trait ClientSide: Send {
     /// What `ray` meets first of what the environment shows, if anything.
     fn pick(&self, ray: &Ray) -> Option<Picked>;
 
-    /// The object of its within reach of a hand at `hand`, in the environment's own coordinates, that a squeeze of the
-    /// right grip takes, where nothing of Tomori's takes the grip, before anything the ray points at that takes it
-    /// ([`Actions::GRAB`]): as a hand closes on what it touches. None, unless a client side says.
+    /// The object of its within reach of a hand at `hand`, in the environment's own coordinates, that a squeeze of that
+    /// hand's grip takes, where nothing of Tomori's takes the grip, before anything the ray points at that takes it
+    /// ([`Actions::GRAB`]): as a hand closes on what it touches. Asked of each hand, each frame. None, unless a client
+    /// side says.
     fn within_reach(&self, hand: Vec3) -> Option<String> {
         let _ = hand;
         None
@@ -580,13 +615,25 @@ mod tests {
             (grab.object.as_str(), grab.hand, grab.phase),
             ("stick", hand, Phase::Began)
         );
+        assert_eq!(grab.side, Side::Right);
+        let left = Grab::new("stone", hand, Phase::Began).of(Side::Left);
+        assert_eq!(left.side, Side::Left);
         let input = Input::new(Vec::new(), now)
             .with_grab(Some(grab.clone()))
             .with_hands(vec![(2, hand)])
             .as_participant(Some(1));
-        assert_eq!(input.grab, Some(grab));
+        assert_eq!(input.grab, Some(grab.clone()));
         assert_eq!(input.hands, [(2, hand)]);
         assert_eq!(input.participant, Some(1));
+        assert_eq!(
+            (input.left_grab.as_ref(), input.left_hands.len()),
+            (None, 0)
+        );
+        let input = input
+            .with_left_grab(Some(left.clone()))
+            .with_left_hands(vec![(3, hand)]);
+        assert_eq!(input.grabs().collect::<Vec<_>>(), [&grab, &left]);
+        assert_eq!(input.left_hands, [(3, hand)]);
         // Taking the grip is apart from taking the stick.
         let picked = Picked::new("stick", "the stick", 1.0).handles(Actions::GRAB);
         assert!(picked.actions.contains(Actions::GRAB));

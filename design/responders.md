@@ -62,7 +62,7 @@ What each control does in each situation, as the frame before found it, before #
 | Left stick (arrows) | travel's, inactive | travel's, inactive | travel, the panel along | travel where it travels, else nothing | travel where it travels, else nothing | travel where it travels, else `left_stick` to the client side | travel where it travels, else `left_stick` to the client side |
 | Right grip (G) | — | detaches or reattaches it | carrying | pulls it off | takes the card, or takes hold of the wall | never the environment's; since the campsite, takes it if it takes the grip | nothing; since the campsite, an object within reach of the hand that takes it |
 | Wheel (desktop) | — | nothing | nothing | scrolls it | nothing | nothing | nothing |
-| X, Y, left stick click, left grip | talk, pin the menu, mute, live microphone, whatever is pointed at; since #355, the left stick click toggles the live microphone, muting is the hand menu's and the left grip does nothing (`interaction.md`) |  |  |  |  |  |  |
+| X, Y, left stick click, left grip | talk, pin the menu, mute, live microphone, whatever is pointed at; since #355, the left stick click toggles the live microphone, muting is the hand menu's, and the left grip takes an environment's object within reach of the left hand (`interaction.md`) |  |  |  |  |  |  |
 
 Hold B for a second to leave is not a rung: every press but one on a panel or wall carried starts it, whichever rung took the press (`interaction.md`; `Step::buttons`).
 
@@ -75,7 +75,7 @@ Where each is decided, and how its ownership is held through a gesture:
 | Trigger | `precedence::Trigger`: Menu, Transcript, CarriedWall, Tomori, Environment, Swarm; since #292 Pad between Tomori and Environment; since the second increment of `panel-actions.md`, Row between CarriedWall and Tomori, a place the trigger no longer summoning in a space left as it was, since Row comes before every rung that did | `scene.rs`, every frame | no one latch: `Selector` latches the environment's pull (`client_side.rs`), `Pointer` the arrival or menu row a pull began on, and `summoning` whether the pull is the swarm's own (`scene.rs`) |
 | B | `conversation::Back`, 15 rungs | `scene.rs` and `conversation.rs` | a press, except a panel or wall carried, latched in `throwing` and `removing` until B is let go (`scene.rs`) |
 | A | none declared; since #291 `precedence::A`: MenuRow, Menu, Transcript, Conversation, Tomori, Environment, Nothing, a teleport pad pointed at being, since #292, the last of the conversation's meanings | `Step::buttons`, `Wrist::input`, `Conversation::accept` | a press; the request's grace refuses A for 0.6 s (`interaction.md`); since #291, a press the environment takes is a select until A is let go, one select at a time with the trigger (`Selector`) |
-| Right grip | none declared; since the campsite, `precedence::Grab`: Transcript, Carried, Tomori, Environment, Nothing, which decides whether a squeeze is the environment's | within Tomori's, each consumer filters on the others: the projector's grip unless a card is held, the board's unless a panel is carried, the transcript's while it shows (`Step::update`) | each consumer's own carry state; the environment's, `Gripping`, latched as the squeeze closes (`scene.rs`) |
+| Right grip, left grip | none declared; since the campsite, `precedence::Grab`: Transcript, Carried, Tomori, Environment, Nothing, which decides whether a squeeze is the environment's, run for each grip, the left grip's Tomori rung being the hand menu while it shows and its Transcript and Carried never, until two-handed pointing gives the left hand Tomori's things | within Tomori's, each consumer filters on the others: the projector's grip unless a card is held, the board's unless a panel is carried, the transcript's while it shows (`Step::update`) | each consumer's own carry state; the environment's, `Gripping`, latched as the squeeze closes (`scene.rs`) |
 | Wheel | inline | `scene.rs` | none: each notch goes to the panel pointed at |
 | Right stick click | inline | `scene.rs` | a press |
 
@@ -166,7 +166,7 @@ Three ideas recur in all of them: **focus** (a modal thing if one is up, otherwi
 - **Carrying is modal and spans controls.** A panel carried takes the right stick, its click and B, and leaves the left stick to travel and the trigger to the swarm; a wall carried also takes the trigger.
 - **The transcript is wrist-anchored, not pointed at.** While it shows, the ray is hidden and points at nothing (`scene.rs`); its focus is moved by the stick, not by pointing.
 - **Holding B to leave watches every press**, whoever took it; it is not something any responder handles.
-- **X, Y and the left stick's click** mean the same wherever the participant points (`interaction.md`): global commands, not routed. The left grip does nothing, kept for taking hold of things (#354).
+- **X, Y and the left stick's click** mean the same wherever the participant points (`interaction.md`): global commands, not routed. The left grip takes an environment's object within reach of the left hand, after the hand menu, and is otherwise kept for taking hold of Tomori's things (#354).
 
 ## Proposal: a responder chain for Tomori
 

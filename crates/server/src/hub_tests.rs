@@ -7738,3 +7738,155 @@ fn a_side_is_told_as_the_hub_sweeps_who_takes_part_in_its_space_but_not_its_visi
     hub.sweep_present();
     told("nobody", Some(Vec::new()));
 }
+
+/// A side that keeps where it was last told its participants are, for a test to read.
+struct Located(Arc<Mutex<Vec<tomori_environment::Presence>>>);
+
+impl tomori_environment::ServerSide for Located {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        while !space.cancellation().is_cancelled() {
+            *self.0.lock().unwrap() = space.presence();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_side_is_told_where_its_participants_are_in_its_own_coordinates_but_not_its_visitors() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    // Participants arrive 5 m along the yard's +X, facing along its +X, so that its coordinates are not the space's.
+    let arrival = tomori_protocol::Pose::at([5.0, 0.0, 0.0]).facing_towards([6.0, 0.0, 0.0]);
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_arrival(arrival)
+            .with_server_side(Located(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let vic = Client::projecting(&hub, Access::visitor(), "vic");
+    vic.join(&id);
+    let source = {
+        let state = hub.lock();
+        let key = state.connections[&ada.connection]
+            .participant
+            .clone()
+            .unwrap();
+        state.participants[&key].source
+    };
+    // Ada stands at home with her right hand a metre ahead of her, along the space's -Z; the visitor stands beside her.
+    ada.send(ClientMessage::Presence {
+        head: upright([0.0, 1.6, 0.0]),
+        left: None,
+        right: Some(upright([0.0, 1.0, -1.0])),
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: None,
+    });
+    vic.send(standing([1.0, 1.6, 0.0]));
+    eventually_in("Ada, where she is", || seen.lock().unwrap().len() == 1);
+    let presence = seen.lock().unwrap()[0];
+    assert_eq!(presence.participant, source);
+    let near = |a: [f32; 3], b: [f32; 3]| (0..3).all(|axis| (a[axis] - b[axis]).abs() < 1e-4);
+    // Home is the arrival, and the space's -Z the yard's +X.
+    assert!(
+        near(presence.head.position, [5.0, 1.6, 0.0]),
+        "{presence:?}"
+    );
+    let right = presence.right.unwrap();
+    assert!(near(right.position, [6.0, 1.0, 0.0]), "{presence:?}");
+    assert_eq!(presence.left, None);
+    // Turned with it: the hand's -Z, ahead along the space's -Z, is along the yard's +X.
+    let [x, y, z, w] = right.orientation;
+    let ahead = [
+        -2.0 * (x * z + w * y),
+        -2.0 * (y * z - w * x),
+        -(1.0 - 2.0 * (x * x + y * y)),
+    ];
+    assert!(near(ahead, [1.0, 0.0, 0.0]), "{ahead:?}");
+    // A hand that is no pose, as one without a rotation or beyond any space, is not given to the side, whose checks of
+    // reach would otherwise meet what is not a number; nor is anything of a report whose head is no pose.
+    std::thread::sleep(tomori_environment::PRESENCE_INTERVAL);
+    ada.send(ClientMessage::Presence {
+        head: upright([0.0, 1.6, 0.0]),
+        left: Some(tomori_protocol::Pose {
+            position: [0.0, 1.0, -1.0],
+            orientation: [0.0; 4],
+        }),
+        right: Some(upright([f32::MAX, 1.0, -1.0])),
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: None,
+    });
+    eventually_in("Ada, without her hands", || {
+        seen.lock().unwrap()[0].right.is_none()
+    });
+    assert_eq!(seen.lock().unwrap()[0].left, None);
+    std::thread::sleep(tomori_environment::PRESENCE_INTERVAL);
+    ada.send(ClientMessage::Presence {
+        head: upright([f32::MAX, 1.6, 0.0]),
+        left: None,
+        right: Some(upright([0.0, 1.0, -1.0])),
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: None,
+    });
+    std::thread::sleep(tomori_environment::PRESENCE_INTERVAL * 4);
+    let presence = seen.lock().unwrap()[0];
+    assert!(presence.head.position.iter().all(|value| value.is_finite()));
+    assert_eq!(presence.right, None);
+    // Gone from the space, she is nowhere.
+    hub.disconnect(ada.connection);
+    hub.sweep_present();
+    eventually_in("nobody", || seen.lock().unwrap().is_empty());
+}
+
+/// A side that announces as fast as it can, keeping how many of its updates the server took and the first refusal.
+struct Flooding(Arc<Mutex<Option<(usize, String)>>>);
+
+impl tomori_environment::ServerSide for Flooding {
+    fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        let mut taken = usize::from(space.share("{}").is_ok());
+        let refused = loop {
+            match space.announce("{}", "{}") {
+                Ok(()) => taken += 1,
+                Err(error) => break error,
+            }
+        };
+        *self.0.lock().unwrap() = Some((taken, refused.message().to_owned()));
+        while !space.cancellation().is_cancelled() {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_side_s_states_and_events_beyond_its_rate_are_refused() {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let told = Arc::new(Mutex::new(None));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_server_side(Flooding(told.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (_id, _commands) = running(&hub, &bound, Snapshot::default());
+    eventually_in("refused", || told.lock().unwrap().is_some());
+    let (taken, refused) = told.lock().unwrap().clone().unwrap();
+    // The burst, and perhaps one more refilled as it went.
+    let burst = tomori_environment::UPDATE_BURST as usize;
+    assert!((burst..=burst + 1).contains(&taken), "{taken}");
+    assert!(refused.contains("faster"), "{refused}");
+}

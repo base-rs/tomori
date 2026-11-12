@@ -1,0 +1,22 @@
+[package]
+name = "tomori-physics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Rigid-body physics for Tomori's environments: loose objects that participants pick up, carry, throw and stack, simulated by the server and drawn alike by every client"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "environment", "physics", "xr"]
+categories = ["game-development", "simulation"]
+
+[features]
+# The simulation itself, on Rapier, which only a server builds: a client reads what it sends without it.
+default = ["simulation"]
+simulation = ["dep:rapier3d"]
+
+[dependencies]
+glam = { version = "0.33", features = ["serde"] }
+rapier3d = { version = "0.36.1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

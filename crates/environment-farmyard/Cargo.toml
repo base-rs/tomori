@@ -13,6 +13,10 @@ exclude = ["assets/source/*.blend"]
 keywords = ["tomori", "environment", "xr", "farmyard"]
 categories = ["game-development"]
 
+[features]
+# The server side, which runs the beach's stones on Rapier: only a server builds it, so that a client never simulates.
+side = ["tomori-physics/simulation"]
+
 [dependencies]
 glam = "0.33"
 log = "0.4"
@@ -21,7 +25,10 @@ serde_json = "1"
 # Its models, built in code and loaded, and the chickens' animator, without drawing them.
 tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
 tomori-environment = { version = "0.2.0", path = "../environment" }
-# The clusters of workers at the trail's and the campsite's anchors, which the tree ferns keep clear of.
+# The beach's stones, their shapes and messages, and with `side`, their simulation.
+tomori-physics = { version = "0.2.0", path = "../physics", default-features = false }
+# The clusters of workers at the trail's and the campsite's anchors, which the tree ferns keep clear of, and the poses of
+# the presence its server side is told.
 tomori-protocol = { version = "0.2.0", path = "../protocol" }
 
 [dev-dependencies]

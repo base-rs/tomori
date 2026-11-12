@@ -829,6 +829,7 @@ mod tests {
             assert_press_edges(&controls, true);
             assert!(controls.live_toggle);
             assert_eq!(controls.transcript_grip, Some(1.0));
+            assert_eq!(controls.left_grip, Some(1.0));
             assert_eq!(controls.navigation.x, 0.8);
             assert!(controls.navigation_active);
             assert_eq!(controls.presentation_navigation.x, -0.9);
@@ -873,6 +874,7 @@ mod tests {
             assert_press_edges(&controls, false);
             assert!(!controls.live_toggle && !controls.live_toggle_active);
             assert_eq!(controls.transcript_grip, None);
+            assert_eq!(controls.left_grip, None);
             assert_eq!(controls.navigation, Vec2::ZERO);
             assert!(!controls.navigation_active);
             assert_eq!(controls.presentation_navigation, Vec2::ZERO);

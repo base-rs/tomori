@@ -40,6 +40,8 @@ pub struct Channel {
     pub places: Option<Places>,
     /// The actions the side declared, each description and label cleaned. See `design/environment-actions.md`.
     pub actions: Vec<tomori_environment::Action>,
+    /// How many more states and events it may send, once it has sent one.
+    pub updates: Option<Updates>,
 }
 
 /// An object a side described, as the server keeps it.
@@ -93,6 +95,7 @@ impl Channel {
             refused: std::collections::VecDeque::new(),
             places: None,
             actions: Vec::new(),
+            updates: None,
         }
     }
 
@@ -261,6 +264,40 @@ impl Acts {
     /// Give back an action taken from the bucket that was not handed on, as one its side could not take.
     pub fn give_back(&mut self) {
         self.tokens = (self.tokens + 1.0).min(ACT_BURST);
+    }
+}
+
+/// The states and events a side may still send in its space: a bucket of [`tomori_environment::UPDATE_BURST`], refilled
+/// at [`tomori_environment::UPDATES_PER_SECOND`], so that a side saying where what moves is 20 times a second is never
+/// refused, and one announcing as fast as it can is held to the rate.
+#[derive(Debug)]
+pub struct Updates {
+    tokens: f32,
+    at: Instant,
+}
+
+impl Updates {
+    pub fn new(now: Instant) -> Self {
+        Self {
+            tokens: tomori_environment::UPDATE_BURST as f32,
+            at: now,
+        }
+    }
+
+    /// Whether an update sent at `now` is taken, taking it from the bucket if so, or why not.
+    pub fn take(&mut self, now: Instant) -> Result<(), &'static str> {
+        let elapsed = now
+            .saturating_duration_since(self.at)
+            .min(Duration::from_secs(60));
+        self.at = self.at.max(now);
+        self.tokens = (self.tokens
+            + elapsed.as_secs_f32() * tomori_environment::UPDATES_PER_SECOND as f32)
+            .min(tomori_environment::UPDATE_BURST as f32);
+        if self.tokens < 1.0 {
+            return Err("The environment is updating faster than Tomori sends its updates.");
+        }
+        self.tokens -= 1.0;
+        Ok(())
     }
 }
 
@@ -950,5 +987,26 @@ mod tests {
         assert_eq!(calls.call(at(100)), Ok(()));
         // A channel without anchors placed has none.
         assert!(Channel::new(1, "yard", 1).anchors().is_empty());
+    }
+
+    #[test]
+    fn a_side_s_updates_are_held_to_thirty_a_second_after_a_burst_of_sixty() {
+        let now = Instant::now();
+        let mut updates = Updates::new(now);
+        for _ in 0..tomori_environment::UPDATE_BURST {
+            assert_eq!(updates.take(now), Ok(()));
+        }
+        assert!(updates.take(now).unwrap_err().contains("faster"));
+        // A second later, thirty more, and no more.
+        let later = now + Duration::from_secs(1);
+        for _ in 0..tomori_environment::UPDATES_PER_SECOND {
+            assert_eq!(updates.take(later), Ok(()));
+        }
+        assert!(updates.take(later).is_err());
+        // Twenty a second, as a side saying where what moves is does, is never refused.
+        let mut steady = Updates::new(now);
+        for tick in 0..2_000u64 {
+            assert_eq!(steady.take(now + Duration::from_millis(tick * 50)), Ok(()));
+        }
     }
 }

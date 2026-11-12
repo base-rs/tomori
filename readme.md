@@ -349,6 +349,7 @@ The workspace's crates are named `tomori-` followed by their role, in folders un
 - [`tomori-security`](crates/security/readme.md): tokens, pairing and certificate pinning.
 - [`tomori-backend`](crates/backend/readme.md) and [`tomori-backend-opencode`](crates/backend-opencode/readme.md): the agent backend interface, and its OpenCode implementation.
 - [`tomori-environment`](crates/environment/readme.md): the interface of an environment's server side, which the server runs for the spaces bound to its environment.
+- [`tomori-physics`](crates/physics/readme.md): rigid-body physics for an environment's loose objects, taken with either hand, carried, thrown and stacked, simulated by its server side on Rapier and mirrored by its clients, which never simulate.
 - [`tomori-assets`](crates/assets/readme.md): environments' models, loaded at runtime from content-addressed `.glb` assets, read as untrusted input, and drawn skinned on the GPU.
 - [`tomori-speech`](crates/speech/readme.md): speech recognition and synthesis with sherpa-onnx.
 - [`tomori-highlight`](crates/highlight/readme.md): the server's syntax highlighting of the agent's code panels, with tree-sitter and syntect, into spans of shared token kinds.
@@ -392,9 +393,9 @@ cargo bake android:apk:verify tomori-0.2.0.apk
 
 A release APK cannot update a locally built one, or the other way round: they are the same app, `com.codeotaku.tomori`, signed with different keys, so switching between them means uninstalling first, which loses the app's pairing.
 
-Most of Tomori's crates were first published at 0.2.0; `tomori-assets`, `tomori-environment`, `tomori-environment-sky-client`, `tomori-environment-github`, `tomori-environment-github-server`, `tomori-environment-github-client`, `tomori-environment-farmyard`, `tomori-environment-farmyard-client`, `tomori-highlight`, `tomori-prometheus` and `tomori-server-app` have not been yet, and need a first upload before the next release. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Between releases, while the workspace's version is one already on crates.io, it builds each crate against the published copies of the others at that version, so it fails once a crate uses something newer; it passes again once the release bumps the version. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
+Most of Tomori's crates were first published at 0.2.0; `tomori-assets`, `tomori-environment`, `tomori-environment-sky-client`, `tomori-environment-github`, `tomori-environment-github-server`, `tomori-environment-github-client`, `tomori-environment-farmyard`, `tomori-environment-farmyard-client`, `tomori-highlight`, `tomori-physics`, `tomori-prometheus` and `tomori-server-app` have not been yet, and need a first upload before the next release. A release publishes the crates listed under [Crates](#crates), which `cargo bake cargo:packages` lists, and `cargo publish --workspace --dry-run --locked` checks that they package and build. Between releases, while the workspace's version is one already on crates.io, it builds each crate against the published copies of the others at that version, so it fails once a crate uses something newer; it passes again once the release bumps the version. Each crate's first upload is `cargo bake cargo:bootstrap PACKAGE`, with an owner token, which also registers `publish.yml` as its trusted publisher, so that later releases publish through GitHub Actions. Upload them in the order of their dependencies, since crates.io needs a crate's dependencies, including dev-dependencies with a version, to exist first:
 
-1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment`, `tomori-assets`, `tomori-environment-sky`, `tomori-environment-github`, `tomori-environment-farmyard`, `tomori-prometheus` and `tomori-text`;
+1. `tomori-protocol`, `tomori-security`, `tomori-backend`, `tomori-environment`, `tomori-assets`, `tomori-physics`, `tomori-environment-sky`, `tomori-environment-github`, `tomori-environment-farmyard`, after `tomori-physics`, `tomori-prometheus` and `tomori-text`;
 2. `tomori-discovery`, `tomori-speech`, `tomori-highlight` and `tomori-backend-opencode`;
 3. `tomori-client`;
 4. `tomori-server`;
@@ -568,7 +569,7 @@ See [releases.md](releases.md) for the full release history.
 
 - Document the direct 1080p virtual camera and dedicated audio input used to share a Tomori space in a Slack Huddle without OBS.
 
-- Toggle the Quest microphone for live conversation with the left grip; hold X to address the agent and release it to return to the previous live setting. Live capture stops on focus loss or disconnection. Echo cancellation is not guaranteed.
+- Toggle the Quest microphone for live conversation with a click of the left stick; hold X to address the agent and release it to return to the previous live setting. Live capture stops on focus loss or disconnection. Echo cancellation is not guaranteed.
 
 - The spectator renders an unobstructed view without the headset HUD, animates the swarm from the space's activity, and publishes 1080p PipeWire video instead of 4K.
 

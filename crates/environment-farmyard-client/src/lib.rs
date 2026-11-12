@@ -11,14 +11,16 @@ pub mod ambience;
 pub mod campsite;
 pub mod client;
 pub mod scenery;
+pub mod stones;
 
 pub use tomori_environment_farmyard::{ID, LABEL, LICENSE, VERSION, chicken, coop, layout, trail};
 
 /// The heading the chicken's licence notice, [`LICENSE`], is shown under with a build's other bundled assets'.
 pub const LICENSE_TITLE: &str = "The farmyard's chicken, by Hinoki Maple Williams (CC BY 4.0)";
 
-/// Where participants may travel in the farmyard: teleporting onto the ground it draws, the yard's earth and the
-/// trail's track and clearings round the outside of the fence, clear of what stands on it, as
+/// Where participants may travel in the farmyard: teleporting onto the ground it draws, the yard's earth, the trail's
+/// track and clearings round the outside of the fence and the beach's shingle down towards the river, clear of what
+/// stands on it, as
 /// `tomori-environment-farmyard`'s `walkable` derives it, at the heights it is drawn, so that whoever stands or lands
 /// there, and the ring where they would, is on what is drawn; through the gate, on the way out declared by hand, and
 /// about the campsite's fire; turning in snaps; between the yard and the lookout at the trail's far end by a pair of
@@ -169,6 +171,7 @@ mod tests {
         for surface in surfaces {
             match surface.navmesh() {
                 Some(mesh) => {
+                    // The beach's flat shingle among it, a little above the meadow, as high as it is drawn.
                     assert!(mesh.triangles().iter().flatten().all(|corner| {
                         (-1e-6..=trail::LIFT + trail::EDGE + 1e-6).contains(&corner.y)
                     }))
@@ -434,6 +437,13 @@ mod tests {
                         "lost: undrawn clearing",
                         lost && kept_by.is_none() && !drawn_clearing && middle > trail::HALF,
                     ),
+                    (
+                        "gained: the beach's shingle",
+                        old.is_none()
+                            && tomori_environment_farmyard::beach::height(point)
+                                .zip(new)
+                                .is_some_and(|(shingle, new)| (shingle - new).abs() < 1e-3),
+                    ),
                 ]
                 .into_iter()
                 .find(|(_, is)| *is)
@@ -453,14 +463,16 @@ mod tests {
         // The yard is as it was, and so is the rest of the trail, but three kinds of ground, each better: up the
         // track's edges, towards their crests, where the ring had been drawn beneath the edge, now on it; within the
         // clearance of a station's post and plaque, which participants had landed in, or on; and beyond what a
-        // clearing draws, its nine sides within the disc it had been declared as. Nowhere is walkable that was not.
+        // clearing draws, its nine sides within the disc it had been declared as. Nowhere is walkable that was not, but
+        // the beach's shingle, as high as it is drawn.
         assert!(both > 16000, "{both}");
         let kinds: Vec<&str> = differences.keys().copied().collect();
         assert!(
             kinds.iter().all(|kind| [
                 "higher: up the track's edge",
                 "lost: trail's posts, seat and rock",
-                "lost: undrawn clearing"
+                "lost: undrawn clearing",
+                "gained: the beach's shingle"
             ]
             .contains(kind)),
             "{kinds:?}"
