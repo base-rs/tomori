@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 use super::*;
 use base_scheduler::Cancellation;
 
+mod cache;
+
 /// A request the fake received.
 struct Seen {
     /// Which of the fake's connections it came on, counted from 0.

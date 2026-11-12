@@ -25,6 +25,8 @@
 //! # Ok::<(), tomori_prometheus::Error>(())
 //! ```
 //!
+//! A client built with a [`Cache`] shares one request among identical calls in flight together, keeps answers while they are fresh, rounding instant queries' times to a bucket ([`Call::bucket`]) so that consumers agree, and keeps range queries' points so that a moving window asks only for the steps it lacks; a partial answer ([`Response::partial`]) is never kept.
+//!
 //! A server side that lets the space's agent inspect a metric it presents describes it with a [`Metric`], which has no field for the endpoint or the token: the query, when it was evaluated, its labels, its latest value, its unit and a link.
 //!
 //! The crate logs nothing. The token is sent only in the `authorization` field of the client's own requests, and is in no error, `Debug` output or log; errors and warnings quote the source's own text only scrubbed of the token and the endpoint (see [`Error`]).
@@ -37,6 +39,7 @@ use std::time::{Duration, Instant};
 use base_scheduler::Cancellation;
 use base_scheduler_native::{NativeOptions, NativeScheduler};
 
+mod cache;
 mod data;
 mod endpoint;
 mod error;
@@ -52,6 +55,7 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use cache::{Cache, CacheStats, DEFAULT_CACHE_BYTES, DEFAULT_CACHE_ENTRIES, DEFAULT_OVERLAP};
 pub use data::{Data, Labels, Point, Response, Sample, Series};
 pub use error::{ENDPOINT, Error, QUOTED_BYTES, REDACTED};
 pub use labels::LabelFilter;
@@ -59,6 +63,7 @@ pub use metric::{Metric, Window};
 pub use time::{Range, Timestamp};
 pub use token::{Token, TokenSource};
 
+use cache::{Begin, Key, Store};
 use data::Answer;
 use error::Scrub;
 use slots::Slots;
@@ -106,18 +111,21 @@ pub enum QueryMethod {
     Get,
 }
 
-/// How one call is sent, for [`Client::query_with`] and [`Client::query_range_with`]: its own time-out, and whether it is a background request.
+/// How one call is sent, for [`Client::query_with`] and [`Client::query_range_with`]: its own time-out, whether it is a background request, and, with a client's [`Cache`], how long its answer is fresh and the bucket an instant query's time is rounded down to.
 ///
 /// ```
 /// use std::time::Duration;
 /// let fleet = tomori_prometheus::Call::new()
 ///     .timeout(Duration::from_secs(60))
-///     .background();
+///     .background()
+///     .bucket(Duration::from_secs(60));
 /// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Call {
     timeout: Option<Duration>,
     background: bool,
+    fresh: Option<Duration>,
+    bucket: Option<Duration>,
 }
 
 impl Call {
@@ -137,6 +145,18 @@ impl Call {
         self.background = true;
         self
     }
+
+    /// How long this call's answer is fresh, in place of the cache's [`Cache::fresh`] or the call's bucket: with a client's cache, a call for the same answer within this time is answered from it without a request. A client without a cache ignores it.
+    pub fn fresh(mut self, fresh: Duration) -> Self {
+        self.fresh = Some(fresh);
+        self
+    }
+
+    /// Evaluate an instant query at the start of the `bucket`-long slot, counted from the epoch, that holds the time it is given ([`Timestamp::floor`]), so that every call within the slot asks the same, and with a client's cache, its answer fresh for the bucket unless [`Call::fresh`] says otherwise, is read once a slot by them all. A range query ignores it: give it a range whose start and end are steps from the epoch ([`Range::aligned`]) for a query cache in front of the source to help.
+    pub fn bucket(mut self, bucket: Duration) -> Self {
+        self.bucket = Some(bucket);
+        self
+    }
 }
 
 /// The configuration of a [`Client`], from [`Client::builder`].
@@ -152,6 +172,7 @@ pub struct Builder {
     method: QueryMethod,
     labels: LabelFilter,
     user_agent: String,
+    cache: Option<Cache>,
     /// [`DROP_WAIT`], or a test's.
     drop_wait: Duration,
     #[cfg(test)]
@@ -223,6 +244,14 @@ impl Builder {
     /// The `user-agent` field; `tomori-prometheus/VERSION` otherwise.
     pub fn user_agent(mut self, user_agent: &str) -> Self {
         self.user_agent = user_agent.to_owned();
+        self
+    }
+
+    /// Keep answers in `cache`, shared by the client's clones: identical calls in flight together send one request, answers are kept while fresh, and range queries ask only for the steps they lack (see [`Cache`]). Without one, every call sends its own request.
+    ///
+    /// A call waits for an identical call's request in flight only if that request has the same priority ([`Call::background`]) and a time-out at least as long as its own; otherwise it sends its own, so that a call is never held to a background request's turn for a slot, nor fails sooner than its own time-out. It waits at most twice its own time-out, as its own request could, failing as [`Error::Timeout`] after.
+    pub fn cache(mut self, cache: Cache) -> Self {
+        self.cache = Some(cache);
         self
     }
 
@@ -308,6 +337,7 @@ impl Builder {
                 labels: self.labels,
                 host,
                 base,
+                cache: self.cache.map(Store::new),
             }),
         })
     }
@@ -361,6 +391,7 @@ struct Shared {
     /// The endpoint's host and path, which quoted text is scrubbed of.
     host: String,
     base: String,
+    cache: Option<Store>,
 }
 
 /// The token last given, when, and how many have been given, so that a caller whose request was refused renews only the token it sent.
@@ -415,6 +446,7 @@ impl fmt::Debug for Client {
             .field("concurrency", &shared.slots.limit())
             .field("method", &shared.method)
             .field("labels", &shared.labels)
+            .field("cache", &shared.cache.as_ref().map(Store::config))
             .finish_non_exhaustive()
     }
 }
@@ -434,6 +466,7 @@ impl Client {
             method: QueryMethod::Post,
             labels: LabelFilter::all(),
             user_agent: concat!("tomori-prometheus/", env!("CARGO_PKG_VERSION")).to_owned(),
+            cache: None,
             drop_wait: DROP_WAIT,
             #[cfg(test)]
             resolver: None,
@@ -449,14 +482,54 @@ impl Client {
         self.query_with(expression, at, Call::new())
     }
 
-    /// Evaluate `expression` at `at`, as [`Client::query`] does, sent as `call` says.
+    /// Evaluate `expression` at `at`, as [`Client::query`] does, sent as `call` says: at the start of its bucket, if it has one, and with the client's cache, answered from it while fresh.
     pub fn query_with(
         &self,
         expression: &str,
         at: Timestamp,
         call: Call,
     ) -> Result<Response<Data>, Error> {
-        self.call("query", expression, &[("time", at.to_string())], call)
+        let at = call.bucket.map_or(at, |bucket| at.floor(bucket));
+        let fetch = || self.call("query", expression, &[("time", at.to_string())], call);
+        let Some(cache) = &self.shared.cache else {
+            return fetch();
+        };
+        let fresh = call.fresh.or(call.bucket).unwrap_or(cache.config_fresh());
+        let key = Key::Instant {
+            expression: expression.to_owned(),
+            at: at.millis(),
+        };
+        match cache.begin_instant(key, fresh, self.sending(call)) {
+            Begin::Hit(response) => Ok(response),
+            Begin::Follow(flight) => flight.wait(self.follow_timeout(call)),
+            Begin::Lead(landing, ()) => {
+                let outcome = fetch();
+                cache.finish_instant(landing, fresh, &outcome);
+                outcome
+            }
+        }
+    }
+
+    /// What the client's cache has done and holds; nothing without one.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.shared
+            .cache
+            .as_ref()
+            .map(Store::stats)
+            .unwrap_or_default()
+    }
+
+    /// How `call`'s request is sent, which decides whose identical request in flight it may wait for.
+    fn sending(&self, call: Call) -> cache::Sending {
+        cache::Sending {
+            background: call.background,
+            timeout: self.follow_timeout(call),
+        }
+    }
+
+    /// A call's time-out, which bounds its wait for an identical call's request in flight as it would its own request.
+    fn follow_timeout(&self, call: Call) -> Duration {
+        call.timeout.unwrap_or(self.shared.timeout).min(MAX_TIMEOUT)
     }
 
     /// Evaluate `expression` at every step of `range`, a range query, whose series have at most [`MAX_POINTS`] points.
@@ -468,13 +541,56 @@ impl Client {
         self.query_range_with(expression, range, Call::new())
     }
 
-    /// Evaluate `expression` at every step of `range`, as [`Client::query_range`] does, sent as `call` says.
+    /// Evaluate `expression` at every step of `range`, as [`Client::query_range`] does, sent as `call` says. With the client's cache, the points kept of the same expression at the same step, whose steps coincide with `range`'s, are used, and only the steps they lack asked for, with the cache's overlap; the window is answered wholly from them while they are fresh and have every step of it.
     pub fn query_range_with(
         &self,
         expression: &str,
         range: Range,
         call: Call,
     ) -> Result<Response<Vec<Series>>, Error> {
+        Self::check(&range)?;
+        let Some(cache) = &self.shared.cache else {
+            return self.fetch_range(expression, range, call);
+        };
+        let fresh = call.fresh.unwrap_or(cache.config_fresh());
+        match cache.begin_range(
+            Key::range(expression, &range),
+            &range,
+            fresh,
+            self.sending(call),
+        ) {
+            Begin::Hit(response) => Ok(response),
+            Begin::Follow(flight) => {
+                flight
+                    .wait(self.follow_timeout(call))
+                    .map(|response| match response.data {
+                        Data::Matrix(series) => Response {
+                            data: series,
+                            warnings: response.warnings,
+                            partial: response.partial,
+                        },
+                        _ => unreachable!("a range query's leader shares its series as a matrix"),
+                    })
+            }
+            Begin::Lead(landing, plan) => {
+                let tail = Range::new(Timestamp::from_millis(plan.from), range.end, range.step);
+                let fetched = self.fetch_range(expression, tail, call);
+                cache.finish_range(landing, &range, plan, fetched)
+            }
+        }
+    }
+
+    /// Keep `series`, the answer to a range query of `expression` over `range` that the application kept itself, such as across a restart, in the client's cache as though read, though never fresh: the next range of the same expression and step whose steps coincide with it, and whose start it holds, asks only for the steps after its last, with the cache's overlap. Its points outside `range` are left out, and any the cache has read itself are kept in place of those remembered for the same steps, being newer. Each series' points must be in order and on `range`'s steps, else it is refused as [`Error::Invalid`], keeping nothing. An expression evaluated at its range's start or end is never kept. Give only what this client answered, whole and not partial, so that it has the client's labels; a client without a cache keeps nothing.
+    pub fn remember(&self, expression: &str, range: Range, series: &[Series]) -> Result<(), Error> {
+        Self::check(&range)?;
+        if let Some(cache) = &self.shared.cache {
+            cache.remember(Key::range(expression, &range), &range, series)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `range` can be asked for.
+    fn check(range: &Range) -> Result<(), Error> {
         let points = range.points().ok_or(Error::Invalid(
             "a range must not end before it starts, and its step must be at least a millisecond"
                 .into(),
@@ -484,6 +600,16 @@ impl Client {
                 "a range of {points} points is more than {MAX_POINTS}"
             )));
         }
+        Ok(())
+    }
+
+    /// Send a range query over `range` as `call` says.
+    fn fetch_range(
+        &self,
+        expression: &str,
+        range: Range,
+        call: Call,
+    ) -> Result<Response<Vec<Series>>, Error> {
         let response = self.call(
             "query_range",
             expression,
@@ -498,6 +624,7 @@ impl Client {
             Data::Matrix(series) => Ok(Response {
                 data: series,
                 warnings: response.warnings,
+                partial: response.partial,
             }),
             _ => Err(Error::Parse(
                 "a range query's answer is not a matrix".into(),

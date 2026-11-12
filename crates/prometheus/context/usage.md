@@ -14,6 +14,7 @@
 - `method` sends queries form-encoded in a `POST` (the default) or in the URL of a `GET`.
 - `labels(LabelFilter::only([...]))` keeps only the labels listed, removing the rest from every answer; without it, every label is kept.
 - `user_agent` replaces `tomori-prometheus/VERSION`.
+- `cache(Cache::new())` keeps answers, as described below.
 
 The client sends up to `concurrency` requests at once, from any of its callers' threads, on a thread of its own, over connections that Base's HTTP client pools for the address that last connected: a slow request holds only its own slot and connection, so one shared client serves several pollers. A failure retires only the connection it happened on, a caller giving up while a new connection is being made included; only the address failing to connect makes the request try each of the host's addresses in turn, the one that last connected first, each but the last within its share of the time-out. Clones share the thread, the connections, the slots and the token, and renew a refused token once between them; the token source is asked by one caller at a time, and callers whose token is still good never wait for it. Redirects are not followed. Dropping the last clone stops the thread, waiting for it for at most `DROP_WAIT`, a second, since a lookup stuck in the system's resolver cannot be interrupted.
 
@@ -24,6 +25,21 @@ The client sends up to `concurrency` requests at once, from any of its callers' 
 - `query_with` and `query_range_with` take a `Call` as well: `Call::new().timeout(duration)` gives that call its own time-out in place of the client's, such as a short one for a quick read and a long one for a slow read of a whole fleet, and `.background()` marks it a background request, which never takes a slot while another request waits for one; background requests together hold at most all but one of the client's slots, so that one is always left for other requests. With a `concurrency` of 1 a background request takes the only slot when nothing else waits, and a request that comes after waits for it, so give a client that sends background requests a concurrency of at least 2.
 
 Answers are `Response`s, the data with Prometheus's warnings. An instant query's `Data` is a `Vector` of `Sample`s (`into_vector()`), a `Matrix` of `Series`, a `Scalar` or a `String`; a range query's is its series. Each `Point` has its own timestamp, to the millisecond, and its value, `NaN` and infinities included. Samples of native histograms are left out, keeping float samples, with a warning saying how many: wrap them in `histogram_count()`, `histogram_sum()` or `histogram_quantile()` to read them.
+
+## Caching
+
+A client built with `cache(Cache::new())` shares the cache among its clones, so build one client for every consumer of a source:
+
+- Identical calls in flight together, the same expression at the same time, or over the same range and step, send one request and share its answer or error; one waiting gives up after its own time-out, twice, as its own request would.
+- An answer is kept while fresh: `Cache::fresh(duration)` for every call, none by default, or `Call::fresh(duration)` for one. Make it no longer than the data's resolution, such as half the scrape interval.
+- `Call::bucket(duration)` evaluates an instant query at the start of the bucket holding its time, such as `Duration::from_secs(15)`, and keeps its answer for the bucket, so that consumers polling at different cadences ask the same and share one request a bucket.
+- A range query's points are kept by expression, step and phase: the next range of the same step, its window moved on, asks only for the steps from the last kept, less `Cache::overlap` (a minute) for late samples, and is answered wholly from the cache while fresh and complete. Give ranges whose start and end are steps from the epoch, with `Range::aligned()`, so that every caller's steps coincide and a query cache in front of the source sees the same requests. A range starting before what is kept, or after a gap, is read whole.
+- `Client::remember(expression, range, &series)` gives the cache a range's answer the application kept itself, such as across a restart, as though read but never fresh, so that the next read asks only for the steps after it.
+- A range whose expression uses `@ start()` or `@ end()` is read whole every time and never kept (`promql::anchored`).
+- A call waits for an identical request in flight only of its own priority and with a time-out at least as long; otherwise it sends its own.
+- `Cache::span_decay` (15 minutes) lets a range's points kept shrink once no range as long has been asked for over two such periods.
+- `Response::partial` says the source gave a warning other than PromQL's own `PromQL info:` and `PromQL warning:` annotations, or its `infos`, as a gateway that could not reach a store does: it is returned but never kept, and the next read of its range asks for the whole window.
+- `Cache::max_entries` (1,024) and `Cache::max_bytes` (64 MiB) bound it, the least recently used dropped first. `Client::cache_stats()` counts `hits`, `tails`, `misses`, `deduped`, `partial` and `evictions`, with the `entries` and `bytes` held, for a server side's own logs.
 
 ## Building queries
 

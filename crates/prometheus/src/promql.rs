@@ -35,6 +35,67 @@ pub fn escape_regex(value: &str) -> String {
     escaped
 }
 
+/// Whether `expression` evaluates any part of itself at its range's start or end, with the `@ start()` or `@ end()` modifier, so that every point of a range query of it depends on the range asked for: a client's cache reads such a range whole every time, as query frontends do. The modifiers are found as PromQL reads them, with any space between their parts, never inside a string literal or a comment.
+///
+/// ```
+/// use tomori_prometheus::promql::anchored;
+///
+/// assert!(anchored("rate(http_requests_total[5m] @ end())"));
+/// assert!(anchored("up @ start ( )"));
+/// assert!(!anchored("up @ 1700000000"));
+/// assert!(!anchored(r#"up{note="@ start()"} # @ end()"#));
+/// ```
+pub fn anchored(expression: &str) -> bool {
+    let bytes = expression.as_bytes();
+    let mut index = 0;
+    let skip_space = |mut index: usize| {
+        while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+            index += 1;
+        }
+        index
+    };
+    while let Some(&byte) = bytes.get(index) {
+        match byte {
+            b'"' | b'\'' | b'`' => {
+                index += 1;
+                while let Some(&inside) = bytes.get(index) {
+                    index += 1;
+                    if inside == b'\\' && byte != b'`' {
+                        index += 1;
+                    } else if inside == byte {
+                        break;
+                    }
+                }
+            }
+            b'#' => {
+                while bytes.get(index).is_some_and(|&inside| inside != b'\n') {
+                    index += 1;
+                }
+            }
+            b'@' => {
+                index = skip_space(index + 1);
+                let word = index;
+                while bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    index += 1;
+                }
+                if matches!(&bytes[word..index], b"start" | b"end") {
+                    let open = skip_space(index);
+                    if bytes.get(open) == Some(&b'(')
+                        && bytes.get(skip_space(open + 1)) == Some(&b')')
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    false
+}
+
 /// What joins two expressions: on a new line, which ends any comment before it.
 const SEPARATOR: &str = "\nor ";
 
@@ -69,6 +130,37 @@ pub fn batch(expressions: &[String], max_bytes: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_start_and_end_modifiers_are_found_as_promql_reads_them() {
+        for expression in [
+            "up @ end()",
+            "up@start()",
+            "sum(rate(x[5m] @ start ( ) ))",
+            "up @\n\tend(\n)",
+            "up{a=\"\\\"\"} @ end()",
+        ] {
+            assert!(anchored(expression), "{expression}");
+        }
+        for expression in [
+            "up",
+            "up @ 1700000000",
+            "up @ end",
+            "up @ ending()",
+            "up @ end(1)",
+            "up @ (end())",
+            r#"up{a="@ end()"}"#,
+            "up{a='@ start()'}",
+            "up{a=`@ end()`}",
+            "up{a=\"\\\"@ end()\"}",
+            "up # @ end()",
+            "up @",
+            "up @ start(",
+        ] {
+            assert!(!anchored(expression), "{expression}");
+        }
+        assert!(anchored("up # comment\n@ end()"));
+    }
 
     #[test]
     fn values_are_quoted_and_escaped() {
