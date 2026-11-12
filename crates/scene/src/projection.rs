@@ -2096,13 +2096,15 @@ impl Projector {
                 .zip(met)
                 .map(|((panel, ..), met)| self.named(panel, met));
             // The trigger, pressed on a node, focuses on it, for this participant alone, or, on the node focused on,
-            // ends the focus.
+            // ends the focus; not where something nearer, such as a card, takes the ray, as it takes the grip.
             let trigger = hand.free && hand.active && hand.pointing;
             let pressed = trigger && !self.triggers[side];
             self.triggers[side] = trigger;
             if pressed
                 && self.held[side].is_none()
-                && let (Some((panel, ..)), Some(volume::Met::Node(index))) = (pointed, met)
+                && let (Some((panel, _, _, distance, _)), Some(volume::Met::Node(index))) =
+                    (pointed, met)
+                && distance < hand.nearer
             {
                 let focus = (panel.id.clone(), index);
                 self.focus = (self.focus.as_ref() != Some(&focus)).then_some(focus);

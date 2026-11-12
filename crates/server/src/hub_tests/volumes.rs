@@ -238,6 +238,12 @@ fn show_diagram_projects_a_volume_and_answers_with_its_warnings_at_once() {
         json!({"source": "a --> b", "layout": "LR", "place": "wall status wall"}),
     );
     assert_eq!(answer["structuredContent"]["warnings"], json!([]));
+    // Many warnings are answered with the first and how many more, as a block's are told.
+    let source = format!("a --> b\n{}", "?? nonsense\n".repeat(20));
+    let answer = call(&hub, "show_diagram", json!({ "source": source }));
+    let warnings = answer["structuredContent"]["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), tomori_protocol::diagram::WARNINGS + 1);
+    assert_eq!(warnings.last().unwrap(), "and 12 more");
     // Refused: a diagram of nothing, a bad id, a place Tomori does not know, one too large, or an argument it does not
     // take.
     for (arguments, error) in [

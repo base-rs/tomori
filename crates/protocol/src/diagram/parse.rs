@@ -209,6 +209,11 @@ impl Reader {
         for (index, link) in links.iter().enumerate() {
             for from in &ends[index] {
                 for to in &ends[index + 1] {
+                    // Both sides' product may be millions: once the edges read are full, each is only counted.
+                    if self.builder.edges_full() {
+                        self.builder.edge_past();
+                        continue;
+                    }
                     let mut edge = link.clone();
                     edge.from.clone_from(&from.id);
                     edge.to.clone_from(&to.id);

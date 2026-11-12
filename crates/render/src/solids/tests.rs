@@ -107,6 +107,14 @@ fn a_frame_s_solids_are_drawn_within_the_budget_at_the_headset_s_limits() {
         let (one, left_out) = solids.counts();
         assert_eq!(left_out, 0);
         assert!(one <= TRIANGLES, "{one}");
+        // So does one of every edge dotted, the most solids an edge has.
+        let mut dotted = largest();
+        for edge in &mut dotted.edges {
+            edge.style = Style::Dotted;
+        }
+        solids.update(&queue, &drawn(&dotted, 1));
+        let (one, left_out) = solids.counts();
+        assert!(left_out == 0 && one <= TRIANGLES, "{one} {left_out}");
         solids.update(&queue, &drawn(&largest(), 16));
         let (triangles, left_out) = solids.counts();
         assert!(

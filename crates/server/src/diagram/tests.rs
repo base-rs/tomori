@@ -355,3 +355,27 @@ fn a_layered_layout_laid_out_again_across_keeps_its_ranks_order() {
     // Down the rank in the order they stood, the new one among them where its edge draws it.
     assert!(y(&after, "a") > y(&after, "b") && y(&after, "b") > y(&after, "c"));
 }
+
+#[test]
+fn a_force_layout_is_golden() {
+    let mut diagram = parse(&PIPELINE.replace("flowchart TD\n", "")).0;
+    diagram.layout = tomori_protocol::diagram::Layout::Force;
+    lay_out(&mut diagram, None);
+    let spots: Vec<[i16; 3]> = diagram.nodes.iter().map(|node| node.at).collect();
+    // Started from each id's hash and majorised in arithmetic every platform rounds alike, it is the same everywhere.
+    assert_eq!(
+        spots,
+        [
+            [-348, 136, -1],
+            [-191, 37, -1],
+            [-11, 0, 0],
+            [-134, -136, -1],
+            [169, 41, 2],
+            [348, 72, -2]
+        ]
+    );
+    assert_eq!(diagram.extent, [835, 413, 144]);
+    // Its cube root is the platform's, but for the last bits, which no `cbrt` promises alike.
+    assert_eq!(super::force::cube_root(64.0), 4.0);
+    assert!((super::force::cube_root(30.0) - 30f64.cbrt()).abs() < 1e-12);
+}

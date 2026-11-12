@@ -1708,7 +1708,8 @@ fn show_diagram_tool() -> Value {
         "annotations": {
             "readOnlyHint": false,
             "destructiveHint": false,
-            "idempotentHint": true,
+            // Without an id, each call shows another.
+            "idempotentHint": false,
             "openWorldHint": false,
         },
     })
@@ -1762,13 +1763,29 @@ fn show_diagram(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Va
     }
     let content = crate::stage::Content::volume(title, slug, Vec::new(), diagram, warnings);
     let shown = hub.agent_show_diagram(session, content, place.as_ref())?;
+    // The first warnings and how many more, as a block's note tells them, since a block of thousands of bad lines
+    // would otherwise answer with as many.
+    let mut warnings: Vec<&str> = shown
+        .warnings
+        .iter()
+        .take(tomori_protocol::diagram::WARNINGS)
+        .map(String::as_str)
+        .collect();
+    let more = shown
+        .warnings
+        .len()
+        .saturating_sub(tomori_protocol::diagram::WARNINGS);
+    let more = format!("and {more} more");
+    if shown.warnings.len() > tomori_protocol::diagram::WARNINGS {
+        warnings.push(&more);
+    }
     Ok(structured(json!({
         "space": shown.space,
         "panel": shown.panel,
         "id": shown.slug,
         "updated": shown.updated,
         "size": shown.size,
-        "warnings": shown.warnings,
+        "warnings": warnings,
         "next": if shown.warnings.is_empty() {
             "Everyone in the space sees it now. Say in a sentence what it shows, since it is not read aloud."
         } else {

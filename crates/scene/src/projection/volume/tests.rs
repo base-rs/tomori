@@ -64,12 +64,13 @@ fn every_shape_is_a_solid_and_every_edge_style_and_arrow_is_drawn() {
     let mut instances = Vec::new();
     mesh.instances(Mat4::IDENTITY, None, 0.0, &mut instances);
     assert_eq!(instances.len(), mesh.solids());
-    // A box for the box and the card, and a sphere for the sphere, the dotted edge's dots and the flow's beads.
+    // A box for the box and the card, a sphere for the sphere and the flow's beads, and a diamond for the diamond and
+    // the dotted edge's dots.
     assert_eq!(counted(&instances, Solid::Box), 2);
     assert_eq!(counted(&instances, Solid::Cylinder), 1);
     assert_eq!(counted(&instances, Solid::Prism), 1);
-    assert_eq!(counted(&instances, Solid::Diamond), 1);
-    assert!(counted(&instances, Solid::Sphere) > 1 + BEADS);
+    assert!(counted(&instances, Solid::Diamond) > 1);
+    assert_eq!(counted(&instances, Solid::Sphere), 1 + BEADS);
     // Forward, back, both ends' and the flow's arrowheads: five, and none on the thick edge.
     assert_eq!(counted(&instances, Solid::Cone), 5);
     // The solid edge through its waypoint is two tubes, the dashed one several, the thick and the flow one each.
@@ -419,6 +420,12 @@ mod projector {
         projector.update(input(Some(&projection), at_a, false, Hold::default(), now));
         let off = towards(Vec3::new(5.0, 1.5, -1.2));
         projector.update(input(Some(&projection), off, true, Hold::default(), now));
+        assert_eq!(projector.focus(), None);
+        // Nor where something nearer, such as a card, takes the ray.
+        projector.update(input(Some(&projection), off, false, Hold::default(), now));
+        let mut card_in_front = input(Some(&projection), at_b, true, Hold::default(), now);
+        card_in_front.nearer = 0.05;
+        projector.update(card_in_front);
         assert_eq!(projector.focus(), None);
         // Time moves the flows on.
         let later = projector.update(input(

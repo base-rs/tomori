@@ -331,6 +331,50 @@ fn bounds_keep_what_fits_in_the_order_written_and_count_the_rest() {
 }
 
 #[test]
+fn a_block_of_many_mentions_reads_within_its_bounds_whatever_it_writes() {
+    // Two sides of 32 joined by & are 1,024 edges: the first read are kept, and the rest only counted.
+    let side = |from: usize| -> String {
+        (from..from + 32)
+            .map(|index| format!("n{index}"))
+            .collect::<Vec<_>>()
+            .join(" & ")
+    };
+    let (diagram, warnings) = parse(&format!("{} --> {}\n", side(0), side(32)));
+    assert_eq!((diagram.nodes.len(), diagram.edges.len()), (NODES, EDGES));
+    assert!(
+        texts(&warnings).contains(&"edges 129 to 1024 left out: at most 128".to_owned()),
+        "{warnings:?}"
+    );
+    // Sides of thousands, as 16 KiB of a block can write, millions of pairs, are counted without being kept, and ids
+    // past the nodes kept are not looked over for misspellings.
+    let ids: Vec<String> = (0..2_000).map(|index| format!("x{index:03}")).collect();
+    let line = format!("{} --> {}", ids[..1_000].join("&"), ids[1_000..].join("&"));
+    let (diagram, warnings) = parse(&line);
+    assert_eq!((diagram.nodes.len(), diagram.edges.len()), (NODES, 0));
+    assert!(
+        texts(&warnings).contains(&"nodes 65 to 2000 left out: at most 64".to_owned()),
+        "{warnings:?}"
+    );
+    assert!(warnings.len() < NODES + 4, "{}", warnings.len());
+    // The tool's JSON is held to as many edges read.
+    let nodes: Vec<serde_json::Value> = (0..40)
+        .map(|index| serde_json::json!({"id": format!("n{index}")}))
+        .collect();
+    let edges: Vec<serde_json::Value> = (0..40)
+        .flat_map(|a| {
+            (a + 1..40)
+                .map(move |b| serde_json::json!({"from": format!("n{a}"), "to": format!("n{b}")}))
+        })
+        .take(600)
+        .collect();
+    let (diagram, warnings) =
+        Diagram::from_json(&serde_json::json!({"nodes": nodes, "edges": edges})).unwrap();
+    assert_eq!(diagram.edges.len(), EDGES);
+    assert_eq!(texts(&warnings), ["edges 129 to 600 left out: at most 128"]);
+    assert_eq!(EDGE_DRAFTS, 512);
+}
+
+#[test]
 fn text_is_cleaned_and_cut() {
     let long = "x".repeat(300);
     let body = format!(

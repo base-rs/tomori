@@ -22,7 +22,7 @@ pub(super) fn lay_out(graph: &Graph, before: &[Option<Spot>]) -> Vec<Spot> {
     let fresh = before.iter().all(Option::is_none);
     // Each node's start: where it stood, or among its neighbours that did, or else hashed from its id.
     let neighbours = graph.neighbours();
-    let spread = unit * (count as f64).cbrt();
+    let spread = unit * cube_root(count as f64);
     let mut spots: Vec<Spot> = (0..count)
         .map(|node| {
             before[node].unwrap_or_else(|| {
@@ -81,6 +81,16 @@ pub(super) fn lay_out(graph: &Graph, before: &[Option<Spot>]) -> Vec<Spot> {
         turned(&mut spots);
     }
     spots
+}
+
+/// The cube root of `value`, by a fixed number of Newton's steps, which only add, multiply and divide, and so are the
+/// same on every platform, as the platform's `cbrt` need not be to its last bit.
+pub(super) fn cube_root(value: f64) -> f64 {
+    let mut root = value.max(1.0);
+    for _ in 0..64 {
+        root = (2.0 * root + value / (root * root)) / 3.0;
+    }
+    root
 }
 
 /// How far apart each pair of nodes is in the graph, in edges, either way: one more than the furthest for nodes not

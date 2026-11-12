@@ -589,9 +589,11 @@ fn tubes(
         Style::Dotted => {
             let step = DOT_MM.max(length / DASHES as f32);
             let mut at = step / 2.0;
+            // Each dot a small diamond, of a tenth of a sphere's triangles, so that a volume of every edge dotted is
+            // within a frame's budget alone.
             while at < length {
                 parts.push(Part {
-                    solid: Solid::Sphere,
+                    solid: Solid::Diamond,
                     position: point_along(path, at),
                     scale: Vec3::splat(radius * 3.0),
                     basis: Mat3::IDENTITY,

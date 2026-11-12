@@ -33,6 +33,9 @@ pub const DETAIL_CHARS: usize = 240;
 pub const REF_BYTES: usize = 256;
 /// The most edges between one pair of nodes, either way.
 pub const PAIR_EDGES: usize = 4;
+/// The most edges read to choose the kept from, beyond which they are only counted: enough that what the bounds
+/// leave out, between nodes past [`NODES`], to themselves or past [`PAIR_EDGES`], rarely leaves fewer than [`EDGES`].
+pub const EDGE_DRAFTS: usize = EDGES * PAIR_EDGES;
 /// The most waypoints of an edge, which a client curves it through.
 pub const WAYPOINTS: usize = 4;
 /// The largest a node is and the heaviest an edge, from 1.
@@ -551,11 +554,15 @@ impl EdgeDraft {
 #[derive(Debug, Default)]
 pub struct Builder {
     layout: Layout,
+    /// Each node, in the order declared: its id, its attributes, and its group, by its index, the first it was put in.
     nodes: Vec<(String, Attributes, Option<usize>)>,
+    /// Each node's place among `nodes`, by its id, so that a block of thousands of mentions reads in time.
+    index: std::collections::BTreeMap<String, usize>,
+    /// The edges read, at most [`EDGE_DRAFTS`]; those past it are only counted, as `a & b & … --> c & d & …` writes as
+    /// many as both sides' product.
     edges: Vec<EdgeDraft>,
+    edges_past: usize,
     groups: Vec<Group>,
-    /// Each node's group, by the node's id, the first it was put in kept.
-    members: Vec<(String, usize)>,
     warnings: Vec<Warning>,
     /// The line being read, from 1, for warnings, while a block is read.
     line: Option<usize>,
@@ -607,25 +614,43 @@ impl Builder {
             ));
             return false;
         }
-        match self.nodes.iter_mut().find(|(known, ..)| known == id) {
-            Some((_, known, _)) => *known = std::mem::take(known).or(&attributes),
-            None => self.nodes.push((id.to_owned(), attributes, self.line)),
-        }
-        if let Some(group) = group
-            && !self.members.iter().any(|(member, _)| member == id)
-        {
-            self.members.push((id.to_owned(), group));
+        match self.index.get(id) {
+            Some(&at) => {
+                let (_, known, member) = &mut self.nodes[at];
+                *known = std::mem::take(known).or(&attributes);
+                if member.is_none() {
+                    *member = group;
+                }
+            }
+            None => {
+                self.index.insert(id.to_owned(), self.nodes.len());
+                self.nodes.push((id.to_owned(), attributes, group));
+            }
         }
         true
     }
 
     /// Whether `id` names a node declared already.
     pub fn has_node(&self, id: &str) -> bool {
-        self.nodes.iter().any(|(known, ..)| known == id)
+        self.index.contains_key(id)
+    }
+
+    /// Whether as many edges are read as are kept to choose from, so that more are only counted.
+    pub fn edges_full(&self) -> bool {
+        self.edges.len() >= EDGE_DRAFTS
+    }
+
+    /// Count an edge left out as the edges read are full.
+    pub fn edge_past(&mut self) {
+        self.edges_past += 1;
     }
 
     /// An edge, as `edge` says it, its ends declared where they are not yet, in `group` where they are in none.
     pub fn edge(&mut self, edge: EdgeDraft, group: Option<usize>) {
+        if self.edges_full() {
+            self.edge_past();
+            return;
+        }
         for end in [&edge.from, &edge.to] {
             if self.strict && !self.has_node(end) && valid_id(end) {
                 self.warn(format!(
@@ -660,17 +685,22 @@ impl Builder {
             .map_or(String::new(), |close| format!(" (did you mean {close}?)"))
     }
 
-    /// The id of a node declared already within two edits of `id`, the first such written.
+    /// The id of a node declared already within two edits of `id`, the first such written; none once the diagram has
+    /// as many nodes as it keeps, since a node made then is left out, so that this costs at most [`NODES`] squared.
     fn closest(&self, id: &str) -> Option<String> {
+        if self.nodes.len() >= NODES {
+            return None;
+        }
         self.nodes
             .iter()
             .map(|(known, ..)| known)
             .find(|known| {
                 // Ids that differ only in the number they end with, as leaf1 and leaf2, are not misspellings.
                 let stem = |id: &str| id.trim_end_matches(|c: char| c.is_ascii_digit()).len();
-                edits(known, id) <= 2
-                    && known.len().min(id.len()) > 2
+                known.len().min(id.len()) > 2
+                    && known.len().abs_diff(id.len()) <= 2
                     && known[..stem(known)] != id[..stem(id)]
+                    && edits(known, id) <= 2
             })
             .cloned()
     }
@@ -743,7 +773,7 @@ impl Builder {
             .nodes
             .iter()
             .take(NODES)
-            .map(|(id, attributes, _)| {
+            .map(|(id, attributes, group)| {
                 let mut node = Node::new(id.clone(), id.clone());
                 if let Some(label) = &attributes.label {
                     let label = one_line(label, LABEL_CHARS).trim().to_owned();
@@ -764,11 +794,8 @@ impl Builder {
                     .as_deref()
                     .map(|reference| cut_bytes(&one_line(reference, REF_BYTES), REF_BYTES))
                     .unwrap_or_default();
-                node.group = self
-                    .members
-                    .iter()
-                    .find(|(member, _)| member == id)
-                    .and_then(|(_, group)| u8::try_from(*group).ok())
+                node.group = group
+                    .and_then(|group| u8::try_from(group).ok())
                     .filter(|group| usize::from(*group) < groups.len());
                 node
             })
@@ -816,6 +843,13 @@ impl Builder {
             edge.colour = draft.colour;
             edge.weight = draft.weight.clamp(1, WEIGHTS);
             edges.push(edge);
+        }
+        // Those past what is read to choose from are left out past the bound.
+        if self.edges_past > 0 {
+            if self.over[1].0 == 0 {
+                self.over[1].1 = kept + 1;
+            }
+            self.over[1].0 += self.edges_past;
         }
         if pairs > 0 {
             warnings.push(Warning {
