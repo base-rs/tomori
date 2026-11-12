@@ -963,6 +963,74 @@ mod enabled {
             pacer.run();
         }
 
+        /// A synthesizer that says nothing, telling `0` each text it is given.
+        struct Told(Sender<String>);
+
+        impl Synthesizer for Told {
+            fn synthesize(
+                &mut self,
+                text: &str,
+                _: &mut dyn FnMut(AudioChunk),
+            ) -> Result<(), tomori_speech::Error> {
+                let _ = self.0.send(text.to_owned());
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn text_that_ends_before_a_tool_call_is_spoken_while_the_tool_runs() {
+            let (hub, space) = space();
+            let (told, said) = mpsc::channel();
+            let mut voice = Voices::new(Told(told)).start(&hub, &space).unwrap();
+            voice.observe(&Event::Busy);
+            voice.observe(&Event::MessageStarted {
+                message: "m".into(),
+                role: Role::Assistant,
+            });
+            // A sentence with no paragraph after it, whose text ends as a tool is called.
+            voice.observe(&Event::TextDelta {
+                message: "m".into(),
+                text: "I'll start a sub-agent to look.".into(),
+            });
+            voice.observe(&Event::MessageCompleted {
+                message: "m".into(),
+            });
+            voice.observe(&Event::ToolStarted {
+                message: "m".into(),
+                tool: "task".into(),
+                id: "t1".into(),
+                input: serde_json::Value::Null,
+            });
+            assert_eq!(
+                said.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "I'll start a sub-agent to look.",
+                "spoken before the tool finishes"
+            );
+            voice.observe(&Event::ToolFinished {
+                id: "t1".into(),
+                error: None,
+            });
+            voice.observe(&Event::MessageStarted {
+                message: "n".into(),
+                role: Role::Assistant,
+            });
+            voice.observe(&Event::TextDelta {
+                message: "n".into(),
+                text: "It has started.".into(),
+            });
+            voice.observe(&Event::MessageCompleted {
+                message: "n".into(),
+            });
+            assert_eq!(
+                said.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "It has started."
+            );
+            assert!(
+                said.recv_timeout(Duration::from_millis(100)).is_err(),
+                "nothing is said twice"
+            );
+        }
+
         #[test]
         fn a_message_is_spoken_once_and_what_is_not_spoken_is_ignored() {
             let (hub, space) = space();

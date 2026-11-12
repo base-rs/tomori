@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **The agent says what it is about to do before slow tool work.** Tomori's instructions now tell the agent that its words are spoken as it writes them, so that when a request needs tool calls first, such as starting a sub-agent, looking something up or updating a panel, it says in a sentence what it is about to do before calling them, and you hear that at once rather than after the tools finish.
+
 - For environments: **context for walls and panels.** A side declares the parameters its panels depend on, such as a selected region, with `Space::set_context` and `ContextParameter`, and a panel says which it depends on with `Panel::depends_on`. A wall or a panel may fix a parameter, or a time window as absolute UTC instants, a panel inheriting its wall's where it fixes none, and the side is told how each panel is bound as an `Intent::context()`, a `Context` of `Binding`s and a `Time`. `tomori-protocol`'s `Wall` and `Panel` gain `context`, a `ContextChip` each, which later headsets draw. See `design/panel-context.md`.
 
 - **Bigger marshmallows.** The campsite's marshmallows are twice as big, 9 cm long, on the end of each stick, and they toast at the same distances from the flames as before; a burnt one's flame is twice as big too. The sticks rest a little further back on their log so they don't tip off it, and a stick dropped in the pool floats and comes back after a minute as before. See `design/farmyard.md`.
