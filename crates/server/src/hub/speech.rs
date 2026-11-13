@@ -4,6 +4,20 @@
 //! The agent's speech in a space, as the speech feature's voice path hands it to the hub: each segment and frame sent live to whoever hears it, kept for a catch-up or a replay and paced, and how long its reply lasts while its voice is still to come. See `design/speech.md`.
 use super::*;
 
+impl HubState {
+    /// Tell everyone in `space` whether the agent's speech is still to come at `now`, if that has changed, paced as the
+    /// agent's events are, and wake the server's timer for that and for when it would stall. See `design/speech.md`.
+    fn retell_speech(&mut self, space: &str, now: Instant) {
+        if self
+            .space_mut(space)
+            .is_some_and(|record| record.following.retell(now))
+        {
+            self.touch_space_paced(space, now);
+            self.woken.notify(usize::MAX);
+        }
+    }
+}
+
 impl Hub {
     /// Announce an agent speech segment to everyone in the space now, in order with its frames.
     pub(super) fn live_speech(
@@ -81,14 +95,18 @@ impl Hub {
             record.following.queued(segments, now);
             // Its reply to Tomori's notes about someone, queued only once they were given it, is an exchange with them.
             self.agent_voiced(&mut state, space, now);
+            state.retell_speech(space, now);
         }
     }
 
     /// One segment of agent speech queued in `space` has been sent whole, in order with its frames, or could not be
     /// synthesized.
     pub(crate) fn speech_sent(&self, space: &str) {
-        if let Some(record) = self.lock().space_mut(space) {
-            record.following.sent(Instant::now());
+        let mut state = self.lock();
+        if let Some(record) = state.space_mut(space) {
+            let now = Instant::now();
+            record.following.sent(now);
+            state.retell_speech(space, now);
         }
     }
 
@@ -102,8 +120,10 @@ impl Hub {
 
     /// Synthesis stopped for `space`: whatever of its speech was still queued will not be sent.
     pub(crate) fn speech_unqueued(&self, space: &str) {
-        if let Some(record) = self.lock().space_mut(space) {
+        let mut state = self.lock();
+        if let Some(record) = state.space_mut(space) {
             record.following.unqueued();
+            state.retell_speech(space, Instant::now());
         }
     }
 

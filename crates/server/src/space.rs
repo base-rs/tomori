@@ -2570,6 +2570,8 @@ impl SpaceModel {
             visitors: self.visitors.len(),
             attribution: self.attribution,
             speech: self.speech,
+            // Set by the hub, which knows the agent's speech.
+            speech_to_come: false,
             voice_answers: true,
             environment_changes: true,
             // Set by the hub.

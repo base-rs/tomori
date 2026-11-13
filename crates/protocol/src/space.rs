@@ -243,6 +243,12 @@ pub struct SpaceState {
     /// [`crate::ClientMessage::SetSpeech`]; a client sends those only to such a server. See `design/speech.md`.
     #[serde(default)]
     pub speech: SpeechSetting,
+    /// Whether the agent's speech is still to come: segments of its reply queued for synthesis, or synthesized and not
+    /// yet all sent, however long after its turn has ended, until none of it has made progress for a minute. A client
+    /// shows the agent speaking meanwhile, through the gaps while the next sentence is synthesized, rather than what its
+    /// session is doing. False from older servers. See `design/speech.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub speech_to_come: bool,
     /// The instructions Tomori gives the agent in this space, in layers, so that everyone in it can see them. Absent
     /// when the space's backend takes no instructions, and from older servers. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

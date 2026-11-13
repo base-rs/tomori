@@ -216,6 +216,9 @@ pub(crate) struct Following {
     unspoken: usize,
     /// When its speech last made progress: a segment queued, a frame sent, or a segment sent whole.
     progressed: Option<Instant>,
+    /// Whether the space's state last told its clients that its speech is still to come, so that they are told again
+    /// once it no longer is, as when it stalls.
+    told: bool,
     /// The participant whose words it was last given, until its reply to them is over: its turn ended and its speech
     /// heard.
     answering: Option<String>,
@@ -256,6 +259,10 @@ impl Following {
             self.glide.as_ref().map(Glide::ends),
             self.homeway_ends(),
             self.poll,
+            // Speech still to come stalls with nothing to tell its clients.
+            self.progressed
+                .filter(|_| self.told)
+                .map(|progressed| progressed + STALLED),
             self.keeping.as_ref().and_then(|keeping| keeping.due),
         ]
         .into_iter()
@@ -302,6 +309,18 @@ impl Following {
             && self
                 .progressed
                 .is_some_and(|at| now.saturating_duration_since(at) < STALLED)
+    }
+
+    /// Whether its space's clients were last told that its speech is still to come, as its state tells them.
+    pub(super) fn to_come(&self) -> bool {
+        self.told
+    }
+
+    /// Whether its speech being still to come at `now` differs from what its space's clients were last told, noting
+    /// that they are told now. See `design/speech.md`.
+    pub(super) fn retell(&mut self, now: Instant) -> bool {
+        let unspoken = self.unspoken(now);
+        unspoken != std::mem::replace(&mut self.told, unspoken)
     }
 
     /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides,
@@ -1371,6 +1390,7 @@ impl HubState {
             speaking: record.following.speaking,
             unspoken: record.following.unspoken,
             progressed: record.following.progressed,
+            told: record.following.told,
             ..Following::default()
         };
         let moved = self.summon(space, None, None);
@@ -1663,6 +1683,8 @@ impl HubState {
             following.homeway = None;
             changed |= following.via.take().is_some();
         }
+        // Speech that stalled is no longer to come.
+        changed |= following.retell(now);
         let mut home = None;
         let mut walked = None;
         if following.poll.is_some_and(|due| due <= now) {
