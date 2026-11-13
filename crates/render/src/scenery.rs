@@ -53,13 +53,6 @@ pub fn eye(scene_to_clip: Mat4) -> Vec3 {
     tomori_world::eye(scene_to_clip)
 }
 
-// A scenery's models are lit by as many lamps as the render world lights a root by, and each piece by as many as it
-// lights an instance by.
-const _: () = assert!(
-    tomori_assets::gpu::LAMPS == tomori_world::LIGHTS
-        && tomori_assets::gpu::PIECE_LAMPS == tomori_world::LIGHTS_PER_INSTANCE
-);
-
 /// What the eyes see this frame, in a scenery's own coordinates: each eye's view and projection, and one frustum
 /// holding all they see, which a scenery culls what it draws against, once, before its eyes are prepared; and, from the
 /// renderer, the render world it submitted to, which says what of that the eyes may see. See `design/rendering.md`.

@@ -53,6 +53,13 @@ macro_rules! shader {
     };
 }
 
+// The farmyard's models are lit by as many lamps as the render world lights a root by, and each piece by as many as it
+// lights an instance by.
+const _: () = assert!(
+    tomori_assets::gpu::LAMPS == tomori_render::world::LIGHTS
+        && tomori_assets::gpu::PIECE_LAMPS == tomori_render::world::LIGHTS_PER_INSTANCE
+);
+
 /// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
 /// read how the farmyard is lit, at its end, as its models are.
 #[repr(C)]
