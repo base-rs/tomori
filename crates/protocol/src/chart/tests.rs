@@ -668,20 +668,18 @@ fn cleaning_keeps_a_time_axis_only_where_it_is_sound_and_it_is_part_of_a_chart_s
         })
         .is_some()
     );
-    let widest = 180 * i64::from(CHART_STEP_MS);
+    // A window wider than its points at a day apart is still that window: a month on a chart of two points.
+    let month = 31 * i64::from(CHART_STEP_MS);
     assert!(
-        with(TimeAxis::Fixed {
-            from_ms: 0,
-            to_ms: widest
-        })
-        .is_some()
-    );
-    assert_eq!(
-        with(TimeAxis::Fixed {
-            from_ms: 0,
-            to_ms: widest + 1
-        }),
-        None
+        Chart::new(2)
+            .with_time(TimeAxis::Fixed {
+                from_ms: 0,
+                to_ms: month
+            })
+            .cleaned()
+            .unwrap()
+            .time
+            .is_some()
     );
     assert_eq!(with(TimeAxis::Unknown), None);
     // On the wire, absent where it says nothing, and read as nothing from an older server.

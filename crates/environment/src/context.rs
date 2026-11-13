@@ -275,5 +275,7 @@ mod tests {
         assert!(!is_instance("~1234567890"));
         let panel = crate::Panel::text("latency", "Latency", "").depends_on(["region"]);
         assert_eq!(panel.depends(), ["region"]);
+        let pods = crate::Panel::text("pods", "Pods", "No history.").for_window(0, 60_000);
+        assert_eq!((pods.window(), panel.window()), (Some((0, 60_000)), None));
     }
 }

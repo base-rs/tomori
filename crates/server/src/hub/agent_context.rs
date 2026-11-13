@@ -343,7 +343,8 @@ impl Hub {
 
 impl Hub {
     /// Take away, in every space, each copy of a panel its environment withdrew longer ago than
-    /// `stage::published::WITHDRAWN_SECS` before `now`, in seconds since the epoch, its side told so.
+    /// `stage::published::WITHDRAWN_SECS` before `now`, in seconds since the epoch, its side told so; and mark how long
+    /// each panel held to a window waits for its content, so that one waiting `stage::held::WAIT_SECS` says it has none.
     pub(crate) fn sweep_withdrawn(&self, now: u64) {
         let environments = self.environments();
         let mut state = self.lock();
@@ -355,9 +356,14 @@ impl Hub {
         for space in ids {
             let record = state.space_mut(&space).expect("listed above");
             let environment = record.model.environment.clone();
-            if record.stage.lapse_withdrawn(&environment, now) {
+            let lapsed = record.stage.lapse_withdrawn(&environment, now);
+            if lapsed {
                 record.stage.settle(&environments.walls(&environment));
                 log::info!("Copies of withdrawn panels in space {space} were taken away.");
+            }
+            // A panel held to a window its side gave nothing for says, in time, that it has no data for it.
+            let waited = record.stage.lapse_waiting(&environment, now);
+            if lapsed || waited {
                 state.touch_projection(&space);
             }
         }

@@ -299,7 +299,7 @@ fn shown_time(chart: &Chart) -> Option<ContextValue> {
 
 impl Kept {
     /// Whether it depends on time: as a chart, or by naming it.
-    fn timed(&self) -> bool {
+    pub(super) fn timed(&self) -> bool {
         self.published.as_ref().is_some_and(|published| {
             published.chart.is_some() || published.depends.iter().any(|depends| depends == TIME)
         })
@@ -327,7 +327,7 @@ impl Kept {
     }
 
     /// The wall it is on, if it is on one.
-    fn wall(&self) -> Option<&str> {
+    pub(super) fn wall(&self) -> Option<&str> {
         match &self.place {
             Placed::Wall { wall, .. } => Some(wall),
             Placed::Free { .. } => None,

@@ -30,6 +30,7 @@ mod code;
 pub(crate) mod context;
 mod frames;
 mod groups;
+pub(crate) mod held;
 mod image;
 mod layouts;
 mod placement;
@@ -1309,7 +1310,7 @@ impl Stage {
         let panels = kept
             .iter()
             .map(|kept| {
-                kept.panel(now)
+                self.held(walls.environment, kept, kept.panel(now), now)
                     .with_context(self.panel_chips(walls.environment, kept))
             })
             .collect();

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tomori_environment::chart::{Chart, TimeAxis};
+use tomori_environment::chart::{Chart, Colour, Series, SeriesStyle, TimeAxis};
 use tomori_environment::{
     Binding, ContextParameter, Intent, Panel, Result, ServerSide, Space, Time,
 };
@@ -49,13 +49,29 @@ impl ServerSide for Console {
                     .lock()
                     .unwrap()
                     .push((intent.participant(), context.clone()));
-                // An instance it is told of, it shows in its context, under the id the server gave it.
+                // An instance it is told of, it shows in its context, under the id the server gave it: for a region, live;
+                // for a window, over exactly that window, as it keeps its history.
                 if let (Some(of), Some(Binding::Fixed(region))) =
                     (context.of(), context.binding("region"))
                 {
                     let chart = Chart::new(181).with_time(TimeAxis::Live { step_ms: 5_000 });
                     space.publish(
                         Panel::chart(context.panel(), format!("{of} · {region}"), chart)
+                            .depends_on(["region"]),
+                    )?;
+                } else if let (Some(of), Time::Window { from_ms, to_ms }) =
+                    (context.of(), context.time())
+                {
+                    let chart = Chart::new(181)
+                        .with_time(TimeAxis::Fixed { from_ms, to_ms })
+                        .with_series(Series::new(
+                            "p99",
+                            Colour::Amber,
+                            SeriesStyle::Line,
+                            vec![Some(41.0); 181],
+                        ));
+                    space.publish(
+                        Panel::chart(context.panel(), format!("{of} · then"), chart)
                             .depends_on(["region"]),
                     )?;
                 }
@@ -495,6 +511,29 @@ fn the_agent_copies_a_panel_with_a_context_and_builds_walls_each_with_its_own() 
         instanced["settings"],
         json!([{"parameter": "region", "value": "AP-SOUTH1", "shown": true}])
     );
+    // Copied for a window, it waits for that window's data, and then shows exactly that window, labelled in UTC.
+    let windowed = tool(
+        "copy_panel",
+        json!({"panel": "Latency", "context": [{"parameter": "time", "from": "2026-11-12T02:20:00Z", "to": "2026-11-12T02:50:00Z"}], "place": "wall environment wall 2"}),
+    )["structuredContent"]["panel"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let held = ada.wait_for(|message| match message {
+        ServerMessage::Projection { projection } => projection
+            .panel(&windowed)
+            .and_then(|panel| panel.chart.clone())
+            .filter(|chart| chart.has_values()),
+        _ => None,
+    });
+    assert_eq!(
+        held.time,
+        Some(TimeAxis::Fixed {
+            from_ms: 1_794_450_000_000,
+            to_ms: 1_794_451_800_000
+        })
+    );
+    assert_eq!(held.labels.last().unwrap().text, "02:50 UTC");
     // Without a context, or with one the panel shows already, a copy would show the same, and is refused; a session in
     // no space copies nothing.
     let plain = failure(&tool(
