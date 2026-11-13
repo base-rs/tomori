@@ -570,6 +570,29 @@ mod tests {
                 Err("note is text of at most 5 characters.".to_owned())
             );
         }
+        // A query of a few hundred characters, where an action declares room for it, reaches the side whole.
+        let chart = Action::new("chart", "").with(Parameter::text(
+            "query",
+            "",
+            tomori_environment::TEXT_LIMIT,
+        ));
+        let selector = r#"{cluster="prod-eu-west-1-observe", namespace="ingest-pipeline", workload="collector", pod=~"collector-.+"}"#;
+        let intake = format!("sum by (pod) (rate(observe_intake_bytes_total{selector}[15m]))");
+        let query = format!("stddev({intake}) / avg({intake}) > 0.125");
+        assert_eq!(query.chars().count(), 340);
+        assert_eq!(
+            checked(&chart, &json!({ "query": query })).unwrap()["query"],
+            json!(query)
+        );
+        assert_eq!(
+            checked(&chart, &json!({ "query": "q".repeat(2001) })),
+            Err("query is text of at most 2000 characters.".to_owned())
+        );
+        let short = Action::new("chart", "").with(Parameter::text("query", "", 200));
+        assert_eq!(
+            checked(&short, &json!({ "query": query })),
+            Err("query is text of at most 200 characters.".to_owned())
+        );
         // Without a step, any number within the bounds; an action of none takes nothing, or an empty object.
         let free = Action::new("set", "").with(Parameter::number("zoom", "", 1.0, 8.0));
         assert!(checked(&free, &json!({ "zoom": 2.25 })).is_ok());

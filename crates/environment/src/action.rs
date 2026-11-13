@@ -33,8 +33,10 @@ pub const PARAMETER_DESCRIPTION_LIMIT: usize = 120;
 /// The longest label of a choice told to the agent, in characters, cleaned and cut as an action's description is.
 pub const CHOICE_LABEL_LIMIT: usize = 80;
 
-/// The longest text a [`Parameter::text`] takes, in characters.
-pub const TEXT_LIMIT: usize = 200;
+/// The longest text a [`Parameter::text`] takes, in characters, and the most an action's text parameters take
+/// together, so that the parameters handed to the side stay a few KiB however the action declares its text. Long
+/// enough for a query, such as a PromQL expression of a few hundred characters.
+pub const TEXT_LIMIT: usize = 2000;
 
 /// The most text in a declaration, in bytes: every name, description, value and label of every action together. A
 /// declaration of more is refused, so that what the agent is told of an object's actions stays small.
@@ -258,7 +260,7 @@ impl Parameter {
     }
 
     /// The parameter `name`, described as `description`, taking text of at most `chars` characters, at most
-    /// [`TEXT_LIMIT`], which the server cleans onto one line.
+    /// [`TEXT_LIMIT`] with the action's other text parameters, which the server cleans onto one line.
     pub fn text(name: impl Into<String>, description: impl Into<String>, chars: usize) -> Self {
         Self {
             name: name.into(),
@@ -331,7 +333,8 @@ impl Choice {
 /// at most [`PARAMETER_LIMIT`] parameters, each named so and unlike the action's others; a choice of 1 to
 /// [`CHOICE_LIMIT`] values, each one [`valid_reference`] takes and unlike the others; a number whose least and most
 /// are finite, the least no more than the most, and whose step, if it has one, is finite and above 0; text of 1 to
-/// [`TEXT_LIMIT`] characters; and at most [`ACTIONS_LIMIT`] bytes of text in all. A side's tests may check its own.
+/// [`TEXT_LIMIT`] characters, and at most that of an action's text parameters together; and at most
+/// [`ACTIONS_LIMIT`] bytes of text in all. A side's tests may check its own.
 ///
 /// ```
 /// use tomori_environment::{Action, Parameter, check_actions};
@@ -367,6 +370,7 @@ pub fn check_actions(actions: &[Action]) -> Result<()> {
         }
         bytes += name.len() + action.description().len();
         let mut parameters = HashSet::new();
+        let mut text = 0;
         for parameter in action.parameters() {
             let named = parameter.name();
             if !valid_action_name(named) {
@@ -416,6 +420,12 @@ pub fn check_actions(actions: &[Action]) -> Result<()> {
                     if !(1..=TEXT_LIMIT).contains(chars) {
                         return Err(Error::new(format!(
                             "The parameter {named} of the action {name} takes text of {chars} characters, not from 1 to {TEXT_LIMIT}."
+                        )));
+                    }
+                    text += chars;
+                    if text > TEXT_LIMIT {
+                        return Err(Error::new(format!(
+                            "The text parameters of the action {name} take {text} characters together, more than the {TEXT_LIMIT} the server takes."
                         )));
                     }
                 }
@@ -560,8 +570,11 @@ mod tests {
             .map(|index| {
                 let mut action = Action::new(format!("a{index}"), "something");
                 for parameter in 0..PARAMETER_LIMIT {
-                    action =
-                        action.with(Parameter::text(format!("p{parameter}"), "text", TEXT_LIMIT));
+                    action = action.with(Parameter::text(
+                        format!("p{parameter}"),
+                        "text",
+                        TEXT_LIMIT / PARAMETER_LIMIT,
+                    ));
                 }
                 action
             })
@@ -573,6 +586,11 @@ mod tests {
             check_actions(&[Action::new("peck", "Peck").with(pecks).consequential()]),
             Ok(())
         );
+        // One text parameter may take the whole of the text, as a query of a few hundred characters needs.
+        let query = Action::new("chart", "Chart a query")
+            .with(Parameter::text("query", "PromQL", TEXT_LIMIT))
+            .with(Parameter::number("hours", "how far back", 1.0, 24.0));
+        assert_eq!(check_actions(&[query]), Ok(()));
         // A step is only a number's.
         assert_eq!(
             Parameter::text("note", "text", 4).stepped(1.0).kind(),
@@ -646,9 +664,16 @@ mod tests {
         for chars in [0, TEXT_LIMIT + 1] {
             assert!(
                 refused(&[Action::new("say", "").with(Parameter::text("t", "", chars))])
-                    .contains("not from 1 to 200")
+                    .contains("not from 1 to 2000")
             );
         }
+        let long = Action::new("say", "")
+            .with(Parameter::text("t", "", TEXT_LIMIT))
+            .with(Parameter::text("u", "", 1));
+        assert_eq!(
+            refused(&[long]),
+            "The text parameters of the action say take 2001 characters together, more than the 2000 the server takes."
+        );
         // Text in all, here 32 actions of 1,100 bytes of description each.
         let wordy: Vec<Action> = (0..ACTION_LIMIT)
             .map(|index| Action::new(format!("a{index}"), "x".repeat(1_100)))
@@ -707,7 +732,7 @@ mod tests {
         assert_eq!((PARAMETER_DESCRIPTION_LIMIT, CHOICE_LABEL_LIMIT), (120, 80));
         assert_eq!(
             (TEXT_LIMIT, ACTIONS_LIMIT, OUTCOME_LIMIT),
-            (200, 32 * 1024, 200)
+            (2000, 32 * 1024, 200)
         );
     }
 }
