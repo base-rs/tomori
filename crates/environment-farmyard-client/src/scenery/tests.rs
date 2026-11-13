@@ -1937,13 +1937,20 @@ fn every_fern_is_drawn_once_in_the_detail_its_distance_from_the_eyes_asks() {
     let all = ferns::all();
     for eyes in [layout::ARRIVAL + Vec3::Y * 1.6, ponga()] {
         let details: Vec<Detail> = all.iter().map(|fern| fern.detail(eyes)).collect();
-        let placed: Vec<Option<Detail>> = details.iter().copied().map(Some).collect();
+        let placed: Vec<Option<Lod>> = all
+            .iter()
+            .zip(&details)
+            .map(|(fern, detail)| {
+                let index = fern.kind.details().iter().position(|kind| kind == detail);
+                Some(Lod::settled(index.map_or(u8::MAX, |index| index as u8)))
+            })
+            .collect();
         let (instances, draws) = fern_instances(&all, &placed, &vec![EVERY; all.len()], &meshes);
         // Every one, but the koru beyond their distance, which are too small to see.
         let unseen = all
             .iter()
             .zip(&details)
-            .filter(|(fern, detail)| fern.kind == ferns::Kind::Koru && **detail == Detail::Far)
+            .filter(|(fern, detail)| fern.kind == ferns::Kind::Koru && **detail != Detail::Near)
             .count();
         assert_eq!(instances.len(), all.len() - unseen);
         // One draw for each mesh any fern is drawn with, its instances one after another.

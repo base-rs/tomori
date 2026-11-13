@@ -2,7 +2,8 @@
 // by the time alone, its frond tips most and its trunk not at all, each fern at its own phase and each frond fluttering
 // a little of its own accord; lit as the farmyard's models are, by the sky's and the ground's light, the moon, a little
 // of the moon through a frond lit from behind, and the few lamps listed for it, its underside's own colour where the
-// back of a frond is seen, ponga's silver; hazed with distance, and drawn only inside the reveal sphere while the farmyard grows.
+// back of a frond is seen, ponga's silver; hazed with distance, and drawn only inside the reveal sphere while the farmyard grows;
+// and, as a fern changes its detail, each detail over its share of the pixels.
 
 struct Lamp {
     // Where it is, and how far it reaches.
@@ -41,7 +42,8 @@ fn weight(lamps: vec4<u32>, index: u32) -> f32 {
 }
 
 // A point of a fern's mesh at its own size: where it is, the way its upper side faces, its colour above and beneath,
-// and how far it sways at most; and its instance: its foot and how it is turned, and how large it is and its phase.
+// and how far it sways at most; and its instance: its foot and how it is turned, how large it is, its phase and, as it
+// changes its detail, how far it is into the change and whether this is the detail it changes to, 1, or from, 2.
 struct Point {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -62,6 +64,7 @@ struct Shaded {
     @location(2) color: vec3<f32>,
     @location(3) underside: vec3<f32>,
     @location(4) @interpolate(flat) lamps: vec4<u32>,
+    @location(5) @interpolate(flat) fade: vec2<f32>,
 }
 
 // The way the breeze blows across the ground, and across it.
@@ -94,6 +97,7 @@ fn fern_vertex(point: Point) -> Shaded {
     out.color = point.color;
     out.underside = point.underside;
     out.lamps = point.lamps;
+    out.fade = point.size.zw;
     return out;
 }
 
@@ -107,9 +111,23 @@ fn lamp_light(lamp: Lamp, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> v
     return lamp.color.rgb * weight * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
 }
 
+// Whether a fern changing its detail covers the pixel at `position` in the detail `fade` says: of an ordered 4 × 4
+// pattern of thresholds, as the farmyard's models', those below how far it is into the change in the detail it changes
+// to, and the rest in the detail it changes from, so that the two together cover every pixel once.
+fn covers(position: vec2<f32>, fade: vec2<f32>) -> bool {
+    let at = vec2<u32>(position) % 4u;
+    let across = at.x ^ at.y;
+    let order = ((across & 1u) << 3u) | ((at.y & 1u) << 2u) | (across & 2u) | ((at.y & 2u) >> 1u);
+    let below = (f32(order) + 0.5) / 16.0 < fade.x;
+    return below == (fade.y < 1.5);
+}
+
 @fragment
 fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
     if camera.reveal.w >= 0.0 && distance(in.world, camera.reveal.xyz) > camera.reveal.w {
+        discard;
+    }
+    if in.fade.y > 0.5 && !covers(in.position.xy, in.fade) {
         discard;
     }
     // Its upper side, or its underside, in its own colour, facing the eye.

@@ -163,7 +163,9 @@ fn each_instance_seen_is_drawn_in_one_level_for_both_eyes_faded_as_it_changes() 
     // Without pixels to measure by, everything is its own.
     world.cull();
     assert_eq!(world.lods(item), &[Lod::settled(0); 4]);
+    assert_eq!(world.height(), None);
     world.set_height(Some(1_000));
+    assert_eq!(world.height(), Some(1_000));
     world.cull();
     // The first is near, the second's first level's error spans half a pixel, the third's second's, and the last may be
     // anywhere, so is its own; without levels, its own.

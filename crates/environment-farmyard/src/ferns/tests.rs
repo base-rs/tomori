@@ -408,10 +408,15 @@ fn each_fern_is_many_long_lacy_fronds_swaying_at_their_tips_and_ponga_s_silver_b
             assert!(tips.into_iter().all(|point| point.sway > TREE_SWAY * 0.5));
         }
     }
-    // Drawn far, each has half its triangles or fewer.
+    // Drawn far, each has half its triangles or fewer, and distant fewer still, a tree fern four fifths as many or fewer.
     for kind in Kind::TREES.iter().chain(&Kind::GROUND) {
-        let [near, far] = [Detail::Near, Detail::Far].map(|detail| mesh(*kind, detail).len());
+        let [near, far, distant] =
+            [Detail::Near, Detail::Far, Detail::Distant].map(|detail| mesh(*kind, detail).len());
         assert!(far * 2 <= near + 3, "{kind:?} {near} {far}");
+        assert!(distant < far, "{kind:?} {far} {distant}");
+        if kind.is_tree() {
+            assert!(distant * 5 <= far * 4, "{kind:?} {far} {distant}");
+        }
     }
     // Ponga's fronds are silver beneath, twice as bright as above and more; every other fern's a little paler beneath.
     for kind in Kind::TREES.iter().chain(&Kind::GROUND) {
@@ -447,8 +452,9 @@ fn each_fern_is_many_long_lacy_fronds_swaying_at_their_tips_and_ponga_s_silver_b
 
 #[test]
 fn the_ferns_are_modest_for_the_quest() {
-    // Each mesh, drawn near and far: a tree fern a few hundred triangles near and a couple of hundred far, a ground fern
-    // about ninety near and thirty far, and a koru eighteen, one draw for each with all its instances.
+    // Each mesh, drawn near, far and distant: a tree fern a few hundred triangles near, a couple of hundred far and about a
+    // hundred distant, a ground fern about ninety near, thirty far and twenty distant, and a koru eighteen, one draw
+    // for each with all its instances.
     let meshes: Vec<(Kind, Detail, usize)> = drawn()
         .into_iter()
         .map(|(kind, detail)| (kind, detail, mesh(kind, detail).len() / 3))
@@ -458,25 +464,36 @@ fn the_ferns_are_modest_for_the_quest() {
         [
             (Kind::Ponga, Detail::Near, 491),
             (Kind::Ponga, Detail::Far, 214),
+            (Kind::Ponga, Detail::Distant, 118),
             (Kind::Mamaku, Detail::Near, 442),
             (Kind::Mamaku, Detail::Far, 193),
+            (Kind::Mamaku, Detail::Distant, 97),
             (Kind::Wheki, Detail::Near, 371),
             (Kind::Wheki, Detail::Far, 147),
+            (Kind::Wheki, Detail::Distant, 111),
             (Kind::CrownFern, Detail::Near, 99),
             (Kind::CrownFern, Detail::Far, 35),
+            (Kind::CrownFern, Detail::Distant, 28),
             (Kind::Kiokio, Detail::Near, 90),
             (Kind::Kiokio, Detail::Far, 28),
+            (Kind::Kiokio, Detail::Distant, 21),
             (Kind::HenAndChickens, Detail::Near, 90),
             (Kind::HenAndChickens, Detail::Far, 28),
+            (Kind::HenAndChickens, Detail::Distant, 21),
             (Kind::Koru, Detail::Near, 18),
         ],
         "the counts the documentation gives"
     );
-    // A fern within its distance of the eyes is drawn near, and beyond it far.
+    // A fern within its distance of the eyes is drawn near, beyond it far, and further distant.
     let fern = ferns()[0];
     let heart = fern.transform().transform_point3(fern.kind.heart());
     assert_eq!(fern.detail(heart + Vec3::X * (NEAR - 0.1)), Detail::Near);
     assert_eq!(fern.detail(heart + Vec3::X * (NEAR + 0.1)), Detail::Far);
+    assert_eq!(fern.detail(heart + Vec3::X * (DISTANT - 0.1)), Detail::Far);
+    assert_eq!(
+        fern.detail(heart + Vec3::X * (DISTANT + 0.1)),
+        Detail::Distant
+    );
     // From anywhere participants stand, every fern, the bush's tree ferns among them, each in its detail there, is
     // within the budget, though all of them near would be well over it.
     let most = eyes()
@@ -484,9 +501,9 @@ fn the_ferns_are_modest_for_the_quest() {
         .map(|eyes| triangles(Some(eyes)))
         .max()
         .unwrap();
-    assert_eq!(most, 22_796, "the count the documentation gives");
+    assert_eq!(most, 20_371, "the count the documentation gives");
     assert!(most <= BUDGET);
-    assert_eq!(triangles(Some(layout::ARRIVAL + Vec3::Y * EYES)), 17_431);
+    assert_eq!(triangles(Some(layout::ARRIVAL + Vec3::Y * EYES)), 16_354);
     assert!(triangles(None) > BUDGET * 3 / 2);
     assert_eq!((ferns().len(), bush().len()), (152, 40));
 }

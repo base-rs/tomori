@@ -443,6 +443,11 @@ impl World {
         self.height = height.filter(|height| *height > 0);
     }
 
+    /// The height of the eyes' images levels of detail are chosen for, if they are.
+    pub fn height(&self) -> Option<u32> {
+        self.height
+    }
+
     /// Cull what the views cannot see, as by default, or see everything, `false`, to compare, from the next cull.
     pub fn set_culling(&mut self, culling: bool) {
         self.culling = culling;

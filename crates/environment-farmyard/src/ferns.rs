@@ -49,6 +49,9 @@ pub const OVERHEAD: f32 = 2.2;
 /// all.
 pub const NEAR: f32 = 10.0;
 
+/// How far from the eyes a fern is drawn far; beyond, distant, with fewer fronds still, each in fewer segments.
+pub const DISTANT: f32 = 25.0;
+
 /// How far, at most, a fern's points sway in the breeze at its own size: a tree fern's frond tips, and a ground fern's.
 pub const TREE_SWAY: f32 = 0.14;
 pub const GROUND_SWAY: f32 = 0.06;
@@ -125,31 +128,36 @@ impl Kind {
         Self::TREES.contains(&self)
     }
 
-    /// The details it is drawn in: near and far, but a koru, which is drawn near alone.
+    /// The details it is drawn in, finest first: near, far and distant, but a koru, which is drawn near alone.
     pub fn details(self) -> &'static [Detail] {
         if self == Kind::Koru {
             &[Detail::Near]
         } else {
-            &[Detail::Near, Detail::Far]
+            &[Detail::Near, Detail::Far, Detail::Distant]
         }
     }
 }
 
-/// How finely a fern is drawn: in full, within [`NEAR`] of the eyes, or, beyond, with fewer fronds and leaflets.
+/// How finely a fern is drawn: in full, within [`NEAR`] of the eyes, or, beyond, with fewer fronds and leaflets, and
+/// beyond [`DISTANT`] fewer still.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Detail {
     Near,
     Far,
+    Distant,
 }
 
 impl Detail {
-    /// How finely a fern whose heart is at `heart` is drawn for eyes at `eyes`: in full within [`NEAR`] of it, and with
-    /// less beyond.
+    /// How finely a fern whose heart is at `heart` is drawn for eyes at `eyes`: in full within [`NEAR`] of it, with less
+    /// within [`DISTANT`], and with least beyond.
     pub fn seen(heart: Vec3, eyes: Vec3) -> Self {
-        if heart.distance(eyes) <= NEAR {
+        let distance = heart.distance(eyes);
+        if distance <= NEAR {
             Detail::Near
-        } else {
+        } else if distance <= DISTANT {
             Detail::Far
+        } else {
+            Detail::Distant
         }
     }
 }
@@ -447,10 +455,10 @@ fn tree(builder: &mut Builder, tree: &Tree, detail: Detail, seed: u32) {
     builder.polygon(&cap, Vec3::Y, (tree.trunk, tree.trunk));
     builder.trunk = false;
     // The skirt: dead fronds hanging close about the trunk below the crown.
-    let skirt = if detail == Detail::Near {
-        tree.skirt
-    } else {
-        tree.skirt / 2
+    let skirt = match detail {
+        Detail::Near => tree.skirt,
+        Detail::Far => tree.skirt / 2,
+        Detail::Distant => tree.skirt / 2,
     };
     for index in 0..skirt {
         let seed = seed + 100 + index as u32 * 7;
@@ -481,6 +489,7 @@ fn tree(builder: &mut Builder, tree: &Tree, detail: Detail, seed: u32) {
     let (fronds, segments) = match detail {
         Detail::Near => (tree.fronds, tree.segments),
         Detail::Far => (tree.fronds * 2 / 3, (tree.segments - 2).max(2)),
+        Detail::Distant => (tree.fronds * 2 / 3, 2),
     };
     for index in 0..fronds {
         let seed = seed + 300 + index as u32 * 11;
@@ -534,6 +543,7 @@ fn clump(builder: &mut Builder, clump: &Clump, detail: Detail, seed: u32) {
     let (fronds, segments) = match detail {
         Detail::Near => (clump.fronds, clump.segments),
         Detail::Far => (clump.fronds / 2 + 1, (clump.segments - 2).max(2)),
+        Detail::Distant => (clump.fronds / 3 + 1, 2),
     };
     for index in 0..fronds {
         let seed = seed + index as u32 * 13;

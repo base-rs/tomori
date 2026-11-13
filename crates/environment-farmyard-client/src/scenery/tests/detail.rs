@@ -256,9 +256,9 @@ fn up_close_the_farmyard_is_drawn_as_it_was_and_further_away_changes_little_thro
                             );
                             continue;
                         }
-                        // Further, where a coarser level is drawn, its edges move by at most a pixel of a Quest 3's: at
-                        // most two pixels in a hundred change, by 3 of 255 on average and 40 at most, the haze having
-                        // hidden much of them.
+                        // Further, where a coarser level is drawn, its edges move by at most a pixel of a Quest 3's, and
+                        // the furthest ferns have fewer leaflets: at most one pixel in thirty changes, by 6 of 255 on
+                        // average and 64 at most, the haze having hidden much of them.
                         let mean = changed.iter().map(|by| f32::from(*by)).sum::<f32>()
                             / changed.len().max(1) as f32;
                         let most = changed.iter().copied().max().unwrap_or(0);
@@ -270,7 +270,7 @@ fn up_close_the_farmyard_is_drawn_as_it_was_and_further_away_changes_little_thro
                             );
                         }
                         assert!(
-                            changed.len() * 50 <= pixels && mean <= 3.0 && most <= 40,
+                            changed.len() * 30 <= pixels && mean <= 6.0 && most <= 64,
                             "{name}, turned {turn}: eye {eye}: {} changed by {mean} on average",
                             changed.len()
                         );
@@ -278,6 +278,111 @@ fn up_close_the_farmyard_is_drawn_as_it_was_and_further_away_changes_little_thro
                 }
             }
         }
+        farmyard.set_detailed(true);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn a_fern_changing_its_detail_is_drawn_in_both_each_over_its_share_and_a_koru_fades_away() {
+    use tomori_environment_farmyard::ferns::{self, Detail, Kind};
+    let (_, meshes) = fern_vertices();
+    let all = ferns::all();
+    let lamps = vec![EVERY; all.len()];
+    let tree = all
+        .iter()
+        .position(|fern| fern.kind == Kind::Ponga)
+        .unwrap();
+    let koru = all.iter().position(|fern| fern.kind == Kind::Koru).unwrap();
+    let only = |index: usize, lod: Lod| {
+        let mut details = vec![None; all.len()];
+        details[index] = Some(lod);
+        let (instances, draws) = fern_instances(&all, &details, &lamps, &meshes);
+        let drawn: Vec<(Detail, [f32; 2])> = draws
+            .iter()
+            .flat_map(|(vertices, range)| {
+                let ((_, detail), _) = meshes.iter().find(|(_, drawn)| drawn == vertices).unwrap();
+                instances[range.start as usize..range.end as usize]
+                    .iter()
+                    .map(move |instance| (*detail, [instance.size[2], instance.size[3]]))
+            })
+            .collect();
+        drawn
+    };
+    // Settled, in one detail, whole; changing, in both, the one it changes to over its share, the other over the rest.
+    assert_eq!(only(tree, Lod::settled(2)), [(Detail::Distant, [0.0, 0.0])]);
+    let changing = Lod {
+        level: 1,
+        from: 0,
+        fade: 0.25,
+    };
+    assert_eq!(
+        only(tree, changing),
+        [(Detail::Near, [0.25, 2.0]), (Detail::Far, [0.25, 1.0])]
+    );
+    // A koru, drawn near alone, fades out where it would be drawn far, and is drawn no more.
+    assert_eq!(only(koru, changing), [(Detail::Near, [0.25, 2.0])]);
+    assert!(only(koru, Lod::settled(1)).is_empty());
+    // Between two levels drawn alike, whole.
+    let alike = Lod {
+        level: 2,
+        from: 1,
+        fade: 0.5,
+    };
+    assert_eq!(only(koru, alike), []);
+}
+
+#[test]
+fn half_way_between_two_details_each_pixel_of_a_fern_is_one_detail_s() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let size = (448, 424);
+        let mut farmyard = with_hens(&device, &queue, size.0, size.1);
+        let (eye, target) = (ponga() + Vec3::new(4.0, -1.5, 4.0), ponga());
+        let clip = tomori_scene::depth::perspective(1.2, size.0 as f32 / size.1 as f32)
+            * glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
+        farmyard.cull(&queue, &Views::new(&[clip]));
+        let count = farmyard.ferns.ferns.len();
+        let mut drawn = |lod: Lod| {
+            farmyard.ferns.lods = Some(vec![lod; count]);
+            farmyard.ferns.place(&queue, eye);
+            capture_clip(&device, &queue, &farmyard, 4, clip, size)
+        };
+        let [near, far] = [0, 1].map(|level| drawn(Lod::settled(level)));
+        let half = drawn(Lod {
+            level: 1,
+            from: 0,
+            fade: 0.5,
+        });
+        let (mut either, mut differ) = (0, 0);
+        for ((near, far), half) in near.chunks(4).zip(far.chunks(4)).zip(half.chunks(4)) {
+            if near != far {
+                differ += 1;
+                either += usize::from(half == near || half == far);
+            }
+        }
+        // Where the two details differ, every pixel is one or the other's, but along an edge, where a pixel's samples
+        // are of both.
+        assert!(differ > 500, "{differ}");
+        assert!(either * 10 >= differ * 9, "{either} of {differ}");
+        // Without a world to choose, each is drawn by its distance, the furthest distant, or far to compare.
+        let above = Vec3::new(0.0, 60.0, 0.0);
+        let levels = |farmyard: &mut Farmyard, detailed: bool| {
+            farmyard.set_detailed(detailed);
+            farmyard.cull(&queue, &Views::unculled(&[clip]));
+            farmyard.ferns.place(&queue, above);
+            let placed = farmyard.ferns.placed.lock().unwrap();
+            // Of those drawn: a koru beyond its near detail is not.
+            placed
+                .0
+                .iter()
+                .flatten()
+                .map(|lod| lod.level)
+                .filter(|level| *level != u8::MAX)
+                .max()
+        };
+        assert_eq!(levels(&mut farmyard, true), Some(2));
+        assert_eq!(levels(&mut farmyard, false), Some(1));
         farmyard.set_detailed(true);
         assert!(pollster::block_on(scope.pop()).is_none());
     });

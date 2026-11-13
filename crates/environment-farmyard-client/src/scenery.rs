@@ -21,6 +21,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use tomori_assets::bounds::{Aabb, Tally};
 use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
+use tomori_assets::lod::Lod;
 use tomori_assets::{Instance, Library, Model};
 use tomori_render::scenery::{Scenery, Target, Views};
 use tomori_render::world::{
@@ -105,7 +106,8 @@ pub(crate) struct FernVertex {
     sway: f32,
 }
 
-/// A fern placed, as its shader reads it: its foot and how it is turned, how large it is and its phase, and its lamps,
+/// A fern placed, as its shader reads it: its foot and how it is turned, how large it is, its phase and, as it changes
+/// its detail, how far it is into the change and whether this is the detail it changes to, 1, or from, 2; and its lamps,
 /// as [`tomori_assets::gpu::lamps`] packs them for the farmyard's models, or every lamp, [`EVERY`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
@@ -128,6 +130,11 @@ impl From<&Fern> for FernInstance {
 
 /// A fern's lamps when none are listed: every lamp of the farmyard's.
 pub(crate) const EVERY: [u32; 4] = tomori_assets::gpu::EVERY_LAMP;
+
+/// How far each of the ferns' details after their near one strays from it, as the render world reckons it, in metres:
+/// as much as spans a pixel in a Quest 3's eye at [`ferns::NEAR`] and [`ferns::DISTANT`], 10 and 25 m, where a fern was
+/// drawn far and distant by its distance, so that it is drawn so there, and beyond in a larger image.
+pub const FERN_DETAIL: [f32; 2] = [0.0098, 0.0265];
 
 /// A point of the ranges, as their shader reads it.
 #[repr(C)]
@@ -781,10 +788,14 @@ struct Ferns {
     ferns: Vec<Fern>,
     /// Where each fern's heart is, found once, so that placing them each frame only measures how far each is.
     hearts: Vec<Vec3>,
-    /// Where each fern may be drawn, however it sways, whether the eyes may see it this frame, and the item they are in
-    /// the render world, once submitted.
+    /// Where each fern may be drawn, however it sways, whether the eyes may see it this frame, the detail the render
+    /// world chose for each, by its index in its kind's details, if it chose, and the item they are in the render world,
+    /// once submitted.
     bounds: Vec<Aabb>,
     seen: Vec<bool>,
+    lods: Option<Vec<Lod>>,
+    /// Whether those furthest are drawn distant, or far, as they were before they had a distant detail.
+    distant: bool,
     item: Option<ItemId>,
     /// How each fern was drawn when last placed, if it was, each mesh's range of vertices with its range of instances,
     /// and how each would be drawn now, kept so that placing them allocates nothing unless that changes, and how many
@@ -792,8 +803,9 @@ struct Ferns {
     placed: Mutex<(Details, FernDraws, Details, u64)>,
 }
 
-/// How each fern is drawn, in order: in which detail, or not at all.
-type Details = Vec<Option<Detail>>;
+/// How each fern is drawn, in order: in which of its kind's details, by index, fading from another as it changes, or
+/// not at all.
+type Details = Vec<Option<Lod>>;
 
 /// Where `fern` may be drawn, in either detail, however it sways: about its foot, as far out as any point of its
 /// kind's meshes reaches whichever way it is turned, as high and as low, and as far again as the breeze sways its
@@ -846,7 +858,8 @@ impl Ferns {
         let ferns = ferns::all();
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Farmyard fern instances"),
-            size: (size_of::<FernInstance>() * ferns.len().max(1)) as u64,
+            // Room for each twice, as each may change from one detail to another.
+            size: (size_of::<FernInstance>() * ferns.len().max(1) * 2) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -865,6 +878,8 @@ impl Ferns {
             hearts: ferns.iter().map(Fern::heart).collect(),
             bounds: ferns.iter().map(fern_bounds).collect(),
             seen: vec![true; ferns.len()],
+            lods: None,
+            distant: true,
             item: None,
             ferns,
             placed: Mutex::new((Vec::new(), Vec::new(), Vec::new(), 0)),
@@ -877,14 +892,17 @@ impl Ferns {
             return;
         }
         let item = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+        world.set_levels(item, Levels::new(&FERN_DETAIL));
         world.place(item, self.bounds.iter().copied().map(Some));
         self.item = Some(item);
     }
 
     /// Draw only the ferns `views` says the eyes may see, as the world culled them, each lit by the lamps the world lists
-    /// for it, if `listed`, or every lamp, or, without a world, against its frustum, lit by every lamp, from the next
-    /// [`Self::place`], and say how many it culled.
-    fn cull(&mut self, views: &Views<'_>, listed: bool) -> Tally {
+    /// for it, if `listed`, or every lamp, and in the detail the world chose for it, or, without a world or one that
+    /// chooses, by its distance from the first eye, or, without a world, against its frustum, lit by every lamp, by its
+    /// distance; far rather than distant unless `detailed`, as before they had a distant detail. From the next
+    /// [`Self::place`]; it says how many it culled.
+    fn cull(&mut self, views: &Views<'_>, (listed, detailed): (bool, bool)) -> Tally {
         match self.item.and_then(|item| views.seen(item)) {
             Some(seen) => self.seen.copy_from_slice(seen),
             None => {
@@ -893,6 +911,24 @@ impl Ferns {
                 }
             }
         }
+        // In the world's details, where it chooses them, for eyes whose images' height it knows, but for the distant, far,
+        // unless `detailed`.
+        let farthest = if detailed { u8::MAX } else { 1 };
+        match self.item.zip(views.world()) {
+            Some((item, (world, _)))
+                if world.instances(item) == self.ferns.len() && world.height().is_some() =>
+            {
+                let lods = self.lods.get_or_insert_with(Vec::new);
+                lods.clear();
+                lods.extend(world.lods(item).iter().map(|lod| Lod {
+                    level: lod.level.min(farthest),
+                    from: lod.from.min(farthest),
+                    ..*lod
+                }));
+            }
+            _ => self.lods = None,
+        }
+        self.distant = detailed;
         self.next_lamps.clear();
         match self.item.zip(views.world()).filter(|_| listed) {
             Some((item, (world, _))) if world.instances(item) == self.ferns.len() => {
@@ -931,8 +967,8 @@ impl Ferns {
         }
     }
 
-    /// Group the ferns the eyes may see by the mesh each is drawn with for eyes at `eyes`, writing their instances only
-    /// when that changes.
+    /// Group the ferns the eyes may see by the mesh each is drawn with, in the detail the world chose, or by its distance
+    /// from eyes at `eyes`, writing their instances only when that changes.
     fn place(&self, queue: &wgpu::Queue, eyes: Vec3) {
         let mut placed = self
             .placed
@@ -940,12 +976,27 @@ impl Ferns {
             .expect("the ferns' placing is never poisoned");
         let (last, draws, details, relit) = &mut *placed;
         details.clear();
-        details.extend(
-            self.hearts
-                .iter()
-                .zip(&self.seen)
-                .map(|(heart, seen)| seen.then(|| Detail::seen(*heart, eyes))),
-        );
+        match &self.lods {
+            Some(lods) => details.extend(
+                self.seen
+                    .iter()
+                    .zip(lods)
+                    .map(|(seen, lod)| seen.then_some(*lod)),
+            ),
+            None => details.extend(self.hearts.iter().zip(&self.seen).zip(&self.ferns).map(
+                |((heart, seen), fern)| {
+                    seen.then(|| {
+                        let detail = match Detail::seen(*heart, eyes) {
+                            Detail::Distant if !self.distant => Detail::Far,
+                            detail => detail,
+                        };
+                        // A koru has no detail but its near one, and is not drawn beyond it.
+                        let index = fern.kind.details().iter().position(|kind| *kind == detail);
+                        Lod::settled(index.map_or(u8::MAX, |index| index as u8))
+                    })
+                },
+            )),
+        }
         if last == details && !draws.is_empty() && *relit == self.relit {
             return;
         }
@@ -994,12 +1045,13 @@ pub(crate) fn fern_vertices() -> (Vec<FernVertex>, FernMeshes) {
     (vertices, meshes)
 }
 
-/// `ferns`' instances, each drawn in its detail of `details`, or not at all for none, lit by its lamps of `lamps`,
-/// grouped by mesh in `meshes`' order, and each mesh with instances, its range of vertices with its range of
-/// instances.
+/// `ferns`' instances, each drawn in its detail of `details`, by its index in its kind's details, or not at all for
+/// none or past its kind's last, and, as it changes from one to another, in both, each over its share of the pixels,
+/// lit by its lamps of `lamps`, grouped by mesh in `meshes`' order, and each mesh with instances, its range of vertices
+/// with its range of instances.
 pub(crate) fn fern_instances(
     ferns: &[Fern],
-    details: &[Option<Detail>],
+    details: &[Option<Lod>],
     lamps: &[[u32; 4]],
     meshes: &[((ferns::Kind, Detail), Range<u32>)],
 ) -> (Vec<FernInstance>, FernDraws) {
@@ -1007,15 +1059,33 @@ pub(crate) fn fern_instances(
     let mut draws = Vec::new();
     for ((kind, detail), vertices) in meshes {
         let start = instances.len() as u32;
+        let shown = |fern: &Fern, lod: &Lod| {
+            let of = |level: u8| fern.kind.details().get(usize::from(level)).copied();
+            let (to, from) = (of(lod.level), of(lod.from));
+            if lod.fading() && to != from {
+                // As each covers its share of the pixels: the detail it changes to, then the one it changes from.
+                [(to, 1.0), (from, 2.0)]
+                    .into_iter()
+                    .find(|(drawn, _)| *drawn == Some(*detail))
+                    .map(|(_, which)| [lod.fade, which])
+            } else {
+                (to == Some(*detail)).then_some([0.0, 0.0])
+            }
+        };
         instances.extend(
             ferns
                 .iter()
                 .zip(details)
                 .zip(lamps)
-                .filter(|((fern, drawn), _)| fern.kind == *kind && **drawn == Some(*detail))
-                .map(|((fern, _), lamps)| FernInstance {
-                    lamps: *lamps,
-                    ..FernInstance::from(fern)
+                .filter(|((fern, _), _)| fern.kind == *kind)
+                .filter_map(|((fern, lod), lamps)| {
+                    let [fade, which] = shown(fern, lod.as_ref()?)?;
+                    let instance = FernInstance::from(fern);
+                    Some(FernInstance {
+                        lamps: *lamps,
+                        size: [instance.size[0], instance.size[1], fade, which],
+                        ..instance
+                    })
                 }),
         );
         if instances.len() as u32 > start {
@@ -1511,8 +1581,9 @@ impl Farmyard {
         self.listed = listed;
     }
 
-    /// Draw its models and hens in the levels of detail the render world chooses for them, as by default, or in their
-    /// own, `false`, to compare, from the next cull.
+    /// Draw its models, hens and ferns in the levels of detail the render world chooses for them, as by default, or, to
+    /// compare, `false`, its models and hens in their own, and its ferns near or far, as the world chooses, but never
+    /// distant, from the next cull.
     pub fn set_detailed(&mut self, detailed: bool) {
         self.detailed = detailed;
     }
@@ -1784,7 +1855,7 @@ impl Scenery for Farmyard {
         {
             tally += drawn.cull(queue, models, views, drawing);
         }
-        tally += ferns.cull(views, drawing.0);
+        tally += ferns.cull(views, drawing);
         // The ferns are placed for the first eye, as they are again when it is prepared.
         let first = views
             .clips()
