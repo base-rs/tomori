@@ -561,3 +561,154 @@ fn only_instances_the_eyes_may_see_are_drawn_and_closed_primitives_without_their
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }
+
+#[test]
+fn each_piece_is_lit_by_the_lamps_listed_for_it_as_it_is_by_every_lamp() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 4);
+        // A dim ambient, a warm lamp by the left box, a cool one by the right and one far behind both.
+        let lamps = [
+            Lamp::new(Vec3::new(0.0, 1.2, 1.0), 2.0, Vec3::new(1.0, 0.6, 0.2)),
+            Lamp::new(Vec3::new(2.4, 1.2, 1.0), 2.0, Vec3::new(0.2, 0.5, 1.0)),
+            Lamp::new(Vec3::new(1.2, 0.0, -30.0), 3.0, Vec3::ONE),
+        ];
+        let lighting = lamps.iter().fold(
+            Lighting::new(Vec3::Y, Vec3::ZERO, Vec3::splat(0.1), Vec3::splat(0.05)),
+            |lighting, lamp| lighting.with_lamp(*lamp),
+        );
+        renderer.set_lighting(&queue, &lighting);
+        let model = box_and_card();
+        let gpu = renderer.upload(&device, &queue, &model);
+        let mut batch = renderer.batch(&device);
+        let instances: Vec<Instance> = [0.0, 2.4]
+            .map(|x| {
+                let mut instance = Instance::new(model.clone());
+                instance.transform = Mat4::from_rotation_translation(
+                    Quat::from_rotation_y(0.5),
+                    Vec3::new(x, 0.3, 0.0),
+                );
+                instance
+            })
+            .into();
+        renderer.place(&device, &queue, &gpu, &mut batch, &instances);
+        let view = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.1, 20.0)
+            * glam::camera::rh::view::look_at_mat4(
+                Vec3::new(1.2, 1.0, 4.0),
+                Vec3::new(1.2, 0.3, 0.0),
+                Vec3::Y,
+            );
+        renderer.prepare(&queue, 0, view, Vec3::new(1.2, 1.0, 4.0));
+        let draw = |batch: &Batch| {
+            render(&device, &queue, 4, |pass| {
+                renderer.draw(pass, 0, &gpu, batch)
+            })
+        };
+        let every = draw(&batch);
+        // Each piece listed the lamps whose reach meets its bounds, in their order, as a render world lists them.
+        let bounds: Vec<Aabb> = batch.bounds().map(Option::unwrap).collect();
+        let reaching = |bounds: &Aabb| -> Vec<(u32, f32)> {
+            lamps
+                .iter()
+                .enumerate()
+                .filter(|(_, lamp)| {
+                    lamp.position
+                        .max(bounds.min)
+                        .min(bounds.max)
+                        .distance(lamp.position)
+                        < lamp.reach
+                })
+                .map(|(index, _)| (index as u32, 1.0))
+                .collect()
+        };
+        let lists: Vec<Vec<(u32, f32)>> = bounds.iter().map(reaching).collect();
+        assert!(lists.iter().all(|list| !list.is_empty() && list.len() < 3));
+        renderer.light(&mut batch, lists.clone());
+        assert!(batch.relit);
+        renderer.show(&queue, &gpu, &mut batch, &[true; 4]);
+        assert!(!batch.relit);
+        // Exactly the pixels every lamp gives, the far lamp, reaching none of them, left out.
+        let listed = draw(&batch);
+        assert!(drawn(&listed).len() > 500);
+        assert_eq!(listed, every);
+        // Listed again as it was, nothing is written.
+        renderer.light(&mut batch, lists.clone());
+        assert!(!batch.relit);
+        // Lit by none, the boxes are darker; by their lamps at half their light, between the two.
+        let sum = |pixels: &[u8]| {
+            pixels
+                .iter()
+                .map(|channel| u64::from(*channel))
+                .sum::<u64>()
+        };
+        renderer.light(&mut batch, vec![Vec::new(); lists.len()]);
+        renderer.show(&queue, &gpu, &mut batch, &[true; 4]);
+        let unlit = draw(&batch);
+        let halves: Vec<Vec<_>> = lists
+            .iter()
+            .map(|list| list.iter().map(|(lamp, _)| (*lamp, 0.5)).collect())
+            .collect();
+        renderer.light(&mut batch, halves);
+        renderer.show(&queue, &gpu, &mut batch, &[true; 4]);
+        let half = draw(&batch);
+        assert!(sum(&unlit) < sum(&half) && sum(&half) < sum(&every));
+        // Lists for other than every piece light each by every lamp, as do lists cleared by placing them again.
+        renderer.light(&mut batch, lists[..2].to_vec());
+        assert!(batch.lamps.iter().all(|lamps| *lamps == EVERY_LAMP));
+        renderer.light(&mut batch, [lists.clone(), lists.clone()].concat());
+        assert!(batch.lamps.iter().all(|lamps| *lamps == EVERY_LAMP));
+        renderer.show(&queue, &gpu, &mut batch, &[true; 4]);
+        assert_eq!(draw(&batch), every);
+        renderer.light(&mut batch, lists.clone());
+        renderer.place(&device, &queue, &gpu, &mut batch, &instances);
+        assert!(batch.lamps.iter().all(|lamps| *lamps == EVERY_LAMP));
+        // Shown fewer pieces, only theirs are written, each with its own lamps.
+        renderer.light(&mut batch, lists.clone());
+        renderer.show(&queue, &gpu, &mut batch, &[true, false, true, false]);
+        assert_eq!(batch.flat.len(), 2);
+        assert_eq!(batch.flat[0].lamps, crate::gpu::lamps(lists[0].clone()));
+        assert_eq!(batch.flat[1].lamps, crate::gpu::lamps(lists[2].clone()));
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn a_piece_s_lamps_are_packed_as_a_mask_with_a_byte_of_light_each() {
+    // Two lamps, one giving all its light and one half, packed in the mask's order whatever the list's.
+    // One list's type throughout, as coverage counts each type's code apart.
+    let lamps = |list: &[(u32, f32)]| lamps(list.to_vec());
+    assert_eq!(
+        lamps(&[(5, 0.5), (1, 1.0)]),
+        [1 << 1 | 1 << 5, 0, 0xffff_80ff, u32::MAX]
+    );
+    // Past the first 32 in the high half; the fifth onwards in the high weights.
+    assert_eq!(
+        lamps(&(0..6).map(|lamp| (lamp * 10, 1.0)).collect::<Vec<_>>()),
+        [
+            1 | 1 << 10 | 1 << 20 | 1 << 30,
+            1 << 8 | 1 << 18,
+            u32::MAX,
+            u32::MAX
+        ]
+    );
+    // Only the first eight; none past the lighting's lamps, giving nothing, or listed twice.
+    assert_eq!(
+        lamps(&(0..12).map(|lamp| (lamp, 1.0)).collect::<Vec<_>>())[0],
+        0xff
+    );
+    assert_eq!(
+        lamps(&[(64, 1.0), (3, 0.0), (2, 1.0), (2, 0.5), (7, -1.0), (9, 2.0)]),
+        [1 << 2 | 1 << 9, 0, u32::MAX, u32::MAX]
+    );
+    assert_eq!(lamps(&[]), [0, 0, u32::MAX, u32::MAX]);
+    // Fading, the eighth's byte is the last.
+    let fading: Vec<_> = (0..8)
+        .map(|lamp| (lamp, if lamp == 7 { 0.2 } else { 1.0 }))
+        .collect();
+    assert_eq!(lamps(&fading)[3], 0x33ff_ffff);
+    // Every lamp is more than a list holds.
+    assert_ne!(
+        EVERY_LAMP,
+        lamps(&(0..64).map(|lamp| (lamp, 1.0)).collect::<Vec<_>>())
+    );
+}

@@ -6,8 +6,9 @@
 //! joint matrices, which a storage buffer holds, or placed by its node's matrix, lit by the scenery's [`Lighting`].
 //!
 //! Once a frame, [`Renderer::cull`] keeps only the instances of each primitive that the eyes' frustum may see, and a
-//! closed primitive, [`Primitive::closed`](crate::Primitive::closed), is drawn without its back faces. See
-//! `design/rendering.md`.
+//! closed primitive, [`Primitive::closed`](crate::Primitive::closed), is drawn without its back faces; and
+//! [`Renderer::light`] lists the few lamps that light each piece, as a render world assigns them, which its pixels then
+//! add up, rather than every lamp. See `design/rendering.md`.
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
@@ -17,8 +18,49 @@ use wgpu::util::DeviceExt;
 use crate::bounds::{self, Aabb, Extent, Frustum, Tally};
 use crate::{INFLUENCES, Instance, Model, Texture};
 
-/// The most lamps that light a scenery's models.
-pub const LAMPS: usize = 4;
+/// The most lamps a scenery's [`Lighting`] holds.
+pub const LAMPS: usize = 64;
+
+/// The most lamps a piece is lit by when [`Renderer::light`] lists its lamps.
+pub const PIECE_LAMPS: usize = 8;
+
+/// A piece lit by every lamp, as [`lamps`] packs a list and the shader reads it: every lamp in its mask, more than a
+/// list holds.
+pub const EVERY_LAMP: [u32; 4] = [u32::MAX; 4];
+
+/// `list`'s lamps, each its index in the lighting's lamps and how much of its light it gives, as the model shader reads
+/// them, so that a scenery's own pipelines may light by the same lists: a mask of the lamps, by index, its low and high
+/// halves, then how much of its light each gives, a byte each, 255 for all of it, in the mask's order, the first four
+/// then the next, and 255 past the last, so that a list none of whose lamps fade has every byte 255, which a pixel
+/// tells at once. Of `list`, at most [`PIECE_LAMPS`] are packed, each once, those past [`LAMPS`] and those giving
+/// nothing left out. A pixel then adds the light of each lamp in the mask, in the lamps' order, which, as `list` is in
+/// the lighting's order, is as it adds every lamp, but for those that reach none of it.
+pub fn lamps(list: impl IntoIterator<Item = (u32, f32)>) -> [u32; 4] {
+    let mut kept = [(0u32, 0u8); PIECE_LAMPS];
+    let mut count = 0;
+    let mut mask = 0u64;
+    for (lamp, weight) in list.into_iter().take(PIECE_LAMPS) {
+        let weight = (weight.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if lamp as usize >= LAMPS || weight == 0 || mask & 1 << lamp != 0 {
+            continue;
+        }
+        mask |= 1 << lamp;
+        kept[count] = (lamp, weight);
+        count += 1;
+    }
+    // In the mask's order.
+    kept[..count].sort_unstable_by_key(|(lamp, _)| *lamp);
+    let mut weights = u64::MAX;
+    for (at, (_, weight)) in kept[..count].iter().enumerate() {
+        weights &= !(0xff << (8 * at)) | u64::from(*weight) << (8 * at);
+    }
+    [
+        mask as u32,
+        (mask >> 32) as u32,
+        weights as u32,
+        (weights >> 32) as u32,
+    ]
+}
 
 /// A lamp: where it is, how far its light reaches, falling to nothing there, and its colour, as bright as at its
 /// centre, linear RGB.
@@ -41,7 +83,8 @@ impl Lamp {
 }
 
 /// How a scenery lights its models: an ambient light from the sky above and the ground below, the sun or moon, up to
-/// [`LAMPS`] lamps, and haze that fades distant things into its colour. Colours are linear RGB.
+/// [`LAMPS`] lamps, each piece lit by those [`Renderer::light`] lists for it, or by every one, and haze that fades
+/// distant things into its colour. Colours are linear RGB.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct Lighting {
@@ -164,11 +207,14 @@ struct MaterialUniform {
     emissive: [f32; 4],
 }
 
+/// One piece as its shader reads it: where its node is; where its joint matrices begin and whether it is skinned; and
+/// its lamps, as [`lamps`] packs them, or every lamp, [`EVERY_LAMP`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Placed {
     world: [f32; 16],
     joints: [u32; 4],
+    lamps: [u32; 4],
 }
 
 #[repr(C)]
@@ -224,7 +270,7 @@ struct Piece {
 }
 
 /// The instances of one model to draw this frame: where each primitive of each is placed, and its joint matrices; and,
-/// as last culled, which of them are drawn.
+/// as last culled, which of them are drawn, and the lamps that light each.
 pub struct Batch {
     placed: wgpu::Buffer,
     joints: wgpu::Buffer,
@@ -240,6 +286,11 @@ pub struct Batch {
     flat: Vec<Placed>,
     /// Where any piece may be drawn, or none if one of them may be drawn anywhere.
     bounds: Option<Aabb>,
+    /// Each piece's lamps, as last lit, and as a light would light them, kept so that lighting allocates nothing.
+    lamps: Vec<[u32; 4]>,
+    next_lamps: Vec<[u32; 4]>,
+    /// Whether the lamps changed since the placements were written.
+    relit: bool,
 }
 
 impl Batch {
@@ -755,10 +806,14 @@ impl Renderer {
             wanted: Vec::new(),
             flat: Vec::new(),
             bounds: Some(Aabb::EMPTY),
+            lamps: Vec::new(),
+            next_lamps: Vec::new(),
+            relit: false,
         }
     }
 
-    /// Place `instances`, each of `model`, in `batch`, to be drawn as they are now, growing its buffers if need be.
+    /// Place `instances`, each of `model`, in `batch`, to be drawn as they are now, each lit by every lamp until
+    /// [`Self::light`] lists its lamps, growing its buffers if need be.
     ///
     /// # Panics
     ///
@@ -792,6 +847,7 @@ impl Renderer {
                         placed: Placed {
                             world: draw.world.to_cols_array(),
                             joints: [first, skinned, 0, 0],
+                            lamps: EVERY_LAMP,
                         },
                         bounds: gpu.extent.placed(&draw),
                         closed,
@@ -816,11 +872,40 @@ impl Renderer {
         batch.pieces = pieces;
         batch.wanted.clear();
         batch.wanted.resize(batch.pieces.len(), true);
+        batch.lamps.clear();
+        batch.lamps.resize(batch.pieces.len(), EVERY_LAMP);
         self.write(queue, model, batch);
     }
 
-    /// Write the pieces of `batch` that it wants drawn into its placements' buffer, each primitive's together, and draw
-    /// those.
+    /// Light each piece of `batch` by the lamps of the lighting `lamps` lists for it, each by its index and how much of
+    /// its light it gives, as [`lamps`] packs them, in the order [`Batch::bounds`] says the pieces, as a render world
+    /// lights them, from the next [`Self::cull`] or [`Self::show`]; or each by every lamp, should `lamps` not list as
+    /// many as it placed. Lighting as before writes nothing.
+    pub fn light<L>(&self, batch: &mut Batch, lamps: impl IntoIterator<Item = L>)
+    where
+        L: IntoIterator<Item = (u32, f32)>,
+    {
+        let Batch {
+            pieces,
+            lamps: lit,
+            next_lamps,
+            relit,
+            ..
+        } = batch;
+        next_lamps.clear();
+        next_lamps.extend(lamps.into_iter().take(pieces.len() + 1).map(self::lamps));
+        if next_lamps.len() != pieces.len() {
+            next_lamps.clear();
+            next_lamps.resize(pieces.len(), EVERY_LAMP);
+        }
+        if next_lamps != lit {
+            std::mem::swap(lit, next_lamps);
+            *relit = true;
+        }
+    }
+
+    /// Write the pieces of `batch` that it wants drawn into its placements' buffer, each primitive's together, with their
+    /// lamps, and draw those.
     fn write(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch) {
         let Batch {
             calls,
@@ -828,17 +913,23 @@ impl Renderer {
             pieces,
             wanted,
             shown,
+            lamps,
+            relit,
             ..
         } = batch;
         calls.clear();
         flat.clear();
-        for (piece, _) in pieces
+        for ((piece, _), lamps) in pieces
             .iter()
             .zip(wanted.iter())
-            .filter(|(_, wanted)| **wanted)
+            .zip(lamps.iter())
+            .filter(|((_, wanted), _)| **wanted)
         {
             let at = flat.len() as u32;
-            flat.push(piece.placed);
+            flat.push(Placed {
+                lamps: *lamps,
+                ..piece.placed
+            });
             match calls.last_mut() {
                 Some(call)
                     if call.primitive == piece.primitive && (call.closed > 0) == piece.closed =>
@@ -860,6 +951,7 @@ impl Renderer {
             queue.write_buffer(&batch.placed, 0, bytemuck::cast_slice(flat));
         }
         shown.clone_from(wanted);
+        *relit = false;
     }
 
     /// Draw only the instances of `batch`'s primitives that `frustum` may see, from the next pass, writing their
@@ -913,9 +1005,10 @@ impl Renderer {
         self.redraw(queue, model, batch)
     }
 
-    /// Write `batch`'s placements again if it wants other pieces drawn than it does, and say what it then draws.
+    /// Write `batch`'s placements again if it wants other pieces drawn than it does, or they are lit by other lamps, and
+    /// say what it then draws.
     fn redraw(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch) -> Tally {
-        if batch.wanted != batch.shown {
+        if batch.wanted != batch.shown || batch.relit {
             self.write(queue, model, batch);
         }
         batch.tally()

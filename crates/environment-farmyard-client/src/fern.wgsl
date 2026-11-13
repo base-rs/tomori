@@ -1,8 +1,8 @@
 // The farmyard's ferns: every instance of each kind's mesh, placed at its foot, turned and sized, swaying in the breeze
 // by the time alone, its frond tips most and its trunk not at all, each fern at its own phase and each frond fluttering
 // a little of its own accord; lit as the farmyard's models are, by the sky's and the ground's light, the moon, a little
-// of the moon through a frond lit from behind, and the lamps, its underside's own colour where the back of a frond is
-// seen, ponga's silver; hazed with distance, and drawn only inside the reveal sphere while the farmyard grows.
+// of the moon through a frond lit from behind, and the few lamps listed for it, its underside's own colour where the
+// back of a frond is seen, ponga's silver; hazed with distance, and drawn only inside the reveal sphere while the farmyard grows.
 
 struct Lamp {
     // Where it is, and how far it reaches.
@@ -27,10 +27,18 @@ struct Camera {
     moonlight: vec4<f32>,
     sky: vec4<f32>,
     ground: vec4<f32>,
-    // The lamps, an unlit one black.
-    lamps: array<Lamp, 4>,
+    // The lamps, an unlit one black, and how many there are.
+    lamps: array<Lamp, 64>,
+    counts: vec4<u32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
+
+// How much of a lamp's light it gives a fern: the `index`th byte of its weights, 255 for all of it.
+fn weight(lamps: vec4<u32>, index: u32) -> f32 {
+    let word = select(lamps.z, lamps.w, index >= 4u);
+    let byte = (word >> (8u * (index % 4u))) & 0xffu;
+    return select(f32(byte) / 255.0, 1.0, byte == 255u);
+}
 
 // A point of a fern's mesh at its own size: where it is, the way its upper side faces, its colour above and beneath,
 // and how far it sways at most; and its instance: its foot and how it is turned, and how large it is and its phase.
@@ -42,6 +50,9 @@ struct Point {
     @location(4) sway: f32,
     @location(5) foot: vec4<f32>,
     @location(6) size: vec4<f32>,
+    // A mask of the lamps that light it, low then high, and how much of its light each gives, a byte each in the mask's
+    // order, 255 for all of it and past the last; or every lamp in the mask for every lamp.
+    @location(7) lamps: vec4<u32>,
 }
 
 struct Shaded {
@@ -50,6 +61,7 @@ struct Shaded {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) underside: vec3<f32>,
+    @location(4) @interpolate(flat) lamps: vec4<u32>,
 }
 
 // The way the breeze blows across the ground, and across it.
@@ -81,7 +93,18 @@ fn fern_vertex(point: Point) -> Shaded {
     out.normal = turned(point.normal, point.foot.w);
     out.color = point.color;
     out.underside = point.underside;
+    out.lamps = point.lamps;
     return out;
+}
+
+// The light `lamp` gives a point at `world` facing `normal`, as much of it as `weight` says.
+fn lamp_light(lamp: Lamp, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let offset = lamp.position.xyz - world;
+    let distance = length(offset);
+    let reach = max(lamp.position.w, 0.001);
+    let falloff = clamp(1.0 - distance / reach, 0.0, 1.0);
+    let towards = offset / max(distance, 0.0001);
+    return lamp.color.rgb * weight * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
 }
 
 @fragment
@@ -99,14 +122,42 @@ fn fern_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0
     let moon = dot(normal, camera.moon.xyz);
     var light = mix(camera.ground.rgb, camera.sky.rgb, normal.y * 0.5 + 0.5)
         + camera.moonlight.rgb * (max(moon, 0.0) + max(-moon, 0.0) * 0.25);
-    for (var index = 0u; index < 4u; index += 1u) {
-        let lamp = camera.lamps[index];
-        let offset = lamp.position.xyz - in.world;
-        let distance = length(offset);
-        let reach = max(lamp.position.w, 0.001);
-        let falloff = clamp(1.0 - distance / reach, 0.0, 1.0);
-        let towards = offset / max(distance, 0.0001);
-        light += lamp.color.rgb * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
+    // Its own lamps, in the lamps' order, or every lamp.
+    if all(in.lamps.xy == vec2<u32>(0xffffffffu)) {
+        for (var index = 0u; index < min(camera.counts.x, 64u); index += 1u) {
+            light += lamp_light(camera.lamps[index], 1.0, in.world, normal);
+        }
+    } else if all(in.lamps.zw == vec2<u32>(0xffffffffu)) {
+        // Each giving all its light.
+        var low = in.lamps.x;
+        while low != 0u {
+            let index = firstTrailingBit(low);
+            low &= low - 1u;
+            light += lamp_light(camera.lamps[index], 1.0, in.world, normal);
+        }
+        var high = in.lamps.y;
+        while high != 0u {
+            let index = firstTrailingBit(high);
+            high &= high - 1u;
+            light += lamp_light(camera.lamps[32u + index], 1.0, in.world, normal);
+        }
+    } else {
+        // Some fading, each by its byte.
+        var lit = 0u;
+        var low = in.lamps.x;
+        while low != 0u {
+            let index = firstTrailingBit(low);
+            low &= low - 1u;
+            light += lamp_light(camera.lamps[index], weight(in.lamps, lit), in.world, normal);
+            lit += 1u;
+        }
+        var high = in.lamps.y;
+        while high != 0u {
+            let index = firstTrailingBit(high);
+            high &= high - 1u;
+            light += lamp_light(camera.lamps[32u + index], weight(in.lamps, lit), in.world, normal);
+            lit += 1u;
+        }
     }
     return vec4<f32>(hazed(albedo * light, camera.haze, distance(in.world, camera.eye.xyz)), 1.0);
 }
