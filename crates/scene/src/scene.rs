@@ -2550,21 +2550,7 @@ impl Step {
         projection.extend(projected.hint.clone());
         projection.extend(projected.left.hint.clone());
         // The images the panels drawn show, of those held, for the renderer to decode and draw over them.
-        let images = projection
-            .iter()
-            .filter_map(|sheet| {
-                sheet
-                    .canvas
-                    .as_deref()
-                    .and_then(|canvas| canvas.image.as_ref())
-            })
-            .filter_map(|image| {
-                conversation
-                    .images()
-                    .png(&image.hash)
-                    .map(|png| (image.hash.clone(), png.clone()))
-            })
-            .collect();
+        let images = conversation.images().drawn(&projection);
         // What each shown ray points at, which words begun now name, the one moved onto most recently first.
         for side in Side::BOTH {
             if let Some(picked) = &resolved[side].object {
