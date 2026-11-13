@@ -11,8 +11,9 @@
 //!   reads it from its [`Source`]s, refusing bytes whose digest differs, and reads it, within [`Limits`], into a
 //!   [`Model`], which it keeps by digest and shares.
 //! - **Models and instances:** a [`Model`] is validated data: nodes, meshes, materials, textures, skins and
-//!   animations; geometry built in code is checked the same way with [`Model::built`]. An [`Instance`] places a model
-//!   in a scene, with a [`Pose`] and nodes it shows or hides.
+//!   animations; geometry built in code is checked the same way with [`Model::built`], and a large one split into
+//!   chunks across the ground with [`Model::chunked`]. An [`Instance`] places a model in a scene, with a [`Pose`] and
+//!   nodes it shows or hides.
 //! - **Animation:** an [`animation::Animator`] moves through an [`animation::Graph`] of states, each a clip of an
 //!   animation, on its parameters, cross-fading, firing events on clips' timelines and measuring root motion, the same
 //!   way however its time is divided, so that a server and its clients compute the same from the same inputs.
@@ -22,6 +23,7 @@
 //! See `design/assets.md`, `design/animation.md` and `context/usage.md`.
 pub mod animation;
 pub mod bounds;
+mod chunks;
 mod gltf;
 pub mod haze;
 mod instance;

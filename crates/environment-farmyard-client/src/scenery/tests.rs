@@ -20,6 +20,7 @@ use tomori_render::test_gpu;
 use super::*;
 use tomori_environment_farmyard::trail;
 
+mod chunks;
 mod culling;
 mod lamps;
 mod light_painting;

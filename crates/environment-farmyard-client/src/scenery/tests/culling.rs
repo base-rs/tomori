@@ -83,6 +83,16 @@ pub(super) fn with_hens(
     width: u32,
     height: u32,
 ) -> Farmyard {
+    chunked_with_hens(device, queue, (width, height), Some(CHUNK))
+}
+
+/// As [`with_hens`], its models in chunks at most `chunk` across, or whole.
+pub(super) fn chunked_with_hens(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    (width, height): (u32, u32),
+    chunk: Option<f32>,
+) -> Farmyard {
     use tomori_scene::client_side::{ClientSide, Input};
     let target = Target::new(
         device,
@@ -93,8 +103,13 @@ pub(super) fn with_hens(
         4,
         tomori_render::glyphs::SharedGlyphs::new(device),
     );
-    let mut farmyard =
-        Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(2.0));
+    let mut farmyard = Farmyard::with_chunks(
+        &target,
+        &Coop::Built,
+        Library::shared(),
+        Clock::Held(2.0),
+        chunk,
+    );
     let chicken = tomori_environment_farmyard::chicken::Chicken::shared().unwrap();
     let flock = tomori_environment_farmyard::flock::Flock::new(
         tomori_environment_farmyard::flock::seed("space-1"),

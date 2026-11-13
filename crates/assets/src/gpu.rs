@@ -228,11 +228,11 @@ struct Vertex {
     weights: [f32; INFLUENCES],
 }
 
-/// A primitive on the GPU, with how far it reaches; its triangles in closed parts first, its material hiding what is
-/// behind them, then the rest.
+/// A primitive on the GPU, with how far it reaches: where its vertices and its indices begin in its model's buffers,
+/// its triangles in closed parts first, its material hiding what is behind them, then the rest.
 struct GpuPrimitive {
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    base: i32,
+    first: u32,
     count: u32,
     /// How many of its indices are of triangles in closed parts, which may be drawn without their back faces.
     closed: u32,
@@ -240,8 +240,12 @@ struct GpuPrimitive {
     extent: Extent,
 }
 
-/// A model on the GPU: its primitives, by mesh, and its materials with their textures.
+/// A model on the GPU: every primitive's vertices in one buffer and indices in another, so that drawing one after
+/// another, as the chunks of a scenery's ground are, changes neither; its primitives, by mesh; and its materials with
+/// their textures.
 pub struct GpuModel {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
     primitives: Vec<GpuPrimitive>,
     meshes: Vec<Range<usize>>,
     materials: Vec<wgpu::BindGroup>,
@@ -685,6 +689,7 @@ impl Renderer {
             })
             .collect();
         let mut primitives = Vec::new();
+        let (mut all_vertices, mut all_indices): (Vec<Vertex>, Vec<u32>) = (Vec::new(), Vec::new());
         let meshes = model
             .meshes
             .iter()
@@ -737,19 +742,13 @@ impl Renderer {
                     primitives.push(GpuPrimitive {
                         extent: Extent::of(primitive),
                         closed: inside.len() as u32 * 3,
-                        vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("Model vertices"),
-                            contents: bytemuck::cast_slice(&vertices),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        }),
-                        indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("Model indices"),
-                            contents: bytemuck::cast_slice(&indices),
-                            usage: wgpu::BufferUsages::INDEX,
-                        }),
+                        base: all_vertices.len() as i32,
+                        first: all_indices.len() as u32,
                         count: primitive.indices.len() as u32,
                         material: primitive.material,
                     });
+                    all_vertices.extend(vertices);
+                    all_indices.extend(indices);
                 }
                 start..primitives.len()
             })
@@ -758,7 +757,20 @@ impl Renderer {
             base_color: [1.0; 4],
             emissive: [0.0; 4],
         };
+        // Never empty, as a buffer bound must not be.
+        all_vertices.resize(all_vertices.len().max(1), Vertex::zeroed());
+        all_indices.resize(all_indices.len().max(1), 0);
         GpuModel {
+            vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Model vertices"),
+                contents: bytemuck::cast_slice(&all_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            indices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Model indices"),
+                contents: bytemuck::cast_slice(&all_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
             primitives,
             meshes,
             materials,
@@ -1060,17 +1072,26 @@ impl Renderer {
         }
         pass.set_bind_group(0, &self.frames[eye], &[]);
         pass.set_bind_group(2, &batch.binding, &[]);
+        pass.set_vertex_buffer(0, model.vertices.slice(..));
+        pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
         // Cut off by the reveal sphere, a closed part is open: what is inside it shows.
         let culled = self.back_faces_culled && self.reveal.is_none();
-        let draw = |pass: &mut wgpu::RenderPass<'_>, call: &Call, indices: Range<u32>| {
+        // Each material bound only as it changes, which it does not between the chunks of a primitive.
+        let mut bound = None;
+        let mut draw = |pass: &mut wgpu::RenderPass<'_>, call: &Call, indices: Range<u32>| {
             let primitive = &model.primitives[call.primitive];
-            let material = primitive
-                .material
-                .map_or(&model.plain, |material| &model.materials[material]);
-            pass.set_bind_group(1, material, &[]);
-            pass.set_vertex_buffer(0, primitive.vertices.slice(..));
-            pass.set_index_buffer(primitive.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(indices, 0, call.instances.clone());
+            if bound != Some(primitive.material) {
+                let material = primitive
+                    .material
+                    .map_or(&model.plain, |material| &model.materials[material]);
+                pass.set_bind_group(1, material, &[]);
+                bound = Some(primitive.material);
+            }
+            pass.draw_indexed(
+                primitive.first + indices.start..primitive.first + indices.end,
+                primitive.base,
+                call.instances.clone(),
+            );
         };
         // The closed parts without their back faces, then the rest with them.
         let closed = |call: &Call| if culled { call.closed } else { 0 };

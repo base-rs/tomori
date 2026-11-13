@@ -9,9 +9,10 @@
 //! and embers drawn with a shader of its own that moves them, lighting what is about it with a flickering lamp, and its
 //! marshmallow sticks where its client side shows them, and the trails of light their burning marshmallows paint in
 //! the air (see [`crate::embers`]); all of it growing out of the space through the reveal sphere as
-//! the space's environment does. Its models, ferns and plaques, with their bounds, its lamps and its moonlight are
-//! submitted to the renderer's world, and once a frame what neither eye can see of them is culled, and each model's
-//! pieces and each fern are lit by the few lamps the world lists for them, rather than by every lamp.
+//! the space's environment does. Its large models are split into chunks as they are uploaded ([`CHUNK`]), and its
+//! models, ferns and plaques, with their bounds, its lamps and its moonlight are submitted to the renderer's world,
+//! and once a frame what neither eye can see of them is culled, and each model's pieces, each chunk among them, and
+//! each fern are lit by the few lamps the world lists for them, rather than by every lamp.
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -59,6 +60,12 @@ const _: () = assert!(
     tomori_assets::gpu::LAMPS == tomori_render::world::LIGHTS
         && tomori_assets::gpu::PIECE_LAMPS == tomori_render::world::LIGHTS_PER_INSTANCE
 );
+
+/// How far across the ground, at most, each chunk of the farmyard's models is, so that each is culled and lit on its
+/// own: the yard, its meadow and pines 43 by 45 m, the foothills 72 m, the trail 22 m and the upper terrace 10 m are
+/// each split, and nothing else is as large. Of 32 lamps 5 to 6 m apart, at most 9 reach a chunk of 7 m, where 12
+/// reached one of 8 m. See `design/rendering.md`.
+pub const CHUNK: f32 = 7.0;
 
 /// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
 /// read how the farmyard is lit, at its end, as its models are.
@@ -971,13 +978,14 @@ impl Backdrop {
         models: &Renderer,
         layout: &wgpu::PipelineLayout,
         sky: &wgpu::ShaderModule,
+        chunked: &dyn Fn(&Model) -> Arc<Model>,
     ) -> Self {
         let (device, queue) = (target.device, target.queue);
         let foothills = Drawn::new(
             device,
             queue,
             models,
-            &Arc::new(backdrop::model()),
+            &chunked(&backdrop::model()),
             Mat4::IDENTITY,
         );
         let placed = backdrop::plants();
@@ -1004,21 +1012,21 @@ impl Backdrop {
             device,
             queue,
             models,
-            &Arc::new(backdrop::rock()),
+            &chunked(&backdrop::rock()),
             Mat4::IDENTITY,
         );
         let trail = Drawn::new(
             device,
             queue,
             models,
-            &Arc::new(trail::model()),
+            &chunked(&trail::model()),
             Mat4::IDENTITY,
         );
         let terrace = Drawn::new(
             device,
             queue,
             models,
-            &Arc::new(terrace::model()),
+            &chunked(&terrace::model()),
             Mat4::IDENTITY,
         );
         let shader = device.create_shader_module(shader!("water.wgsl"));
@@ -1286,6 +1294,21 @@ impl Farmyard {
 
     /// As [`Self::new`], its water moved by `clock`.
     pub fn with_clock(target: &Target, coop: &Coop, library: &Library, clock: Clock) -> Self {
+        Self::with_chunks(target, coop, library, clock, Some(CHUNK))
+    }
+
+    /// As [`Self::with_clock`], its models split into chunks at most `chunk` across the ground, or kept whole, `None`, to
+    /// compare.
+    pub fn with_chunks(
+        target: &Target,
+        coop: &Coop,
+        library: &Library,
+        clock: Clock,
+        chunk: Option<f32>,
+    ) -> Self {
+        let chunked = |model: &Model| {
+            Arc::new(chunk.map_or_else(|| model.clone(), |size| model.chunked(size)))
+        };
         let device = target.device;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Farmyard sky layout"),
@@ -1340,23 +1363,23 @@ impl Farmyard {
             device,
             target.queue,
             &models,
-            &Arc::new(props::model()),
+            &chunked(&props::model()),
             Mat4::IDENTITY,
         );
         let coop = Drawn::new(
             device,
             target.queue,
             &models,
-            &coop.model(library),
+            &chunked(&coop.model(library)),
             coop::placement(),
         );
-        let backdrop = Backdrop::new(target, &models, &pipeline_layout, &shader);
+        let backdrop = Backdrop::new(target, &models, &pipeline_layout, &shader, &chunked);
         let plaques = Plaques::new(target);
         let campsite = Drawn::new(
             device,
             target.queue,
             &models,
-            &Arc::new(campsite::model()),
+            &chunked(&campsite::model()),
             Mat4::IDENTITY,
         );
         let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
@@ -1365,7 +1388,7 @@ impl Farmyard {
             device,
             target.queue,
             &models,
-            &Arc::new(beach::model()),
+            &chunked(&beach::model()),
             Mat4::IDENTITY,
         );
         let stones = Drawn::placed(device, target.queue, &models, &stones(), &[]);

@@ -6,9 +6,9 @@
 //! viewpoints, by the GPU's timestamps: culled against both eyes as the renderer culls it, each piece lit by the lamps
 //! the world lists for it, and, to compare, without culling, with closed models' back faces drawn, with neither, culled
 //! with every piece lit by every lamp, with 28 more lanterns about the yard, by each piece's lamps and by every lamp,
-//! and culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds, the eight
-//! taken in turn frame by frame after a few seconds' warming up, so that the GPU's
-//! clock changing affects each alike, each the median of 600 frames. Pass a number for another count, and then a
+//! culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds, and with its
+//! models whole rather than in chunks, with its own lamps and with 32, the ten taken in turn frame by frame after a few
+//! seconds' warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a number for another count, and then a
 //! configuration's name, such as `culled`, to time it alone, or several separated by `|`, as a frame that culls what
 //! the last culled writes nothing. It times the CPU too: culling, through a render world as the renderer culls, and
 //! culling and encoding both eyes. Run by hand on a desktop GPU, not on CI's lavapipe; see `design/rendering.md`.
@@ -23,7 +23,7 @@ use tomori_assets::Library;
 use tomori_environment_farmyard_client::coop::Coop;
 use tomori_environment_farmyard_client::embers::{self, Embers};
 use tomori_environment_farmyard_client::layout;
-use tomori_environment_farmyard_client::scenery::{Clock, Farmyard};
+use tomori_environment_farmyard_client::scenery::{CHUNK, Clock, Farmyard};
 use tomori_environment_farmyard_client::trail;
 use tomori_render::scenery::{Scenery, Target, Views};
 use tomori_render::world::{Light, World};
@@ -133,15 +133,15 @@ fn main() {
         .unwrap_or(600);
     // Each configuration: whether it culls against the eyes, whether closed parts' back faces are culled, whether four
     // burning marshmallows' trails, as long as the ring holds, glow before the eyes, whether each piece is lit by the
-    // lamps listed for it, and whether 28 more lanterns light the yard.
+    // lamps listed for it, whether 28 more lanterns light the yard, and whether its models are whole.
     let only = std::env::args().nth(2);
     let configurations: Vec<_> = [
-        ("culled", true, true, false, true, false),
-        ("frustum only", true, false, false, true, false),
-        ("back faces only", false, true, false, true, false),
-        ("neither", false, false, false, true, false),
-        ("culled, every lamp", true, true, false, false, false),
-        ("culled, 32 lamps", true, true, false, true, true),
+        ("culled", true, true, false, true, false, false),
+        ("frustum only", true, false, false, true, false, false),
+        ("back faces only", false, true, false, true, false, false),
+        ("neither", false, false, false, true, false, false),
+        ("culled, every lamp", true, true, false, false, false, false),
+        ("culled, 32 lamps", true, true, false, true, true, false),
         (
             "culled, 32 lamps, every lamp",
             true,
@@ -149,8 +149,19 @@ fn main() {
             false,
             false,
             true,
+            false,
         ),
-        ("culled, with trails", true, true, true, true, false),
+        ("culled, with trails", true, true, true, true, false, false),
+        ("culled, whole", true, true, false, true, false, true),
+        (
+            "culled, 32 lamps, whole",
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+        ),
     ]
     .into_iter()
     .filter(|(name, ..)| {
@@ -209,8 +220,16 @@ fn main() {
         4,
         tomori_render::glyphs::SharedGlyphs::new(&device),
     );
-    let mut farmyard =
-        Farmyard::with_clock(&target, &Coop::Built, Library::shared(), Clock::Held(CLOCK));
+    // The farmyard in chunks, as it is drawn, and whole, as it was, each with its own render world.
+    let mut farmyards = [Some(CHUNK), None].map(|chunk| {
+        Farmyard::with_chunks(
+            &target,
+            &Coop::Built,
+            Library::shared(),
+            Clock::Held(CLOCK),
+            chunk,
+        )
+    });
     // The flock out, as its client side shows it a little after it is made.
     let drawn = {
         use tomori_scene::client_side::{ClientSide, Input};
@@ -233,7 +252,9 @@ fn main() {
         ));
         output.drawn.unwrap()
     };
-    farmyard.animate(&device, &queue, drawn.as_ref());
+    for farmyard in &mut farmyards {
+        farmyard.animate(&device, &queue, drawn.as_ref());
+    }
     let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
         label: Some("Scenery frames"),
         ty: wgpu::QueryType::Timestamp,
@@ -254,18 +275,21 @@ fn main() {
     let period = f64::from(queue.get_timestamp_period());
     // The render world, as the renderer's, with 28 more lanterns in rows across the yard and beyond it, 5 m apart and
     // reaching 4 m, dark unless a configuration lights them.
-    let mut world = World::new();
-    let root = world.add_root();
-    let lanterns: Vec<_> = (0..28)
-        .map(|index| {
-            let at = Vec3::new(
-                -15.0 + (index % 7) as f32 * 5.0,
-                2.0,
-                -20.0 + (index / 7) as f32 * 6.0,
-            );
-            world.add_light(Light::new(root, at, 4.0, Vec3::ZERO))
-        })
-        .collect();
+    let mut worlds = [(); 2].map(|_| {
+        let mut world = World::new();
+        let root = world.add_root();
+        let lanterns: Vec<_> = (0..28)
+            .map(|index| {
+                let at = Vec3::new(
+                    -15.0 + (index % 7) as f32 * 5.0,
+                    2.0,
+                    -20.0 + (index / 7) as f32 * 6.0,
+                );
+                world.add_light(Light::new(root, at, 4.0, Vec3::ZERO))
+            })
+            .collect::<Vec<_>>();
+        (world, root, lanterns)
+    });
     for (name, middle, facing) in viewpoints() {
         let clips = eyes(middle, facing);
         let mut gpu = vec![Vec::with_capacity(frames); configurations.len()];
@@ -277,7 +301,10 @@ fn main() {
         while gpu.iter().any(|times| times.len() < frames) {
             let which = frame % configurations.len();
             frame += 1;
-            let (_, culled, back_faces, trails, listed, lit) = configurations[which];
+            let (_, culled, back_faces, trails, listed, lit, whole) = configurations[which];
+            let farmyard = &mut farmyards[usize::from(whole)];
+            let (world, root, lanterns) = &mut worlds[usize::from(whole)];
+            let root = *root;
             if trails {
                 paint(farmyard.embers_mut(), middle, facing);
             } else {
@@ -288,7 +315,7 @@ fn main() {
             farmyard.set_back_faces_culled(back_faces);
             farmyard.set_lamps_listed(listed);
             // What it submits to the render world, culled there, then drawn as the world saw it, as the renderer does.
-            for lantern in &lanterns {
+            for lantern in lanterns.iter() {
                 world.light_mut(*lantern).expect("a lantern").color = if lit {
                     Vec3::new(1.0, 0.7, 0.35)
                 } else {
@@ -297,9 +324,9 @@ fn main() {
             }
             world.set_views(&clips);
             world.set_culling(culled);
-            farmyard.submit(&mut world, root);
+            farmyard.submit(world, root);
             world.cull();
-            tallies[which] = farmyard.cull(&queue, &Views::of(&world, root));
+            tallies[which] = farmyard.cull(&queue, &Views::of(world, root));
             let culling = started.elapsed();
             let mut encoder = device.create_command_encoder(&Default::default());
             for (eye, clip) in clips.iter().enumerate() {

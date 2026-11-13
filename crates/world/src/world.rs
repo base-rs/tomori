@@ -406,7 +406,8 @@ impl World {
 
     /// Find what the views may see of every active root: its static instances through their hierarchy, built again if
     /// they changed, and its dynamic items one by one, each item's bounds and then its instances'; which of its lights
-    /// reach into the views, of which at most [`LIGHTS`] light its items, those nearest the eyes of more; and, by
+    /// reach into the views, of which at most [`LIGHTS`] light its items, those nearest the eyes of more, those at the cut
+    /// fading as they near the nearest left out ([`light::FADE`] of their reach); and, by
     /// [`light::assign`], which of those light each instance seen.
     pub fn cull(&mut self) {
         let unculled = Views::unculled(self.views.clips());
@@ -509,7 +510,7 @@ impl World {
                 continue;
             }
             let id = RootId(index as u32);
-            // By how far each is from reaching the first eye, then in the order they were added.
+            // By how far each is from reaching the first eye, less within its reach, then in the order they were added.
             let eye = root.views.eyes().next().unwrap_or(Vec3::ZERO);
             root.ranked.clear();
             root.ranked
@@ -520,24 +521,30 @@ impl World {
                         .enumerate()
                         .filter_map(|(slot, (_, light))| {
                             let (light, seen) = light.as_ref()?;
-                            (light.root == id && *seen && light.gives_light()).then(|| {
-                                let gap = light.position.distance(eye) - light.reach;
-                                (gap.max(0.0), slot as u32)
-                            })
+                            (light.root == id && *seen && light.gives_light())
+                                .then(|| (light.position.distance(eye) - light.reach, slot as u32))
                         }),
                 );
+            // Of more, those as near as the nearest left out fade, as they near it, so that none is seen to come or go.
+            let mut cut = None;
             if root.ranked.len() > LIGHTS {
                 root.ranked
                     .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                cut = Some(root.ranked[LIGHTS].0);
                 root.ranked.truncate(LIGHTS);
                 root.ranked.sort_unstable_by_key(|(_, slot)| *slot);
             }
             root.lit.clear();
-            root.lit.extend(root.ranked.iter().map(|(_, slot)| {
-                self.lights.slots[*slot as usize]
+            root.lit.extend(root.ranked.iter().map(|(gap, slot)| {
+                let light = self.lights.slots[*slot as usize]
                     .1
                     .expect("a light ranked is here")
-                    .0
+                    .0;
+                Light {
+                    intensity: light.intensity
+                        * cut.map_or(1.0, |cut| light::faded(light.reach, *gap, cut)),
+                    ..light
+                }
             }));
         }
         for (_, entry) in self.items.slots.iter_mut() {
@@ -567,7 +574,8 @@ impl World {
         }
     }
 
-    /// The lights that light `root`'s items, as last culled, in the order they were added, which [`Lit::light`] indexes.
+    /// The lights that light `root`'s items, as last culled, in the order they were added, which [`Lit::light`] indexes;
+    /// of more than [`LIGHTS`], those fading at the cut with their intensity scaled down.
     pub fn root_lights(&self, root: RootId) -> &[Light] {
         &self.roots[root.0 as usize].lit
     }

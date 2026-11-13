@@ -370,6 +370,12 @@ impl Primitive {
     /// with an edge only one triangle has, as an open box's or a card's, or with next to no volume, as a card drawn on
     /// both sides as two layers, is not closed, nor is a triangle with two corners at one point.
     pub fn closed_triangles(&self) -> Vec<bool> {
+        self.parts().into_iter().map(|(_, closed)| closed).collect()
+    }
+
+    /// For each of its triangles, the part it belongs to, as [`Primitive::closed_triangles`] finds them, by the first of
+    /// the part's triangles, and whether that part is closed.
+    pub(crate) fn parts(&self) -> Vec<(usize, bool)> {
         // Vertices where the same point is, as a faceted mesh gives each face its own, are one.
         let mut points: HashMap<[u32; 3], u32> = HashMap::new();
         let mut welded = |index: u32| {
@@ -442,11 +448,17 @@ impl Primitive {
             let [a, b, c] = corners(triangle).map(|corner| corner - middle);
             *volume += a.dot(b.cross(c)) / 6.0;
         }
+        // Each part named by its first triangle, so that the same primitive names its parts the same way each time.
+        let mut first: HashMap<usize, usize> = HashMap::new();
         (0..triangles.len())
             .map(|triangle| {
-                let (opened, volume, bounds) = parts[&root(&mut part, triangle)];
+                let root = root(&mut part, triangle);
+                let (opened, volume, bounds) = parts[&root];
                 let across = (bounds.max - bounds.min).length();
-                !opened && volume > 1e-6 * across * across * across
+                (
+                    *first.entry(root).or_insert(triangle),
+                    !opened && volume > 1e-6 * across * across * across,
+                )
             })
             .collect()
     }
