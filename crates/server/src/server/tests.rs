@@ -844,6 +844,7 @@ fn watching(server: Server) -> Server {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         },
         tomori_protocol::ClientMessage::Join { space: id },

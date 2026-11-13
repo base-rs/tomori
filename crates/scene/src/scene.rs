@@ -477,6 +477,14 @@ fn place(conversation: &Conversation) -> locomotion::Place<'_> {
         .map(|(space, _)| (space.id.as_str(), conversation.environment()))
 }
 
+/// Where the participant arrived in the space `conversation` is in, as the server chose: the room at its spawn point, or
+/// home. See `design/environments.md`.
+fn spawn(conversation: &Conversation) -> Rig {
+    conversation
+        .spawn()
+        .map_or(Rig::default(), |spawn| Rig::arriving(&spawn))
+}
+
 /// The scene arrival heads for: its objects outside a space, and inside one, none, with the space's environment to grow out of its object.
 pub fn arrival_target(conversation: &Conversation) -> arrival::Scene {
     match conversation.arrival() {
@@ -910,9 +918,11 @@ impl Step {
 
     /// Where the participant's room is in the space's scene, in the space `conversation` is in: the transform the frame's poses are given in, which each platform applies to its head, eyes, controllers and hands before [`Self::update`]. Anywhere else, or in another space, the room is back home. See `design/locomotion.md`.
     pub fn rig(&mut self, conversation: &Conversation) -> Rig {
-        self.placed = self
-            .travel
-            .settle(place(conversation), &conversation.locomotion());
+        self.placed = self.travel.settle(
+            place(conversation),
+            &conversation.locomotion(),
+            spawn(conversation),
+        );
         self.placed
     }
 
@@ -1860,6 +1870,7 @@ impl Step {
         let travel = self.travel.update(locomotion::Input {
             place: place(conversation),
             locomotion: &locomotion,
+            spawn: spawn(conversation),
             stick: self.travel_stick,
             ray: rays[aimer],
             head: senses.head_pose.map(|pose| Vec3::from_array(pose.position)),

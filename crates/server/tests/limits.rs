@@ -127,6 +127,7 @@ fn an_oversized_hello_is_refused() {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
         let error = client.error();

@@ -24,6 +24,7 @@ speech = ["tomori-server/speech"]
 speech-shared = ["tomori-server/speech-shared"]
 
 [dependencies]
+glam = "0.33"
 tomori-environment = { version = "0.2.0", path = "../environment" }
 tomori-environment-farmyard = { version = "0.2.0", path = "../environment-farmyard", features = ["side"] }
 tomori-environment-github-server = { version = "0.2.0", path = "../environment-github-server" }
@@ -40,7 +41,6 @@ tomori-client-quest = { path = "../client-quest" }
 tomori-client-spectator = { path = "../client-spectator" }
 tomori-render = { path = "../render", features = ["test-gpu"] }
 # The farmyard's notice board, drawn on lavapipe as participants see it from where they arrive.
-glam = "0.33"
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "vulkan", "wgsl"] }

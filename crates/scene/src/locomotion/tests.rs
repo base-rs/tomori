@@ -157,6 +157,7 @@ fn input(locomotion: &Locomotion, stick: Vec2, ray: Option<Ray>) -> Input<'_> {
     Input {
         place: PLACE,
         locomotion,
+        spawn: Rig::default(),
         stick,
         ray,
         head: Some(HEAD),
@@ -685,6 +686,51 @@ fn a_teleport_darkens_the_view_and_it_comes_back_over_a_blink() {
 }
 
 #[test]
+fn the_room_arrives_on_its_spawn_point_facing_its_way() {
+    // At home, it is exactly home.
+    assert_eq!(Rig::arriving(&tomori_protocol::Pose::HOME), Rig::default());
+    // By a gate 4 m along +X, on a floor 0.5 m up, facing +X: the room's middle there, looking along +X.
+    let gate = tomori_protocol::Pose::upright([4.0, 0.5, 0.0], std::f32::consts::FRAC_PI_2);
+    let rig = Rig::arriving(&gate);
+    assert_eq!(rig.floor(), 0.5);
+    let middle = rig.matrix().transform_point3(Vec3::ZERO);
+    assert!(middle.distance(Vec3::new(4.0, 0.5, 0.0)) < 1e-5, "{middle}");
+    let ahead = rig.matrix().transform_vector3(Vec3::NEG_Z);
+    assert!(ahead.distance(Vec3::X) < 1e-5, "{ahead}");
+    // Facing +Z, half a turn from home, it is turned by half a turn, either way.
+    let behind = Rig::arriving(&tomori_protocol::Pose::upright([0.0; 3], 0.0));
+    let ahead = behind.matrix().transform_vector3(Vec3::NEG_Z);
+    assert!(ahead.distance(Vec3::Z) < 1e-5, "{ahead}");
+}
+
+#[test]
+fn the_rig_starts_where_the_participant_arrived_and_goes_back_there_without_travel() {
+    let floors = floors();
+    let gate = Rig::arriving(&tomori_protocol::Pose::upright(
+        [4.0, 0.0, 0.0],
+        std::f32::consts::FRAC_PI_2,
+    ));
+    let mut travel = Travel::default();
+    let at_gate = |stick: Vec2| Input {
+        spawn: gate,
+        ..input(&floors, stick, None)
+    };
+    // Joining, the room arrives at the gate, and travel goes on from there.
+    assert_eq!(travel.settle(PLACE, &floors, gate), gate);
+    travel.update(at_gate(Vec2::X));
+    travel.update(at_gate(Vec2::ZERO));
+    let turned = travel.rig();
+    assert_ne!(turned, gate);
+    assert_eq!(travel.settle(PLACE, &floors, gate), turned);
+    // Without travel, it stays at the gate, rather than going home.
+    assert_eq!(travel.settle(PLACE, &Locomotion::None, gate), gate);
+    // Arriving anew, at another point, puts it there; leaving puts it home, wherever it arrived.
+    let camp = Rig::arriving(&tomori_protocol::Pose::upright([0.0, 0.0, -6.0], 1.0));
+    assert_eq!(travel.settle(PLACE, &floors, camp), camp);
+    assert_eq!(travel.settle(None, &floors, camp), Rig::default());
+}
+
+#[test]
 fn the_rig_goes_home_on_leaving_changing_environment_or_without_travel() {
     let floors = floors();
     let mut travel = Travel::default();
@@ -713,7 +759,11 @@ fn the_rig_goes_home_on_leaving_changing_environment_or_without_travel() {
     turn(&mut travel, input(&floors, Vec2::X, None));
     assert_ne!(travel.rig(), Rig::default());
     assert_eq!(
-        travel.settle(Some(("space-2", Environment::new("floor"))), &floors),
+        travel.settle(
+            Some(("space-2", Environment::new("floor"))),
+            &floors,
+            Rig::default()
+        ),
         Rig::default()
     );
     // Another environment.

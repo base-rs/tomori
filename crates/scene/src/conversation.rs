@@ -468,6 +468,12 @@ pub struct Conversation {
     reported: Option<Engagement>,
     /// Whether this client reports engagement at all; the spectator does not, so it follows live speech.
     reports_engagement: bool,
+    /// Whether this client arrives where the server says as it joins a space; the spectator chooses where it watches
+    /// from itself. See `design/environments.md`.
+    arrives: bool,
+    /// Where the participant arrived in the joined space, as the server chose: the space and environment it is for, and
+    /// the spawn point, in the space's coordinates, kept until they next arrive, so that reconnecting moves nobody.
+    spawn: Option<(String, String, tomori_protocol::Pose)>,
     /// Whether agent speech is muted locally.
     muted: bool,
     /// Whether a replay or catch-up was playing at the last frame.
@@ -626,6 +632,8 @@ impl Conversation {
             engagement: Engagement::Engaged,
             reported: None,
             reports_engagement: true,
+            arrives: true,
+            spawn: None,
             muted: false,
             replaying: false,
             speech: SpeechActivity::default(),
@@ -1043,6 +1051,26 @@ impl Conversation {
                 }
             }
             ServerMessage::Space { state } => self.update_space(*state),
+            // Where the participant arrives in the joined space, as it is now, once for each arrival: a spawn point sent
+            // again on reconnecting, for the space and environment they arrived in, moves nobody. See
+            // `design/environments.md`.
+            ServerMessage::Spawn {
+                space,
+                environment,
+                at,
+            } => {
+                let here = self
+                    .space
+                    .as_ref()
+                    .is_some_and(|joined| joined.id == space && joined.environment == environment);
+                let arrived = self
+                    .spawn
+                    .as_ref()
+                    .is_some_and(|(kept, held, _)| *kept == space && *held == environment);
+                if here && !arrived {
+                    self.spawn = Some((space, environment, at));
+                }
+            }
             ServerMessage::Name { name } => {
                 log::info!("Now called {name:?}");
                 self.server_name = Some(name);
@@ -1336,6 +1364,14 @@ impl Conversation {
             log::info!("Space {} is now titled {:?}", state.id, state.title);
             self.notice = Some(retitled(&state));
         }
+        // In another environment, where the participant arrived means nothing: they arrive anew, there and on coming back.
+        if self
+            .spawn
+            .as_ref()
+            .is_some_and(|(_, held, _)| *held != state.environment)
+        {
+            self.spawn = None;
+        }
         // A late update from a space being left does not end a join of another.
         if entered || self.joining.as_deref() == Some(state.id.as_str()) {
             self.joining = None;
@@ -1440,6 +1476,33 @@ impl Conversation {
     #[cfg(not(target_os = "android"))]
     pub fn follow_live_speech_only(&mut self) {
         self.reports_engagement = false;
+    }
+
+    /// Never be told where to arrive, so that the server keeps no spawn point for this client, as for the spectator,
+    /// which chooses where it watches from itself and whom nobody sees standing there. See `design/spectator.md`.
+    #[cfg(not(target_os = "android"))]
+    pub fn choose_own_arrival(&mut self) {
+        self.arrives = false;
+    }
+
+    /// Where the participant arrived in the joined space, as the server chose among its environment's spawn points, in
+    /// the space's coordinates, while the space is in the environment it was chosen in; none at home, as in an
+    /// environment that declares none. See `design/environments.md`.
+    pub fn spawn(&self) -> Option<tomori_protocol::Pose> {
+        let (space, environment, at) = self.spawn.as_ref()?;
+        self.space
+            .as_ref()
+            .filter(|joined| joined.id == *space && joined.environment == *environment)
+            .map(|_| *at)
+    }
+
+    /// Where the spectator watches from in the joined space while it follows nobody: the spawn point its environment
+    /// tags for spectators, or else the first untagged, in the space's coordinates; none at home. See
+    /// `design/spectator.md`.
+    pub fn spectator_spawn(&self) -> Option<tomori_protocol::Pose> {
+        let spawns = &self.space.as_ref()?.anchors.spawns;
+        tomori_protocol::spawn::choose(spawns, tomori_protocol::spawn::SPECTATOR, &[], &[])
+            .map(|index| spawns[index].pose)
     }
 
     /// The participant put the device on or took it off, or something else took or returned its input. Taking it off stops the live microphone and any recording, as losing focus does; see `design/live-audio.md`.
@@ -1652,6 +1715,7 @@ impl Conversation {
         self.knock = None;
         self.forget_turn();
         self.space = None;
+        self.spawn = None;
         self.forget_hands();
         self.cards = None;
         self.projection.clear();
@@ -4973,6 +5037,11 @@ impl Session for Conversation {
     /// And their data ops, to its live panels, with the shared rule, keeping each panel's version as a place op says it.
     fn live_panels(&self) -> bool {
         true
+    }
+
+    /// And arrives where the server says, unless it chooses for itself, as the spectator does.
+    fn spawns(&self) -> bool {
+        self.arrives
     }
 
     fn report(&mut self, report: Report) {

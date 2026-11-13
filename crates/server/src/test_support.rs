@@ -530,6 +530,7 @@ impl TestClient {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
         // The welcome is the first reply to hello.

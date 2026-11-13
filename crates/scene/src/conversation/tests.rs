@@ -8668,3 +8668,56 @@ fn a_on_a_teleport_pad_is_the_last_of_a_s_meanings_and_never_answers_a_request()
         assert!(!conversation.take_pad_choice());
     }
 }
+
+#[test]
+fn the_participant_arrives_once_where_the_server_says() {
+    let spawned = |space: &str, environment: &str, x: f32| {
+        Event::Message(ServerMessage::Spawn {
+            space: space.into(),
+            environment: environment.into(),
+            at: tomori_protocol::Pose::at([x, 0.0, 0.0]),
+        })
+    };
+    let mut conversation = joined(|_| {});
+    // A headset or desktop window asks where it arrives.
+    assert!(Session::spawns(&conversation));
+    assert_eq!(conversation.spawn(), None);
+    // One for another space, or for another environment than the space is in, is not where it arrives.
+    conversation.apply(spawned("elsewhere", "sky", 1.0));
+    conversation.apply(spawned(SPACE, "farmyard", 1.0));
+    assert_eq!(conversation.spawn(), None);
+    conversation.apply(spawned(SPACE, "sky", 2.0));
+    assert_eq!(conversation.spawn().map(|at| at.position[0]), Some(2.0));
+    // Told again, as on reconnecting, it stays where it arrived.
+    conversation.apply(spawned(SPACE, "sky", 3.0));
+    assert_eq!(conversation.spawn().map(|at| at.position[0]), Some(2.0));
+    // As the space changes environment, it arrives anew there, and not where it arrived before.
+    conversation.apply(space(|state| state.environment = "farmyard".into()));
+    assert_eq!(conversation.spawn(), None);
+    conversation.apply(spawned(SPACE, "farmyard", 4.0));
+    assert_eq!(conversation.spawn().map(|at| at.position[0]), Some(4.0));
+    // Back in the first, it arrives anew there, not where it first arrived.
+    conversation.apply(space(|state| state.environment = "sky".into()));
+    assert_eq!(conversation.spawn(), None);
+    conversation.apply(spawned(SPACE, "sky", 5.0));
+    assert_eq!(conversation.spawn().map(|at| at.position[0]), Some(5.0));
+    // Leaving forgets it.
+    conversation.apply(Event::Message(ServerMessage::LEFT));
+    assert_eq!(conversation.spawn(), None);
+    assert_eq!(conversation.spectator_spawn(), None);
+}
+
+#[test]
+fn the_spectator_chooses_its_own_spawn_point() {
+    use tomori_protocol::spawn::{self, Spawn};
+    let at = |x: f32| tomori_protocol::Pose::at([x, 0.0, 0.0]);
+    let mut conversation = joined(|state| {
+        state.anchors = tomori_protocol::Anchors::new()
+            .with_spawn(Spawn::new(at(1.0)).with_tag(spawn::VISITOR))
+            .with_spawn(Spawn::new(at(2.0)))
+            .with_spawn(Spawn::new(at(3.0)).with_tag(spawn::SPECTATOR));
+    });
+    assert_eq!(conversation.spectator_spawn(), Some(at(3.0)));
+    conversation.choose_own_arrival();
+    assert!(!Session::spawns(&conversation));
+}

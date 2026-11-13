@@ -30,6 +30,7 @@ fn seeing(hub: &Arc<Hub>, participant: &str, world_edges: bool) -> Client {
         world_edges,
         projection_patches: false,
         live_panels: false,
+        spawns: false,
         limits: Some(Limits::TODAY.with_volumes(16, 1024)),
     });
     client.read();

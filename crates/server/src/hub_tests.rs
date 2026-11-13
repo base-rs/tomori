@@ -91,6 +91,7 @@ impl Client {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
     }
@@ -243,6 +244,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         world_edges: false,
         projection_patches: false,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     let errors = client.errors();
@@ -1968,6 +1970,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         world_edges: false,
         projection_patches: false,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     client.read()
@@ -3189,6 +3192,7 @@ fn presenting(
         world_edges: false,
         projection_patches: false,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     client.read();
@@ -6178,6 +6182,7 @@ impl Client {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
         client.read();
@@ -8400,6 +8405,7 @@ impl Client {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
         client.read();
@@ -8789,6 +8795,8 @@ mod proximity;
 mod references;
 #[path = "hub_tests/relocating.rs"]
 mod relocating;
+#[path = "hub_tests/spawning.rs"]
+mod spawning;
 #[path = "hub_tests/timers.rs"]
 mod timers;
 #[path = "hub_tests/volumes.rs"]

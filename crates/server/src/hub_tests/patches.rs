@@ -48,6 +48,7 @@ impl Client {
             world_edges: false,
             projection_patches: true,
             live_panels,
+            spawns: false,
             limits,
         });
         client.read();
@@ -436,6 +437,7 @@ fn a_client_joining_again_or_reconnecting_is_sent_the_projection_whole() {
         world_edges: false,
         projection_patches: true,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     rejoined.read(&again);
@@ -503,6 +505,7 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
         let Some(ServerMessage::Welcome { limits, .. }) = client.read().into_iter().next() else {
@@ -568,6 +571,7 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
         world_edges: false,
         projection_patches: true,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     assert_eq!(kept(&blind), (Limits::TODAY, false));

@@ -140,6 +140,7 @@ fn a_hello_longer_than_a_visitor_sends_is_refused() {
         world_edges: false,
         projection_patches: false,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     let error = client.error();

@@ -213,7 +213,9 @@ fn an_environment_s_client_side_is_made_for_its_space_once_it_grows_in_and_prese
         Action::Send(ClientMessage::EnvironmentIntent { .. })
     )));
     // Leaving, it is gone; joining again, it is made anew.
-    conversation.apply(Event::Message(ServerMessage::LEFT));
+    conversation.apply(tomori_client::Event::Message(
+        tomori_protocol::ServerMessage::LEFT,
+    ));
     assert!(
         step.update(&senses, &mut conversation, &mut feedback, now, FRAME)
             .environment
@@ -1946,6 +1948,32 @@ fn without_a_client_side_the_right_stick_pages_no_result_card_in_a_space() {
             now,
         );
     }
+}
+
+#[test]
+fn joining_sets_the_room_on_the_spawn_point_the_server_chose_and_leaving_sends_it_home() {
+    let mut conversation = lobby(ConnectionRole::Owner);
+    let mut step = Step::default();
+    conversation.apply(space(|_| {}));
+    // Until the server says, and in an environment that declares none, the room is home.
+    assert_eq!(step.rig(&conversation), Rig::default());
+    let camp = tomori_protocol::Pose::upright([3.0, 0.0, -5.0], 2.0);
+    conversation.apply(tomori_client::Event::Message(
+        tomori_protocol::ServerMessage::Spawn {
+            space: "space-1".into(),
+            environment: "sky".into(),
+            at: camp,
+        },
+    ));
+    // Sky allows no travel, so the room stays at the campsite, frame after frame.
+    assert_eq!(step.rig(&conversation), Rig::arriving(&camp));
+    let now = Instant::now();
+    step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+    assert_eq!(step.rig(&conversation), Rig::arriving(&camp));
+    conversation.apply(tomori_client::Event::Message(
+        tomori_protocol::ServerMessage::LEFT,
+    ));
+    assert_eq!(step.rig(&conversation), Rig::default());
 }
 
 #[test]

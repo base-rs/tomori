@@ -47,6 +47,7 @@ mod layouts;
 mod pairing_window;
 mod provenance;
 mod sides;
+mod spawning;
 // Only the speech feature's voice path hands the hub the agent's speech.
 #[cfg_attr(not(feature = "speech"), allow(dead_code))]
 mod speech;
@@ -578,6 +579,9 @@ struct ConnectionRecord {
     /// Whether the client said in Hello that it also applies a patch's data ops to live panels and keeps the version a
     /// place op carries. See `design/projection.md`.
     live_panels: bool,
+    /// Whether the client said in Hello that it reads where it arrives, [`ServerMessage::Spawn`]. See
+    /// `design/environments.md`.
+    spawns: bool,
     /// What the connection is bound by: the lesser of what the client said in Hello that it takes at most, today's from an
     /// older one, and [`LIMITS`]. See `design/projection.md`.
     limits: Limits,
@@ -811,6 +815,9 @@ struct SpaceRecord {
     /// Who is within the space's anchors that notify its agent, and when each was last told, for this run only. See
     /// `design/environments.md`.
     proximity: crate::proximity::Proximity,
+    /// Where people joining it arrived, among its environment's spawn points, for this run and this environment only.
+    /// See `design/environments.md`.
+    arrivals: crate::spawns::Arrivals,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -2147,6 +2154,8 @@ impl HubState {
             && let Some(record) = self.space_mut(space)
         {
             record.model.visitors.retain(|id| *id != knock.participant);
+            // Admitted, they stay where they arrived, under their new key: a role changing moves nobody.
+            record.arrivals.rekey(&knock.participant, &key);
             if *space == knock.space {
                 record.model.participants.push(key.clone());
             } else {
@@ -2901,6 +2910,7 @@ impl Hub {
                 world_edges: false,
                 patches: false,
                 live_panels: false,
+                spawns: false,
                 limits: Limits::TODAY,
                 projected: None,
                 projection_sent: 0,
@@ -3145,6 +3155,7 @@ impl Hub {
                 world_edges,
                 projection_patches,
                 live_panels,
+                spawns,
                 limits,
             } = message
             {
@@ -3159,6 +3170,7 @@ impl Hub {
                     record.world_edges = world_edges;
                     record.patches = projection && projection_patches;
                     record.live_panels = record.patches && live_panels;
+                    record.spawns = spawns;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
                     // says, within the most any connection takes; frames each way from the next on. See
                     // `design/projection.md` and `design/server.md`.
@@ -3394,6 +3406,9 @@ impl Hub {
         self.tell_window_on_hello(state, connection);
         // The space they were in, unless it was forgotten meanwhile.
         let rejoined = rejoin.is_some_and(|space| state.join(&participant, &space));
+        if rejoined {
+            self.arrive(state, &participant, false);
+        }
         if !rejoined && role != ConnectionRole::Pairing {
             outbox.spaces();
         }
@@ -3559,13 +3574,19 @@ impl Hub {
                 {
                     record.model.attend();
                 }
+                // The space is listed, checked above, and the participant connected, so they join it.
                 state.join(participant, &target);
+                self.arrive(state, participant, false);
             }
             ClientMessage::Leave => {
                 state.abandon_utterance(connection, deferred);
                 // Announce leaving before the lobby listing that leaving produces.
                 outbox.clear_audio();
                 outbox.message(ServerMessage::LEFT);
+                // Leaving, they arrive anew when they next join, unlike a reconnect. See `design/environments.md`.
+                for record in &mut state.spaces {
+                    record.arrivals.forget(participant);
+                }
                 state.leave(participant);
                 // A member is kept.
                 state
@@ -5623,6 +5644,7 @@ impl Hub {
             agent_at: None,
             rates: Default::default(),
             proximity: Default::default(),
+            arrivals: Default::default(),
             active: None,
         });
         // Created now, it is active from now.
@@ -5655,8 +5677,8 @@ impl Hub {
                 record.connection.is_some()
                     && (record.space.is_none() || record.space == request.creator_space)
             });
-        if creator_waiting {
-            state.join(&request.creator, &id);
+        if creator_waiting && state.join(&request.creator, &id) {
+            self.arrive(&mut state, &request.creator, false);
         }
         state.pump(&id);
         state.forget_closed();
@@ -5798,6 +5820,7 @@ impl Hub {
                     agent_at: None,
                     rates: Default::default(),
                     proximity: Default::default(),
+                    arrivals: Default::default(),
                     active: kept.active,
                 });
             }
