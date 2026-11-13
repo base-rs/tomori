@@ -582,6 +582,14 @@ fn deliver(
             }
         },
         FrameKind::Audio => {
+            // A voice not played is dropped before its samples are decoded, so a malformed frame from one is dropped
+            // quietly rather than ending the connection: it would never be played, and its header named a source, which
+            // only the server sets. A header too short to name one is refused below.
+            if AudioFrame::source_of(&frame.payload)
+                .is_some_and(|from| !context.shared.delivers(from))
+            {
+                return Ok(());
+            }
             let audio = frame.to_audio().map_err(protocol)?;
             // What this participant records never plays back to them. The server does not relay it back; this guards against a server that does.
             if audio.source == source {

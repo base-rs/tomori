@@ -28,6 +28,8 @@ use tomori_scene::{
 };
 
 pub use spectator_feed::SpectatorOptions;
+/// Whose voices a spectator plays, its [`SpectatorOptions::voices`].
+pub use tomori_client::Hearing;
 
 use pipewire_video::Producer;
 use spectator_feed::Feed;

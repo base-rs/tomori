@@ -59,6 +59,8 @@ pub struct Command {
     pub follow: Option<String>,
     /// The PipeWire output a spectator plays to, by its node name.
     pub audio_output: Option<String>,
+    /// Whose voices a spectator plays: everyone's, unless `--voices` says otherwise.
+    pub voices: tomori_client_spectator::Hearing,
 }
 
 impl Command {
@@ -72,6 +74,7 @@ impl Command {
         overrides.server = server;
         overrides.token = token;
         let (mut space, mut follow, mut audio_output, mut mode) = (None, None, None, None);
+        let mut voices = None;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let mut value = |what: &str| {
@@ -86,6 +89,11 @@ impl Command {
                 "--space" => space = Some(value("a space id")?),
                 "--follow" => follow = Some(value("a participant name")?),
                 "--audio-output" => audio_output = Some(value("an output's name")?),
+                "--voices" => {
+                    voices = Some(tomori_client_spectator::cli::parse_voices(&value(
+                        "all, agent or none",
+                    )?)?)
+                }
                 _ if mode.is_none() => {
                     mode = Some(
                         Mode::parse(&argument)
@@ -113,6 +121,10 @@ impl Command {
             (space.is_none() && follow.is_none()) || mode.spectator(),
             "--space and --follow apply only to the spectator modes; use --help"
         );
+        ensure!(
+            voices.is_none() || mode.spectator(),
+            "--voices applies only to the spectator modes; use --help"
+        );
         // The same setting would also choose the microphone, which only the participant modes open.
         ensure!(
             audio_output.is_none() || mode.spectator(),
@@ -138,6 +150,7 @@ impl Command {
             space,
             follow,
             audio_output,
+            voices: voices.unwrap_or_default(),
         })
     }
 
@@ -156,12 +169,13 @@ impl Command {
     }
 
     fn spectator_options(&self) -> SpectatorOptions {
-        SpectatorOptions {
-            server: self.overrides.server.clone(),
-            space: self.space.clone(),
-            follow: self.follow.clone(),
-            token: self.overrides.token.clone(),
-        }
+        let mut options = SpectatorOptions::new();
+        options.server = self.overrides.server.clone();
+        options.space = self.space.clone();
+        options.follow = self.follow.clone();
+        options.token = self.overrides.token.clone();
+        options.voices = self.voices;
+        options
     }
 
     /// Run the command as `builder` builds the headset, with its windows shown by `shell`, [`crate::Desktop`] or a test's, until its window or connection closes.
@@ -219,7 +233,7 @@ pub fn help(program: &str, drawable: &[tomori_scene::environment::Environment]) 
         .map(|environment| environment.id())
         .collect();
     format!(
-        "{program} [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `{program} discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
+        "{program} [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--voices all|agent|none] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `{program} discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --voices WHICH    with the spectator modes, play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
         crate::DESKTOP_CONTROLS,
         choices.join("|"),
         Environment::first(drawable).id()
@@ -310,6 +324,8 @@ mod tests {
             "s1",
             "--follow",
             "Bob",
+            "--voices",
+            "agent",
         ];
         let with_output = [&spectator[..], &["--audio-output", "sink"]].concat();
         // An output is a PipeWire node, so it is refused where there is no PipeWire.
@@ -323,14 +339,22 @@ mod tests {
             );
             parse(&spectator).unwrap()
         };
+        let options = command.spectator_options();
         assert_eq!(
-            command.spectator_options(),
-            SpectatorOptions {
-                server: Some("host:2".into()),
-                space: Some("s1".into()),
-                follow: Some("Bob".into()),
-                token: Some("secret".into()),
-            }
+            (
+                options.server.as_deref(),
+                options.space.as_deref(),
+                options.follow.as_deref(),
+                options.token.as_deref(),
+                options.voices,
+            ),
+            (
+                Some("host:2"),
+                Some("s1"),
+                Some("Bob"),
+                Some("secret"),
+                tomori_client_spectator::Hearing::Agent,
+            )
         );
         #[cfg(target_os = "linux")]
         assert_eq!(command.audio_output.as_deref(), Some("sink"));
@@ -341,6 +365,7 @@ mod tests {
             ("--space", "a space id"),
             ("--follow", "a participant name"),
             ("--audio-output", "an output's name"),
+            ("--voices", "all, agent or none"),
         ] {
             assert_eq!(
                 error(&["--desktop", option]),
@@ -361,6 +386,12 @@ mod tests {
         assert!(error(&["--desktop", "--follow", "Bob"]).starts_with("--space and --follow"));
         assert!(
             error(&["--desktop", "--audio-output", "sink"]).starts_with("--audio-output applies")
+        );
+        assert!(error(&["--desktop", "--voices", "agent"]).starts_with("--voices applies"));
+        assert!(error(&["--spectator", "--voices", "some"]).starts_with("--voices takes"));
+        assert_eq!(
+            parse(&["--spectator"]).unwrap().voices,
+            tomori_client_spectator::Hearing::All
         );
     }
 

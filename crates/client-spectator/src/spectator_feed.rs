@@ -28,6 +28,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
+use tomori_client::Hearing;
 use tomori_protocol::{Hand, ServerMessage};
 use tomori_render::scenery::Sceneries;
 use tomori_scene::avatar::Coordinator;
@@ -111,8 +112,10 @@ pub struct Projected {
     pub images: Vec<(String, Arc<[u8]>)>,
 }
 
-/// The options a spectator is started with.
+/// The options a spectator is started with: [`Self::new`]'s, none, changed field by field, so that options added later
+/// break no application that sets its own.
 #[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
 pub struct SpectatorOptions {
     /// A server address to connect to straight away.
     pub server: Option<String>,
@@ -122,6 +125,15 @@ pub struct SpectatorOptions {
     pub follow: Option<String>,
     /// A token for the server, for a server that refuses visitors. See `design/security.md`.
     pub token: Option<String>,
+    /// Whose voices it plays: everyone's, by default, the agent's speech alone, or none. See `design/spectator.md`.
+    pub voices: Hearing,
+}
+
+impl SpectatorOptions {
+    /// No server, space, participant or token, and every voice played.
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// The spectator's connection to a space. Tracks participant presence and
@@ -205,6 +217,7 @@ impl Feed {
         );
         // The spectator's audience sees no interface, so it hears no cues; see `design/spectator.md`.
         connection.feedback().mute_sounds();
+        connection.hear(options.voices);
 
         // If a space is given, join it directly, as the lobby's accept would.
         if let Some(space) = &options.space {
@@ -259,6 +272,20 @@ impl Feed {
             last_poll: Instant::now(),
             last_caption: None,
         }
+    }
+
+    /// Whose voices it plays, as its connection was last told.
+    pub fn voices(&self) -> Hearing {
+        self.connection.hearing()
+    }
+
+    /// Play the next voices from now on, everyone's, then the agent's alone, then none, and everyone's again, as the
+    /// window's V key chooses, returning them. See `design/spectator.md`.
+    pub fn next_voices(&mut self) -> Hearing {
+        let voices = self.voices().next();
+        self.connection.hear(voices);
+        log::info!("Spectator: voices {}", voices.name());
+        voices
     }
 
     /// Draw `sceneries`, as the application that runs the spectator registers them, such as Tomori's own: its `Hello` lists their environments, a space in one is shown in it, and `TOMORI_ENVIRONMENT` chooses among them outside a space, as on the desktop window. The client sides registered with them run as a spectator's, drawing what they show. See `design/environments.md` and `design/spectator.md`.
@@ -697,6 +724,7 @@ mod tests {
             space: Some(space.clone()),
             follow: Some("Bea".into()),
             token: None,
+            ..Default::default()
         });
         // Until Bea is seen, the spectator waits for her, looking at the scene.
         let frame = until(&mut feed, |feed, _| {
@@ -763,6 +791,7 @@ mod tests {
             space: Some(space),
             follow: Some("Bea".into()),
             token: None,
+            ..Default::default()
         });
         until(&mut feed, |feed, _| {
             feed.conversation.joined_space().is_some_and(|(space, _)| {
@@ -830,6 +859,21 @@ mod tests {
     }
 
     #[test]
+    fn the_voices_played_are_those_chosen_and_v_cycles_through_them() {
+        assert_eq!(feed(SpectatorOptions::new()).voices(), Hearing::All);
+        let mut demonstrating = feed(SpectatorOptions {
+            voices: Hearing::Agent,
+            ..Default::default()
+        });
+        assert_eq!(demonstrating.connection.hearing(), Hearing::Agent);
+        let cycled = [(); 3].map(|()| demonstrating.next_voices());
+        assert_eq!(cycled, [Hearing::Nobody, Hearing::All, Hearing::Agent]);
+        // Each is what its connection was told, so that it is what plays.
+        demonstrating.next_voices();
+        assert_eq!(demonstrating.connection.hearing(), Hearing::Nobody);
+    }
+
+    #[test]
     fn without_a_name_the_spectator_follows_the_first_participant_it_sees_until_they_leave() {
         let server = Server::start();
         let bea = server.remote("Bea", Some(server.owner("Bea")));
@@ -839,6 +883,7 @@ mod tests {
             space: Some(space),
             follow: None,
             token: None,
+            ..Default::default()
         });
         let frame = until(&mut feed, |feed, _| {
             feed.conversation.joined_space().is_some()

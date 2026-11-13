@@ -5,7 +5,7 @@
 //!
 //! The session is the client's conversation with the server, as `tomori-scene`'s `Conversation` is: state that asks for [`Action`]s and applies [`Event`]s and [`Report`]s, so that nothing in it touches the network or a device. The application calls [`Connection::poll`] once a frame.
 use crate::{
-    Client, ConnectionState, Disconnect, Event, Fingerprint, Options, Transport,
+    Client, ConnectionState, Disconnect, Event, Fingerprint, Hearing, Options, Transport,
     capture::Capture,
     discovery,
     feedback::{self, Event as Feedback, Hand},
@@ -304,6 +304,8 @@ pub struct Connection {
     local_source: Option<u32>,
     /// The participant whose head the spectator hears from, who is the listener rather than a source.
     listening_as: Option<u32>,
+    /// Whose voices play, on this connection and the next.
+    hearing: Hearing,
     /// The other participants in the space, kept between frames to avoid allocating.
     others: Vec<u32>,
     /// Where [`Self::listen`] last placed the voices, kept so that it can be read back.
@@ -564,6 +566,7 @@ impl Connection {
             heads: HashMap::new(),
             local_source: None,
             listening_as: None,
+            hearing: Hearing::All,
             others: Vec::new(),
             placed: Scene::default(),
             echo_test: None,
@@ -645,6 +648,22 @@ impl Connection {
     /// Hear as `participant` does, from their head, as the spectator does for the participant it follows: they are the listener, so their own voice is not placed.
     pub fn listen_as(&mut self, participant: Option<u32>) {
         self.listening_as = participant;
+    }
+
+    /// Play only the voices `hearing` says, on this connection and the next, as the spectator chooses: participants'
+    /// voices not played are dropped as they arrive, so that they cost nothing to play, and the agent's speech, not
+    /// played, is muted, so that it still reports [`Report::AgentSpeech`] playing. See `design/spectator.md`.
+    pub fn hear(&mut self, hearing: Hearing) {
+        self.hearing = hearing;
+        self.speaker.set_voiceless(hearing.mutes_agent());
+        if let Some(client) = &self.client {
+            client.hear(hearing);
+        }
+    }
+
+    /// The voices played, as [`Self::hear`] last said.
+    pub fn hearing(&self) -> Hearing {
+        self.hearing
     }
 
     /// Place the voices, once a frame: `participants` are those in the space this participant is in, by number, and `place` fills the player's scene from the [`Voices`] of the others, with where this participant hears from and where the agent is. See `design/spatial-audio.md`. Without a connection nothing plays, and `place` is not called.
@@ -1154,6 +1173,7 @@ impl Connection {
         options.limits = session.limits();
         options.live_panels = session.live_panels();
         options.spawns = session.spawns();
+        options.hearing = self.hearing;
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {

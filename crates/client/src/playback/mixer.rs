@@ -120,7 +120,8 @@ impl Source {
     }
 }
 
-fn is_agent(source: u32) -> bool {
+/// Whether `source` is the agent's speech, live or played again.
+pub(crate) fn is_agent(source: u32) -> bool {
     source == AGENT_SOURCE || source == REPLAY_SOURCE
 }
 

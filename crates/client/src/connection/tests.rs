@@ -924,10 +924,15 @@ impl Peer {
 
     /// Speak as the agent for a fifth of a second, with one frame lost on the way, and poll until it has all arrived.
     fn speak(&self, connection: &mut Connection, session: &mut Script) {
-        for sequence in (0..10).filter(|sequence| *sequence != 4) {
+        self.speak_as(tomori_protocol::AGENT_SOURCE, 0, connection, session);
+    }
+
+    /// Speak as `source` for a fifth of a second, as [`Self::speak`] does, numbering its frames from `from`.
+    fn speak_as(&self, source: u32, from: u32, connection: &mut Connection, session: &mut Script) {
+        for sequence in (from..from + 10).filter(|sequence| *sequence != from + 4) {
             let frame = tomori_protocol::AudioFrame {
                 gate: Gate::Live,
-                source: tomori_protocol::AGENT_SOURCE,
+                source,
                 sequence,
                 timestamp: u64::from(sequence) * 20_000,
                 sample_rate: 48_000,
@@ -1436,6 +1441,49 @@ fn agent_speech_muted_while_connected_is_not_heard() {
     // Leaving the server closes the speaker, logging what it played.
     session.push(Action::Disconnect);
     connection.poll(true, &mut session);
+}
+
+#[test]
+fn the_voices_chosen_are_played_from_the_first_frame_and_as_they_change() {
+    const PERSON: u32 = 7;
+    let peer = Peer::start();
+    let held = Held::default();
+    let mut session = Script::default();
+    let mut connection = connection(&mut session, Scripted::default(), held.clone());
+    // Chosen before connecting, it holds from the connection's first frame.
+    connection.hear(crate::Hearing::Agent);
+    assert_eq!(connection.hearing(), crate::Hearing::Agent);
+    session.push(Action::Connect(peer.choice()));
+    until(&mut connection, &mut session, |_, session| {
+        session.connected()
+    });
+    until(&mut connection, &mut session, |_, _| held.opened());
+    // Whether the next second is heard, and whether agent speech plays meanwhile, heard or muted.
+    let played = |held: &Held, connection: &Connection| {
+        let (mut heard, mut speaking) = (false, false);
+        for _ in 0..10 {
+            heard |= held.heard();
+            speaking |= connection.speaker.agent_speech().0;
+        }
+        held.flush();
+        (heard, speaking)
+    };
+    let (connection, session) = (&mut connection, &mut session);
+    // Each stream numbered on from the last, so that none is taken for late frames of the one before.
+    for (from, (hearing, person, agent)) in (0..).step_by(10).zip([
+        (None, false, true),
+        (Some(crate::Hearing::Nobody), false, false),
+        (Some(crate::Hearing::All), true, true),
+    ]) {
+        if let Some(hearing) = hearing {
+            connection.hear(hearing);
+        }
+        peer.speak_as(PERSON, from, connection, session);
+        assert_eq!(played(&held, connection), (person, false), "{hearing:?}");
+        // Agent speech that is not played is muted rather than dropped, so it still plays, for the agent to be seen speaking.
+        peer.speak_as(tomori_protocol::AGENT_SOURCE, from, connection, session);
+        assert_eq!(played(&held, connection), (agent, true), "{hearing:?}");
+    }
 }
 
 #[test]

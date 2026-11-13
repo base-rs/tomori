@@ -168,7 +168,7 @@ The spectator is its own executable, `tomori-spectator`, in the `tomori-client-s
 
 The spectator requests a **1920×1080 physical-pixel** content area at startup, with a 1080p minimum and no window decorations, to match a 1080p OBS canvas. Press **Esc** to close it. Resizing larger changes the render resolution. On a 1080-pixel-high display the desktop panel can cover part of the borderless window; the compositor may also constrain sizes on smaller or scaled displays. Check the actual size in the startup log and OBS preview.
 
-In OBS, add the spectator window as a window/screen capture. The spectator plays participant audio and agent speech through the PC's default audio output; capture that output separately if you want audio. Avoid capturing the same sound twice, and preview audio/video synchronization before going live.
+In OBS, add the spectator window as a window/screen capture. The spectator plays participant audio and agent speech through the PC's default audio output; capture that output separately if you want audio. Run it with `--voices agent` to play only the agent's speech, as when demonstrating in a room where your own voice would come back out of the PC's speakers, or `--voices none` for silence; **V** in the window cycles through `all`, `agent` and `none`. Avoid capturing the same sound twice, and preview audio/video synchronization before going live.
 
 ### Experimental direct PipeWire video (Linux)
 

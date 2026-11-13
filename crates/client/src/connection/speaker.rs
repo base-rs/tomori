@@ -30,6 +30,8 @@ pub(super) struct Speaker {
     pub(super) reported: bool,
     /// Whether agent speech is muted locally, kept across connections.
     pub(super) muted: bool,
+    /// Whether agent speech is muted too as the voices played say, kept across connections. See [`crate::Hearing`].
+    pub(super) voiceless: bool,
     /// How the open output plays, and how the next one should.
     pub(super) route: Route,
     /// Whether the players made for later connections load the echo probe, for the echo test.
@@ -51,6 +53,7 @@ impl Speaker {
             retry_at: None,
             reported: false,
             muted: false,
+            voiceless: false,
             route: Route::default(),
             probe: false,
             ambience: None,
@@ -103,7 +106,7 @@ impl Speaker {
         if self.probe {
             player.load_probe();
         }
-        control.set_agent_muted(self.muted);
+        control.set_agent_muted(self.muted || self.voiceless);
         control.set_ambience_gain(self.ambience_gain);
         control.set_ambience(self.ambience.clone());
         self.player = Some((Arc::new(Mutex::new(player)), control));
@@ -131,8 +134,19 @@ impl Speaker {
     /// Mute or unmute agent speech locally, on this player and those of later connections.
     pub(super) fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
+        self.apply_muted();
+    }
+
+    /// Mute agent speech, or not, as the voices played say, on this player and those of later connections, whether or
+    /// not it is muted locally.
+    pub(super) fn set_voiceless(&mut self, voiceless: bool) {
+        self.voiceless = voiceless;
+        self.apply_muted();
+    }
+
+    fn apply_muted(&self) {
         if let Some(control) = self.control() {
-            control.set_agent_muted(muted);
+            control.set_agent_muted(self.muted || self.voiceless);
         }
     }
 

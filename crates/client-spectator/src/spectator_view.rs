@@ -10,7 +10,7 @@ use crate::{graphics::Renderer, spectator_feed::Feed, swarm::Swarm};
 use glam::{Mat4, Vec3};
 
 pub(crate) struct SpectatorView {
-    feed: Feed,
+    pub(crate) feed: Feed,
     /// The GPU buffers of the space's walls and panels, made with the renderer's first frame.
     panels: Option<tomori_render::scene_graphics::Panels>,
 }

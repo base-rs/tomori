@@ -2,6 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -11,7 +12,7 @@ use base_scheduler_native::NativeOptions;
 use tomori_protocol::{AudioFrame, ClientMessage};
 
 use crate::outbox::{FailedUtterance, Membership, Outbox};
-use crate::{ConnectionState, Event, Events, Options, SendError, session};
+use crate::{ConnectionState, Event, Events, Hearing, Options, SendError, session};
 
 /// State shared by the application handles and the connection thread.
 pub(crate) struct Shared {
@@ -22,9 +23,17 @@ pub(crate) struct Shared {
     pub closing: Cancellation,
     /// The display name each Hello suggests: the one the client was made with, until the server renames this participant, after which the new name, so that a name the server does not keep, such as a visitor's, survives reconnecting. See `design/security.md`.
     pub name: Mutex<String>,
+    /// Whether the participants' voices are delivered to play, as [`Client::hear`] last said.
+    pub participants: AtomicBool,
 }
 
 impl Shared {
+    /// Whether received audio from `source` is delivered to play: the agent's speech always, which a [`Hearing`] that
+    /// does not play it mutes, and the participants' voices as [`Client::hear`] last said.
+    pub fn delivers(&self, source: u32) -> bool {
+        crate::playback::is_agent(source) || self.participants.load(Ordering::Relaxed)
+    }
+
     pub fn set_state(&self, state: ConnectionState) {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = state.clone();
         self.events.push(Event::State(state));
@@ -54,6 +63,7 @@ impl Sender {
                 events: Events::new(),
                 closing: Cancellation::new(),
                 name: Mutex::new(String::new()),
+                participants: AtomicBool::new(true),
             }),
         }
     }
@@ -164,6 +174,7 @@ impl Client {
             events: Events::new(),
             closing: Cancellation::new(),
             name: Mutex::new(options.name.clone()),
+            participants: AtomicBool::new(options.hearing.participants()),
         });
         if options.microphone_rearm_on_disconnect {
             shared.outbox.require_microphone_rearm();
@@ -223,6 +234,16 @@ impl Client {
     /// Move received audio to another thread, typically to a [`crate::playback::Player`]. Returns `None` if already taken. Audio attributed to this client's own participant number is never delivered.
     pub fn take_audio(&mut self) -> Option<Receiver<AudioFrame>> {
         self.audio.take()
+    }
+
+    /// Deliver the participants' voices from now on only if `hearing` plays them, dropping them as they arrive, before
+    /// their samples are decoded; what was delivered already still plays. The agent's speech is always delivered, for
+    /// the player to mute; see [`crate::connection::Connection::hear`].
+    pub fn hear(&self, hearing: Hearing) {
+        self.sender
+            .shared
+            .participants
+            .store(hearing.participants(), Ordering::Relaxed);
     }
 
     /// The next received audio frame, unless the receiver was taken.
