@@ -610,6 +610,12 @@ mod tests {
         let primitive = shapes.primitive(PLAIN);
         let (mut earth, mut meadow) = (0.0, 0.0);
         let mut colors = std::collections::HashSet::new();
+        // How many of the meadow's triangles have each edge, either way along it, by its corners to the bit.
+        let mut edges: std::collections::HashMap<[[u32; 2]; 2], usize> = Default::default();
+        let key = |from: Vec3, to: Vec3| {
+            let [from, to] = [from, to].map(|point| [point.x.to_bits(), point.z.to_bits()]);
+            if from < to { [from, to] } else { [to, from] }
+        };
         for triangle in primitive.indices.as_chunks::<3>().0 {
             let corners = triangle.map(|corner| primitive.positions[corner as usize]);
             let level = corners[0].y;
@@ -632,6 +638,11 @@ mod tests {
                 earth += area;
             } else {
                 meadow += area;
+                for index in 0..3 {
+                    *edges
+                        .entry(key(corners[index], corners[(index + 1) % 3]))
+                        .or_default() += 1;
+                }
             }
             colors.insert((
                 level.to_bits(),
@@ -653,8 +664,45 @@ mod tests {
             .sum::<f32>()
             .abs();
         assert!((meadow - disc).abs() < 0.05, "{meadow} {disc}");
+        // Its triangles meet edge to edge, without a corner on another's edge, and its open edges are the first ring's
+        // chords, each piece as the parts it was drawn as before had it, as the foothills meet them. Those parts, as the
+        // beach's outline cuts them, had a corner of one here and there on another's edge along the outline, which now
+        // meet corner to corner.
+        let (beach, parts) = crate::shapes::cut(&ring, &crate::beach::outline());
+        let mut before: std::collections::HashMap<[[u32; 2]; 2], usize> = Default::default();
+        for part in parts.iter().chain(&beach) {
+            for index in 0..part.len() {
+                *before
+                    .entry(key(part[index], part[(index + 1) % part.len()]))
+                    .or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|count| *count <= 2));
+        let mut length = 0.0;
+        for [from, to] in edges
+            .iter()
+            .filter(|(_, count)| **count == 1)
+            .map(|(edge, _)| *edge)
+        {
+            assert_eq!(before.get(&[from, to]), Some(&1));
+            let [from, to] = [from, to].map(|point| glam::Vec2::from(point.map(f32::from_bits)));
+            let on_a_chord = (0..ring.len()).any(|index| {
+                let [a, b] = [ring[index], ring[(index + 1) % ring.len()]]
+                    .map(|corner| glam::Vec2::new(corner.x, corner.z));
+                [from, to].iter().all(|point| {
+                    (b - a).perp_dot(*point - a).abs() < 1e-4 * a.distance(b)
+                        && (*point - a).dot(b - a) > -1e-4
+                        && (*point - b).dot(a - b) > -1e-4
+                })
+            });
+            assert!(on_a_chord, "{from} {to}");
+            length += from.distance(to);
+        }
+        let perimeter: f32 = (0..ring.len())
+            .map(|index| ring[index].distance(ring[(index + 1) % ring.len()]))
+            .sum();
+        assert!((length - perimeter).abs() < 1e-3, "{length} {perimeter}");
         // The earth, and each of the meadow's parts and the beach's shingle within it.
-        let (_, parts) = crate::shapes::cut(&ring, &crate::beach::outline());
         assert_eq!(colors.len(), 1 + parts.len() + 1);
     }
 
