@@ -22,6 +22,16 @@ pub enum Speaking {
     Skipped,
 }
 
+/// What speaking over the agent skips on this device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Skip {
+    /// What the agent was saying, if a message was announced: skipped until it says something else.
+    Said(Option<String>),
+    /// Its speech still to come, none of which had played within the hold: the next message announced is skipped as
+    /// though it had been playing, until it says something after it, or nothing more is to come before any of it was.
+    ToCome,
+}
+
 #[derive(Debug, Default)]
 pub struct Turn {
     /// The frame's time, from the connection's tick, which agent speech is reported after.
@@ -34,12 +44,14 @@ pub struct Turn {
     turn: Option<Instant>,
     /// The message of the agent's speech announced last, live or played again.
     announced: Option<String>,
-    /// While the agent's speech is skipped, the message it was saying when the participant spoke over it, if one was announced.
-    skipped: Option<Option<String>>,
+    /// While the agent's speech is skipped, what was skipped.
+    skipped: Option<Skip>,
     /// Whether the server holds a reply for the participant, while they record or in the pause after they let go of X.
     held: bool,
     /// When the server last said it no longer holds it, until it plays, so that it is still waiting until it is heard.
     unheld: Option<Instant>,
+    /// Whether the server says the agent's speech is still to come, queued for synthesis or not yet all sent.
+    to_come: bool,
 }
 
 impl Turn {
@@ -62,23 +74,43 @@ impl Turn {
         }
     }
 
-    /// Whether the agent is speaking on this device at `now`: its speech playing, or having played within [`HOLD`], as the swarm shows it.
-    pub fn speaking(&self, now: Instant) -> bool {
+    /// Whether the server says the agent's speech is still to come, as it last said: its reply goes on through the gaps while the next of it is synthesized, however long after its turn has ended. See `design/speech.md`.
+    /// Returns whether that ends a skip, as nothing more is to come of the speech the participant spoke over before any of it was announced.
+    pub fn to_come(&mut self, to_come: bool) -> bool {
+        self.to_come = to_come;
+        let ends = !to_come && self.skipped == Some(Skip::ToCome);
+        if ends {
+            self.skipped = None;
+        }
+        ends
+    }
+
+    /// Whether agent speech played here within [`HOLD`] of `now`.
+    fn playing(&self, now: Instant) -> bool {
         self.played
             .is_some_and(|played| now.saturating_duration_since(played) < HOLD)
+    }
+
+    /// Whether the agent is speaking on this device at `now`: its speech playing, or having played within [`HOLD`], or more of it still to come, as the swarm shows it.
+    pub fn speaking(&self, now: Instant) -> bool {
+        self.to_come || self.playing(now)
     }
 
     /// The agent announced speech of `message`, live or played again: returns whether that ends a skip, as it says something other than what the participant spoke over.
     pub fn announced(&mut self, message: &str) -> bool {
         self.announced = Some(message.to_owned());
-        let ends = self
-            .skipped
-            .as_ref()
-            .is_some_and(|skipped| skipped.as_deref() != Some(message));
-        if ends {
-            self.skipped = None;
+        match &self.skipped {
+            // The speech to come that the participant spoke over begins: it is what is skipped.
+            Some(Skip::ToCome) => {
+                self.skipped = Some(Skip::Said(Some(message.to_owned())));
+                false
+            }
+            Some(Skip::Said(said)) if said.as_deref() != Some(message) => {
+                self.skipped = None;
+                true
+            }
+            _ => false,
         }
-        ends
     }
 
     /// The server said whether it holds a reply for the participant, at the frame's time. See `design/speech.md`.
@@ -101,15 +133,24 @@ impl Turn {
                 .is_some_and(|unheld| now.saturating_duration_since(unheld) < HOLD)
     }
 
-    /// The participant started speaking at `now`: it is no longer a turn to cue, and speech that has not been heard since is not one either. Returns whether the agent was speaking, in which case the rest of what it is saying is skipped.
+    /// The participant started speaking at `now`: it is no longer a turn to cue, and speech that has not been heard since is not one either. Returns whether the agent was speaking, in which case the rest of what it is saying is skipped: what was playing, or, in a gap while more is to come, what comes next.
     pub fn speak(&mut self, now: Instant) -> bool {
         self.heard = false;
         self.turn = None;
-        let speaking = self.speaking(now);
-        if speaking {
-            self.skipped = Some(self.announced.clone());
+        if self.playing(now) {
+            self.skipped = Some(Skip::Said(self.announced.clone()));
+            true
+        } else if self.to_come {
+            self.skipped = Some(Skip::ToCome);
+            true
+        } else {
+            false
         }
-        speaking
+    }
+
+    /// Whether what is skipped is speech still to come, none of which had played as the participant spoke.
+    pub fn skips_to_come(&self) -> bool {
+        self.skipped == Some(Skip::ToCome)
     }
 
     /// Hear the agent again: the participant asked for a reply played again, or left the space or lost the connection, after which nothing is skipped. Returns whether something was skipped.
@@ -195,6 +236,69 @@ mod tests {
         assert_eq!(turn.speaking_as(start, false), Some(Speaking::Heard));
         assert_eq!(turn.speaking_as(start, true), Some(Speaking::Muted));
         assert_eq!(turn.speaking_as(start + HOLD, false), None);
+    }
+
+    #[test]
+    fn speaking_goes_on_while_more_is_to_come_however_long_it_takes_to_synthesize() {
+        let start = Instant::now();
+        let mut turn = Turn::default();
+        // Queued before any of it plays, it is speaking.
+        turn.to_come(true);
+        frame(&mut turn, start, false, false);
+        assert!(turn.speaking(start));
+        frame(&mut turn, start + ms(100), true, true);
+        // A gap far longer than the hold while the next sentence is synthesized, the agent free on the server.
+        let gap = start + ms(100) + HOLD * 10;
+        frame(&mut turn, gap, false, false);
+        assert_eq!(turn.speaking_as(gap, false), Some(Speaking::Heard));
+        turn.settle(gap, true);
+        assert_eq!(turn.turn(), None, "no turn while more is to come");
+        // Speaking over it skips the rest of it.
+        assert!(turn.speak(gap));
+        turn.resume();
+        // The last of it plays and nothing more is to come: it holds, then the turn comes once it ends.
+        frame(&mut turn, gap + ms(100), true, true);
+        turn.to_come(false);
+        assert!(turn.speaking(gap + ms(100) + HOLD - ms(1)));
+        let ended = gap + ms(100) + HOLD;
+        assert!(!turn.speaking(ended));
+        turn.settle(ended, true);
+        assert_eq!(turn.turn(), Some(ended));
+    }
+
+    #[test]
+    fn speaking_before_a_reply_s_first_words_skips_that_reply_as_it_comes() {
+        let start = Instant::now();
+        let mut turn = Turn::default();
+        // An earlier reply, heard and ended.
+        assert!(!turn.announced("m1"));
+        frame(&mut turn, start, true, true);
+        // The next reply is queued, none of it playing yet: pressing X skips it, not what was said before.
+        let pressed = start + HOLD * 4;
+        assert!(!turn.to_come(true));
+        frame(&mut turn, pressed, false, false);
+        assert!(turn.speak(pressed));
+        assert!(turn.skips_to_come());
+        // Its first words stay skipped, as does the rest of that message; the next message is heard.
+        assert!(!turn.announced("m2"));
+        assert!(turn.is_skipped() && !turn.skips_to_come());
+        assert!(!turn.announced("m2"));
+        assert!(turn.is_skipped());
+        assert!(turn.announced("m3"));
+        assert!(!turn.is_skipped());
+        // Speech to come that ends before any of it began skips nothing after it.
+        assert!(!turn.to_come(true));
+        assert!(turn.speak(pressed + HOLD));
+        assert!(turn.to_come(false));
+        assert!(!turn.is_skipped());
+        assert!(!turn.announced("m4"));
+        // While it plays, pressing X skips what is playing, as ever.
+        frame(&mut turn, pressed + HOLD * 2, true, true);
+        assert!(!turn.to_come(true));
+        assert!(turn.speak(pressed + HOLD * 2));
+        assert!(!turn.skips_to_come());
+        assert!(!turn.to_come(false), "what plays stays skipped");
+        assert!(turn.is_skipped());
     }
 
     #[test]

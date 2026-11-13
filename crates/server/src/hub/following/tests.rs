@@ -87,3 +87,26 @@ fn speech_still_to_come_counts_until_it_is_sent_or_nothing_of_it_moves_for_a_min
     following.sent(later + Duration::from_secs(56));
     assert!(!following.unspoken(later + Duration::from_secs(56)));
 }
+
+#[test]
+fn clients_are_told_when_speech_becomes_to_come_and_when_it_ends_or_stalls() {
+    let now = Instant::now();
+    let mut following = Following::default();
+    assert!(!following.retell(now), "nothing to come, as they were told");
+    following.queued(1, now);
+    assert!(following.retell(now));
+    assert!(!following.retell(now), "told once");
+    // Due when it would stall, so that they are told then.
+    assert_eq!(following.deadline(), Some(now + STALLED));
+    following.queued(1, now);
+    following.sent(now);
+    assert!(!following.retell(now), "still to come");
+    following.sent(now);
+    assert!(following.retell(now));
+    assert_eq!(following.deadline(), None);
+    // Speech that stalls is told as no longer to come, and is then due no more.
+    following.queued(1, now);
+    assert!(following.retell(now));
+    assert!(following.retell(now + STALLED));
+    assert_eq!(following.deadline(), None);
+}

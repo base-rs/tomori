@@ -1006,3 +1006,41 @@ fn its_own_tool_pins_it_or_takes_it_to_someone_its_entourage_home_while_it_follo
     assert_eq!(changed, Ok(true));
     assert!(!state.space(&space).unwrap().following.pinned);
 }
+
+#[test]
+fn everyone_is_told_while_its_speech_is_still_to_come_through_a_tool_call_and_after_its_turn() {
+    let (hub, _jobs, space, _commands, ada) = following(Some(90));
+    let told = |ada: &Client| {
+        hub.flush_snapshots(Instant::now() + crate::hub::SNAPSHOT_INTERVAL);
+        let state = last_state(ada).expect("told");
+        (state.activity, state.speech_to_come)
+    };
+    hub.drive_event(&space, Event::Busy);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Running, false));
+    // A sentence before a tool call is queued: its speech is to come until it has been sent.
+    hub.speech_queued(&space, 1);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Running, true));
+    hub.speech_sent(&space);
+    // The tool runs, its turn going on, with nothing of its speech to come.
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Running, false));
+    // Then two more sentences, and its turn ends while they are still synthesized.
+    hub.speech_queued(&space, 2);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Running, true));
+    hub.drive_event(&space, Event::Idle);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Idle, true));
+    hub.speech_sent(&space);
+    hub.flush_snapshots(Instant::now() + crate::hub::SNAPSHOT_INTERVAL);
+    assert!(last_state(&ada).is_none(), "nothing changed between them");
+    hub.speech_sent(&space);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Idle, false));
+    // Speech that stalls is told as no longer to come.
+    hub.speech_queued(&space, 1);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Idle, true));
+    hub.flush_snapshots(Instant::now() + crate::hub::following::STALLED);
+    assert_eq!(told(&ada), (tomori_protocol::Activity::Idle, false));
+    // Synthesis stopping leaves nothing to come.
+    hub.speech_queued(&space, 1);
+    assert!(told(&ada).1);
+    hub.speech_unqueued(&space);
+    assert!(!told(&ada).1);
+}

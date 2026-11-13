@@ -8257,6 +8257,42 @@ fn words_said_while_the_agent_moved_on_say_which_message_they_answer() {
 }
 
 #[test]
+fn speech_held_for_someone_recording_still_progresses_live_so_it_never_stalls_while_held() {
+    let (hub, _jobs) = hub_waiting();
+    let (space, _commands) = idle(&hub);
+    let ada = Client::greeted(&hub, Access::open(), "ada");
+    hub.lock()
+        .connections
+        .get_mut(&ada.connection)
+        .unwrap()
+        .speech_held = true;
+    ada.join(&space);
+    ada.send(ClientMessage::Engagement {
+        state: Engagement::Engaged,
+    });
+    ada.read();
+    begin_seeing(&ada, "u1", None);
+    let queued = Instant::now();
+    hub.speech_queued(&space, 1);
+    std::thread::sleep(Duration::from_millis(20));
+    // Held for her as she records, its frames are still sent live, kept for her, and count as its progress.
+    hub.agent_speech(&space, 1, speech(1));
+    hub.agent_audio(&space, 1, &frame(320));
+    hub.pace_speech(&space, Instant::now());
+    assert!(
+        ada.read()
+            .iter()
+            .any(|message| matches!(message, ServerMessage::SpeechHeld { held: true })),
+        "held for her"
+    );
+    // So a minute after it was queued, however long she records, it has not stalled.
+    let minute = queued + crate::hub::following::STALLED + Duration::from_millis(10);
+    hub.flush_snapshots(minute);
+    let state = hub.lock();
+    assert!(state.space(&space).unwrap().following.to_come());
+}
+
+#[test]
 fn a_reply_held_while_someone_records_starts_a_short_pause_after_they_let_go_of_x() {
     let (hub, _jobs) = hub_waiting();
     let (space, _commands) = idle(&hub);

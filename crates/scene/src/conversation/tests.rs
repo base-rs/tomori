@@ -5414,6 +5414,69 @@ fn the_pill_says_a_reply_is_waiting_while_it_is_held_and_through_the_pause_then_
 }
 
 #[test]
+fn the_pill_and_swarm_say_speaking_through_a_turn_while_its_speech_is_to_come_and_idle_only_after()
+{
+    use crate::pill::Speaking;
+    let mut conversation = on_wrist(|space| space.activity = Activity::Running);
+    let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+    let start = Instant::now();
+    let ms = Duration::from_millis;
+    let label = |conversation: &mut Conversation, at: Instant| {
+        let status = conversation.pill_status(at).unwrap();
+        crate::pill::rows(&status)[0]
+            .plain()
+            .split("  ")
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    // A sentence queued as the agent writes, before any of it plays: speaking.
+    conversation.apply(space(|space| {
+        space.activity = Activity::Running;
+        space.speech_to_come = true;
+    }));
+    speech_frame(&mut conversation, start, false);
+    assert_eq!(label(&mut conversation, start), "◉ speaking");
+    assert!(conversation.speech().to_come);
+    announce(&mut conversation, "m1");
+    speech_frame(&mut conversation, start + ms(20), true);
+    // Sent, the agent runs a tool: running, after the hold.
+    conversation.apply(space(|space| space.activity = Activity::Running));
+    let tool = start + ms(20) + crate::turn::HOLD;
+    speech_frame(&mut conversation, tool, false);
+    assert_eq!(label(&mut conversation, tool), "● running");
+    assert!(!conversation.speech().to_come);
+    // More is queued and its turn ends, while the next sentence takes far longer than the hold to synthesize: still
+    // speaking, and not yet the participant's turn.
+    conversation.apply(space(|space| {
+        space.activity = Activity::Idle;
+        space.speech_to_come = true;
+    }));
+    announce(&mut conversation, "m2");
+    speech_frame(&mut conversation, tool + ms(1_000), true);
+    let gap = tool + ms(1_000) + crate::turn::HOLD * 5;
+    speech_frame(&mut conversation, gap, false);
+    let status = conversation.pill_status(gap).unwrap();
+    assert_eq!(status.speaking, Some(Speaking::Heard));
+    assert_eq!(label(&mut conversation, gap), "◉ speaking");
+    assert_eq!(turn_cues(&conversation, &mut feedback, gap), 0);
+    // Its last sentence plays and nothing more is to come: idle once it has ended, and the participant's turn.
+    speech_frame(&mut conversation, gap + ms(20), true);
+    conversation.apply(space(|space| space.activity = Activity::Idle));
+    let ended = gap + ms(20) + crate::turn::HOLD;
+    speech_frame(&mut conversation, ended, false);
+    assert_eq!(label(&mut conversation, ended), "● idle");
+    assert_eq!(turn_cues(&conversation, &mut feedback, ended), 1);
+    // While the connection is down, or out of the space, nothing is to come.
+    conversation.apply(space(|space| space.speech_to_come = true));
+    assert!(conversation.speech().to_come);
+    conversation.apply(Event::State(ConnectionState::Connecting { attempt: 2 }));
+    assert!(!conversation.speech().to_come);
+    conversation.mode = Mode::Servers;
+    assert!(!conversation.speech().to_come);
+}
+
+#[test]
 fn the_pill_says_speaking_while_speech_plays_then_settles_to_idle_with_your_turn_once() {
     use crate::pill::Speaking;
     let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
@@ -5534,6 +5597,48 @@ fn muted_speech_shows_as_speaking_muted_and_is_no_turn() {
     assert_eq!(conversation.pill_status(ended).unwrap().speaking, None);
     assert_eq!(turn_cues(&conversation, &mut feedback, ended), 0);
     assert_eq!(conversation.pill_status(ended).unwrap().pulse, 0);
+}
+
+#[test]
+fn speaking_before_a_reply_s_first_words_skips_it_as_it_comes_and_nothing_once_none_is_to_come() {
+    let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
+    let start = Instant::now();
+    let ms = Duration::from_millis;
+    // An earlier reply, heard and ended; the next is queued, none of it playing yet.
+    announce(&mut conversation, "m1");
+    speech_frame(&mut conversation, start, true);
+    conversation.apply(space(|space| space.speech_to_come = true));
+    let pressed = start + crate::turn::HOLD * 4;
+    speech_frame(&mut conversation, pressed, false);
+    conversation.take_actions();
+    conversation.talk(true);
+    assert!(matches!(
+        &conversation.take_actions()[..],
+        [Action::SetAgentSkipped(true), Action::BeginUtterance(_)]
+    ));
+    conversation.talk(false);
+    conversation.talk = None;
+    conversation.take_actions();
+    // Its first words are skipped, not heard as something other than what was said before.
+    announce(&mut conversation, "m2");
+    assert!(conversation.take_actions().is_empty());
+    announce(&mut conversation, "m3");
+    assert_eq!(
+        conversation.take_actions(),
+        [Action::SetAgentSkipped(false)]
+    );
+    // Spoken over again before any more plays, and nothing more comes: nothing stays skipped.
+    speech_frame(&mut conversation, pressed + ms(20), false);
+    conversation.talk(true);
+    conversation.talk(false);
+    conversation.talk = None;
+    conversation.take_actions();
+    conversation.apply(space(|space| space.speech_to_come = false));
+    speech_frame(&mut conversation, pressed + ms(40), false);
+    assert_eq!(
+        conversation.take_actions(),
+        [Action::SetAgentSkipped(false)]
+    );
 }
 
 #[test]

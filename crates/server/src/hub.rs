@@ -6628,6 +6628,8 @@ impl Hub {
                 state.partner = space.partner;
                 state.via = space.following.via;
                 state.stream = space.following.stream;
+                // Whether its speech is still to come, so that clients show it speaking through the gaps in it.
+                state.speech_to_come = space.following.to_come();
                 // The avatar its environment names, or else its backend's, for everyone in it. See `design/avatars.md`.
                 state.avatar = environments
                     .avatar(&space.model.environment)

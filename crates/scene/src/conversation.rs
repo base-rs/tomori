@@ -1613,14 +1613,30 @@ impl Conversation {
         // A reply held for the participant shows the swarm preparing to speak, rather than idle.
         SpeechActivity {
             pending: self.speech.pending || self.turn.waiting(self.turn_clock()),
+            to_come: self.speech_to_come(),
             ..self.speech
         }
+    }
+
+    /// Whether the server says the agent's speech in the space is still to come, queued for synthesis or not yet all sent, so that it is shown speaking through the gaps in it. See `design/speech.md`.
+    /// Not while the connection is down, since what the server last said may no longer be so.
+    fn speech_to_come(&self) -> bool {
+        matches!(self.state, Some(ConnectionState::Connected { .. }))
+            && self
+                .space
+                .as_ref()
+                .filter(|_| self.mode == Mode::Space)
+                .is_some_and(|space| space.speech_to_come)
     }
 
     /// Agent speech played this frame, `playing` or not: heard if it is neither muted, skipped nor silenced while the participant records; and once it has ended, with the agent free, it is the participant's turn.
     fn hear(&mut self, playing: bool) {
         let recording = matches!(self.talk, Some(Talk::Recording { .. }));
         let audible = !self.muted && !self.turn.is_skipped() && !recording;
+        // Speech to come that was spoken over before any of it began, and is no longer to come, skips nothing more.
+        if self.turn.to_come(self.speech_to_come()) {
+            self.actions.push(Action::SetAgentSkipped(false));
+        }
         self.turn.played(playing, audible);
         let free = self.turn_free();
         self.turn.settle(self.turn_clock(), free);
@@ -1652,7 +1668,13 @@ impl Conversation {
         if !self.turn.speak(self.turn_clock()) {
             return;
         }
-        log::info!("Spoke over the agent: skipping the rest of what it is saying");
+        if self.turn.skips_to_come() {
+            log::info!(
+                "Spoke before the agent's next words: skipping the rest of its reply as it comes"
+            );
+        } else {
+            log::info!("Spoke over the agent: skipping the rest of what it is saying");
+        }
         self.actions.push(Action::SetAgentSkipped(true));
         if self.replaying {
             self.send(ClientMessage::StopReplay);

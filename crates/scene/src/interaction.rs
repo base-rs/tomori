@@ -20,6 +20,8 @@ pub enum SessionActivity {
 pub struct SpeechActivity {
     pub pending: bool,
     pub playing: bool,
+    /// Whether the server says more of the agent's speech is still to come, queued for synthesis or not yet all sent, so that the swarm speaks through the gaps while it is synthesized.
+    pub to_come: bool,
     pub level: f32,
     pub failed: bool,
 }
@@ -106,7 +108,10 @@ impl Signals {
         } else {
             (self.speaking_for - step).max(0.0)
         };
-        let speaking = input.speech.playing || self.speaking_for > 0.0;
+        // And while more of it is still to come, however long the next of it takes to synthesize, unless a reply is held for the participant, which the swarm prepares for.
+        let speaking = input.speech.playing
+            || self.speaking_for > 0.0
+            || (input.speech.to_come && !input.speech.pending);
         let mode = if input.recording {
             Mode::Listening
         } else if speaking {
@@ -279,6 +284,34 @@ mod tests {
                 .level,
             0.0
         );
+    }
+
+    #[test]
+    fn a_gap_while_more_is_to_come_keeps_speaking_however_long_but_a_held_reply_prepares() {
+        let mut signals = Signals::default();
+        let dt = 0.05;
+        let to_come = |pending: bool| Inputs {
+            session: SessionActivity::Ready,
+            speech: SpeechActivity {
+                to_come: true,
+                pending,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        modes(
+            &mut signals,
+            || speech(SessionActivity::Working, true, 0.5),
+            1.0,
+            dt,
+        );
+        // The next sentence takes far longer than the hold to synthesize, the session ready meanwhile.
+        let gap = modes(&mut signals, || to_come(false), SPEAKING_HOLD * 10.0, dt);
+        assert!(gap.iter().all(|mode| *mode == Mode::Speaking));
+        assert_eq!(signals.update(to_come(false), dt).level, 0.0);
+        // A reply held for the participant prepares, as it does without speech to come.
+        let held = modes(&mut signals, || to_come(true), SPEAKING_HOLD * 2.0, dt);
+        assert_eq!(held.last(), Some(&Mode::Preparing));
     }
 
     #[test]
