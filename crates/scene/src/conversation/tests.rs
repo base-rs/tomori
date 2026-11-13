@@ -8721,3 +8721,85 @@ fn the_spectator_chooses_its_own_spawn_point() {
     conversation.choose_own_arrival();
     assert!(!Session::spawns(&conversation));
 }
+
+#[test]
+fn a_presses_a_copy_s_time_chip_freezing_or_unfreezing_it_as_seen_and_never_for_a_visitor() {
+    use tomori_protocol::context::{ChipPress, ContextChip, ContextSetting, ContextValue};
+    let chip = |press: Option<ChipPress>| {
+        let chip = ContextChip::new(
+            "time",
+            "Time",
+            ContextValue::Live { minutes: 15 },
+            ContextSetting::Follows,
+        );
+        match press {
+            Some(press) => chip.with_press(press),
+            None => chip,
+        }
+    };
+    let projected = |press: Option<ChipPress>, version: u64| {
+        Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky").with_panels(vec![
+                    tomori_protocol::Panel::new(
+                        "panel-3",
+                        "Latency",
+                        "",
+                        tomori_protocol::Place::Free {
+                            pose: tomori_protocol::Pose::default(),
+                        },
+                    )
+                    .with_context(vec![chip(press)])
+                    .with_version(version),
+                ]),
+            ),
+        })
+    };
+    let freeze = |frozen: bool, revision: Option<u64>| ClientMessage::FreezePanel {
+        panel: "panel-3".into(),
+        frozen,
+        revision,
+    };
+    let mut conversation = joined(|space| space.projection = true);
+    conversation.apply(role(ConnectionRole::Collaborator));
+    let pointed = ("panel-3".to_owned(), "time".to_owned());
+    // Nothing projected, or a chip that says nothing of pressing, presses nothing.
+    conversation.point_chip(Some(pointed.clone()));
+    assert_eq!(conversation.pointed_press(), None);
+    conversation.apply(projected(None, 4));
+    conversation.take_actions();
+    assert_eq!(conversation.pointed_press(), None);
+    assert!(conversation.press_a(None));
+    assert!(sent(&mut conversation).is_empty());
+    // A copy's following time chip freezes it, as it was seen; a frozen one unfreezes it.
+    conversation.apply(projected(Some(ChipPress::Freeze), 5));
+    assert_eq!(
+        conversation.chip_press(&pointed),
+        Some(("panel-3".to_owned(), ChipPress::Freeze))
+    );
+    assert_eq!(
+        conversation.chip_press(&("panel-3".to_owned(), "region".to_owned())),
+        None
+    );
+    assert_eq!(
+        conversation.chip_press(&("panel-9".to_owned(), "time".to_owned())),
+        None
+    );
+    assert!(!conversation.press_a(None));
+    assert_eq!(sent(&mut conversation), [freeze(true, Some(5))]);
+    conversation.apply(projected(Some(ChipPress::Unfreeze), 0));
+    assert!(!conversation.press_a(None));
+    assert_eq!(sent(&mut conversation), [freeze(false, None)]);
+    // What a newer server says pressing does, it offers nothing for.
+    conversation.apply(projected(Some(ChipPress::Unknown), 6));
+    assert_eq!(conversation.pointed_press(), None);
+    // Pointed at nothing, A presses nothing; a visitor is refused, and told they only watch.
+    conversation.apply(projected(Some(ChipPress::Freeze), 7));
+    conversation.point_chip(None);
+    assert_eq!(conversation.pointed_press(), None);
+    conversation.point_chip(Some(pointed));
+    conversation.apply(role(ConnectionRole::Visitor));
+    assert!(!conversation.press_a(None));
+    assert!(conversation.a_refused());
+    assert!(sent(&mut conversation).is_empty());
+}

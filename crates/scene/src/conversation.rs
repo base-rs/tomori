@@ -21,6 +21,7 @@ use tomori_client::{
     feedback,
     server_choice::{self, Choice},
 };
+use tomori_protocol::context::ChipPress;
 use tomori_protocol::{
     Activity, BackendInfo, ClientMessage, ConnectionRole, Decision, Engagement, EnvironmentInfo,
     QueueState, Role, ServerMessage, SessionSummary, SpaceState, SpaceSummary, SpeechSetting,
@@ -437,6 +438,9 @@ pub struct Conversation {
     /// The checklist item the participant points at now, by its panel and the line of the body it begins on, which A
     /// ticks or unticks, as the frame step last reported. See `design/projection.md`.
     pointed_item: Option<(String, u32)>,
+    /// The chip of a panel's context the participant points at now, by its panel and parameter, which A presses where
+    /// it says pressing does something, as the frame step last reported. See `design/panel-context.md`.
+    pointed_chip: Option<(String, String)>,
     /// Whether the participant points at a teleport pad now, which A chooses, as the frame step last reported, and
     /// whether A chose it since the frame step last asked. See `design/locomotion.md`.
     pointed_pad: bool,
@@ -618,6 +622,7 @@ impl Conversation {
             pointing_left: None,
             left_first: false,
             pointed_item: None,
+            pointed_chip: None,
             pointed_pad: false,
             pad_chosen: false,
             chosen_row: None,
@@ -2352,6 +2357,7 @@ impl Conversation {
                 | ClientMessage::DismissPanel { .. }
                 | ClientMessage::CheckPanelItem { .. }
                 | ClientMessage::ChoosePanelRow { .. }
+                | ClientMessage::FreezePanel { .. }
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());
@@ -3112,12 +3118,12 @@ impl Conversation {
 
     /// A's last meanings, after everything that decides something, a request, a decision on its way and a queued entry,
     /// so that a press meant for a prompt never acts on the world beyond Tomori: a choosable row of an environment's
-    /// list pointed at, which it chooses for that environment, unless a request, an approval or a question, waits, when
+    /// list pointed at, which it chooses for that environment, or a chip that says what pressing it does, which it does, unless a request, an approval or a question, waits, when
     /// it is refused, saying to answer the request first, the press being likely meant for it; then a teleport pad
     /// pointed at. Returns whether it did either, or was refused, as a visitor's choice is. See
     /// `design/panel-actions.md` and `design/locomotion.md`.
     fn last_meanings(&mut self) -> bool {
-        if self.pointed_row().is_some() {
+        if self.pointed_row().is_some() || self.pointed_press().is_some() {
             let requested = self
                 .space
                 .as_ref()
@@ -3125,7 +3131,7 @@ impl Conversation {
             if requested {
                 self.refused = true;
                 self.notice = Some(ANSWER_FIRST.into());
-            } else if !self.choose_row() {
+            } else if !self.choose_row() && !self.press_chip() {
                 self.refused = true;
             }
             return true;
@@ -3727,6 +3733,53 @@ impl Conversation {
     /// ticks or unticks it. See `design/projection.md`.
     pub fn point_item(&mut self, item: Option<(String, u32)>) {
         self.pointed_item = item;
+    }
+
+    /// The chip of a panel's context the participant points at now, by its panel and parameter, or `None`: from the
+    /// headset's ray or the desktop's mouse each frame. A presses it where it says pressing does something.
+    pub fn point_chip(&mut self, chip: Option<(String, String)>) {
+        self.pointed_chip = chip;
+    }
+
+    /// What pressing the chip `chip`, by its panel and parameter, does, as the joined space shows it, by its panel:
+    /// freezing or unfreezing it, where its chip says so; `None` for any other chip, or one that says nothing a client
+    /// knows. See `design/panel-context.md`.
+    pub fn chip_press(&self, (panel, parameter): &(String, String)) -> Option<(String, ChipPress)> {
+        self.projection()?
+            .panel(panel)?
+            .context
+            .iter()
+            .find(|chip| chip.parameter == *parameter)?
+            .press
+            .filter(|press| matches!(press, ChipPress::Freeze | ChipPress::Unfreeze))
+            .map(|press| (panel.clone(), press))
+    }
+
+    /// What pressing the chip the participant points at now does, as [`Self::chip_press`] says.
+    pub fn pointed_press(&self) -> Option<(String, ChipPress)> {
+        self.chip_press(self.pointed_chip.as_ref()?)
+    }
+
+    /// Press the chip the participant points at, as A does: see [`Self::press_chip_at`].
+    fn press_chip(&mut self) -> bool {
+        self.pointed_press()
+            .is_some_and(|press| self.press_chip_at(press))
+    }
+
+    /// Do what pressing a chip does, `press`, to the panel `panel`, for everyone in the space: freeze it or unfreeze it,
+    /// saying the panel's version the server last sent, so that the server refuses it where the panel changed since.
+    /// Says whether it asked, as only a participant does; a visitor is told they only watch.
+    pub fn press_chip_at(&mut self, (panel, press): (String, ChipPress)) -> bool {
+        let revision = self
+            .projection()
+            .and_then(|projection| projection.panel(&panel))
+            .map(|shown| shown.version)
+            .filter(|version| *version > 0);
+        self.send(ClientMessage::FreezePanel {
+            panel,
+            frozen: press == ChipPress::Freeze,
+            revision,
+        })
     }
 
     /// Whether the participant points at a teleport pad now, from the headset's ray or the desktop's mouse each frame,

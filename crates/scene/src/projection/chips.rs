@@ -1,14 +1,15 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The chips of a wall's or a panel's context, read-only: what each parameter its environment's panels depend on, and
+//! The chips of a wall's or a panel's context: what each parameter its environment's panels depend on, and
 //! their time, shows, as a small rounded backing behind its label and value, its look saying whether it follows the
 //! environment, is fixed by its own setting or inherited from its wall's. At most [`SHOWN`] on a wall or a panel, those
 //! fixed first, and `+N` for those left out, laid out in one row of cells beside a panel's metadata, or on a row of
 //! their own where both would not fit, or after a wall's label, in the face drawn once and kept, so that they cost
-//! nothing a frame. Times are written in UTC, saying so, with the date where it is not today. Only text, list and chart
+//! nothing a frame. Times are written in UTC, saying so, with the date where it is not today. A frozen copy's time chip
+//! says so with `❄`, and pressing it unfreezes it, as pressing a copy's following one freezes it. Only text, list and chart
 //! panels draw chips, as only those are what an environment publishes. See `design/panel-context.md`.
-use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+use tomori_protocol::context::{ChipPress, ContextChip, ContextSetting, ContextValue};
 
 use crate::shapes::{Mark, Shape};
 use crate::transcript::DIM;
@@ -144,6 +145,15 @@ pub fn value(chip: &ContextChip, today: i64) -> String {
     }
 }
 
+/// What a chip says before its text of what pressing it undoes: `❄ ` on a frozen copy's time chip, which unfreezes it.
+fn mark(chip: &ContextChip) -> &'static str {
+    if chip.press == Some(ChipPress::Unfreeze) {
+        "❄ "
+    } else {
+        ""
+    }
+}
+
 /// The chips of `context` that are shown, at most [`SHOWN`]: those fixed, then those inherited, then those following,
 /// each in the order given.
 pub fn shown(context: &[ContextChip]) -> Vec<&ContextChip> {
@@ -204,9 +214,12 @@ fn lay_within(
     let columns = columns.saturating_sub(if counted { 3 } else { 0 });
     let labelled: Vec<String> = shown
         .iter()
-        .map(|chip| format!("{} {}", chip.label, value(chip, today)))
+        .map(|chip| format!("{}{} {}", mark(chip), chip.label, value(chip, today)))
         .collect();
-    let values: Vec<String> = shown.iter().map(|chip| value(chip, today)).collect();
+    let values: Vec<String> = shown
+        .iter()
+        .map(|chip| format!("{}{}", mark(chip), value(chip, today)))
+        .collect();
     // Each chip takes its text and a cell either side, and one between it and the next.
     let room = |texts: &[String]| {
         texts.iter().map(|text| width(text) + 2).sum::<usize>() + texts.len() - 1

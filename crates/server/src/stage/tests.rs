@@ -1023,6 +1023,7 @@ fn beyond_the_limit_the_hidden_panel_placed_longest_ago_is_forgotten() {
         anchor: None,
         size: None,
         context: context::Settings::new(),
+        thaw: None,
     };
     // More hidden in other environments than the limit allows, the earliest placed in the second.
     for (environment, placed) in [("e0", 10..10 + PANELS as u64), ("e1", 0..2)] {
