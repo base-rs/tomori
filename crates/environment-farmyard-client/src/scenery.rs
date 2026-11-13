@@ -10,7 +10,8 @@
 //! marshmallow sticks where its client side shows them, and the trails of light their burning marshmallows paint in
 //! the air (see [`crate::embers`]); all of it growing out of the space through the reveal sphere as
 //! the space's environment does. Its models, ferns and plaques, with their bounds, its lamps and its moonlight are
-//! submitted to the renderer's world, and once a frame what neither eye can see of them is culled.
+//! submitted to the renderer's world, and once a frame what neither eye can see of them is culled, and each model's
+//! pieces and each fern are lit by the few lamps the world lists for them, rather than by every lamp.
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -52,6 +53,13 @@ macro_rules! shader {
     };
 }
 
+// The farmyard's models are lit by as many lamps as the render world lights a root by, and each piece by as many as it
+// lights an instance by.
+const _: () = assert!(
+    tomori_assets::gpu::LAMPS == tomori_render::world::LIGHTS
+        && tomori_assets::gpu::PIECE_LAMPS == tomori_render::world::LIGHTS_PER_INSTANCE
+);
+
 /// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
 /// read how the farmyard is lit, at its end, as its models are.
 #[repr(C)]
@@ -68,6 +76,8 @@ struct SkyCamera {
     sky: [f32; 4],
     ground: [f32; 4],
     lamps: [[f32; 4]; 2 * tomori_assets::gpu::LAMPS],
+    /// How many lamps there are, in its first component.
+    counts: [u32; 4],
 }
 
 /// A point of a fern's mesh, as its shader reads it.
@@ -81,22 +91,29 @@ pub(crate) struct FernVertex {
     sway: f32,
 }
 
-/// A fern placed, as its shader reads it: its foot and how it is turned, and how large it is and its phase.
+/// A fern placed, as its shader reads it: its foot and how it is turned, how large it is and its phase, and its lamps,
+/// as [`tomori_assets::gpu::lamps`] packs them for the farmyard's models, or every lamp, [`EVERY`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub(crate) struct FernInstance {
     foot: [f32; 4],
     size: [f32; 4],
+    lamps: [u32; 4],
 }
 
 impl From<&Fern> for FernInstance {
+    /// `fern`, lit by every lamp.
     fn from(fern: &Fern) -> Self {
         Self {
             foot: fern.at.extend(fern.turn).to_array(),
             size: [fern.scale, fern.phase, 0.0, 0.0],
+            lamps: EVERY,
         }
     }
 }
+
+/// A fern's lamps when none are listed: every lamp of the farmyard's.
+pub(crate) const EVERY: [u32; 4] = tomori_assets::gpu::EVERY_LAMP;
 
 /// A point of the ranges, as their shader reads it.
 #[repr(C)]
@@ -390,9 +407,25 @@ impl Drawn {
         world.place(item, self.batch.bounds());
     }
 
-    /// Draw only what `views` says the eyes may see of it, as the world culled it, or, without a world, against its
-    /// frustum, and say how much it then draws.
-    fn cull(&mut self, queue: &wgpu::Queue, models: &Renderer, views: &Views<'_>) -> Tally {
+    /// Draw only what `views` says the eyes may see of it, as the world culled it, each piece lit by the lamps the world
+    /// lists for it, if `listed`, or every lamp, or, without a world, against its frustum, lit by every lamp, and say how
+    /// much it then draws.
+    fn cull(
+        &mut self,
+        queue: &wgpu::Queue,
+        models: &Renderer,
+        views: &Views<'_>,
+        listed: bool,
+    ) -> Tally {
+        match self.item.zip(views.world()).filter(|_| listed) {
+            Some((item, (world, _))) => models.light(
+                &mut self.batch,
+                world
+                    .lit(item)
+                    .map(|lit| lit.iter().map(|lit| (lit.light, lit.weight))),
+            ),
+            None => models.light(&mut self.batch, std::iter::empty::<[(u32, f32); 0]>()),
+        }
         match self.item.and_then(|item| views.seen(item)) {
             Some(seen) => models.show(queue, &self.model, &mut self.batch, seen),
             None => models.cull(queue, &self.model, &mut self.batch, views.frustum()),
@@ -664,6 +697,11 @@ struct Ferns {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
+    /// Each fern's lamps, as its instance holds them, as last culled and as a cull lights them, kept so that lighting
+    /// allocates nothing; and how many times they have changed.
+    lamps: Vec<[u32; 4]>,
+    next_lamps: Vec<[u32; 4]>,
+    relit: u64,
     /// Each mesh, and its range of the vertices.
     meshes: FernMeshes,
     ferns: Vec<Fern>,
@@ -675,8 +713,9 @@ struct Ferns {
     seen: Vec<bool>,
     item: Option<ItemId>,
     /// How each fern was drawn when last placed, if it was, each mesh's range of vertices with its range of instances,
-    /// and how each would be drawn now, kept so that placing them allocates nothing unless that changes.
-    placed: Mutex<(Details, FernDraws, Details)>,
+    /// and how each would be drawn now, kept so that placing them allocates nothing unless that changes, and how many
+    /// times their lamps had changed then.
+    placed: Mutex<(Details, FernDraws, Details, u64)>,
 }
 
 /// How each fern is drawn, in order: in which detail, or not at all.
@@ -723,7 +762,7 @@ impl Ferns {
                 Some(wgpu::VertexBufferLayout {
                     array_stride: size_of::<FernInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![5 => Float32x4, 6 => Float32x4],
+                    attributes: &wgpu::vertex_attr_array![5 => Float32x4, 6 => Float32x4, 7 => Uint32x4],
                 }),
             ],
             (true, wgpu::CompareFunction::Less),
@@ -739,6 +778,9 @@ impl Ferns {
         });
         Self {
             pipeline,
+            lamps: vec![EVERY; ferns.len()],
+            next_lamps: Vec::with_capacity(ferns.len()),
+            relit: 0,
             vertices: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Farmyard fern meshes"),
                 contents: bytemuck::cast_slice(&vertices),
@@ -751,7 +793,7 @@ impl Ferns {
             seen: vec![true; ferns.len()],
             item: None,
             ferns,
-            placed: Mutex::new((Vec::new(), Vec::new(), Vec::new())),
+            placed: Mutex::new((Vec::new(), Vec::new(), Vec::new(), 0)),
         }
     }
 
@@ -765,9 +807,10 @@ impl Ferns {
         self.item = Some(item);
     }
 
-    /// Draw only the ferns `views` says the eyes may see, as the world culled them, or, without a world, against its
-    /// frustum, from the next [`Self::place`], and say how many it culled.
-    fn cull(&mut self, views: &Views<'_>) -> Tally {
+    /// Draw only the ferns `views` says the eyes may see, as the world culled them, each lit by the lamps the world lists
+    /// for it, if `listed`, or every lamp, or, without a world, against its frustum, lit by every lamp, from the next
+    /// [`Self::place`], and say how many it culled.
+    fn cull(&mut self, views: &Views<'_>, listed: bool) -> Tally {
         match self.item.and_then(|item| views.seen(item)) {
             Some(seen) => self.seen.copy_from_slice(seen),
             None => {
@@ -775,6 +818,19 @@ impl Ferns {
                     *seen = views.sees(bounds);
                 }
             }
+        }
+        self.next_lamps.clear();
+        match self.item.zip(views.world()).filter(|_| listed) {
+            Some((item, (world, _))) if world.instances(item) == self.ferns.len() => {
+                self.next_lamps.extend(world.lit(item).map(|lit| {
+                    tomori_assets::gpu::lamps(lit.iter().map(|lit| (lit.light, lit.weight)))
+                }));
+            }
+            _ => self.next_lamps.resize(self.ferns.len(), EVERY),
+        }
+        if self.next_lamps != self.lamps {
+            std::mem::swap(&mut self.lamps, &mut self.next_lamps);
+            self.relit += 1;
         }
         let drawn = self.seen.iter().filter(|seen| **seen).count();
         Tally {
@@ -808,7 +864,7 @@ impl Ferns {
             .placed
             .lock()
             .expect("the ferns' placing is never poisoned");
-        let (last, draws, details) = &mut *placed;
+        let (last, draws, details, relit) = &mut *placed;
         details.clear();
         details.extend(
             self.hearts
@@ -816,12 +872,13 @@ impl Ferns {
                 .zip(&self.seen)
                 .map(|(heart, seen)| seen.then(|| Detail::seen(*heart, eyes))),
         );
-        if last == details && !draws.is_empty() {
+        if last == details && !draws.is_empty() && *relit == self.relit {
             return;
         }
-        let (instances, placed) = fern_instances(&self.ferns, details, &self.meshes);
+        let (instances, placed) = fern_instances(&self.ferns, details, &self.lamps, &self.meshes);
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
         *draws = placed;
+        *relit = self.relit;
         std::mem::swap(last, details);
     }
 
@@ -863,11 +920,13 @@ pub(crate) fn fern_vertices() -> (Vec<FernVertex>, FernMeshes) {
     (vertices, meshes)
 }
 
-/// `ferns`' instances, each drawn in its detail of `details`, or not at all for none, grouped by mesh in `meshes`'
-/// order, and each mesh with instances, its range of vertices with its range of instances.
+/// `ferns`' instances, each drawn in its detail of `details`, or not at all for none, lit by its lamps of `lamps`,
+/// grouped by mesh in `meshes`' order, and each mesh with instances, its range of vertices with its range of
+/// instances.
 pub(crate) fn fern_instances(
     ferns: &[Fern],
     details: &[Option<Detail>],
+    lamps: &[[u32; 4]],
     meshes: &[((ferns::Kind, Detail), Range<u32>)],
 ) -> (Vec<FernInstance>, FernDraws) {
     let mut instances = Vec::with_capacity(ferns.len());
@@ -878,8 +937,12 @@ pub(crate) fn fern_instances(
             ferns
                 .iter()
                 .zip(details)
-                .filter(|(fern, drawn)| fern.kind == *kind && **drawn == Some(*detail))
-                .map(|(fern, _)| FernInstance::from(fern)),
+                .zip(lamps)
+                .filter(|((fern, drawn), _)| fern.kind == *kind && **drawn == Some(*detail))
+                .map(|((fern, _), lamps)| FernInstance {
+                    lamps: *lamps,
+                    ..FernInstance::from(fern)
+                }),
         );
         if instances.len() as u32 > start {
             draws.push((vertices.clone(), start..instances.len() as u32));
@@ -1208,6 +1271,10 @@ pub struct Farmyard {
     reveal: Option<(Vec3, f32)>,
     /// The lamps it submitted to the render world: the lanterns, then the bonfire's, which flickers.
     lamps: Vec<LightId>,
+    /// The lamps the world lit it by when last culled, if it was culled in a world, which its models and ferns are
+    /// lit by, each by those listed for it, if `listed`, or by every one.
+    lit: Option<Vec<Lamp>>,
+    listed: bool,
 }
 
 impl Farmyard {
@@ -1329,6 +1396,8 @@ impl Farmyard {
             stones,
             reveal: None,
             lamps: Vec::new(),
+            lit: None,
+            listed: true,
         }
     }
 
@@ -1341,6 +1410,12 @@ impl Farmyard {
     /// Draw closed models' parts without their back faces, as by default, or with them, `false`, to compare.
     pub fn set_back_faces_culled(&mut self, culled: bool) {
         self.models.set_back_faces_culled(culled);
+    }
+
+    /// Light each model's pieces and each fern by the lamps the render world lists for it, as by default, or by every
+    /// lamp, `false`, to compare, from the next cull.
+    pub fn set_lamps_listed(&mut self, listed: bool) {
+        self.listed = listed;
     }
 }
 
@@ -1564,8 +1639,25 @@ impl Scenery for Farmyard {
             stones,
             ferns,
             plaques,
+            lit,
+            listed,
             ..
         } = self;
+        // The lamps the world lights it by this frame, in its order, which each piece's and fern's lamps index.
+        match views.world() {
+            Some((world, root)) => {
+                let lamps = lit.get_or_insert_with(Vec::new);
+                lamps.clear();
+                lamps.extend(
+                    world
+                        .root_lights(root)
+                        .iter()
+                        .map(|light| Lamp::new(light.position, light.reach, light.radiance())),
+                );
+            }
+            None => *lit = None,
+        }
+        let listed = *listed;
         let mut tally = Tally::default();
         for drawn in [Some(yard), Some(coop), chickens.as_mut()]
             .into_iter()
@@ -1583,9 +1675,9 @@ impl Scenery for Farmyard {
             .chain(&mut backdrop.plants)
             .chain([&mut backdrop.stones, &mut backdrop.rock])
         {
-            tally += drawn.cull(queue, models, views);
+            tally += drawn.cull(queue, models, views, listed);
         }
-        tally += ferns.cull(views);
+        tally += ferns.cull(views, listed);
         // The ferns are placed for the first eye, as they are again when it is prepared.
         let first = views
             .clips()
@@ -1596,10 +1688,14 @@ impl Scenery for Farmyard {
     }
 
     fn prepare(&self, queue: &wgpu::Queue, eye: usize, scene_to_clip: Mat4) {
-        // The bonfire's light flickers, once a frame, as the first eye is prepared, and the ferns are drawn in the detail
-        // its distance from them asks.
+        // Lit, once a frame, as the first eye is prepared, by the lamps the world lit it by when last culled, the bonfire's
+        // flickering as it was submitted, or, culled in no world, by its own, the bonfire's flickering now; and the ferns
+        // are drawn in the detail its distance from them asks.
         let seconds = self.clock.seconds(self.made);
-        let lit = lighting_at(seconds, self.fire_size);
+        let mut lit = lighting_at(seconds, self.fire_size);
+        if let Some(lamps) = &self.lit {
+            lit.lamps.clone_from(lamps);
+        }
         if eye == 0 {
             self.models.set_lighting(queue, &lit);
             self.ferns.place(queue, self::eye(scene_to_clip));
@@ -1646,6 +1742,12 @@ impl Scenery for Farmyard {
                     }
                 })
             }),
+            counts: [
+                lit.lamps.len().min(tomori_assets::gpu::LAMPS) as u32,
+                0,
+                0,
+                0,
+            ],
         };
         queue.write_buffer(&self.cameras[eye], 0, bytemuck::bytes_of(&camera));
     }

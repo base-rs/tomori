@@ -21,6 +21,7 @@ use super::*;
 use tomori_environment_farmyard::trail;
 
 mod culling;
+mod lamps;
 mod light_painting;
 
 const WIDTH: u32 = 320;
@@ -1406,9 +1407,9 @@ fn the_bonfire_s_light_flickers_and_the_campsite_draws_within_its_budget() {
             .windows(2)
             .any(|pair| (pair[0] - pair[1]).abs() > 0.02)
     );
-    // It is the farmyard's fourth lamp, the last a scenery's models are lit by, at the fire, its light changing.
+    // It is the farmyard's fourth lamp, and last, at the fire, its light changing.
     let lit = lighting_at(1.0, 0.0);
-    assert_eq!(lit.lamps.len(), tomori_assets::gpu::LAMPS);
+    assert_eq!(lit.lamps.len(), 4);
     assert!(lit.lamps[3].position.distance(campsite::heart()) < 0.3);
     assert_ne!(
         lighting_at(1.0, 0.0).lamps[3],
@@ -1935,7 +1936,7 @@ fn every_fern_is_drawn_once_in_the_detail_its_distance_from_the_eyes_asks() {
     for eyes in [layout::ARRIVAL + Vec3::Y * 1.6, ponga()] {
         let details: Vec<Detail> = all.iter().map(|fern| fern.detail(eyes)).collect();
         let placed: Vec<Option<Detail>> = details.iter().copied().map(Some).collect();
-        let (instances, draws) = fern_instances(&all, &placed, &meshes);
+        let (instances, draws) = fern_instances(&all, &placed, &vec![EVERY; all.len()], &meshes);
         // Every one, but the koru beyond their distance, which are too small to see.
         let unseen = all
             .iter()

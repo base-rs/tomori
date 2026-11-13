@@ -1,5 +1,6 @@
 // Models drawn with tomori-assets: each instance's meshes, skinned on the GPU from its joint matrices or placed by its
-// node's matrix, lit by the scenery's light: a sky and ground ambient, the sun or moon, and a few lamps, with haze.
+// node's matrix, lit by the scenery's light: a sky and ground ambient, the sun or moon, and the few lamps listed for each
+// piece, or every lamp, with haze.
 
 struct Camera {
     view_projection: mat4x4<f32>,
@@ -24,9 +25,16 @@ struct Lighting {
     ground: vec4<f32>,
     // The haze's colour, and its density in its fourth component.
     haze: vec4<f32>,
-    lamps: array<Lamp, 4>,
+    lamps: array<Lamp, 64>,
     // How many lamps there are.
     count: vec4<u32>,
+}
+
+// How much of a lamp's light it gives a piece: the `index`th byte of its weights, 255 for all of it.
+fn weight(lamps: vec4<u32>, index: u32) -> f32 {
+    let word = select(lamps.z, lamps.w, index >= 4u);
+    let byte = (word >> (8u * (index % 4u))) & 0xffu;
+    return select(f32(byte) / 255.0, 1.0, byte == 255u);
 }
 
 struct Material {
@@ -40,6 +48,9 @@ struct Placed {
     world: mat4x4<f32>,
     // The first joint matrix, and whether the primitive is skinned.
     joints: vec4<u32>,
+    // A mask of the lamps that light it, low then high, and how much of its light each gives, a byte each in the mask's
+    // order, 255 for all of it and past the last; or every lamp in the mask for every lamp.
+    lamps: vec4<u32>,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -67,6 +78,8 @@ struct Shaded {
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) color: vec4<f32>,
+    // The piece's lamps, as it is placed.
+    @location(4) @interpolate(flat) lamps: vec4<u32>,
 }
 
 @vertex
@@ -91,7 +104,18 @@ fn model_vertex(vertex: Vertex, @builtin(instance_index) instance: u32) -> Shade
     out.normal = (transform * vec4<f32>(vertex.normal, 0.0)).xyz;
     out.uv = vertex.uv;
     out.color = vertex.color;
+    out.lamps = one.lamps;
     return out;
+}
+
+// The light `lamp` gives a point at `world` facing `normal`, as much of it as `weight` says.
+fn lamp_light(lamp: Lamp, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let offset = lamp.position.xyz - world;
+    let distance = length(offset);
+    let reach = max(lamp.position.w, 0.001);
+    let falloff = clamp(1.0 - distance / reach, 0.0, 1.0);
+    let towards = offset / max(distance, 0.0001);
+    return lamp.color.rgb * weight * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
 }
 
 fn shade(in: Shaded, facing: bool) -> vec4<f32> {
@@ -112,14 +136,42 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
     normal = normalize(normal);
     var light = mix(lighting.ground.rgb, lighting.sky.rgb, normal.y * 0.5 + 0.5)
         + lighting.sun.rgb * max(dot(normal, lighting.sun_direction.xyz), 0.0);
-    for (var index = 0u; index < min(lighting.count.x, 4u); index += 1u) {
-        let lamp = lighting.lamps[index];
-        let offset = lamp.position.xyz - in.world;
-        let distance = length(offset);
-        let reach = max(lamp.position.w, 0.001);
-        let falloff = clamp(1.0 - distance / reach, 0.0, 1.0);
-        let towards = offset / max(distance, 0.0001);
-        light += lamp.color.rgb * falloff * falloff * (0.35 + 0.65 * max(dot(normal, towards), 0.0));
+    // Its own lamps, in the lamps' order, or every lamp.
+    if all(in.lamps.xy == vec2<u32>(0xffffffffu)) {
+        for (var index = 0u; index < min(lighting.count.x, 64u); index += 1u) {
+            light += lamp_light(lighting.lamps[index], 1.0, in.world, normal);
+        }
+    } else if all(in.lamps.zw == vec2<u32>(0xffffffffu)) {
+        // Each giving all its light.
+        var low = in.lamps.x;
+        while low != 0u {
+            let index = firstTrailingBit(low);
+            low &= low - 1u;
+            light += lamp_light(lighting.lamps[index], 1.0, in.world, normal);
+        }
+        var high = in.lamps.y;
+        while high != 0u {
+            let index = firstTrailingBit(high);
+            high &= high - 1u;
+            light += lamp_light(lighting.lamps[32u + index], 1.0, in.world, normal);
+        }
+    } else {
+        // Some fading, each by its byte.
+        var lit = 0u;
+        var low = in.lamps.x;
+        while low != 0u {
+            let index = firstTrailingBit(low);
+            low &= low - 1u;
+            light += lamp_light(lighting.lamps[index], weight(in.lamps, lit), in.world, normal);
+            lit += 1u;
+        }
+        var high = in.lamps.y;
+        while high != 0u {
+            let index = firstTrailingBit(high);
+            high &= high - 1u;
+            light += lamp_light(lighting.lamps[32u + index], weight(in.lamps, lit), in.world, normal);
+            lit += 1u;
+        }
     }
     let color = surface.rgb * light + material.emissive.rgb;
     let far = distance(in.world, camera.eye.xyz);

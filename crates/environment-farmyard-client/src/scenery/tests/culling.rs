@@ -12,7 +12,7 @@ use super::*;
 use tomori_render::scenery::Stage;
 
 /// A Quest 3's eyes, about, each its own asymmetric frustum: 52° out, 41° in, 40° up and 50° down, 64 mm apart.
-fn quest_eyes(middle: Vec3, heading: f32) -> [Mat4; 2] {
+pub(super) fn quest_eyes(middle: Vec3, heading: f32) -> [Mat4; 2] {
     let facing =
         glam::Quat::from_rotation_y(heading) * glam::Quat::from_rotation_x(-10f32.to_radians());
     let across = facing * Vec3::X * 0.032;
@@ -57,7 +57,7 @@ fn heading(from: Vec3, to: Vec3) -> f32 {
 /// The proposal's viewpoints, each where the eyes are and the heading of the subject seen from there: the arrival,
 /// facing the coop's corner as participants arrive; the yard before the workbench, looking into its corner; station 3,
 /// in its clearing, looking along the trail; and the campsite, seated on the lookout's log, looking at the fire.
-fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
+pub(super) fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
     let arrival = layout::ARRIVAL + Vec3::Y * 1.6;
     let (bench, into) = workbench();
     let station = trail::STATIONS[2];
@@ -77,7 +77,12 @@ fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
 }
 
 /// The farmyard, its flock out, as its client side shows it a little after it is made.
-fn with_hens(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> Farmyard {
+pub(super) fn with_hens(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+) -> Farmyard {
     use tomori_scene::client_side::{ClientSide, Input};
     let target = Target::new(
         device,
