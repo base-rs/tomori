@@ -22,6 +22,7 @@ use tomori_environment_farmyard::trail;
 
 mod chunks;
 mod culling;
+mod detail;
 mod lamps;
 mod light_painting;
 

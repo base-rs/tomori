@@ -3,8 +3,9 @@
 
 //! How long the farmyard's scenery takes the GPU to draw, as the headset draws it: two passes, one for each of a Quest
 //! 3's eyes, each 1,680 × 1,760 with 4× multisampling resolved in the pass, from the rendering proposal's four
-//! viewpoints, by the GPU's timestamps: culled against both eyes as the renderer culls it, each piece lit by the lamps
-//! the world lists for it, and, to compare, without culling, with closed models' back faces drawn, with neither, culled
+//! viewpoints and, furthest from most of it, the upper terrace's flat rock and the waterfall rock, by the GPU's
+//! timestamps: culled against both eyes as the renderer culls it, each piece lit by the lamps the world lists for it, in
+//! the level of detail the world chooses for a Quest 3's eye, and, to compare, in its own, without culling, with closed models' back faces drawn, with neither, culled
 //! with every piece lit by every lamp, with 28 more lanterns about the yard, by each piece's lamps and by every lamp,
 //! culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds, and with its
 //! models whole rather than in chunks, with its own lamps and with 32, the ten taken in turn frame by frame after a few
@@ -65,8 +66,9 @@ fn heading(from: Vec3, to: Vec3) -> f32 {
     (-way.x).atan2(-way.z)
 }
 
-/// The proposal's viewpoints, as the farmyard's census test takes them.
-fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
+/// The proposal's viewpoints, as the farmyard's census test takes them, then the upper terrace's flat rock and the
+/// waterfall rock, each looking back at the yard, as its levels of detail's test takes them.
+fn viewpoints() -> [(&'static str, Vec3, f32); 6] {
     let at = |point: glam::Vec2, y: f32| Vec3::new(point.x, y, point.y);
     let arrival = layout::ARRIVAL + Vec3::Y * 1.6;
     let bench = at(layout::on_workbench(-1.0, 0.0), 1.6);
@@ -83,6 +85,10 @@ fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
     let (middle, seat_along, length, _) = trail::seat();
     let seat = middle + Vec3::new(seat_along.x, 0.0, seat_along.y) * length * 0.35 + Vec3::Y * 1.15;
     let fire = tomori_environment_farmyard::campsite::FIRE;
+    let (across, out) = tomori_environment_farmyard::terrace::SEAT;
+    let flat = tomori_environment_farmyard::terrace::on_fall(across, out);
+    let terrace = Vec3::new(flat.x, layout::TERRACE + 1.2, flat.y);
+    let rock = layout::WATERFALL_ROCK + Vec3::Y * 1.6;
     [
         ("arrival", arrival, heading(arrival, layout::ARRIVAL_FACING)),
         ("workbench", bench, heading(bench, into)),
@@ -96,6 +102,8 @@ fn viewpoints() -> [(&'static str, Vec3, f32); 4] {
             seat,
             heading(seat, Vec3::new(fire.x - 0.5, 0.4, fire.z - 0.05)),
         ),
+        ("terrace", terrace, heading(terrace, layout::ARRIVAL)),
+        ("waterfall rock", rock, heading(rock, layout::ARRIVAL)),
     ]
 }
 
@@ -133,10 +141,12 @@ fn main() {
         .unwrap_or(600);
     // Each configuration: whether it culls against the eyes, whether closed parts' back faces are culled, whether four
     // burning marshmallows' trails, as long as the ring holds, glow before the eyes, whether each piece is lit by the
-    // lamps listed for it, whether 28 more lanterns light the yard, and whether its models are whole.
+    // lamps listed for it, whether 28 more lanterns light the yard, and whether its models are whole; all but `own
+    // detail` in the levels the world chooses.
     let only = std::env::args().nth(2);
     let configurations: Vec<_> = [
         ("culled", true, true, false, true, false, false),
+        ("culled, own detail", true, true, false, true, false, false),
         ("frustum only", true, false, false, true, false, false),
         ("back faces only", false, true, false, true, false, false),
         ("neither", false, false, false, true, false, false),
@@ -277,6 +287,7 @@ fn main() {
     // reaching 4 m, dark unless a configuration lights them.
     let mut worlds = [(); 2].map(|_| {
         let mut world = World::new();
+        world.set_height(Some(SIZE.1));
         let root = world.add_root();
         let lanterns: Vec<_> = (0..28)
             .map(|index| {
@@ -301,7 +312,8 @@ fn main() {
         while gpu.iter().any(|times| times.len() < frames) {
             let which = frame % configurations.len();
             frame += 1;
-            let (_, culled, back_faces, trails, listed, lit, whole) = configurations[which];
+            let (configuration, culled, back_faces, trails, listed, lit, whole) =
+                configurations[which];
             let farmyard = &mut farmyards[usize::from(whole)];
             let (world, root, lanterns) = &mut worlds[usize::from(whole)];
             let root = *root;
@@ -314,6 +326,7 @@ fn main() {
             let started = Instant::now();
             farmyard.set_back_faces_culled(back_faces);
             farmyard.set_lamps_listed(listed);
+            farmyard.set_detailed(configuration != "culled, own detail");
             // What it submits to the render world, culled there, then drawn as the world saw it, as the renderer does.
             for lantern in lanterns.iter() {
                 world.light_mut(*lantern).expect("a lantern").color = if lit {

@@ -8,7 +8,9 @@
 //! Once a frame, [`Renderer::cull`] keeps only the instances of each primitive that the eyes' frustum may see, and a
 //! closed primitive, [`Primitive::closed`](crate::Primitive::closed), is drawn without its back faces; and
 //! [`Renderer::light`] lists the few lamps that light each piece, as a render world assigns them, which its pixels then
-//! add up, rather than every lamp. See `design/rendering.md`.
+//! add up, rather than every lamp; and a model uploaded with coarser levels of detail ([`Renderer::upload_levels`]) has
+//! each piece drawn in the level [`Renderer::detail`] says, a piece changing from one to another drawn in both, each
+//! over its share of the pixels by an ordered dither, so that it fades rather than pops. See `design/rendering.md`.
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
@@ -16,6 +18,7 @@ use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::bounds::{self, Aabb, Extent, Frustum, Tally};
+use crate::lod::Lod;
 use crate::{INFLUENCES, Instance, Model, Texture};
 
 /// The most lamps a scenery's [`Lighting`] holds.
@@ -207,8 +210,9 @@ struct MaterialUniform {
     emissive: [f32; 4],
 }
 
-/// One piece as its shader reads it: where its node is; where its joint matrices begin and whether it is skinned; and
-/// its lamps, as [`lamps`] packs them, or every lamp, [`EVERY_LAMP`].
+/// One piece as its shader reads it: where its node is; where its joint matrices begin, whether it is skinned and, as it
+/// changes its level of detail, how far it is into the change and whether this is the level it changes to, 1, or from,
+/// 2; and its lamps, as [`lamps`] packs them, or every lamp, [`EVERY_LAMP`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Placed {
@@ -241,22 +245,57 @@ struct GpuPrimitive {
 }
 
 /// A model on the GPU: every primitive's vertices in one buffer and indices in another, so that drawing one after
-/// another, as the chunks of a scenery's ground are, changes neither; its primitives, by mesh; and its materials with
+/// another, as the chunks of a scenery's ground are, changes neither; its primitives, by mesh, then those of its coarser
+/// levels of detail, and, for each of its own, the primitive it is drawn as in each coarser level; and its materials with
 /// their textures.
 pub struct GpuModel {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     primitives: Vec<GpuPrimitive>,
     meshes: Vec<Range<usize>>,
+    levels: Vec<Vec<usize>>,
     materials: Vec<wgpu::BindGroup>,
     plain: wgpu::BindGroup,
 }
 
-/// What a batch draws: each primitive with its range of placed instances, and whether the triangles of its closed parts
-/// may be drawn without their back faces.
+impl GpuModel {
+    /// The primitive `primitive`, one of its own, is drawn as in `level`: itself in its own, 0, and in a level past its
+    /// coarsest, its coarsest.
+    fn level(&self, primitive: usize, level: u8) -> usize {
+        match level.checked_sub(1) {
+            None => primitive,
+            Some(coarser) => {
+                let levels = &self.levels[primitive];
+                levels
+                    .get(usize::from(coarser))
+                    .or(levels.last())
+                    .copied()
+                    .unwrap_or(primitive)
+            }
+        }
+    }
+
+    /// How many levels of detail it is drawn in, its own among them.
+    pub fn levels(&self) -> usize {
+        self.levels.iter().map(Vec::len).max().unwrap_or(0) + 1
+    }
+}
+
+/// How a piece is drawn as it changes its level of detail: wholly, over the pixels of the level it changes to, or over
+/// the rest, those of the level it changes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Dither {
+    Whole,
+    To,
+    From,
+}
+
+/// What a batch draws: each primitive with its range of placed instances, whether the triangles of its closed parts
+/// may be drawn without their back faces, and whether it is drawn over its share of the pixels alone.
 struct Call {
     primitive: usize,
     instances: Range<u32>,
+    dither: Dither,
     /// How many of the primitive's indices, first, are of closed parts, drawn without their back faces: none for a
     /// mirrored instance.
     closed: u32,
@@ -284,16 +323,20 @@ pub struct Batch {
     pieces: Vec<Piece>,
     /// Which pieces the placements' buffer holds now.
     shown: Vec<bool>,
-    /// Which pieces a cull would draw, and the placements written, kept between frames so that culling allocates
-    /// nothing.
+    /// Which pieces a cull would draw, and the placements written, each with what it is drawn as, kept between frames so
+    /// that culling allocates nothing.
     wanted: Vec<bool>,
     flat: Vec<Placed>,
+    sorted: Vec<((Dither, usize, bool, usize), Placed)>,
     /// Where any piece may be drawn, or none if one of them may be drawn anywhere.
     bounds: Option<Aabb>,
     /// Each piece's lamps, as last lit, and as a light would light them, kept so that lighting allocates nothing.
     lamps: Vec<[u32; 4]>,
     next_lamps: Vec<[u32; 4]>,
-    /// Whether the lamps changed since the placements were written.
+    /// Each piece's level of detail, as last given, and as it would be given, kept so that it allocates nothing.
+    lods: Vec<Lod>,
+    next_lods: Vec<Lod>,
+    /// Whether the lamps or levels changed since the placements were written.
     relit: bool,
 }
 
@@ -322,6 +365,28 @@ impl Batch {
                 .sum(),
         }
     }
+
+    /// How many pieces it draws in each level of detail, as last placed or culled, and in each as they change to it, the
+    /// first `N` levels; those changing are counted in both.
+    pub fn levels<const N: usize>(&self) -> [usize; N] {
+        let mut levels = [0; N];
+        for (lod, _) in self
+            .lods
+            .iter()
+            .zip(&self.shown)
+            .filter(|(_, shown)| **shown)
+        {
+            for level in [lod.level, lod.from] {
+                if let Some(count) = levels.get_mut(usize::from(level)) {
+                    *count += 1;
+                }
+                if lod.from == lod.level {
+                    break;
+                }
+            }
+        }
+        levels
+    }
 }
 
 /// Draws models in an eye's pass, into targets of the format and sample count it was made for, with a 32-bit float
@@ -330,6 +395,9 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     /// As `pipeline`, without back faces, for closed primitives.
     closed: wgpu::RenderPipeline,
+    /// As `pipeline` and `closed`, over a piece's share of the pixels alone, as it changes its level of detail.
+    faded: wgpu::RenderPipeline,
+    closed_faded: wgpu::RenderPipeline,
     revealed: wgpu::RenderPipeline,
     /// Whether closed primitives are drawn without their back faces, as they are unless a comparison turns it off.
     back_faces_culled: bool,
@@ -611,6 +679,8 @@ impl Renderer {
         Self {
             pipeline: pipeline("model_fragment", None),
             closed: pipeline("model_fragment", Some(wgpu::Face::Back)),
+            faded: pipeline("faded_model_fragment", None),
+            closed_faded: pipeline("faded_model_fragment", Some(wgpu::Face::Back)),
             // Cut off by the reveal sphere, a closed primitive is open: what is inside it shows.
             revealed: pipeline("revealed_model_fragment", None),
             back_faces_culled: true,
@@ -666,6 +736,20 @@ impl Renderer {
 
     /// Upload `model`, once, to draw any number of its instances.
     pub fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, model: &Model) -> GpuModel {
+        self.upload_levels(device, queue, model, &[])
+    }
+
+    /// Upload `model`, once, with `coarser`, its levels of detail coarser than its own, in order, each of its meshes and
+    /// primitives, as [`Model::simplified`] makes them, so that each piece may be drawn in any of them; a primitive of a
+    /// level the same as the level before's is drawn as that one, uploaded once, and a level of other meshes or
+    /// primitives than `model`'s is left out, with those after it.
+    pub fn upload_levels(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model: &Model,
+        coarser: &[Model],
+    ) -> GpuModel {
         let textures: Vec<_> = model
             .textures
             .iter()
@@ -690,69 +774,102 @@ impl Renderer {
             .collect();
         let mut primitives = Vec::new();
         let (mut all_vertices, mut all_indices): (Vec<Vertex>, Vec<u32>) = (Vec::new(), Vec::new());
-        let meshes = model
+        let mut push = |primitive: &crate::Primitive| {
+            let vertices = (0..primitive.positions.len()).map(|index| Vertex {
+                position: primitive.positions[index].to_array(),
+                normal: primitive
+                    .normals
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Vec3::ZERO)
+                    .to_array(),
+                uv: primitive
+                    .uvs
+                    .get(index)
+                    .copied()
+                    .unwrap_or_default()
+                    .to_array(),
+                color: primitive
+                    .colors
+                    .get(index)
+                    .copied()
+                    .unwrap_or(Vec4::ONE)
+                    .to_array(),
+                joints: primitive.joints.get(index).copied().unwrap_or_default(),
+                weights: primitive.weights.get(index).copied().unwrap_or_default(),
+            });
+            // The triangles of its closed parts first, if its material hides what is behind them.
+            let closed = if bounds::opaque(model, primitive.material) {
+                primitive.closed_triangles()
+            } else {
+                vec![false; primitive.indices.len() / 3]
+            };
+            let (inside, outside): (Vec<_>, Vec<_>) = primitive
+                .indices
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(&closed)
+                .partition(|(_, closed)| **closed);
+            let indices = inside
+                .iter()
+                .chain(&outside)
+                .flat_map(|(triangle, _)| triangle.iter().copied());
+            primitives.push(GpuPrimitive {
+                extent: Extent::of(primitive),
+                closed: inside.len() as u32 * 3,
+                base: all_vertices.len() as i32,
+                first: all_indices.len() as u32,
+                count: primitive.indices.len() as u32,
+                material: primitive.material,
+            });
+            all_vertices.extend(vertices);
+            all_indices.extend(indices);
+            primitives.len() - 1
+        };
+        let mut next = 0;
+        let meshes: Vec<Range<usize>> = model
             .meshes
             .iter()
             .map(|mesh| {
-                let start = primitives.len();
+                let start = next;
                 for primitive in &mesh.primitives {
-                    let vertices: Vec<Vertex> = (0..primitive.positions.len())
-                        .map(|index| Vertex {
-                            position: primitive.positions[index].to_array(),
-                            normal: primitive
-                                .normals
-                                .get(index)
-                                .copied()
-                                .unwrap_or(Vec3::ZERO)
-                                .to_array(),
-                            uv: primitive
-                                .uvs
-                                .get(index)
-                                .copied()
-                                .unwrap_or_default()
-                                .to_array(),
-                            color: primitive
-                                .colors
-                                .get(index)
-                                .copied()
-                                .unwrap_or(Vec4::ONE)
-                                .to_array(),
-                            joints: primitive.joints.get(index).copied().unwrap_or_default(),
-                            weights: primitive.weights.get(index).copied().unwrap_or_default(),
-                        })
-                        .collect();
-                    // The triangles of its closed parts first, if its material hides what is behind them.
-                    let closed = if bounds::opaque(model, primitive.material) {
-                        primitive.closed_triangles()
-                    } else {
-                        vec![false; primitive.indices.len() / 3]
-                    };
-                    let (inside, outside): (Vec<_>, Vec<_>) = primitive
-                        .indices
-                        .as_chunks::<3>()
-                        .0
-                        .iter()
-                        .zip(&closed)
-                        .partition(|(_, closed)| **closed);
-                    let indices: Vec<u32> = inside
-                        .iter()
-                        .chain(&outside)
-                        .flat_map(|(triangle, _)| triangle.iter().copied())
-                        .collect();
-                    primitives.push(GpuPrimitive {
-                        extent: Extent::of(primitive),
-                        closed: inside.len() as u32 * 3,
-                        base: all_vertices.len() as i32,
-                        first: all_indices.len() as u32,
-                        count: primitive.indices.len() as u32,
-                        material: primitive.material,
-                    });
-                    all_vertices.extend(vertices);
-                    all_indices.extend(indices);
+                    next = push(primitive) + 1;
                 }
-                start..primitives.len()
+                start..next
             })
             .collect();
+        // Each coarser level's primitives after the model's own, each the one before it where it is the same.
+        let own: Vec<&crate::Primitive> = model
+            .meshes
+            .iter()
+            .flat_map(|mesh| &mesh.primitives)
+            .collect();
+        let mut levels: Vec<Vec<usize>> = vec![Vec::new(); own.len()];
+        let mut last = own.clone();
+        for level in coarser.iter().take_while(|level| {
+            level.meshes.len() == model.meshes.len()
+                && level
+                    .meshes
+                    .iter()
+                    .zip(&model.meshes)
+                    .all(|(level, own)| level.primitives.len() == own.primitives.len())
+        }) {
+            let theirs: Vec<&crate::Primitive> = level
+                .meshes
+                .iter()
+                .flat_map(|mesh| &mesh.primitives)
+                .collect();
+            for (index, primitive) in theirs.iter().enumerate() {
+                let drawn = if *primitive == last[index] {
+                    levels[index].last().copied().unwrap_or(index)
+                } else {
+                    push(primitive)
+                };
+                levels[index].push(drawn);
+            }
+            last = theirs;
+        }
         let plain = MaterialUniform {
             base_color: [1.0; 4],
             emissive: [0.0; 4],
@@ -773,6 +890,7 @@ impl Renderer {
             }),
             primitives,
             meshes,
+            levels,
             materials,
             plain: self.material(device, plain, &self.white),
         }
@@ -817,9 +935,12 @@ impl Renderer {
             shown: Vec::new(),
             wanted: Vec::new(),
             flat: Vec::new(),
+            sorted: Vec::new(),
             bounds: Some(Aabb::EMPTY),
             lamps: Vec::new(),
             next_lamps: Vec::new(),
+            lods: Vec::new(),
+            next_lods: Vec::new(),
             relit: false,
         }
     }
@@ -868,12 +989,14 @@ impl Renderer {
             }
         }
         let pieces: Vec<Piece> = pieces.into_iter().flatten().flatten().collect();
-        let placed_bytes = (pieces.len().max(1) * size_of::<Placed>()) as u64;
+        // Room for each piece twice, of a model in levels of detail, as each may change from one to another.
+        let placements = pieces.len().max(1) * if model.levels() > 1 { 2 } else { 1 };
+        let placed_bytes = (placements * size_of::<Placed>()) as u64;
         let joint_bytes = (joints.len().max(1) * size_of::<[f32; 16]>()) as u64;
         if placed_bytes > batch.placed.size() || joint_bytes > batch.joints.size() {
             *batch = self.sized_batch(
                 device,
-                pieces.len().next_power_of_two(),
+                placements.next_power_of_two(),
                 joints.len().max(1).next_power_of_two(),
             );
         }
@@ -886,6 +1009,7 @@ impl Renderer {
         batch.wanted.resize(batch.pieces.len(), true);
         batch.lamps.clear();
         batch.lamps.resize(batch.pieces.len(), EVERY_LAMP);
+        batch.lods.resize(batch.pieces.len(), Lod::default());
         self.write(queue, model, batch);
     }
 
@@ -916,45 +1040,108 @@ impl Renderer {
         }
     }
 
-    /// Write the pieces of `batch` that it wants drawn into its placements' buffer, each primitive's together, with their
-    /// lamps, and draw those.
+    /// Draw each piece of `batch` in the level of detail `lods` says for it, in the order [`Batch::bounds`] says the
+    /// pieces, as a render world chooses them, from the next [`Self::cull`] or [`Self::show`], those changing from one
+    /// level to another in both; or each in its own, should `lods` not say of as many as it placed. A level past the
+    /// model's coarsest is its coarsest. Giving the same levels as before writes nothing.
+    pub fn detail(&self, batch: &mut Batch, lods: impl IntoIterator<Item = Lod>) {
+        let Batch {
+            pieces,
+            lods: given,
+            next_lods,
+            relit,
+            ..
+        } = batch;
+        next_lods.clear();
+        next_lods.extend(lods.into_iter().take(pieces.len() + 1));
+        if next_lods.len() != pieces.len() {
+            next_lods.clear();
+            next_lods.resize(pieces.len(), Lod::default());
+        }
+        if next_lods != given {
+            std::mem::swap(given, next_lods);
+            *relit = true;
+        }
+    }
+
+    /// Write the pieces of `batch` that it wants drawn into its placements' buffer, each primitive's together, in their
+    /// levels of detail, those changing in both, each over its share of the pixels, with their lamps, and draw those.
     fn write(&self, queue: &wgpu::Queue, model: &GpuModel, batch: &mut Batch) {
         let Batch {
             calls,
             flat,
+            sorted,
             pieces,
             wanted,
             shown,
             lamps,
+            lods,
             relit,
             ..
         } = batch;
         calls.clear();
         flat.clear();
-        for ((piece, _), lamps) in pieces
+        sorted.clear();
+        for (index, (((piece, _), lamps), lod)) in pieces
             .iter()
             .zip(wanted.iter())
             .zip(lamps.iter())
-            .filter(|((_, wanted), _)| **wanted)
+            .zip(lods.iter())
+            .enumerate()
+            .filter(|(_, (((_, wanted), _), _))| **wanted)
         {
-            let at = flat.len() as u32;
-            flat.push(Placed {
+            let placed = Placed {
                 lamps: *lamps,
                 ..piece.placed
-            });
+            };
+            let drawn = |level: u8, dither: Dither, fade: f32| {
+                let mut placed = placed;
+                if dither != Dither::Whole {
+                    placed.joints[2] = fade.to_bits();
+                    placed.joints[3] = dither as u32;
+                }
+                (
+                    (
+                        dither,
+                        model.level(piece.primitive, level),
+                        !piece.closed,
+                        index,
+                    ),
+                    placed,
+                )
+            };
+            if lod.fading()
+                && model.level(piece.primitive, lod.level) != model.level(piece.primitive, lod.from)
+            {
+                sorted.push(drawn(lod.level, Dither::To, lod.fade));
+                sorted.push(drawn(lod.from, Dither::From, lod.fade));
+            } else {
+                sorted.push(drawn(lod.level, Dither::Whole, 1.0));
+            }
+        }
+        // Each primitive's together, in its order, the whole first, each piece in its order, as they were placed; as each
+        // piece's own primitive is in that order already, a batch drawn in its own level alone is drawn as it was.
+        sorted.sort_unstable_by_key(|(key, _)| *key);
+        for ((dither, primitive, open, _), placed) in sorted.iter() {
+            let at = flat.len() as u32;
+            flat.push(*placed);
+            let closed = !*open;
             match calls.last_mut() {
                 Some(call)
-                    if call.primitive == piece.primitive && (call.closed > 0) == piece.closed =>
+                    if call.primitive == *primitive
+                        && call.dither == *dither
+                        && (call.closed > 0) == closed =>
                 {
                     call.instances.end = at + 1;
                 }
                 _ => {
-                    let primitive = &model.primitives[piece.primitive];
+                    let gpu = &model.primitives[*primitive];
                     calls.push(Call {
-                        primitive: piece.primitive,
+                        primitive: *primitive,
                         instances: at..at + 1,
-                        closed: if piece.closed { primitive.closed } else { 0 },
-                        count: primitive.count,
+                        dither: *dither,
+                        closed: if closed { gpu.closed } else { 0 },
+                        count: gpu.count,
                     });
                 }
             }
@@ -1093,21 +1280,44 @@ impl Renderer {
                 call.instances.clone(),
             );
         };
-        // The closed parts without their back faces, then the rest with them.
+        // The closed parts without their back faces, then the rest with them, each drawn whole first, then what changes
+        // its level of detail, over its share of the pixels. Growing through the reveal sphere, which cuts what it draws
+        // already, a piece changing is drawn whole in the level it changes to.
         let closed = |call: &Call| if culled { call.closed } else { 0 };
-        if batch.calls.iter().any(|call| closed(call) > 0) {
-            pass.set_pipeline(&self.closed);
-            for call in batch.calls.iter().filter(|call| closed(call) > 0) {
-                draw(pass, call, 0..closed(call));
-            }
-        }
-        pass.set_pipeline(if self.reveal.is_some() {
+        let revealing = self.reveal.is_some();
+        let dithered = |call: &Call| call.dither != Dither::Whole && !revealing;
+        let open = if revealing {
             &self.revealed
         } else {
             &self.pipeline
-        });
-        for call in batch.calls.iter().filter(|call| closed(call) < call.count) {
-            draw(pass, call, closed(call)..call.count);
+        };
+        for (pipeline, fading, part) in [
+            (&self.closed, false, true),
+            (&self.closed_faded, true, true),
+            (open, false, false),
+            (&self.faded, true, false),
+        ] {
+            let mut set = false;
+            for call in batch.calls.iter().filter(|call| {
+                !(revealing && call.dither == Dither::From)
+                    && dithered(call) == fading
+                    && if part {
+                        closed(call) > 0
+                    } else {
+                        closed(call) < call.count
+                    }
+            }) {
+                if !set {
+                    pass.set_pipeline(pipeline);
+                    set = true;
+                }
+                let indices = if part {
+                    0..closed(call)
+                } else {
+                    closed(call)..call.count
+                };
+                draw(pass, call, indices);
+            }
         }
     }
 }

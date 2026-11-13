@@ -712,3 +712,150 @@ fn a_piece_s_lamps_are_packed_as_a_mask_with_a_byte_of_light_each() {
         lamps(&(0..64).map(|lamp| (lamp, 1.0)).collect::<Vec<_>>())
     );
 }
+
+/// [`box_and_card`] in another colour, as a coarser level of it drawn in green, to tell it from its own.
+fn green(model: &Model) -> Model {
+    let mut green = model.clone();
+    for primitive in &mut green.meshes[0].primitives {
+        primitive.colors = vec![Vec4::new(0.0, 1.0, 0.0, 1.0); primitive.positions.len()];
+    }
+    green
+}
+
+#[test]
+fn each_piece_is_drawn_in_its_level_of_detail_and_fades_from_one_to_the_next_over_its_share_of_the_pixels()
+ {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 4);
+        renderer.set_lighting(&queue, &even());
+        let model = box_and_card();
+        let coarser = green(&model);
+        // Two coarser levels, the second the same as the first, which is uploaded once.
+        let gpu = renderer.upload_levels(&device, &queue, &model, &[coarser.clone(), coarser]);
+        assert_eq!((gpu.levels(), gpu.primitives.len()), (3, 4));
+        assert_eq!(renderer.upload(&device, &queue, &model).levels(), 1);
+        let plain = renderer.upload(&device, &queue, &model);
+        let mut batch = renderer.batch(&device);
+        let mut instance = Instance::new(model.clone());
+        instance.transform = Mat4::from_rotation_translation(
+            Quat::from_rotation_y(0.6) * Quat::from_rotation_x(0.4),
+            Vec3::new(0.6, 0.3, 0.0),
+        );
+        renderer.place(&device, &queue, &gpu, &mut batch, &[instance.clone()]);
+        renderer.prepare(&queue, 0, camera(), Vec3::new(1.0, 0.3, 4.0));
+        let draw = |renderer: &Renderer, model: &GpuModel, batch: &Batch| {
+            render(&device, &queue, 4, |pass| {
+                renderer.draw(pass, 0, model, batch)
+            })
+        };
+        // In its own level, it is drawn as without levels, to the bit.
+        let own = draw(&renderer, &gpu, &batch);
+        let mut plain_batch = renderer.batch(&device);
+        renderer.place(&device, &queue, &plain, &mut plain_batch, &[instance]);
+        assert_eq!(own, draw(&renderer, &plain, &plain_batch));
+        let pixels = drawn(&own);
+        assert!(pixels.len() > 500);
+        let at = |picture: &[u8], (x, y): (u32, u32)| {
+            let index = ((y * SIZE + x) * 4) as usize;
+            [picture[index], picture[index + 1], picture[index + 2]]
+        };
+        let (white, green) = ([255, 255, 255], [0, 255, 0]);
+        // Within what it covers, away from its edges, which a pixel's samples share with what is beside them.
+        let inside: Vec<(u32, u32)> = pixels
+            .iter()
+            .copied()
+            .filter(|(x, y)| {
+                [(0, 1), (2, 1), (1, 0), (1, 2)].iter().all(|(dx, dy)| {
+                    at(
+                        &own,
+                        ((x + dx).saturating_sub(1), (y + dy).saturating_sub(1)),
+                    ) == white
+                }) && at(&own, (*x, *y)) == white
+            })
+            .collect();
+        assert!(inside.len() > 300);
+        let show = |renderer: &Renderer, batch: &mut Batch, lods: &[Lod]| {
+            renderer.detail(batch, lods.iter().copied());
+            renderer.show(&queue, &gpu, batch, &[true, true])
+        };
+        // In the coarser level, each piece is drawn as it is there, as many triangles, and so in a level past the last.
+        for level in [1, 2, 7] {
+            let tally = show(&renderer, &mut batch, &[Lod::settled(level); 2]);
+            assert_eq!(tally.triangles, 12 + 2);
+            let picture = draw(&renderer, &gpu, &batch);
+            assert_eq!(drawn(&picture), pixels);
+            assert!(inside.iter().all(|pixel| at(&picture, *pixel) == green));
+            // Counted in the levels asked, but past those counted, none.
+            let counted = match level {
+                1 => [0, 2, 0],
+                2 => [0, 0, 2],
+                _ => [0; 3],
+            };
+            assert_eq!(batch.levels::<3>(), counted);
+        }
+        // Changing from its own, both are drawn, each over its share of the pixels, every pixel once, by as much as the
+        // change has gone, within a sixteenth.
+        for fade in [0.25, 0.5, 0.75] {
+            let changing = Lod {
+                level: 1,
+                from: 0,
+                fade,
+            };
+            let tally = show(&renderer, &mut batch, &[changing; 2]);
+            assert_eq!((tally.triangles, tally.draws), (2 * (12 + 2), 4));
+            assert_eq!(batch.levels::<2>(), [2, 2]);
+            let picture = draw(&renderer, &gpu, &batch);
+            assert_eq!(drawn(&picture), pixels);
+            let greens = inside
+                .iter()
+                .filter(|pixel| at(&picture, **pixel) == green)
+                .count();
+            let whites = inside
+                .iter()
+                .filter(|pixel| at(&picture, **pixel) == white)
+                .count();
+            assert_eq!(
+                greens + whites,
+                inside.len(),
+                "a pixel drawn in neither or both"
+            );
+            let share = greens as f32 / inside.len() as f32;
+            assert!((share - fade).abs() < 0.1, "{fade}: {share}");
+            // Growing through the reveal sphere, it is drawn whole in the level it changes to.
+            renderer.set_reveal(Some((Vec3::ZERO, 50.0)));
+            let revealed = draw(&renderer, &gpu, &batch);
+            assert!(inside.iter().all(|pixel| at(&revealed, *pixel) == green));
+            renderer.set_reveal(None);
+        }
+        // Between two levels drawn alike, it is drawn whole; given as before, nothing is written; told of fewer pieces
+        // than it placed, each is its own.
+        let alike = Lod {
+            level: 2,
+            from: 1,
+            fade: 0.5,
+        };
+        assert_eq!(show(&renderer, &mut batch, &[alike; 2]).draws, 2);
+        renderer.detail(&mut batch, [alike; 2]);
+        assert!(!batch.relit);
+        show(&renderer, &mut batch, &[alike]);
+        assert_eq!(draw(&renderer, &gpu, &batch), own);
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn a_level_of_detail_of_other_primitives_is_left_out() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 1);
+        let model = box_and_card();
+        let mut fewer = green(&model);
+        fewer.meshes[0].primitives.pop();
+        let mut more = green(&model);
+        more.meshes.push(crate::Mesh::new("more", Vec::new()));
+        for other in [fewer, more] {
+            let gpu = renderer.upload_levels(&device, &queue, &model, &[other, green(&model)]);
+            assert_eq!((gpu.levels(), gpu.primitives.len()), (1, 2));
+        }
+    });
+}

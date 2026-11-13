@@ -24,7 +24,7 @@ use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
 use tomori_assets::{Instance, Library, Model};
 use tomori_render::scenery::{Scenery, Target, Views};
 use tomori_render::world::{
-    EnvironmentLight, Item, ItemId, Layer, Light, LightId, Mobility, RootId, World,
+    EnvironmentLight, Item, ItemId, Layer, Levels, Light, LightId, Mobility, RootId, World,
 };
 use wgpu::util::DeviceExt;
 
@@ -66,6 +66,13 @@ const _: () = assert!(
 /// each split, and nothing else is as large. Of 32 lamps 5 to 6 m apart, at most 9 reach a chunk of 7 m, where 12
 /// reached one of 8 m. See `design/rendering.md`.
 pub const CHUNK: f32 = 7.0;
+
+/// How far, at most, each coarser level of detail of the farmyard's large models and its hens strays from their own, in
+/// metres, each simplified from its own as it is uploaded ([`tomori_assets::Model::simplified`]): drawn where that
+/// spans at most a pixel from the nearer eye, about 9, 22 and 52 m away in a Quest 3's eye. Its bush's plants, stones,
+/// rock, sticks and logs, of 15 to 145 triangles each, simplify by too little to be worth it, and the ferns have their
+/// own details. See `design/rendering.md`.
+pub const DETAIL: [f32; 3] = [0.01, 0.025, 0.06];
 
 /// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
 /// read how the farmyard is lit, at its end, as its models are.
@@ -356,12 +363,42 @@ fn lanterns() -> [Lamp; 3] {
 /// told it.
 pub use tomori_render::scenery::eye;
 
-/// One model the farmyard draws, uploaded once, with its instances placed, and the item it is in the render world, once
-/// submitted.
+/// One model the farmyard draws, uploaded once, with its instances placed, the levels of detail it is drawn in, if any,
+/// and the item it is in the render world, once submitted.
 struct Drawn {
     model: GpuModel,
     batch: Batch,
+    levels: Levels,
     item: Option<ItemId>,
+}
+
+/// `model`'s levels of detail coarser than its own, for instances placed by `placement`, as large as its largest scale,
+/// each straying from it by at most [`DETAIL`]'s metres, simplified once for each model and kept as long as it is.
+fn coarser(model: &Arc<Model>, placement: Mat4) -> Arc<Vec<Model>> {
+    type Kept = Vec<(std::sync::Weak<Model>, u32, Arc<Vec<Model>>)>;
+    static KEPT: Mutex<Kept> = Mutex::new(Vec::new());
+    let scale = placement
+        .x_axis
+        .truncate()
+        .length()
+        .max(placement.y_axis.truncate().length())
+        .max(placement.z_axis.truncate().length());
+    let mut kept = KEPT.lock().expect("the levels kept are never poisoned");
+    kept.retain(|(model, ..)| model.strong_count() > 0);
+    if let Some((_, _, levels)) = kept
+        .iter()
+        .find(|(kept, at, _)| kept.as_ptr() == Arc::as_ptr(model) && *at == scale.to_bits())
+    {
+        return levels.clone();
+    }
+    let levels = Arc::new(
+        DETAIL
+            .iter()
+            .map(|error| model.simplified(error / scale).0)
+            .collect::<Vec<_>>(),
+    );
+    kept.push((Arc::downgrade(model), scale.to_bits(), levels.clone()));
+    levels
 }
 
 impl Drawn {
@@ -397,6 +434,28 @@ impl Drawn {
         Self {
             model: gpu,
             batch,
+            levels: Levels::default(),
+            item: None,
+        }
+    }
+
+    /// `model`, uploaded once with its levels of detail, [`coarser`], with an instance at `placement`.
+    fn detailed(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &Renderer,
+        model: &Arc<Model>,
+        placement: Mat4,
+    ) -> Self {
+        let gpu = renderer.upload_levels(device, queue, model, &coarser(model, placement));
+        let mut batch = renderer.batch(device);
+        let mut instance = Instance::new(model.clone());
+        instance.transform = placement;
+        renderer.place(device, queue, &gpu, &mut batch, &[instance]);
+        Self {
+            model: gpu,
+            batch,
+            levels: Levels::new(&DETAIL),
             item: None,
         }
     }
@@ -407,23 +466,31 @@ impl Drawn {
         let item = match self.item.filter(|item| world.contains(*item)) {
             Some(_) if mobility == Mobility::Static => return,
             Some(item) => item,
-            None => *self
-                .item
-                .insert(world.add(Item::new(root, Layer::Opaque, mobility))),
+            None => {
+                let item = world.add(Item::new(root, Layer::Opaque, mobility));
+                world.set_levels(item, self.levels);
+                *self.item.insert(item)
+            }
         };
         world.place(item, self.batch.bounds());
     }
 
     /// Draw only what `views` says the eyes may see of it, as the world culled it, each piece lit by the lamps the world
-    /// lists for it, if `listed`, or every lamp, or, without a world, against its frustum, lit by every lamp, and say how
-    /// much it then draws.
+    /// lists for it, if `listed`, or every lamp, and in the level of detail the world chose for it, if `detailed`, or its
+    /// own, or, without a world, against its frustum, lit by every lamp, in its own, and say how much it then draws.
     fn cull(
         &mut self,
         queue: &wgpu::Queue,
         models: &Renderer,
         views: &Views<'_>,
-        listed: bool,
+        (listed, detailed): (bool, bool),
     ) -> Tally {
+        match self.item.zip(views.world()).filter(|_| detailed) {
+            Some((item, (world, _))) => {
+                models.detail(&mut self.batch, world.lods(item).iter().copied());
+            }
+            None => models.detail(&mut self.batch, std::iter::empty()),
+        }
         match self.item.zip(views.world()).filter(|_| listed) {
             Some((item, (world, _))) => models.light(
                 &mut self.batch,
@@ -981,7 +1048,7 @@ impl Backdrop {
         chunked: &dyn Fn(&Model) -> Arc<Model>,
     ) -> Self {
         let (device, queue) = (target.device, target.queue);
-        let foothills = Drawn::new(
+        let foothills = Drawn::detailed(
             device,
             queue,
             models,
@@ -1015,14 +1082,14 @@ impl Backdrop {
             &chunked(&backdrop::rock()),
             Mat4::IDENTITY,
         );
-        let trail = Drawn::new(
+        let trail = Drawn::detailed(
             device,
             queue,
             models,
             &chunked(&trail::model()),
             Mat4::IDENTITY,
         );
-        let terrace = Drawn::new(
+        let terrace = Drawn::detailed(
             device,
             queue,
             models,
@@ -1283,6 +1350,8 @@ pub struct Farmyard {
     /// lit by, each by those listed for it, if `listed`, or by every one.
     lit: Option<Vec<Lamp>>,
     listed: bool,
+    /// Whether its models and hens are drawn in the levels of detail the world chooses for them, or in their own.
+    detailed: bool,
 }
 
 impl Farmyard {
@@ -1359,14 +1428,14 @@ impl Farmyard {
         let models = Renderer::new(device, target.queue, target.format, target.samples);
         let lighting = lighting();
         models.set_lighting(target.queue, &lighting);
-        let yard = Drawn::new(
+        let yard = Drawn::detailed(
             device,
             target.queue,
             &models,
             &chunked(&props::model()),
             Mat4::IDENTITY,
         );
-        let coop = Drawn::new(
+        let coop = Drawn::detailed(
             device,
             target.queue,
             &models,
@@ -1375,7 +1444,7 @@ impl Farmyard {
         );
         let backdrop = Backdrop::new(target, &models, &pipeline_layout, &shader, &chunked);
         let plaques = Plaques::new(target);
-        let campsite = Drawn::new(
+        let campsite = Drawn::detailed(
             device,
             target.queue,
             &models,
@@ -1384,7 +1453,7 @@ impl Farmyard {
         );
         let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
         let logs = Drawn::placed(device, target.queue, &models, &log(), &[]);
-        let shingle = Drawn::new(
+        let shingle = Drawn::detailed(
             device,
             target.queue,
             &models,
@@ -1421,6 +1490,7 @@ impl Farmyard {
             lamps: Vec::new(),
             lit: None,
             listed: true,
+            detailed: true,
         }
     }
 
@@ -1439,6 +1509,12 @@ impl Farmyard {
     /// lamp, `false`, to compare, from the next cull.
     pub fn set_lamps_listed(&mut self, listed: bool) {
         self.listed = listed;
+    }
+
+    /// Draw its models and hens in the levels of detail the render world chooses for them, as by default, or in their
+    /// own, `false`, to compare, from the next cull.
+    pub fn set_detailed(&mut self, detailed: bool) {
+        self.detailed = detailed;
     }
 }
 
@@ -1567,9 +1643,16 @@ impl Scenery for Farmyard {
             return;
         };
         let models = &self.models;
+        // The hens in their levels of detail, simplified for as large as they are placed.
         let chickens = self.chickens.get_or_insert_with(|| Drawn {
-            model: models.upload(device, queue, first.model()),
+            model: models.upload_levels(
+                device,
+                queue,
+                first.model(),
+                &coarser(first.model(), first.transform),
+            ),
             batch: models.batch(device),
+            levels: Levels::new(&DETAIL),
             item: None,
         });
         models.place(
@@ -1664,6 +1747,7 @@ impl Scenery for Farmyard {
             plaques,
             lit,
             listed,
+            detailed,
             ..
         } = self;
         // The lamps the world lights it by this frame, in its order, which each piece's and fern's lamps index.
@@ -1680,7 +1764,7 @@ impl Scenery for Farmyard {
             }
             None => *lit = None,
         }
-        let listed = *listed;
+        let drawing = (*listed, *detailed);
         let mut tally = Tally::default();
         for drawn in [Some(yard), Some(coop), chickens.as_mut()]
             .into_iter()
@@ -1698,9 +1782,9 @@ impl Scenery for Farmyard {
             .chain(&mut backdrop.plants)
             .chain([&mut backdrop.stones, &mut backdrop.rock])
         {
-            tally += drawn.cull(queue, models, views, listed);
+            tally += drawn.cull(queue, models, views, drawing);
         }
-        tally += ferns.cull(views, listed);
+        tally += ferns.cull(views, drawing.0);
         // The ferns are placed for the first eye, as they are again when it is prepared.
         let first = views
             .clips()

@@ -154,6 +154,12 @@ impl Stage {
         scenery.cull(queue, &Views::of(&self.world, self.root))
     }
 
+    /// Choose levels of detail for the eyes' images `height` pixels tall, as the renderer does for its own, from the next
+    /// cull, or draw every instance in its own, with none, as by default.
+    pub fn set_height(&mut self, height: Option<u32>) {
+        self.world.set_height(height);
+    }
+
     /// The world, as last culled, and the scenery's coordinates in it.
     pub fn world(&self) -> (&tomori_world::World, tomori_world::RootId) {
         (&self.world, self.root)

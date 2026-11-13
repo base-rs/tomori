@@ -46,7 +46,8 @@ struct Material {
 // One instance of one primitive: where its node is, and where its joint matrices begin, if it is skinned.
 struct Placed {
     world: mat4x4<f32>,
-    // The first joint matrix, and whether the primitive is skinned.
+    // The first joint matrix, whether the primitive is skinned, and, as it changes its level of detail, how far it is
+    // into the change, a float's bits, and whether this is the level it changes to, 1, or from, 2.
     joints: vec4<u32>,
     // A mask of the lamps that light it, low then high, and how much of its light each gives, a byte each in the mask's
     // order, 255 for all of it and past the last; or every lamp in the mask for every lamp.
@@ -80,6 +81,8 @@ struct Shaded {
     @location(3) color: vec4<f32>,
     // The piece's lamps, as it is placed.
     @location(4) @interpolate(flat) lamps: vec4<u32>,
+    // How far it is into changing its level of detail, and which level it is of the change.
+    @location(5) @interpolate(flat) fade: vec2<u32>,
 }
 
 @vertex
@@ -105,6 +108,7 @@ fn model_vertex(vertex: Vertex, @builtin(instance_index) instance: u32) -> Shade
     out.uv = vertex.uv;
     out.color = vertex.color;
     out.lamps = one.lamps;
+    out.fade = one.joints.zw;
     return out;
 }
 
@@ -181,6 +185,27 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
 @fragment
 fn model_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
     return shade(in, facing);
+}
+
+// Whether a piece changing its level of detail covers the pixel at `position` in the level `fade` says: of an ordered
+// 4 × 4 pattern of thresholds, those below how far it is into the change in the level it changes to, and the rest in the
+// level it changes from, so that the two together cover every pixel once.
+fn covers(position: vec2<f32>, fade: vec2<u32>) -> bool {
+    let at = vec2<u32>(position) % 4u;
+    let across = at.x ^ at.y;
+    let order = ((across & 1u) << 3u) | ((at.y & 1u) << 2u) | (across & 2u) | ((at.y & 2u) >> 1u);
+    let below = (f32(order) + 0.5) / 16.0 < bitcast<f32>(fade.x);
+    return below == (fade.y == 1u);
+}
+
+// A piece changing its level of detail, over its share of the pixels. Shaded first, as shading takes derivatives.
+@fragment
+fn faded_model_fragment(in: Shaded, @builtin(front_facing) facing: bool) -> @location(0) vec4<f32> {
+    let color = shade(in, facing);
+    if !covers(in.position.xy, in.fade) {
+        discard;
+    }
+    return color;
 }
 
 // Only inside the reveal sphere, while the scenery grows. Shaded first, as shading takes derivatives.

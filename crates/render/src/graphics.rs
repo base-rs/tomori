@@ -1273,6 +1273,8 @@ impl Renderer {
         } = self;
         world.set_culling(self.culling);
         world.set_views(matrices);
+        // Levels of detail are chosen for the eyes' images as tall as the renderer draws them.
+        world.set_height(Some(self.size.1));
         // The panels are in the space's coordinates, as the eyes are; the cubes and the avatar in the scene's; the
         // environment's scenery in its own, carried into the scene's.
         world.set_transform(submitted.scene, scene_to_space);
