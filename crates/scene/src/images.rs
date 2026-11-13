@@ -58,6 +58,24 @@ pub fn shown(projection: &Projection) -> Vec<&Image> {
 }
 
 impl Images {
+    /// The images the faces of `sheets` show, of those held, each with its PNG, for the renderer to decode and draw over
+    /// them: as the frame step and the spectator hand them over.
+    pub fn drawn(&self, sheets: &[crate::controller_ui::Sheet]) -> Vec<(String, Arc<[u8]>)> {
+        sheets
+            .iter()
+            .filter_map(|sheet| {
+                sheet
+                    .canvas
+                    .as_deref()
+                    .and_then(|canvas| canvas.image.as_ref())
+            })
+            .filter_map(|image| {
+                self.png(&image.hash)
+                    .map(|png| (image.hash.clone(), png.clone()))
+            })
+            .collect()
+    }
+
     /// The image `hash`, if it is held.
     pub fn png(&self, hash: &str) -> Option<&Arc<[u8]>> {
         self.held.get(hash).map(|(png, _)| png)

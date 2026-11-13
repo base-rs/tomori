@@ -102,6 +102,15 @@ impl SwarmAnimation {
     }
 }
 
+/// What the space projects this frame, for the renderer: the walls and panels' faces, farthest first, the volumes'
+/// solids, and the images the panels drawn show, of those held.
+#[derive(Default)]
+pub struct Projected {
+    pub sheets: Vec<tomori_scene::controller_ui::Sheet>,
+    pub volumes: Vec<tomori_scene::projection::volume::Drawn>,
+    pub images: Vec<(String, Arc<[u8]>)>,
+}
+
 /// The options a spectator is started with.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpectatorOptions {
@@ -146,6 +155,10 @@ pub struct Feed {
     /// shows this frame. See `design/spectator.md`.
     client_side: tomori_scene::spectating::Spectated,
     drawn: Option<tomori_scene::client_side::Drawn>,
+    /// The space's walls, their panels and the floating panels, laid out as a participant's frame step lays them out,
+    /// pointed at by nobody, and what they draw this frame. See `design/spectator.md`.
+    projector: tomori_scene::projection::Projector,
+    projected: Projected,
     last_poll: Instant,
     last_caption: Option<String>,
 }
@@ -239,6 +252,8 @@ impl Feed {
             sceneries: Sceneries::empty(),
             client_side: tomori_scene::spectating::Spectated::new(),
             drawn: None,
+            projector: tomori_scene::projection::Projector::paced(),
+            projected: Projected::default(),
             last_poll: Instant::now(),
             last_caption: None,
         }
@@ -291,6 +306,11 @@ impl Feed {
     /// `design/spectator.md`.
     pub fn drawn(&self) -> Option<&tomori_scene::client_side::Drawn> {
         self.drawn.as_ref()
+    }
+
+    /// What the space projects this frame, for the renderer. See `design/spectator.md`.
+    pub fn projected(&self) -> &Projected {
+        &self.projected
     }
 
     /// How many intents the environment's client sides have asked, all dropped, since a spectator asks nothing.
@@ -497,6 +517,7 @@ impl Feed {
             camera,
             now,
         );
+        self.projected = Self::project(&mut self.projector, &self.conversation, camera, now, dt);
 
         // Convert protocol poses to controller poses for the frame.
         let to_pose = |p: Option<tomori_protocol::Pose>| {
@@ -527,6 +548,49 @@ impl Feed {
             workspace: workspace.clone(),
             presentation_page: 0,
             presentation_content_page: 0,
+        }
+    }
+
+    /// Lay out what `conversation`'s space projects with `projector`, as a participant's frame step does, seen from
+    /// `camera`, with no ray, grip or stick and no rights over walls, so that nothing is pointed at, carried or edited.
+    /// See `design/spectator.md`.
+    fn project(
+        projector: &mut tomori_scene::projection::Projector,
+        conversation: &Conversation,
+        camera: Option<Vec3>,
+        now: Instant,
+        dt: f32,
+    ) -> Projected {
+        let surfaces = conversation.surfaces();
+        // The spectator keeps no frame times, so its projector's work, unlike the frame step's, is not timed; running the
+        // spectator through the frame step's own assembly would time it (#482).
+        let output = projector.update(tomori_scene::projection::Input {
+            // None on the server list, as the frame step shows none in arrival.
+            projection: conversation
+                .projection()
+                .filter(|_| conversation.arrival().is_none()),
+            ray: None,
+            grip: None,
+            viewer: camera,
+            active: false,
+            pointing: false,
+            nearer: f32::INFINITY,
+            stick: glam::Vec2::ZERO,
+            straighten: false,
+            free: false,
+            controls: tomori_scene::projection::Controls::Controllers,
+            scroll: None,
+            rights: tomori_scene::projection::editing::Rights::default(),
+            surfaces: Some(&surfaces),
+            left: tomori_scene::projection::Hold::default(),
+            now,
+            dt,
+        });
+        let images = conversation.images().drawn(&output.sheets);
+        Projected {
+            sheets: output.sheets,
+            volumes: output.volumes,
+            images,
         }
     }
 
@@ -1286,6 +1350,204 @@ mod tests {
                 },
             );
             assert_eq!(animated.load(Ordering::Relaxed), 3);
+        });
+    }
+
+    #[test]
+    fn the_spectator_draws_the_space_s_walls_and_the_panels_published_on_them_as_a_visitor() {
+        use tomori_protocol::{Panel, Place, Projection, TOMORI_WALL, WALL_SLOTS, Wall, WallKind};
+        // Rows of a multiple of 256 bytes, as wgpu copies them.
+        const WIDTH: u32 = 192;
+        const HEIGHT: u32 = 144;
+        // A one-pixel PNG, which an image panel shows.
+        const PNG: [u8; 70] = [
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xdf, 0xc0, 0xf0, 0x1f, 0x00, 0x06, 0x80, 0x02, 0x7f, 0x10, 0x4c,
+            0x1b, 0xe1, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        let hash = format!("{:064x}", 1);
+        // A visitor's spectator in a space whose server projects the Tomori wall ahead, with `panels` on it, holding the
+        // image they show if it was `fetched`.
+        let watching = |panels: Vec<Panel>, fetched: bool| {
+            let mut feed = Feed::with_audio(
+                SpectatorOptions::default(),
+                Box::new(Silent),
+                Box::new(Nowhere),
+            );
+            feed.conversation
+                .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+            feed.conversation
+                .apply(Event::State(ConnectionState::Connected {
+                    source: 1,
+                    server: "Test".into(),
+                    role: tomori_protocol::ConnectionRole::Visitor,
+                    certificate: None,
+                    backends: vec![],
+                    roots: vec![],
+                    environments: vec![],
+                    utterance_limit: None,
+                    name: None,
+                }));
+            feed.conversation
+                .apply(Event::Message(ServerMessage::Space {
+                    state: Box::new(SpaceState {
+                        id: "space".into(),
+                        projection: true,
+                        ..Default::default()
+                    }),
+                }));
+            let wall = Wall::new(
+                TOMORI_WALL,
+                WallKind::Tomori,
+                tomori_protocol::Pose::upright_facing([0.0, 1.2, -2.3], [0.0, 1.2, 0.0]),
+            );
+            feed.conversation
+                .apply(Event::Message(ServerMessage::Projection {
+                    projection: Box::new(
+                        Projection::new("space", "")
+                            .with_walls(vec![wall])
+                            .with_panels(panels),
+                    ),
+                }));
+            if fetched {
+                feed.conversation.apply(Event::Image {
+                    hash: hash.clone(),
+                    png: PNG.to_vec().into(),
+                });
+            }
+            feed.conversation.take_actions();
+            feed
+        };
+        let published: Vec<Panel> = (0..WALL_SLOTS)
+            .map(|slot| {
+                let place = Place::Wall {
+                    wall: TOMORI_WALL.into(),
+                    slot,
+                };
+                Panel::new(
+                    format!("panel-{slot}"),
+                    "Charts",
+                    "**Published** on the wall.",
+                    place,
+                )
+                .with_image(tomori_protocol::Image::new(
+                    &hash,
+                    1,
+                    1,
+                    PNG.len() as u32,
+                ))
+            })
+            .collect();
+        // The wall's face and each panel's are laid out, as a participant's frame step lays them out, pointed at by nobody.
+        let mut feed = watching(published.clone(), true);
+        for _ in 0..4 {
+            feed.build_frame(&BTreeMap::new(), 4.0 / 3.0, 1.0 / 60.0, Instant::now());
+        }
+        let faces = |feed: &Feed| {
+            feed.projected()
+                .sheets
+                .iter()
+                .filter(|sheet| sheet.canvas.is_some() && sheet.model.is_some())
+                .count()
+        };
+        assert!(
+            faces(&feed) > WALL_SLOTS as usize,
+            "the wall and its panels: {}",
+            faces(&feed)
+        );
+        // With the image each image panel shows, for the renderer to draw over it.
+        let images = &feed.projected().images;
+        assert!(!images.is_empty());
+        assert!(
+            images
+                .iter()
+                .all(|(shown, png)| (shown.as_str(), &png[..]) == (hash.as_str(), &PNG[..]))
+        );
+        // And drawn, in an offscreen render of the spectator's view, over the wall without them.
+        let draw = |gpu: &tomori_render::test_gpu::Gpu, feed: Feed| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let mut renderer =
+                crate::graphics::Renderer::new(&gpu.device, &gpu.queue, format, WIDTH, HEIGHT);
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("spectator panels"),
+                size: wgpu::Extent3d {
+                    width: WIDTH,
+                    height: HEIGHT,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let mut view = crate::spectator_view::SpectatorView::new(feed);
+            let mut swarm = Swarm::default();
+            for _ in 0..4 {
+                view.render(crate::spectator_view::RenderInputs {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    renderer: &mut renderer,
+                    swarm: &mut swarm,
+                    target: target.create_view(&Default::default()),
+                    aspect: WIDTH as f32 / HEIGHT as f32,
+                });
+            }
+            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("spectator panels readback"),
+                size: u64::from(WIDTH * HEIGHT * 4),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(WIDTH * 4),
+                        rows_per_image: Some(HEIGHT),
+                    },
+                },
+                target.size(),
+            );
+            gpu.queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            gpu.device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            let uploaded = renderer.images().levels(&hash).is_some();
+            (
+                buffer.slice(..).get_mapped_range().unwrap().to_vec(),
+                uploaded,
+            )
+        };
+        let changed = |a: &[u8], b: &[u8]| {
+            a.chunks(4)
+                .zip(b.chunks(4))
+                .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 8))
+                .count()
+        };
+        tomori_render::test_gpu::with(|gpu| {
+            let (with_panels, uploaded) = draw(&gpu, watching(published.clone(), true));
+            let (unfetched, unheld) = draw(&gpu, watching(published, false));
+            let (without, _) = draw(&gpu, watching(Vec::new(), false));
+            let drawn = changed(&unfetched, &without);
+            assert!(
+                drawn > 200,
+                "the panels must draw over the wall: {drawn} pixels changed"
+            );
+            // The image is uploaded and drawn over its panels, where until it is fetched they show none.
+            assert!(uploaded && !unheld);
+            let image = changed(&with_panels, &unfetched);
+            assert!(
+                image > 20,
+                "the image must draw over its panels: {image} pixels changed"
+            );
         });
     }
 

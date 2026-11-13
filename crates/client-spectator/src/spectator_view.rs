@@ -11,6 +11,8 @@ use glam::{Mat4, Vec3};
 
 pub(crate) struct SpectatorView {
     feed: Feed,
+    /// The GPU buffers of the space's walls and panels, made with the renderer's first frame.
+    panels: Option<tomori_render::scene_graphics::Panels>,
 }
 
 pub(crate) struct RenderInputs<'a> {
@@ -24,7 +26,7 @@ pub(crate) struct RenderInputs<'a> {
 
 impl SpectatorView {
     pub fn new(feed: Feed) -> Self {
-        Self { feed }
+        Self { feed, panels: None }
     }
 
     pub fn render(&mut self, input: RenderInputs<'_>) {
@@ -91,6 +93,20 @@ impl SpectatorView {
         input
             .renderer
             .update_controllers(input.queue, frame.controllers, frame.hands);
+        // The space's walls and panels, as the headset draws them, by its own copy of the part of
+        // `tomori_render::scene_graphics::draw` that draws them, until the spectator draws the frame step's own frame
+        // (#482). See `design/spectator.md`.
+        let projected = self.feed.projected();
+        input
+            .renderer
+            .update_volumes(input.queue, &projected.volumes);
+        input
+            .renderer
+            .update_images(input.device, input.queue, &projected.images);
+        let panels = self.panels.get_or_insert_with(|| {
+            tomori_render::scene_graphics::Panels::new(input.device, input.renderer)
+        });
+        panels.set_cards(input.device, input.queue, input.renderer, &projected.sheets);
         // Preserve the followed participant's vertical FOV instead of
         // stretching its view to the spectator output aspect ratio.
         let aspect_correction =
@@ -102,8 +118,8 @@ impl SpectatorView {
             &[input.target],
             &[projection],
             Mat4::from_cols_array(&frame.scene_to_space),
-            // The headset's head-locked HUD would obstruct the spectator view.
-            &[],
+            // The space's walls and panels only: the headset's head-locked HUD would obstruct the spectator view.
+            &panels.list(Mat4::from_cols_array(&frame.scene_to_space)),
         );
     }
 }
