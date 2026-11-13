@@ -437,27 +437,102 @@ pub fn ground() -> Vec<[Vec3; 3]> {
     yard().0.walkable().to_vec()
 }
 
+/// How far apart the corners within the meadow and the yard's earth are, which are each one flat face: a seventh of the
+/// chunks the scenery draws the yard in, so that none of their triangles reaches far beyond its chunk's cell.
+const FINELY: f32 = 1.0;
+
+/// The meadow, out to the foothills' first ring, whose corners are its edge, so that the river's channel beyond it is
+/// open, cut along the beach's outline, the part within it the beach's shingle, each part one face, as when each was
+/// fanned from its first corner, drawn in triangles about [`FINELY`] across: each edge along one of the outline's lines
+/// cut at every part's corner on that line and every [`FINELY`] along it, alike for the parts either side of it, so that
+/// they meet corner to corner, and the ring's chords, about a metre long, kept whole, as the foothills meet them.
+fn meadow(shapes: &mut Shapes) {
+    let outline = crate::beach::outline();
+    let (beach, meadow) = crate::shapes::cut(&crate::backdrop::meadow(), &outline);
+    let parts: Vec<(Vec<Vec3>, Vec3)> = meadow
+        .into_iter()
+        .map(|part| (part, palette::GRASS))
+        .chain(beach.map(|part| (part, crate::beach::shingle(0))))
+        .collect();
+    let lines: Vec<(Vec2, Vec2)> = (0..outline.len())
+        .map(|index| (outline[index], outline[(index + 1) % outline.len()]))
+        .collect();
+    let flat = |point: Vec3| Vec2::new(point.x, point.z);
+    let on = |(from, to): (Vec2, Vec2), point: Vec3| {
+        ((to - from).perp_dot(flat(point) - from) / from.distance(to)).abs() < 1e-3
+    };
+    let along_line = |(from, to): (Vec2, Vec2), point: Vec3| {
+        (flat(point) - from).dot(to - from) / from.distance(to)
+    };
+    // Each line's marks, by how far along it each is: every part's corner on it, and every `FINELY` along it but those
+    // within a quarter of that of a corner.
+    let marks: Vec<Vec<(f32, Vec3)>> = lines
+        .iter()
+        .map(|line| {
+            let mut marks: Vec<(f32, Vec3)> = Vec::new();
+            for corner in parts.iter().flat_map(|(part, _)| part) {
+                if on(*line, *corner) && !marks.iter().any(|(_, mark)| mark == corner) {
+                    marks.push((along_line(*line, *corner), *corner));
+                }
+            }
+            let corners = marks.len();
+            let (from, to) = *line;
+            for step in -64..=64 {
+                let at = step as f32 * FINELY;
+                if marks[..corners]
+                    .iter()
+                    .all(|(mark, _)| (mark - at).abs() > FINELY * 0.25)
+                {
+                    let point = from + (to - from).normalize() * at;
+                    marks.push((at, Vec3::new(point.x, crate::backdrop::MEADOW, point.y)));
+                }
+            }
+            marks.sort_by(|a, b| a.0.total_cmp(&b.0));
+            marks
+        })
+        .collect();
+    let along = |from: Vec3, to: Vec3| -> Vec<Vec3> {
+        let Some(line) = lines
+            .iter()
+            .position(|line| on(*line, from) && on(*line, to))
+        else {
+            return Vec::new();
+        };
+        let ends = (along_line(lines[line], from), along_line(lines[line], to));
+        let (low, high) = (ends.0.min(ends.1), ends.0.max(ends.1));
+        let mut within: Vec<Vec3> = marks[line]
+            .iter()
+            .filter(|(at, _)| *at > low + 1e-4 && *at < high - 1e-4)
+            .map(|(_, mark)| *mark)
+            .collect();
+        if ends.0 > ends.1 {
+            within.reverse();
+        }
+        within
+    };
+    for (part, color) in parts {
+        shapes.finely(&part, along, FINELY, color);
+    }
+}
+
 /// The yard's shapes, lit and glowing.
 fn yard() -> (Shapes, Shapes) {
     let mut shapes = Shapes::new();
     let mut glass = Shapes::new();
-    // The meadow, out to the foothills' first ring, whose corners are its edge, so that the river's channel beyond it is
-    // open, cut along the beach's outline, the part within it the beach's shingle; and the packed earth inside the
-    // fence, a little above it.
-    let (beach, meadow) = crate::shapes::cut(&crate::backdrop::meadow(), &crate::beach::outline());
-    let meadow = meadow.into_iter().map(|part| (part, palette::GRASS));
-    for (part, color) in meadow.chain(beach.map(|part| (part, crate::beach::shingle(0)))) {
-        crate::backdrop::facing(&mut shapes, &part, Vec3::Y, color);
-    }
+    // The meadow, and the packed earth inside the fence, a little above it, each one face in triangles about [`FINELY`]
+    // across rather than fanned from one corner across the yard, so that it is drawn in chunks of its own.
+    meadow(&mut shapes);
     let fence = layout::FENCE;
     shapes.ground(|shapes| {
-        shapes.polygon(
+        shapes.finely(
             &[
                 Vec3::new(fence.low.x, 0.0, fence.high.y),
                 Vec3::new(fence.high.x, 0.0, fence.high.y),
                 Vec3::new(fence.high.x, 0.0, fence.low.y),
                 Vec3::new(fence.low.x, 0.0, fence.low.y),
             ],
+            |from, to| crate::shapes::even(from, to, FINELY),
+            FINELY,
             palette::EARTH,
         )
     });
@@ -519,6 +594,119 @@ mod tests {
     }
 
     #[test]
+    fn the_earth_and_meadow_are_drawn_in_small_triangles_and_walked_on_as_the_earth_was() {
+        // Walked on as the one face of the earth inside the fence, fanned from its first corner.
+        let fence = layout::FENCE;
+        let [a, b, c, d] = [
+            Vec3::new(fence.low.x, 0.0, fence.high.y),
+            Vec3::new(fence.high.x, 0.0, fence.high.y),
+            Vec3::new(fence.high.x, 0.0, fence.low.y),
+            Vec3::new(fence.low.x, 0.0, fence.low.y),
+        ];
+        assert_eq!(ground(), [[a, b, c], [a, c, d]]);
+        // Drawn in triangles none more than 1.5 m across the ground, each facing up, all of one colour for each face
+        // they draw, covering the earth and the meadow as they did.
+        let (shapes, _) = yard();
+        let primitive = shapes.primitive(PLAIN);
+        let (mut earth, mut meadow) = (0.0, 0.0);
+        let mut colors = std::collections::HashSet::new();
+        // How many of the meadow's triangles have each edge, either way along it, by its corners to the bit.
+        let mut edges: std::collections::HashMap<[[u32; 2]; 2], usize> = Default::default();
+        let key = |from: Vec3, to: Vec3| {
+            let [from, to] = [from, to].map(|point| [point.x.to_bits(), point.z.to_bits()]);
+            if from < to { [from, to] } else { [to, from] }
+        };
+        for triangle in primitive.indices.as_chunks::<3>().0 {
+            let corners = triangle.map(|corner| primitive.positions[corner as usize]);
+            let level = corners[0].y;
+            if !corners.iter().all(|corner| corner.y == level)
+                || ![0.0, crate::backdrop::MEADOW].contains(&level)
+            {
+                continue;
+            }
+            let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
+            let (low, high) = (
+                corners[0].min(corners[1]).min(corners[2]),
+                corners[0].max(corners[1]).max(corners[2]),
+            );
+            if normal.y <= 0.0 || (level == 0.0 && !fence.contains(glam::Vec2::new(low.x, low.z))) {
+                continue;
+            }
+            assert!((high - low).x.max((high - low).z) <= 1.5, "{corners:?}");
+            let area = normal.length() * 0.5;
+            if level == 0.0 {
+                earth += area;
+            } else {
+                meadow += area;
+                for index in 0..3 {
+                    *edges
+                        .entry(key(corners[index], corners[(index + 1) % 3]))
+                        .or_default() += 1;
+                }
+            }
+            colors.insert((
+                level.to_bits(),
+                primitive.colors[triangle[0] as usize]
+                    .to_array()
+                    .map(f32::to_bits),
+            ));
+        }
+        assert!(
+            (earth - fence.size().x * fence.size().y).abs() < 0.01,
+            "{earth}"
+        );
+        let ring = crate::backdrop::meadow();
+        let disc: f32 = (0..ring.len())
+            .map(|index| {
+                let (from, to) = (ring[index], ring[(index + 1) % ring.len()]);
+                (from.x * to.z - to.x * from.z) * 0.5
+            })
+            .sum::<f32>()
+            .abs();
+        assert!((meadow - disc).abs() < 0.05, "{meadow} {disc}");
+        // Its triangles meet edge to edge, without a corner on another's edge, and its open edges are the first ring's
+        // chords, each piece as the parts it was drawn as before had it, as the foothills meet them. Those parts, as the
+        // beach's outline cuts them, had a corner of one here and there on another's edge along the outline, which now
+        // meet corner to corner.
+        let (beach, parts) = crate::shapes::cut(&ring, &crate::beach::outline());
+        let mut before: std::collections::HashMap<[[u32; 2]; 2], usize> = Default::default();
+        for part in parts.iter().chain(&beach) {
+            for index in 0..part.len() {
+                *before
+                    .entry(key(part[index], part[(index + 1) % part.len()]))
+                    .or_default() += 1;
+            }
+        }
+        assert!(edges.values().all(|count| *count <= 2));
+        let mut length = 0.0;
+        for [from, to] in edges
+            .iter()
+            .filter(|(_, count)| **count == 1)
+            .map(|(edge, _)| *edge)
+        {
+            assert_eq!(before.get(&[from, to]), Some(&1));
+            let [from, to] = [from, to].map(|point| glam::Vec2::from(point.map(f32::from_bits)));
+            let on_a_chord = (0..ring.len()).any(|index| {
+                let [a, b] = [ring[index], ring[(index + 1) % ring.len()]]
+                    .map(|corner| glam::Vec2::new(corner.x, corner.z));
+                [from, to].iter().all(|point| {
+                    (b - a).perp_dot(*point - a).abs() < 1e-4 * a.distance(b)
+                        && (*point - a).dot(b - a) > -1e-4
+                        && (*point - b).dot(a - b) > -1e-4
+                })
+            });
+            assert!(on_a_chord, "{from} {to}");
+            length += from.distance(to);
+        }
+        let perimeter: f32 = (0..ring.len())
+            .map(|index| ring[index].distance(ring[(index + 1) % ring.len()]))
+            .sum();
+        assert!((length - perimeter).abs() < 1e-3, "{length} {perimeter}");
+        // The earth, and each of the meadow's parts and the beach's shingle within it.
+        assert_eq!(colors.len(), 1 + parts.len() + 1);
+    }
+
+    #[test]
     fn nothing_lies_flat_just_above_the_earth_to_flicker_against_it() {
         // Every face of the yard and the coop that faces up, but the meadow and the earth themselves, stands at least
         // 5 mm above whatever flat face it is over, so that none fights the earth, the coop's floor or another for depth.
@@ -563,16 +751,16 @@ mod tests {
         let mut decals = 0;
         for (index, (height, low, high, face)) in flats.iter().enumerate() {
             let inside = fence.contains(*low) && fence.contains(*high);
-            if (-0.02..0.05).contains(height) && inside && *height != 0.0 {
+            let ground = [0.0, crate::backdrop::MEADOW].contains(height);
+            if (-0.02..0.05).contains(height) && inside && !ground {
                 assert!(*height >= 0.005, "{height} {low} {high}");
                 decals += 1;
             }
             for (other, other_low, other_high, other_face) in &flats[index + 1..] {
                 let overlaps = low.cmplt(*other_high).all() && other_low.cmplt(*high).all();
-                // The meadow's parts, cut along the beach's outline from one flat polygon, meet rather than overlap.
-                let meadow =
-                    *height == crate::backdrop::MEADOW && *other == crate::backdrop::MEADOW;
-                if overlaps && face != other_face && !meadow {
+                // The meadow's parts, cut along the beach's outline from one flat polygon, and the triangles each of them
+                // and the earth is drawn in, meet rather than overlap.
+                if overlaps && face != other_face && !(ground && height == other) {
                     assert!(
                         (height - other).abs() >= 0.001,
                         "{height} {other} {low} {high}"

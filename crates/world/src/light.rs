@@ -19,6 +19,13 @@ pub const LIGHTS_PER_INSTANCE: usize = 8;
 /// [`LIGHTS_PER_INSTANCE`] fades in over, so that two lights passing each other in brightness swap without a flicker.
 pub const FADE: f32 = 0.2;
 
+/// How much of its light a light kept of more than [`LIGHTS`] gives, `gap` from reaching the first eye, by how far it
+/// reaches, `reach`, of the nearest left out, `cut`: none as near as it, rising over [`FADE`] of its reach nearer, so
+/// that a light passing another at the cut fades rather than coming or going at once.
+pub(crate) fn faded(reach: f32, gap: f32, cut: f32) -> f32 {
+    ((cut - gap) / (FADE * reach)).clamp(0.0, 1.0)
+}
+
 /// How much further than its reach a light is taken to reach an instance's bounds, so that rounding never leaves out a
 /// light that lights some of it: a centimetre, and a ten-thousandth of its reach.
 const MARGIN: (f32, f32) = (0.01, 1e-4);

@@ -365,3 +365,67 @@ fn each_instance_seen_is_lit_by_its_root_s_lights_within_the_budgets() {
     world.place(post, [Some(around(Vec3::new(0.0, 1.0, -2.5), 0.5))]);
     assert!(world.lit(post).all(<[Lit]>::is_empty));
 }
+
+#[test]
+fn of_more_lights_than_a_root_lights_by_those_at_the_cut_fade_as_the_eyes_move() {
+    let mut world = World::new();
+    let root = world.add_root();
+    // Eighty lights in a row ahead of the eyes, a quarter of a metre apart, each reaching 2 m.
+    let lights: Vec<LightId> = (0..80)
+        .map(|index| {
+            world.add_light(Light::new(
+                root,
+                Vec3::new(0.0, 1.0, -3.0 - index as f32 * 0.25),
+                2.0,
+                Vec3::ONE,
+            ))
+        })
+        .collect();
+    let given = |world: &World| -> Vec<f32> {
+        (0..80)
+            .map(|index| {
+                world
+                    .root_lights(root)
+                    .iter()
+                    .find(|light| light.position.z == -3.0 - index as f32 * 0.25)
+                    .map_or(0.0, |light| light.intensity)
+            })
+            .collect()
+    };
+    // As the eyes walk 3 m along the row, a centimetre at a time, nearer the far end: each light's share of its light
+    // changes by little at each step, as it nears the cut and passes it, rather than coming or going whole.
+    let mut last: Option<Vec<f32>> = None;
+    let mut fading = 0;
+    for step in 0..=300 {
+        let at = Vec3::new(0.0, 1.6, -(step as f32) * 0.01);
+        world.set_views(&both(at, 0.0));
+        world.cull();
+        assert_eq!(world.root_lights(root).len(), LIGHTS);
+        let now = given(&world);
+        assert!(now.iter().all(|share| (0.0..=1.0).contains(share)));
+        // Those as near as the nearest left out give nothing, and the nearest give all their light.
+        assert_eq!(now[..40], [1.0; 40]);
+        assert!(now.iter().filter(|share| **share > 0.0).count() <= LIGHTS);
+        fading += now
+            .iter()
+            .filter(|share| **share > 0.0 && **share < 1.0)
+            .count();
+        if let Some(last) = &last {
+            for (index, (was, is)) in last.iter().zip(&now).enumerate() {
+                // A step of 1 cm moves a light's gap and the cut's by as much: 2 cm over a fifth of 2 m.
+                assert!(
+                    (was - is).abs() <= 0.05 + 1e-4,
+                    "{step} {index}: {was} {is}"
+                );
+            }
+        }
+        last = Some(now);
+    }
+    assert!(fading > 300, "{fading}");
+    // With no more than the budget, none fades.
+    for light in &lights[LIGHTS..] {
+        world.remove_light(*light);
+    }
+    world.cull();
+    assert!(given(&world)[..LIGHTS].iter().all(|share| *share == 1.0));
+}

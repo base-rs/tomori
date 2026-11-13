@@ -42,6 +42,12 @@ impl Shapes {
             .normalize_or_zero();
         let color = varied(color, self.faces, 0.06);
         self.faces += 1;
+        self.face(corners, normal, color);
+    }
+
+    /// A flat polygon through `corners`, of `normal` and `color`, fanned from its first corner: one face, or a piece of
+    /// one, whose colour is varied already.
+    fn face(&mut self, corners: &[Vec3], normal: Vec3, color: Vec4) {
         let first = self.positions.len() as u32;
         for corner in corners {
             self.positions.push(*corner);
@@ -53,11 +59,91 @@ impl Shapes {
                 .extend([first, first + index, first + index + 1]);
         }
         if self.marking {
-            self.ground.extend(
-                (1..corners.len() - 1)
-                    .map(|index| [corners[0], corners[index], corners[index + 1]]),
-            );
+            self.ground.extend(fan(corners));
         }
+    }
+
+    /// A level polygon through `corners`, facing up whichever way they wind, as [`Shapes::polygon`] draws it so, one face
+    /// of one normal and colour, walked on as the same fan if it is ground, but drawn in triangles about `spacing` across
+    /// rather than in slivers fanned from its first corner: each edge cut at the points `along` gives it, in order from
+    /// its first corner to its last, then a constrained Delaunay triangulation of them refined within, its edges kept as
+    /// they are cut, so that two faces whose shared edge `along` cuts alike meet corner to corner, and a chunk of it is
+    /// no larger than a chunk.
+    pub fn finely(
+        &mut self,
+        corners: &[Vec3],
+        along: impl Fn(Vec3, Vec3) -> Vec<Vec3>,
+        spacing: f32,
+        color: Vec3,
+    ) {
+        use spade::{
+            AngleLimit, ConstrainedDelaunayTriangulation, Point2, RefinementParameters,
+            Triangulation,
+        };
+        let corners: Vec<Vec3> = if (corners[1] - corners[0]).cross(corners[2] - corners[0]).y < 0.0
+        {
+            corners.iter().rev().copied().collect()
+        } else {
+            corners.to_vec()
+        };
+        let corners = corners.as_slice();
+        let normal = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .normalize_or_zero();
+        let color = varied(color, self.faces, 0.06);
+        self.faces += 1;
+        // Walked on as the fan it was, not as the faces it is drawn in.
+        if self.marking {
+            self.ground.extend(fan(corners));
+        }
+        let marking = std::mem::replace(&mut self.marking, false);
+        let edge: Vec<Vec3> = (0..corners.len())
+            .flat_map(|index| {
+                let (from, to) = (corners[index], corners[(index + 1) % corners.len()]);
+                std::iter::once(from).chain(along(from, to))
+            })
+            .collect();
+        // Where each point of its edge is, to the bit, to find it again from the triangulation's own.
+        let key = |x: f64, z: f64| [(x as f32).to_bits(), (z as f32).to_bits()];
+        let points: std::collections::HashMap<_, Vec3> = edge
+            .iter()
+            .map(|point| (key(f64::from(point.x), f64::from(point.z)), *point))
+            .collect();
+        let constraints = (0..edge.len())
+            .map(|index| [index, (index + 1) % edge.len()])
+            .collect();
+        let mut triangulation: ConstrainedDelaunayTriangulation<Point2<f64>> =
+            ConstrainedDelaunayTriangulation::bulk_load_cdt(
+                edge.iter()
+                    .map(|point| Point2::new(f64::from(point.x), f64::from(point.z)))
+                    .collect(),
+                constraints,
+            )
+            .expect("a level polygon's corners are finite and its edges do not cross");
+        let refined = triangulation.refine(
+            RefinementParameters::new()
+                .with_angle_limit(AngleLimit::from_deg(20.0))
+                .with_max_allowed_area(f64::from(spacing * spacing) * 0.5)
+                .with_max_additional_vertices(edge.len() * 64)
+                .keep_constraint_edges()
+                .exclude_outer_faces(true),
+        );
+        let outer: std::collections::HashSet<_> = refined.excluded_faces.into_iter().collect();
+        let level = corners[0].y;
+        for face in triangulation
+            .inner_faces()
+            .filter(|face| !outer.contains(&face.fix()))
+        {
+            let [a, b, c] = face.positions().map(|point| {
+                points
+                    .get(&key(point.x, point.y))
+                    .copied()
+                    .unwrap_or(Vec3::new(point.x as f32, level, point.y as f32))
+            });
+            // The triangulation's faces wind anticlockwise across the ground, facing down: turned to face up.
+            self.face(&[a, c, b], normal, color);
+        }
+        self.marking = marking;
     }
 
     /// Draw what `draw` draws as ground, too: the faces participants walk on, as Tomori derives where they may land
@@ -283,6 +369,15 @@ pub fn cut(corners: &[Vec3], outline: &[Vec2]) -> (Option<Vec<Vec3>>, Vec<Vec<Ve
         }
     }
     (Some(within), beyond)
+}
+
+/// The points that cut the edge from `from` to `to` into pieces of the same length, at most `spacing` long, in order from
+/// `from`, but neither end: none for an edge no longer.
+pub fn even(from: Vec3, to: Vec3, spacing: f32) -> Vec<Vec3> {
+    let pieces = (from.distance(to) / spacing).ceil().max(1.0) as usize;
+    (1..pieces)
+        .map(|piece| from.lerp(to, piece as f32 / pieces as f32))
+        .collect()
 }
 
 /// The triangles a flat, convex polygon is drawn in, a fan about its first corner, each wound as it is.
