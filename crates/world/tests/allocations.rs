@@ -2,21 +2,30 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! A frame costs no allocation: once what is placed stops growing, giving the world its views, placing what moves and
-//! culling allocate nothing, so that the indirection costs the headset's frame no time in the allocator.
+//! culling allocate nothing, so that the indirection costs the headset's frame no time in the allocator. Counted on the
+//! test's thread only, as the world uses no other, so that what the test harness allocates on its own threads meanwhile
+//! is not.
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 use glam::{Mat4, Quat, Vec3};
 use tomori_world::{Aabb, Item, Layer, Light, Mobility, World};
 
-/// The system's allocator, counting what it allocates.
+/// The system's allocator, counting what each thread allocates.
 struct Counting;
 
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count() {
+    // Without a thread's locals, as it ends, nothing is counted.
+    let _ = ALLOCATED.try_with(|allocated| allocated.set(allocated.get() + 1));
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATED.fetch_add(1, Ordering::Relaxed);
+        count();
         unsafe { System.alloc(layout) }
     }
 
@@ -25,7 +34,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        ALLOCATED.fetch_add(1, Ordering::Relaxed);
+        count();
         unsafe { System.realloc(pointer, layout, size) }
     }
 }
@@ -100,11 +109,11 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
     for step in 0..3 {
         frame(&mut world, step);
     }
-    let before = ALLOCATED.load(Ordering::Relaxed);
+    let before = ALLOCATED.with(Cell::get);
     let mut seen = 0;
     for step in 3..200 {
         seen += frame(&mut world, step);
     }
-    assert_eq!(ALLOCATED.load(Ordering::Relaxed) - before, 0);
+    assert_eq!(ALLOCATED.with(Cell::get) - before, 0);
     assert!(seen > 0);
 }
