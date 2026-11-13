@@ -7,6 +7,62 @@ use tomori_protocol::{EnvironmentVersion, Keepalive, Limits};
 
 use crate::Backoff;
 
+/// Whose voices a client plays: everyone's, the agent's speech alone, live or played again, or none. A participant's
+/// voice not played is dropped as it arrives, before its samples are decoded; the agent's speech, not played, is muted
+/// rather than dropped, so that it is still measured and the agent is still seen speaking. The spectator chooses, so that
+/// a demonstration's own voice does not come back out of its speakers. See `design/spectator.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Hearing {
+    /// Every participant's voice and the agent's speech.
+    #[default]
+    All,
+    /// The agent's speech alone.
+    Agent,
+    /// No voice at all.
+    Nobody,
+}
+
+impl Hearing {
+    /// Every choice, in the order [`Self::next`] cycles through them.
+    pub const EVERY: [Self; 3] = [Self::All, Self::Agent, Self::Nobody];
+
+    /// Its name on a command line: `all`, `agent` or `none`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Agent => "agent",
+            Self::Nobody => "none",
+        }
+    }
+
+    /// The choice [`Self::name`] names, if any.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::EVERY
+            .into_iter()
+            .find(|hearing| hearing.name() == name)
+    }
+
+    /// The next choice: everyone's, then the agent's alone, then none, and everyone's again.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Agent,
+            Self::Agent => Self::Nobody,
+            Self::Nobody => Self::All,
+        }
+    }
+
+    /// Whether the participants' voices are delivered to play.
+    pub(crate) fn participants(self) -> bool {
+        self == Self::All
+    }
+
+    /// Whether the agent's speech is muted.
+    pub(crate) fn mutes_agent(self) -> bool {
+        self == Self::Nobody
+    }
+}
+
 /// How a [`crate::Client`] reaches the server. A Tomori server that admits by tokens serves only TLS with a self-signed certificate, which the client pins by its fingerprint. See `design/security.md`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -52,6 +108,9 @@ pub struct Options {
     pub outgoing_utterance_limit: usize,
     /// Received audio frames held for the application; newer frames are dropped when it falls this far behind.
     pub incoming_audio_limit: usize,
+    /// Whose voices are delivered to play, from the first frame received; [`crate::Client::hear`] changes it. Everyone's,
+    /// by default.
+    pub hearing: Hearing,
     /// Require a new explicit microphone activation after a connection ends.
     /// Disabled by default for clients that restore their microphone gate.
     pub microphone_rearm_on_disconnect: bool,
@@ -98,6 +157,7 @@ impl std::fmt::Debug for Options {
             .field("outgoing_audio_limit", &self.outgoing_audio_limit)
             .field("outgoing_utterance_limit", &self.outgoing_utterance_limit)
             .field("incoming_audio_limit", &self.incoming_audio_limit)
+            .field("hearing", &self.hearing)
             .field(
                 "microphone_rearm_on_disconnect",
                 &self.microphone_rearm_on_disconnect,
@@ -131,6 +191,7 @@ impl Options {
             outgoing_audio_limit: 8,
             outgoing_utterance_limit: 1500,
             incoming_audio_limit: 256,
+            hearing: Hearing::All,
             microphone_rearm_on_disconnect: false,
             environments: None,
             projection_patches: false,
@@ -138,5 +199,31 @@ impl Options {
             spawns: false,
             limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_hearing_is_named_cycles_and_says_what_it_plays() {
+        for hearing in Hearing::EVERY {
+            assert_eq!(Hearing::named(hearing.name()), Some(hearing));
+        }
+        assert_eq!(Hearing::named("some"), None);
+        assert_eq!(
+            Hearing::EVERY.map(Hearing::next),
+            [Hearing::Agent, Hearing::Nobody, Hearing::All]
+        );
+        assert_eq!(
+            Hearing::EVERY.map(Hearing::participants),
+            [true, false, false]
+        );
+        assert_eq!(
+            Hearing::EVERY.map(Hearing::mutes_agent),
+            [false, false, true]
+        );
+        assert_eq!(Hearing::default(), Hearing::All);
     }
 }

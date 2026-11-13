@@ -15,6 +15,7 @@ pub use duck::{Duck, Shape};
 pub use earcon::{Bank, Earcon, Note, PROBE_LENGTH, PROBE_LEVEL, Spec, probe};
 pub use jitter_buffer::{JitterBuffer, JitterOptions};
 pub use limiter::{CEILING, Limiter};
+pub(crate) use mixer::is_agent;
 pub use mixer::{Direction, Layout, Mixer, MixerOptions, Sound};
 pub use player::{Player, PlayerControl};
 

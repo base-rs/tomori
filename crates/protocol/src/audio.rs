@@ -86,6 +86,12 @@ impl AudioFrame {
         output
     }
 
+    /// The [`Self::source`] of an encoded frame, read from its header without decoding its samples, so that a receiver
+    /// can drop a frame it will not play before decoding it; `None` if the header is truncated.
+    pub fn source_of(bytes: &[u8]) -> Option<u32> {
+        Some(u32::from_le_bytes(*bytes.get(4..)?.first_chunk()?))
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, AudioError> {
         if bytes.len() < AUDIO_HEADER_BYTES {
             return Err(AudioError::Truncated);
@@ -149,6 +155,19 @@ mod tests {
             let frame = AudioFrame { gate, ..frame() };
             assert_eq!(AudioFrame::decode(&frame.encode()).unwrap(), frame);
         }
+    }
+
+    #[test]
+    fn the_source_is_read_from_the_header_alone() {
+        let bytes = AudioFrame {
+            source: 7,
+            ..frame()
+        }
+        .encode();
+        assert_eq!(AudioFrame::source_of(&bytes), Some(7));
+        assert_eq!(AudioFrame::source_of(&bytes[..8]), Some(7));
+        assert_eq!(AudioFrame::source_of(&bytes[..7]), None);
+        assert_eq!(AudioFrame::source_of(&bytes[..3]), None);
     }
 
     #[test]

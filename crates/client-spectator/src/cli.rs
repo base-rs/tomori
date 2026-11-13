@@ -4,6 +4,13 @@
 //! The `tomori-spectator` executable's command line: which output, which space and whom to follow, and running it.
 use crate::SpectatorOptions;
 use anyhow::{Context, Result, bail};
+use tomori_client::Hearing;
+
+/// The voices `--voices` names, `all`, `agent` or `none`, for a command line that takes it, such as `tomori --spectator`'s.
+pub fn parse_voices(value: &str) -> Result<Hearing> {
+    Hearing::named(value)
+        .with_context(|| format!("--voices takes all, agent or none, not {value:?}"))
+}
 
 /// Where the spectator's view goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +45,7 @@ impl Command {
             space: None,
             follow: None,
             token,
+            voices: Hearing::All,
         };
         let (mut audio_output, mut mode) = (None, None);
         let mut arguments = arguments.into_iter();
@@ -52,6 +60,7 @@ impl Command {
                 "--token" => options.token = Some(value("a token")?),
                 "--space" => options.space = Some(value("a space id")?),
                 "--follow" => options.follow = Some(value("a participant name")?),
+                "--voices" => options.voices = parse_voices(&value("all, agent or none")?)?,
                 "--audio-output" => audio_output = Some(value("an output's name")?),
                 _ if mode.is_none() => {
                     mode = Some(match argument.as_str() {
@@ -112,7 +121,7 @@ impl Command {
 }
 
 /// What `--help` shows.
-pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--audio-output NAME]
+pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--audio-output NAME]
 
 Renders a live space as a read-only view that follows a participant, for OBS or a call.
 
@@ -126,6 +135,7 @@ Options:
   --token TOKEN        a token from the server, such as from `tomori-server auth mint`; TOMORI_TOKEN does the same.
   --space ID           join this space (see `tomori discover --server ADDRESS`).
   --follow NAME        follow this participant by name (default: the first in the space).
+  --voices WHICH       play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.
   --audio-output NAME  on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.";
 
 #[cfg(test)]
@@ -193,12 +203,27 @@ mod tests {
                 space: Some("s1".into()),
                 follow: Some("Ada".into()),
                 token: Some("tomori_t".into()),
+                voices: Hearing::All,
             }
         );
         let command = parse(&["--server", "h:1", "--token", "tomori_u"]).unwrap();
         assert_eq!(command.options.server.as_deref(), Some("h:1"));
         assert_eq!(command.options.token.as_deref(), Some("tomori_u"));
         assert_eq!(command.audio_output, None);
+    }
+
+    #[test]
+    fn voices_are_named_and_every_voice_plays_by_default() {
+        assert_eq!(parse(&[]).unwrap().options.voices, Hearing::All);
+        for voices in Hearing::EVERY {
+            let command = parse(&["--voices", voices.name()]).unwrap();
+            assert_eq!(command.options.voices, voices);
+        }
+        assert_eq!(
+            error(&["--voices", "some"]),
+            "--voices takes all, agent or none, not \"some\""
+        );
+        assert_eq!(error(&["--voices"]), "--voices needs all, agent or none");
     }
 
     #[test]
@@ -240,7 +265,12 @@ mod tests {
 
     #[test]
     fn help_names_every_output() {
-        for output in ["--pipewire ", "--pipewire-preview", "--audio-output"] {
+        for output in [
+            "--pipewire ",
+            "--pipewire-preview",
+            "--audio-output",
+            "--voices",
+        ] {
             assert!(HELP.contains(output), "{output}");
         }
     }
