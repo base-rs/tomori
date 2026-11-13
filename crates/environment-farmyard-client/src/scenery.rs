@@ -68,11 +68,12 @@ const _: () = assert!(
 /// reached one of 8 m. See `design/rendering.md`.
 pub const CHUNK: f32 = 7.0;
 
-/// How far, at most, each coarser level of detail of the farmyard's large models and its hens strays from their own, in
-/// metres, each simplified from its own as it is uploaded ([`tomori_assets::Model::simplified`]): drawn where that
-/// spans at most a pixel from the nearer eye, about 9, 22 and 52 m away in a Quest 3's eye. Its bush's plants, stones,
-/// rock, sticks and logs, of 15 to 145 triangles each, simplify by too little to be worth it, and the ferns have their
-/// own details. See `design/rendering.md`.
+/// How far, at most, each coarser level of detail of the farmyard's yard and coop, in chunks, and its hens strays from
+/// their own, in metres, each simplified from its own as it is uploaded ([`tomori_assets::Model::simplified`]): drawn
+/// where that spans at most a pixel from the nearer eye, about 9, 22 and 52 m away in a Quest 3's eye. Its foothills,
+/// trail, upper terrace, campsite and beach, whose faces are each varied in colour, lose less than a tenth of their
+/// triangles within 6 cm, and its bush's plants, stones, rock, sticks and logs, of 15 to 145 triangles each, too few to
+/// be worth it; the ferns have their own details. See `design/rendering.md`.
 pub const DETAIL: [f32; 3] = [0.01, 0.025, 0.06];
 
 /// What the sky's, the ranges', the water's, the fire's and the ferns' shaders are told for each eye: the ferns' alone
@@ -132,9 +133,10 @@ impl From<&Fern> for FernInstance {
 pub(crate) const EVERY: [u32; 4] = tomori_assets::gpu::EVERY_LAMP;
 
 /// How far each of the ferns' details after their near one strays from it, as the render world reckons it, in metres:
-/// as much as spans a pixel in a Quest 3's eye at [`ferns::NEAR`] and [`ferns::DISTANT`], 10 and 25 m, where a fern was
-/// drawn far and distant by its distance, so that it is drawn so there, and beyond in a larger image.
-pub const FERN_DETAIL: [f32; 2] = [0.0098, 0.0265];
+/// as much as spans a pixel in a Quest 3's eye where a fern's nearest frond is about 8.5 and 32 m away, as its heart is
+/// about [`ferns::NEAR`] and [`ferns::DISTANT`], 10 and 35 m, where it is drawn far and distant by its distance, so that
+/// it is drawn so there, and further in a larger image. Distant, the haze has hidden three fifths of it.
+pub const FERN_DETAIL: [f32; 2] = [0.0098, 0.037];
 
 /// A point of the ranges, as their shader reads it.
 #[repr(C)]
@@ -1118,7 +1120,7 @@ impl Backdrop {
         chunked: &dyn Fn(&Model) -> Arc<Model>,
     ) -> Self {
         let (device, queue) = (target.device, target.queue);
-        let foothills = Drawn::detailed(
+        let foothills = Drawn::new(
             device,
             queue,
             models,
@@ -1152,14 +1154,14 @@ impl Backdrop {
             &chunked(&backdrop::rock()),
             Mat4::IDENTITY,
         );
-        let trail = Drawn::detailed(
+        let trail = Drawn::new(
             device,
             queue,
             models,
             &chunked(&trail::model()),
             Mat4::IDENTITY,
         );
-        let terrace = Drawn::detailed(
+        let terrace = Drawn::new(
             device,
             queue,
             models,
@@ -1514,7 +1516,7 @@ impl Farmyard {
         );
         let backdrop = Backdrop::new(target, &models, &pipeline_layout, &shader, &chunked);
         let plaques = Plaques::new(target);
-        let campsite = Drawn::detailed(
+        let campsite = Drawn::new(
             device,
             target.queue,
             &models,
@@ -1523,7 +1525,7 @@ impl Farmyard {
         );
         let sticks = Drawn::placed(device, target.queue, &models, &stick(), &[]);
         let logs = Drawn::placed(device, target.queue, &models, &log(), &[]);
-        let shingle = Drawn::detailed(
+        let shingle = Drawn::new(
             device,
             target.queue,
             &models,

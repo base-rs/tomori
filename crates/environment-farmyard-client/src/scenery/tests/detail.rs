@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The farmyard's large models and hens in their levels of detail, chosen for a Quest 3's eyes: each level simplified
+//! The farmyard's yard and coop, in chunks, and its hens in their levels of detail, chosen for a Quest 3's eyes: each level simplified
 //! within its error, its chunks' edges where they were; fewer triangles drawn from afar and never more; everything
 //! within 4 m ahead of the eyes, 8 m at the corners of their view, drawn exactly as before; and, further, a few pixels changed, by little, through the haze. Set
 //! `TOMORI_FARMYARD_CENSUS` to anything to print the triangles and pixels, and `TOMORI_FARMYARD_DETAIL_SIZE` to a size,
@@ -86,32 +86,14 @@ fn open(primitive: &tomori_assets::Primitive) -> HashSet<[[u32; 3]; 2]> {
 }
 
 #[test]
-fn each_level_of_the_large_models_and_hens_is_coarser_its_chunks_meeting_where_they_did() {
+fn each_level_of_the_yard_the_coop_and_a_hen_is_coarser_its_chunks_meeting_where_they_did() {
     let hen = tomori_environment_farmyard::chicken::Chicken::shared().unwrap();
     let models: Vec<(&str, Arc<Model>, Mat4, f32)> = vec![
         (
             "yard",
             Arc::new(props::model().chunked(CHUNK)),
             Mat4::IDENTITY,
-            0.35,
-        ),
-        (
-            "foothills",
-            Arc::new(backdrop::model().chunked(CHUNK)),
-            Mat4::IDENTITY,
-            0.25,
-        ),
-        (
-            "trail",
-            Arc::new(trail::model().chunked(CHUNK)),
-            Mat4::IDENTITY,
-            0.1,
-        ),
-        (
-            "terrace",
-            Arc::new(terrace::model().chunked(CHUNK)),
-            Mat4::IDENTITY,
-            0.25,
+            0.45,
         ),
         (
             "coop",
@@ -119,7 +101,7 @@ fn each_level_of_the_large_models_and_hens_is_coarser_its_chunks_meeting_where_t
             coop::placement(),
             0.3,
         ),
-        ("hen", hen.model.clone(), hen.placement, 0.45),
+        ("hen", hen.model.clone(), hen.placement, 0.55),
     ];
     let triangles = |model: &Model| -> usize {
         model
@@ -194,9 +176,9 @@ fn from_afar_the_farmyard_draws_fewer_triangles_and_never_more() {
                     sums[1] / 8
                 );
             }
-            // From the upper terrace and the waterfall rock, where most is far away, a tenth fewer at least.
+            // From the upper terrace and the waterfall rock, where most is far away, a twentieth fewer at least.
             if name.starts_with("Upper") || name.starts_with("Waterfall") {
-                assert!(sums[0] * 10 <= sums[1] * 9, "{name}: {sums:?}");
+                assert!(sums[0] * 20 <= sums[1] * 19, "{name}: {sums:?}");
             }
         }
         assert!(pollster::block_on(scope.pop()).is_none());
@@ -257,10 +239,11 @@ fn up_close_the_farmyard_is_drawn_as_it_was_and_further_away_changes_little_thro
                             continue;
                         }
                         // Further, where a coarser level is drawn, its edges move by at most a pixel of a Quest 3's, and
-                        // the furthest ferns have fewer leaflets: at most one pixel in thirty changes, by 6 of 255 on
-                        // average and 64 at most, the haze having hidden much of them.
-                        let mean = changed.iter().map(|by| f32::from(*by)).sum::<f32>()
-                            / changed.len().max(1) as f32;
+                        // the furthest ferns have fewer leaflets: at most two pixels in a hundred change, by 64 of 255 at
+                        // most and, over the whole view, by a sixteenth of one of 255 on average, the haze having hidden
+                        // much of them.
+                        let total: usize = changed.iter().map(|by| usize::from(*by)).sum();
+                        let mean = total as f32 / changed.len().max(1) as f32;
                         let most = changed.iter().copied().max().unwrap_or(0);
                         if print && eye == 0 {
                             eprintln!(
@@ -270,7 +253,7 @@ fn up_close_the_farmyard_is_drawn_as_it_was_and_further_away_changes_little_thro
                             );
                         }
                         assert!(
-                            changed.len() * 30 <= pixels && mean <= 6.0 && most <= 64,
+                            changed.len() * 50 <= pixels && total * 16 <= pixels && most <= 64,
                             "{name}, turned {turn}: eye {eye}: {} changed by {mean} on average",
                             changed.len()
                         );

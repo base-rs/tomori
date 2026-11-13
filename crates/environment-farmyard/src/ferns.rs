@@ -50,7 +50,7 @@ pub const OVERHEAD: f32 = 2.2;
 pub const NEAR: f32 = 10.0;
 
 /// How far from the eyes a fern is drawn far; beyond, distant, with fewer fronds still, each in fewer segments.
-pub const DISTANT: f32 = 25.0;
+pub const DISTANT: f32 = 35.0;
 
 /// How far, at most, a fern's points sway in the breeze at its own size: a tree fern's frond tips, and a ground fern's.
 pub const TREE_SWAY: f32 = 0.14;

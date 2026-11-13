@@ -41,6 +41,11 @@ impl Quadric {
         ])
     }
 
+    /// These planes, each counted `weight` times.
+    fn scaled(self, weight: f64) -> Self {
+        Self(self.0.map(|value| value * weight))
+    }
+
     fn add(&mut self, other: &Self) {
         for (a, b) in self.0.iter_mut().zip(other.0) {
             *a += b;
@@ -108,8 +113,8 @@ struct Surface {
     classes: Vec<Class>,
     /// Whether each corner keeps its own normal and colour wherever it goes, as a faceted surface's do.
     faceted: bool,
-    /// The seam edges, both ways, by their points.
-    seams: HashMap<(u32, u32), ()>,
+    /// The seam edges, both ways, by their points, with how firmly each holds.
+    seams: HashMap<(u32, u32), f64>,
     /// Each vertex's attributes, as one number for vertices whose attributes are the same: on a faceted surface, those
     /// but its normal and colour.
     attributes: Vec<u32>,
@@ -146,8 +151,8 @@ impl Surface {
         }
         // Faceted, each triangle's corners of one normal and colour, as a low-poly model's faces are, a corner keeps its
         // face's normal and colour wherever it goes, and a seam is where the texture or the colour changes across an edge,
-        // not its normal, held only by the planes across it, so that where faces of other colours meet moves no further
-        // than any surface does.
+        // not its normal, held only by the planes across it, as firmly as the colour changes, so that where faces of other
+        // colours meet moves no further than any surface does, and where faces varied a little meet, a little further.
         let faceted = corners.iter().all(|corner| {
             let corner = corner.map(|vertex| vertex as usize);
             constant(&primitive.normals, corner) && constant(&primitive.colors, corner)
@@ -159,25 +164,26 @@ impl Surface {
                 about[*point as usize].push(index as u32);
             }
         }
-        let alike = |a: u32, b: u32| {
-            attributes[a as usize] == attributes[b as usize]
-                && (!faceted
-                    || match (
-                        primitive.colors.get(a as usize),
-                        primitive.colors.get(b as usize),
-                    ) {
-                        (Some(a), Some(b)) => similar(*a, *b),
-                        _ => true,
-                    })
+        let firmness = |a: u32, b: u32| {
+            if attributes[a as usize] != attributes[b as usize] {
+                return 1.0;
+            }
+            match (
+                primitive.colors.get(a as usize),
+                primitive.colors.get(b as usize),
+            ) {
+                (Some(a), Some(b)) if faceted => contrast(*a, *b),
+                _ => 0.0,
+            }
         };
-        // Each edge: how many triangles cross it each way, the vertices at its ends in the first, and whether attributes
-        // change across it.
+        // Each edge: how many triangles cross it each way, the vertices at its ends in the first, and how firmly it holds
+        // as a seam for how its attributes change across it, not at all where they do not.
         #[derive(Default)]
         struct Edge {
             forward: u32,
             backward: u32,
             ends: Option<(u32, u32)>,
-            seam: bool,
+            seam: f64,
         }
         let mut edges: HashMap<(u32, u32), Edge> = HashMap::new();
         for (triangle, corner) in triangles.iter().zip(&corners) {
@@ -192,7 +198,12 @@ impl Surface {
                     edge.backward += 1;
                 }
                 match edge.ends {
-                    Some(seen) => edge.seam |= !alike(seen.0, ends.0) || !alike(seen.1, ends.1),
+                    Some(seen) => {
+                        edge.seam = edge
+                            .seam
+                            .max(firmness(seen.0, ends.0))
+                            .max(firmness(seen.1, ends.1));
+                    }
                     None => edge.ends = Some(ends),
                 }
             }
@@ -205,11 +216,11 @@ impl Surface {
                 // Open, or met by more than two triangles, or by two wound alike.
                 classes[*a as usize] = Class::Locked;
                 classes[*b as usize] = Class::Locked;
-            } else if edge.seam {
+            } else if edge.seam > 0.0 {
                 seam_edges[*a as usize] += 1;
                 seam_edges[*b as usize] += 1;
-                seams.insert((*a, *b), ());
-                seams.insert((*b, *a), ());
+                seams.insert((*a, *b), edge.seam);
+                seams.insert((*b, *a), edge.seam);
             }
         }
         for (class, count) in classes.iter_mut().zip(&seam_edges) {
@@ -222,7 +233,7 @@ impl Surface {
             }
         }
         // Each point's planes: of the triangles about it, and, on a seam, of the planes through the seam across each
-        // triangle along it, so that a seam moved aside strays as its surface would.
+        // triangle along it, as firmly as it holds, so that a seam moved aside strays as its surface would.
         let mut quadrics = vec![Quadric::default(); points.len()];
         for triangle in &triangles {
             let [a, b, c] = triangle.map(|point| points[point as usize]);
@@ -233,9 +244,9 @@ impl Surface {
             }
             for side in 0..3 {
                 let (from, to) = (triangle[side], triangle[(side + 1) % 3]);
-                if seams.contains_key(&(from, to)) {
+                if let Some(firmness) = seams.get(&(from, to)) {
                     let (p, q) = (points[from as usize], points[to as usize]);
-                    let across = Quadric::plane((q - p).cross(normal), p);
+                    let across = Quadric::plane((q - p).cross(normal), p).scaled(*firmness);
                     quadrics[from as usize].add(&across);
                     quadrics[to as usize].add(&across);
                 }
@@ -385,14 +396,18 @@ impl Surface {
     }
 }
 
-/// Whether two colours of faces are near enough the same that where they meet is no seam, as a model's faces varied a
-/// little face by face, by at most 6% of their colour, are: each channel within [`SIMILAR`] of the brighter.
-fn similar(a: glam::Vec4, b: glam::Vec4) -> bool {
-    (a - b).abs().cmple(a.max(b) * SIMILAR).all()
+/// How firmly where two faces' colours meet holds as a seam: by how far apart they are, the most any channel differs of
+/// the brighter, over [`SIMILAR`], squared, at most 1, so that moving it aside by a distance strays as much as moving a
+/// surface by that distance times their difference over [`SIMILAR`]; faces varied a little face by face, by at most 6% of
+/// their colour, as a model's are, hold a little, and the same colour not at all.
+fn contrast(a: glam::Vec4, b: glam::Vec4) -> f64 {
+    let brighter = a.max(b);
+    let apart = (a - b).abs() / brighter.max(glam::Vec4::splat(f32::MIN_POSITIVE));
+    f64::from((apart.max_element() / SIMILAR).min(1.0)).powi(2)
 }
 
-/// How much two channels of colour may differ, of the brighter, and be the same colour's faces: twice the 6% a model's
-/// faces are varied by, and a little more.
+/// How much two colours differ, of the brighter, for where they meet to hold as firmly as any surface: twice the 6% a
+/// model's faces are varied by, and a little more.
 const SIMILAR: f32 = 0.15;
 
 /// Whether `values`, if there are any, are the same at each of `corners`.
@@ -434,11 +449,14 @@ impl Primitive {
     /// that strays it no further, judged by the squared distances of where the vertex goes from the planes of every
     /// triangle it has been part of, and, along a seam, of the planes across it, so that the distance from any of them
     /// is no more than `error`. Kept as they are: every vertex on an open edge, where its surface was cut, as a chunk's
-    /// was from its neighbours, so that they still meet; where more than two triangles meet at an edge; and where seams,
-    /// edges across which attributes change, meet, so that a box's corners stay; a vertex on a seam moves only along
-    /// it. No collapse folds the surface onto itself or turns a triangle over, so a closed part stays closed, and every
-    /// vertex kept is where it was, with the attributes it had, but those of a corner moved onto another, which takes
-    /// that vertex's on its side of any seam. Its triangles are in the order they were, and its material is the same.
+    /// was from its neighbours, so that they still meet; and where more than two triangles meet at an edge. On a smooth
+    /// surface, where seams, edges across which attributes change, meet, so that a box's corners stay, and a vertex on a
+    /// seam moves only along it; on a faceted one, each triangle of one normal and colour, a corner keeps its face's
+    /// normal and colour, and where its texture or colour changes is held by the planes across it, its colour as firmly
+    /// as the two differ. No collapse folds the surface onto itself or turns a triangle over, so a closed part stays
+    /// closed, and every vertex kept is where it was, with the attributes it had, but those of a corner moved onto
+    /// another, which takes that vertex's on its side of any seam. Its triangles are in the order they were, and its
+    /// material is the same.
     pub fn simplified(&self, error: f32) -> (Primitive, f32) {
         let mut surface = Surface::new(self);
         let limit = f64::from(error.max(0.0)).powi(2);
