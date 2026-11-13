@@ -113,7 +113,7 @@ pub(super) fn with_hens(
 }
 
 /// How far two pictures differ: the pixels whose colour differs at all.
-pub(super) fn differing(a: &[u8], b: &[u8]) -> usize {
+fn differing(a: &[u8], b: &[u8]) -> usize {
     a.chunks(4).zip(b.chunks(4)).filter(|(a, b)| a != b).count()
 }
 

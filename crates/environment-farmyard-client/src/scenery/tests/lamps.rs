@@ -1,9 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The farmyard lit by the few lamps the render world lists for each of its models' pieces and ferns looks exactly as
-//! lit by every lamp, from the census's viewpoints through a Quest 3's eyes and by the campfire at its biggest, while
-//! most of what is drawn adds up fewer lamps. Set `TOMORI_FARMYARD_CENSUS` to anything to print how many.
+//! The farmyard lit by the few lamps the render world lists for each of its models' pieces and ferns looks as lit by
+//! every lamp, but for a colour rounded apart here and there, from the census's viewpoints through a Quest 3's eyes and
+//! by the campfire at its biggest, while most of what is drawn adds up fewer lamps. Set `TOMORI_FARMYARD_CENSUS` to
+//! anything to print how many.
 use std::f32::consts::PI;
 
 use super::culling::{quest_eyes, viewpoints, with_hens};
@@ -63,10 +64,18 @@ fn the_farmyard_lit_by_each_piece_s_own_lamps_looks_as_lit_by_every_lamp() {
                         .any(|pixel| pixel[..3] != listed[eye][..3]),
                     "{name}: eye {eye} sees nothing"
                 );
-                assert_eq!(
-                    super::culling::differing(&every[eye], &listed[eye]),
-                    0,
-                    "{name}: listing each piece's lamps changed eye {eye}"
+                // The same pixels, but where the two loops round a colour apart: at most one pixel in 10,000, by a
+                // step or so of 255, as on lavapipe.
+                let changed: Vec<u8> = every[eye]
+                    .chunks(4)
+                    .zip(listed[eye].chunks(4))
+                    .filter(|(a, b)| a != b)
+                    .map(|(a, b)| a.iter().zip(b).map(|(a, b)| a.abs_diff(*b)).max().unwrap())
+                    .collect();
+                assert!(
+                    changed.len() * 10_000 <= (size.0 * size.1) as usize
+                        && changed.iter().all(|by| *by <= 3),
+                    "{name}: listing each piece's lamps changed eye {eye}: {changed:?}"
                 );
             }
             let (some, of) = self::listed(farmyard, &stage);
