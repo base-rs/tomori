@@ -68,7 +68,7 @@ fn lamps(space: &Space) -> Result<()> {
 }
 ```
 
-A side may declare actions the space's agent takes on what it describes when someone asks, such as showing a terminal's charts for another region: each action has a name, a description for the agent and typed parameters, a choice of values, a bounded number or short text, and is harmless unless marked consequential. Each object offers those it takes by name, the server checks every call against them and who asked, and the side is handed each as an `Intent` whose `acted()` names it, which it answers, done or refused with a reason:
+A side may declare actions the space's agent takes on what it describes when someone asks, such as showing a terminal's charts for another region: each action has a name, a description for the agent and typed parameters, a choice of values, a bounded number or text of up to 2,000 characters, such as a query, and is harmless unless marked consequential. Each object offers those it takes by name, the server checks every call against them and who asked, and the side is handed each as an `Intent` whose `acted()` names it, which it answers, done or refused with a reason:
 
 ```rust
 use std::time::Duration;
