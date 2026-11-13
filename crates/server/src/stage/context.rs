@@ -730,7 +730,7 @@ impl Stage {
             .filter(|kept| kept.published.is_some())
             .count();
         if shown >= super::published::PUBLISHED {
-            return Err("An environment publishes at most 32 panels in a space.");
+            return Err(super::published::MOST_PUBLISHED.as_str());
         }
         // Onto the Tomori wall, by any name, is the status wall's, which holds no environment's panels.
         if matches!(self.resolve(walls, to), super::Spot::Status(_)) {

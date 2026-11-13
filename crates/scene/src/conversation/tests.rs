@@ -7546,19 +7546,25 @@ mod events {
         use tomori_protocol::{Limits, MOST_FRAME_BYTES};
         let longest = Limits::TODAY.with_frame_bytes(MOST_FRAME_BYTES as u32);
         let mut conversation = joined();
-        // The Tomori wall, sixteen of an environment's own and six or twelve added, six slots each; and sixteen
-        // volumes of 1,024 nodes together.
+        // The Tomori wall, sixty-four of an environment's own and six or twelve added, six slots each; every panel an
+        // environment may publish beside the Tomori wall's and those floating; and sixteen volumes of 1,024 nodes
+        // together.
         assert_eq!(
             HEADSET_LIMITS,
             longest
-                .with_projection(23, 138, 12, 90)
+                .with_projection(71, 426, 12, 180)
                 .with_volumes(16, 1024)
+        );
+        assert!(
+            HEADSET_LIMITS.panels as usize
+                >= tomori_environment::PANEL_LIMIT
+                    + (tomori_protocol::WALL_SLOTS + tomori_protocol::PROJECTION_FLOATING) as usize
         );
         assert_eq!(Session::limits(&conversation), HEADSET_LIMITS);
         assert_eq!(
             DESKTOP_LIMITS,
             longest
-                .with_projection(29, 174, 24, 180)
+                .with_projection(77, 462, 24, 360)
                 .with_volumes(16, 1024)
         );
         conversation.set_limits(DESKTOP_LIMITS);

@@ -12,6 +12,14 @@ use serde::{Deserialize, Serialize};
 /// added.
 pub const PROJECTION_WALLS: u32 = 1 + 6 + 6;
 
+/// The most walls of an environment's own that are shown, the first it declares; any more are ignored. Sixty-four, where
+/// sixteen were before, so that a console of a wall for each of its stations, such as an operations bridge and the
+/// consoles of an observation deck, fits with room to grow: a wall is about 160 bytes of a projection and a board of a
+/// few quads in one draw, and the walls' slots together are still bounded by [`Limits::MOST`]'s, which bound what a
+/// projection holds however many walls they are on. The server uses it, and Tomori's headset and desktop window state
+/// walls and slots enough to draw this many standard walls. See `design/projection.md`.
+pub const DECLARED_WALLS: u32 = 64;
+
 /// The most slots the walls shown in one environment of a space have together: as many as the Tomori wall and twelve
 /// walls of six, so that a projection at every limit fits in one frame.
 pub const PROJECTION_SLOTS: u32 = crate::WALL_SLOTS * PROJECTION_WALLS;
@@ -103,12 +111,12 @@ impl Limits {
 
     /// The most any connection is bound by, which Tomori's server states in its `Welcome`, and its desktop window in its
     /// `Hello`: frames of [`crate::MOST_FRAME_BYTES`], and ten times today's slots and floating panels, on the Tomori
-    /// wall, as many as sixteen of an environment's own and sixty owners add, so that a projection at every limit fits
-    /// in one frame, which it does however many walls its slots are on. A peer stating more is read as stating this.
+    /// wall, as many as [`DECLARED_WALLS`] of an environment's own and sixty owners add, so that a projection at every
+    /// limit fits in one frame, which it does however many walls its slots are on. A peer stating more is read as stating this.
     /// See `design/projection.md`.
     pub const MOST: Limits = Limits {
         frame_bytes: crate::MOST_FRAME_BYTES as u32,
-        walls: 1 + 16 + 60,
+        walls: 1 + DECLARED_WALLS + 60,
         slots: 10 * PROJECTION_SLOTS,
         floating: 10 * PROJECTION_FLOATING,
         panels: 10 * PROJECTION_SLOTS + 10 * PROJECTION_FLOATING,
@@ -229,7 +237,7 @@ mod tests {
             Limits::MOST,
             Limits {
                 frame_bytes: 32 * 1024 * 1024,
-                walls: 77,
+                walls: 125,
                 slots: 780,
                 floating: 120,
                 panels: 900,

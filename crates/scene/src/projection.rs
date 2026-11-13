@@ -1634,7 +1634,8 @@ impl Projector {
             self.focus = None;
             return Output::default();
         };
-        self.lay_out(projection);
+        let viewer = input.viewer.unwrap_or(HOME);
+        self.lay_out(projection, viewer);
         self.keep_meshes(projection);
         // The Tomori wall an older server moves folds, travels and unfolds; meanwhile nothing is put on it by hand,
         // nor is it taken hold of, and a wall the editor held lets go of it, as of a wall no longer shown. See
@@ -1663,7 +1664,6 @@ impl Projector {
                 self.held[side] = None;
             }
         }
-        let viewer = input.viewer.unwrap_or(HOME);
         let mut output = Output::default();
         // Held with both hands, letting go of one leaves it carried by the other from where it is now, so that it does
         // not jump; letting go of both puts it down, as one hand does.
@@ -1813,7 +1813,9 @@ impl Projector {
                     .map(|(model, fit)| (panel, model, fit))
             })
             .collect();
-        // How large each panel shown is, and how far it scrolls, as it is sized now, and the one scrolled, within that.
+        // Which are drawn far, then how large each panel shown is, and how far it scrolls, as it is sized now, and the one
+        // scrolled, within that.
+        self.distances(&standing, viewer);
         let sizes = self.lay_out_standing(&standing, true);
         if let Some((panel, rows)) = input.scroll
             && let Some(limit) = self.faces.get(panel).and_then(|faces| faces.limit)
@@ -2344,7 +2346,12 @@ impl Projector {
                 };
                 let border = frame(highlighted.contains(&panel.id), newest);
                 let scroll = self.scroll(&panel.id);
-                self.faces_for(panel).face(*fit, (scroll, &marks), border)
+                let faces = self.faces_for(panel);
+                if faces.far {
+                    let (columns, rows) = self::fit(panel, *fit);
+                    return faces.far_face(sized(columns, rows), border);
+                }
+                faces.face(*fit, (scroll, &marks), border)
             })
             .collect()
     }
@@ -2628,6 +2635,14 @@ impl Projector {
                     .faces
                     .get_mut(&panel.id)
                     .expect("a panel that stands has its faces");
+                // Drawn far, as only a panel in a slot is, it is a slot's size, and scrolls not at all.
+                if faces.far {
+                    if limits {
+                        faces.limit = Some(0);
+                    }
+                    let (columns, rows) = self::fit(panel, *fit);
+                    return sized(columns, rows);
+                }
                 let layout = faces.at(*fit);
                 let (size, most) = (layout.size, layout.most_scroll);
                 if limits {
@@ -2645,10 +2660,11 @@ impl Projector {
     /// Follow what each of `projection`'s panels shows, laying out again those whose content changed, and forget the
     /// faces of panels, and how far they are scrolled, no longer projected, and how far every panel scrolls, until it
     /// is known again as it stands this frame. Paced, at most [`faces::LAYOUTS`] of the panels the server changed
-    /// take their turn this frame, laid out or drawn again, and at most [`faces::ARRIVALS`] of those it sent that show
-    /// nothing yet are given their faces, so that they stand; the rest wait for the frames after, each in turn from
-    /// where this frame's ended, in the projection's order, so that none waits behind the same ones every frame.
-    fn lay_out(&mut self, projection: &Projection) {
+    /// take their turn this frame, laid out or drawn again, those drawn far following theirs without one, and at most
+    /// [`faces::ARRIVALS`] of those it sent that show nothing yet are given their faces, so that they stand, the
+    /// nearest `viewer` first; the rest wait for the frames after, each in turn from where this frame's ended, in the
+    /// projection's order, so that none waits behind the same ones every frame.
+    fn lay_out(&mut self, projection: &Projection, viewer: Vec3) {
         let shown: HashSet<&str> = projection
             .panels
             .iter()
@@ -2660,14 +2676,46 @@ impl Projector {
         });
         self.scrolls.retain(|id, _| shown.contains(id.as_str()));
         let count = projection.panels.len();
-        let (mut turns, mut arrivals) = if self.paced {
+        let (mut turns, arrivals) = if self.paced {
             (faces::LAYOUTS, faces::ARRIVALS)
         } else {
             (count, count)
         };
         let from = self.turn;
-        for offset in 0..count {
-            let index = (from + offset) % count;
+        let order = (0..count).map(|offset| (from + offset) % count);
+        // Of those that arrive, those nearest `viewer` stand first, the nearest wall's or the nearest floating, each
+        // in turn among those as near.
+        let mut arriving: Vec<(f32, usize)> = Vec::new();
+        if self.faces.len() < count {
+            arriving.extend(
+                order
+                    .clone()
+                    .filter(|index| !self.faces.contains_key(&projection.panels[*index].id))
+                    .map(|index| (0.0, index)),
+            );
+        }
+        if self.paced && arriving.len() > arrivals {
+            let walls: HashMap<&str, Vec3> = projection
+                .walls
+                .iter()
+                .map(|wall| (wall.id.as_str(), Vec3::from(wall.pose.position)))
+                .collect();
+            for (distance, index) in &mut arriving {
+                let at = match &projection.panels[*index].place {
+                    Place::Wall { wall, .. } => walls.get(wall.as_str()).copied(),
+                    Place::Free { pose } => Some(Vec3::from(pose.position)),
+                    _ => None,
+                };
+                *distance = at.map_or(f32::INFINITY, |at| at.distance(viewer));
+            }
+        }
+        arriving.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let arrive: HashSet<usize> = arriving
+            .into_iter()
+            .take(arrivals)
+            .map(|(_, index)| index)
+            .collect();
+        for index in order {
             let panel = &projection.panels[index];
             let scroll = self.scrolls.get(&panel.id).copied().unwrap_or_default();
             let took = match self.faces.get_mut(&panel.id) {
@@ -2676,10 +2724,9 @@ impl Projector {
                     turns -= usize::from(took);
                     took
                 }
-                None if arrivals > 0 => {
+                None if arrive.contains(&index) => {
                     self.faces
                         .insert(panel.id.clone(), faces::Faces::new(panel));
-                    arrivals -= 1;
                     true
                 }
                 None => false,
@@ -2687,6 +2734,59 @@ impl Projector {
             if took {
                 self.turn = index + 1;
             }
+        }
+    }
+
+    /// Which of `standing`'s panels a paced projector draws far, as a row of each one's text subtends from `viewer`
+    /// (see [`faces::FAR`]): only one in a wall's slot, and never a volume, whose diagram stands before its face, nor
+    /// one carried or let go; at most [`faces::NEARING`] drawn whole again in a frame, the nearest first.
+    fn distances(&mut self, standing: &[Standing], viewer: Vec3) {
+        if !self.paced {
+            return;
+        }
+        let moved: Vec<String> = Side::BOTH
+            .into_iter()
+            .flat_map(|side| {
+                [
+                    self.held_in(side).map(str::to_owned),
+                    self.pending[side]
+                        .as_ref()
+                        .map(|pending| pending.panel.clone()),
+                ]
+            })
+            .flatten()
+            .collect();
+        // Those that may come near, drawn far and now near enough, wait for one of a few a frame, the nearest first;
+        // every other changes at once, if at all: drawn far as it goes far, or whole as it may not be drawn far, as a
+        // panel taken hold of is laid out in its frame.
+        let mut nearing: Vec<(f32, &Panel)> = Vec::new();
+        for (panel, model, fit) in standing {
+            let far = matches!(fit, Fit::Slot(_))
+                && panel.diagram.is_none()
+                && !moved.contains(&panel.id);
+            let pixel = if panel.code.is_some() {
+                CODE_PIXEL
+            } else {
+                PIXEL
+            };
+            let row = CELL_HEIGHT as f32 * pixel * model.y_axis.truncate().length();
+            let distance = model.w_axis.truncate().distance(viewer);
+            let (angle, mut whole) = if far {
+                (row / distance.max(f32::EPSILON), 0)
+            } else {
+                (f32::INFINITY, usize::MAX)
+            };
+            let faces = self.faces_for(panel);
+            if far && faces.far && angle > faces::NEAR {
+                nearing.push((angle, *panel));
+            } else {
+                faces.distance(angle, &mut whole);
+            }
+        }
+        nearing.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut left = faces::NEARING;
+        for (angle, panel) in nearing {
+            self.faces_for(panel).distance(angle, &mut left);
         }
     }
 

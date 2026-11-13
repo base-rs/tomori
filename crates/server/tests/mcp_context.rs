@@ -135,6 +135,17 @@ fn the_agent_reads_every_setting_and_sets_a_wall_s_or_a_panel_s_context_in_utc()
         json!({"id": "region", "label": "Region", "value": "US-EAST1", "choices": ["US-EAST1", "EU-WEST1", "AP-SOUTH1"]})
     );
     assert_eq!(read["walls"], json!([]));
+    assert_eq!((&read["total"], &read["offset"]), (&json!(2), &json!(0)));
+    assert!(read.get("next").is_none());
+    // From an offset, the rest; from one that is no whole number, refused.
+    let rest = tool("contexts", json!({"offset": 1}))["structuredContent"].clone();
+    assert_eq!(rest["panels"].as_array().unwrap().len(), 1);
+    let negative = tool("contexts", json!({"offset": -1}));
+    assert_eq!(negative["isError"], true, "{negative}");
+    assert_eq!(
+        negative["content"][0]["text"],
+        "offset is a whole number, from 0."
+    );
     let latency = read["panels"]
         .as_array()
         .unwrap()

@@ -11,11 +11,14 @@ use crate::{REFERENCE_BYTES, valid_reference};
 pub const PANEL_ID_BYTES: usize = 32;
 
 /// The most panels a side shows in its space with [`crate::Space::publish`], counting those whose updates wait: one
-/// more is refused, saying so. Enough for a console of several terminals, each a few charts and a list, and few enough
-/// that as many charts of every series at every point fit in the frame an older client reads; the server's limits on
-/// a space's changes grow with it, so that a side puts up, or updates, every one together. See
-/// `design/projection.md`.
-pub const PANEL_LIMIT: usize = 32;
+/// more is refused, saying so. 128, where it was 32, enough for a console of a few dozen terminals, each a few charts
+/// and a list, across the [`tomori_protocol::DECLARED_WALLS`] an environment may declare. What it costs was measured
+/// at 32, 64 and 128 (see `design/projection.md`): every chart of every series at every point, as a space at every
+/// limit, fits in one frame of a client that takes the most, and an older client is sent what today's limits hold, as
+/// many charts as its frame holds and the rest as their summaries; the server's limits on a space's changes put up a
+/// page of 32 at once and grow with it after; a headset draws a far panel's face as its title alone, and lays out the
+/// nearest panels first (see `design/rendering.md`).
+pub const PANEL_LIMIT: usize = 128;
 
 /// Whether `id` is one a side may name a panel by: 1 to [`PANEL_ID_BYTES`] ASCII letters, digits, `-` and `_`, as the
 /// agent names its panels.
@@ -731,7 +734,7 @@ mod tests {
     fn a_panel_id_is_a_short_slug() {
         assert!(valid_panel_id(&"a".repeat(PANEL_ID_BYTES)));
         assert!(!valid_panel_id(&"a".repeat(PANEL_ID_BYTES + 1)));
-        assert_eq!((PANEL_ID_BYTES, PANEL_LIMIT), (32, 32));
+        assert_eq!((PANEL_ID_BYTES, PANEL_LIMIT), (32, 128));
         for refused in ["", "a b", "a:b", "a/b", "ä", "a\n"] {
             assert!(!valid_panel_id(refused), "{refused:?}");
         }

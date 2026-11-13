@@ -192,7 +192,7 @@ impl ServerSide for Observers {
 }
 
 /// How many regions the Terminals example shows, each a terminal of three charts and a list.
-const REGIONS: usize = 8;
+const REGIONS: usize = 32;
 
 /// An example environment's side that shows as many panels as an environment may, as a console of terminals does:
 /// three live charts and a list of pods for each of eight regions, every chart a point newer each tick, and, once they
@@ -318,12 +318,16 @@ fn start_paced(backend: &FakeBackend, go: Arc<std::sync::atomic::AtomicBool>) ->
 /// and says into `refused` what the server said of one panel more than it takes.
 fn start_terminals(backend: &FakeBackend, refused: Arc<Mutex<Option<String>>>) -> TestServer {
     TestServer::with_tools(backend.clone(), |backends| {
-        let walls = [-4.5_f32, -1.5, 1.5, 4.5].map(|x| {
-            tomori_server::EnvironmentWall::new(
-                tomori_protocol::Pose::at([x, 1.4, -4.0]).facing_towards([x, 1.4, 0.0]),
-            )
-            .with_grid(tomori_protocol::Grid::from((4, 2)))
-        });
+        // Sixteen walls of eight slots, two regions each.
+        let walls: Vec<tomori_server::EnvironmentWall> = (0..REGIONS / 2)
+            .map(|index| {
+                let x = index as f32 * 3.0 - 22.5;
+                tomori_server::EnvironmentWall::new(
+                    tomori_protocol::Pose::at([x, 1.4, -4.0]).facing_towards([x, 1.4, 0.0]),
+                )
+                .with_grid(tomori_protocol::Grid::from((4, 2)))
+            })
+            .collect();
         Server::new(backends, Arc::new(TextTranscriber::default())).with_environments(vec![
             Environment::new("sky", "Sky"),
             Environment::new("terminals", "Terminals")
@@ -572,7 +576,15 @@ fn an_environment_shows_as_many_panels_as_it_may_every_chart_live_and_is_refused
     let refused = Arc::new(Mutex::new(None));
     let server = start_terminals(&backend, refused.clone());
     let mut ada = TestClient::open(server.address);
-    ada.hello_projected("ada", "Ada");
+    // Within frames of today's 1 MiB, but walls, slots and panels enough for every one.
+    let most = tomori_protocol::Limits::MOST;
+    let limits = tomori_protocol::Limits::TODAY.with_projection(
+        most.walls,
+        most.slots,
+        most.floating,
+        most.panels,
+    );
+    ada.hello_projected_within("ada", "Ada", limits);
     ada.send(&ClientMessage::CreateSpace {
         title: "Terminals".to_owned(),
         backend: FAKE_BACKEND_NAME.to_owned(),
@@ -623,7 +635,7 @@ fn an_environment_shows_as_many_panels_as_it_may_every_chart_live_and_is_refused
     let said = eventually(|| refused.lock().unwrap().clone());
     assert_eq!(
         said,
-        "An environment publishes at most 32 panels in a space."
+        "An environment publishes at most 128 panels in a space."
     );
     // Each chart is live: published again every second, every one of them moves on, in place.
     let later = whole(&ada, &|projection| {
@@ -638,8 +650,12 @@ fn an_environment_shows_as_many_panels_as_it_may_every_chart_live_and_is_refused
     // The agent reads every one back as its environment's.
     let session = tomori_backend::Session::id(&backend.started()[0]);
     let token = token(&backend);
-    let panels = call(&server, &token, &session, "panels", json!({}));
-    let listed = panels["panels"].as_array().unwrap();
+    let (mut listed, mut offset, mut panels) = (Vec::new(), Some(0), json!(null));
+    while let Some(from) = offset {
+        panels = call(&server, &token, &session, "panels", json!({"offset": from}));
+        listed.extend(panels["panels"].as_array().unwrap().iter().cloned());
+        offset = panels["next"].as_u64();
+    }
     assert_eq!(listed.len(), limit);
     assert!(
         listed
@@ -648,12 +664,11 @@ fn an_environment_shows_as_many_panels_as_it_may_every_chart_live_and_is_refused
     );
     let kinds = |kind: &str| listed.iter().filter(|panel| panel["kind"] == kind).count();
     assert_eq!((kinds("chart"), kinds("text")), (3 * REGIONS, REGIONS));
-    // Listed briefly, a console of 24 charts and 8 lists of 30 rows is within what an agent reads at once, where
-    // with every panel's text, items and rows it was 44 KB.
+    // Listed briefly, a console of 96 charts and 32 lists of 30 rows is read in a page or two, each within what an
+    // agent reads at once.
     let lists = listed.iter().filter(|panel| panel["row_count"] == 30);
     assert_eq!(lists.count(), REGIONS);
     assert_eq!(panels["total"], limit);
-    assert!(panels.get("next").is_none());
 }
 
 #[test]

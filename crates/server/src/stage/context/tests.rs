@@ -1038,9 +1038,12 @@ fn a_copy_is_refused_where_it_would_mean_nothing_and_bounded() {
 
 #[test]
 fn copies_count_towards_the_panels_an_environment_shows() {
-    let declared: Vec<crate::EnvironmentWall> = DECLARED
-        .iter()
-        .map(|wall| wall.with_grid(tomori_protocol::Grid::from((8, 3))))
+    // Six walls of 24 slots, room for every panel an environment may show.
+    let declared: Vec<crate::EnvironmentWall> = (0..6)
+        .map(|index| {
+            crate::EnvironmentWall::new(Pose::at([3.0 * index as f32 - 7.5, 1.5, -4.0]))
+                .with_grid(tomori_protocol::Grid::from((8, 3)))
+        })
         .collect();
     let walls = Walls {
         declared: &declared,
@@ -1051,7 +1054,7 @@ fn copies_count_towards_the_panels_an_environment_shows() {
     for index in 0..crate::stage::published::PUBLISHED {
         let panel = Panel::text(format!("p{index}"), "P", "x")
             .depends_on(["region"])
-            .on_wall(index as u32 % 2, None);
+            .on_wall(index as u32 % 6, None);
         stage
             .publish(&walls, Publishing::new(panel).unwrap(), 0)
             .unwrap();
@@ -1062,7 +1065,7 @@ fn copies_count_towards_the_panels_an_environment_shows() {
         stage
             .copy_panel(&walls, &id, eu(), &to)
             .unwrap_err()
-            .contains("at most 32")
+            .contains("at most 128")
     );
 }
 

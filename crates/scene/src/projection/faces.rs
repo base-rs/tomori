@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tomori_protocol::{Chart, Panel};
 
 use super::{
-    CODE_PADDING, CODE_PIXEL, CodeLayout, Fit, chart, code_columns, code_face, fitted, image,
-    item_in,
+    CODE_PADDING, CODE_PIXEL, CodeLayout, Fit, PIXEL, chart, code_columns, code_face, fitted,
+    image, item_in,
     list::{Marked, RowMarks},
     sized, text_face,
 };
@@ -20,8 +20,8 @@ use crate::{
     board,
     canvas::Canvas,
     chart::{PlotArea, readout::Readout},
-    transcript::Line,
-    ui_text::{CELL_HEIGHT, CELL_WIDTH},
+    transcript::{BRIGHT, Line},
+    ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style},
 };
 
 /// How many sizes a panel's faces are kept at: in its slot, floating as it is carried, and one more, so that carrying
@@ -43,17 +43,40 @@ struct Key(Panel);
 /// The most panels that show something already that one frame of a paced projector lays out again, or draws again for
 /// their live data, for what the server changed of them: one whose content changed at a new version, one whose age
 /// shows otherwise, and a chart whose data moved on. The rest keep the faces they have until a frame after, each in
-/// turn, so that an environment's 32 panels changing together, each up to 0.7 ms to lay out on a desktop and several
-/// times that on a headset, cost each frame what two do, and all show within 16 frames. What this client changed of a
+/// turn, so that an environment's panels changing together, each up to 0.7 ms to lay out on a desktop and several
+/// times that on a headset, cost each frame what two do: 32 within 16 frames, and 128 near enough to read within 64,
+/// those drawn far taking no turn. What this client changed of a
 /// panel itself, a tick shown at once, and a panel sized anew are laid out in their frame. See `design/rendering.md`.
 pub(super) const LAYOUTS: usize = 2;
 
 /// The most panels that show nothing yet that one frame of a paced projector lays out, besides [`LAYOUTS`]: panels
-/// that arrive, as a space is entered or an environment puts up its 32, each standing from the frame it is laid out
-/// in. Four times as many as are laid out again, since nothing is seen of a panel until then, and waiting costs more
+/// that arrive, as a space is entered or an environment puts up a page of its 128, the nearest first, each standing from
+/// the frame it is laid out in. Four times as many as are laid out again, since nothing is seen of a panel until then, and waiting costs more
 /// than a frame a little longer as a space appears: a headset's 90 panels stand within 12 frames, a sixth of a second,
 /// and the 900 a space may show a client that takes them all within 113, about a second and a half.
 pub(super) const ARRIVALS: usize = 8;
+
+/// The angle, in radians, a row of a panel's text subtends from the viewer below which a paced projector draws its face
+/// in a wall's slot far: its title alone, [`FAR_SCALE`] times as large, rather than text that could not be read there,
+/// and lays nothing of it out. A quarter of a degree, about six of a Quest 3's pixels for a row of twelve font pixels,
+/// so that a standard slot's text is drawn far beyond about 5 m and a wall of twice the scale beyond about 10 m. What
+/// the panel shows changing while it is far draws nothing until it comes near, so that a console of 128 panels, most
+/// of them across the room, costs the frame what those near enough to read cost, and the title of each of the others.
+/// See `design/rendering.md`.
+pub(super) const FAR: f32 = 0.25 * std::f32::consts::PI / 180.0;
+
+/// The angle above which a face drawn far is drawn whole again: a fifth more than [`FAR`], so that a head swaying at
+/// the threshold does not switch it back and forth.
+pub(super) const NEAR: f32 = 1.2 * FAR;
+
+/// How many times as large as its text a far face draws its title, so that it can still be read from three times as
+/// far as its text could.
+pub(super) const FAR_SCALE: f32 = 3.0;
+
+/// The most panels drawn far that one frame of a paced projector lays out to be drawn whole again as they come near,
+/// the nearest first, as many as it lays out again for what the server changed ([`LAYOUTS`]): the rest stay far until a
+/// frame after, so that walking up to a wall never lays out all of its panels in one frame.
+pub(super) const NEARING: usize = LAYOUTS;
 
 /// How a panel differs from the one its faces were laid out from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +160,19 @@ pub(super) struct Faces {
     /// For a list laid out again as it changed, the row that stood at the top of its face, by its id, and how many lines
     /// into it, by which its scroll is found again among its rows as they are now. See [`super::list::anchor`].
     pub(super) anchor: Option<(String, f32)>,
+    /// Whether it is drawn far, its title alone, with nothing of it laid out. See [`FAR`].
+    pub(super) far: bool,
+    /// Its far face, as last drawn, kept while it is drawn far at the same size and frame and its title is the same.
+    far_face: Option<FarFace>,
+}
+
+/// A far face drawn: the title, size and frame it was drawn with.
+#[derive(Clone, Debug)]
+struct FarFace {
+    title: String,
+    size: (f32, f32),
+    border: [f32; 4],
+    canvas: Arc<Canvas>,
 }
 
 impl Faces {
@@ -147,7 +183,49 @@ impl Faces {
             limit: None,
             behind: false,
             anchor: None,
+            far: false,
+            far_face: None,
         }
+    }
+
+    /// Draw it far, or whole again, as a row of its text subtends `angle` from the viewer: far below [`FAR`], forgetting
+    /// what was laid out of it; whole again above [`NEAR`], while `nearing` allows, taking one of them, so that it is laid
+    /// out as it is next sized.
+    pub(super) fn distance(&mut self, angle: f32, nearing: &mut usize) {
+        if self.far {
+            if angle > NEAR && *nearing > 0 {
+                self.far = false;
+                self.far_face = None;
+                *nearing -= 1;
+            }
+        } else if angle < FAR {
+            self.far = true;
+            self.behind = false;
+            self.anchor = None;
+            self.sizes.clear();
+        }
+    }
+
+    /// Its far face, `size` and framed in `border`: its title alone, [`FAR_SCALE`] times as large as its text, as the
+    /// panel was last followed, the one last drawn while those are the same.
+    pub(super) fn far_face(&mut self, size: (f32, f32), border: [f32; 4]) -> Arc<Canvas> {
+        let title = &self.key.0.title;
+        if let Some(face) = self
+            .far_face
+            .as_ref()
+            .filter(|face| face.size == size && face.border == border && face.title == *title)
+        {
+            return face.canvas.clone();
+        }
+        count(0, 1);
+        let canvas = Arc::new(far(title, size, border));
+        self.far_face = Some(FarFace {
+            title: title.clone(),
+            size,
+            border,
+            canvas: canvas.clone(),
+        });
+        canvas
     }
 
     /// Follow `panel` as the projection has it now: its layouts are kept while it shows the same, its faces drawn again
@@ -159,6 +237,11 @@ impl Faces {
     /// follows that row wherever the list now puts it.
     pub(super) fn follow(&mut self, panel: &Panel, turn: bool, scroll: f32) -> bool {
         let change = self.key.change(panel);
+        // Drawn far, nothing of it is laid out, so following it costs nothing, and takes no turn.
+        if self.far {
+            self.key = Key::of(panel);
+            return false;
+        }
         self.behind = matches!(change, Change::Plot | Change::Restyle | Change::Content) && !turn;
         if change == Change::Same || self.behind {
             return false;
@@ -230,7 +313,7 @@ impl Faces {
         scroll: usize,
         point: glam::Vec3,
     ) -> Option<u32> {
-        if self.behind {
+        if self.behind || self.far {
             return None;
         }
         self.at(fit).item(model, scroll, point)
@@ -244,7 +327,7 @@ impl Faces {
         model: glam::Mat4,
         point: glam::Vec3,
     ) -> Option<String> {
-        if self.behind {
+        if self.behind || self.far {
             return None;
         }
         self.at(fit).chip(model, point)
@@ -258,6 +341,9 @@ impl Faces {
         model: glam::Mat4,
         point: glam::Vec3,
     ) -> Option<(f32, Arc<Canvas>, Readout)> {
+        if self.far {
+            return None;
+        }
         self.at(fit);
         self.sizes[0].readout(&self.key.0, model, point)
     }
@@ -265,6 +351,9 @@ impl Faces {
     /// Its chart's readout at `at`, a point's index or a share of the way between two, sized as `fit` says, linked to the
     /// readout of another chart pointed at, as [`Layout::readout_at`] draws it, of the panel as it was last followed.
     pub(super) fn linked(&mut self, fit: Fit, at: f32) -> Option<(Arc<Canvas>, Readout)> {
+        if self.far {
+            return None;
+        }
         self.at(fit);
         let (face, readout) = self.sizes[0].readout_at(&self.key.0, at)?;
         Some((face, readout.linked()))
@@ -315,6 +404,33 @@ fn chips_of(panel: &Panel, columns: usize) -> super::chips::Laid {
         super::chips::today(),
     )
     .2
+}
+
+/// A far face of `title`, `width` by `height` metres, framed in `border`: the title in bold, wrapped onto as many rows as
+/// fit, at [`FAR_SCALE`] times the size of a slot's text, its font pixel made exactly as wide as the face is, and its
+/// rows and padding filling its height to within half a font pixel.
+fn far(title: &str, (width, height): (f32, f32), border: [f32; 4]) -> Canvas {
+    const MARGIN: (usize, usize) = (2, 2);
+    let across = width / (PIXEL * FAR_SCALE) - (2 * MARGIN.0) as f32;
+    let columns = ((across / CELL_WIDTH as f32) as usize).max(1);
+    let pixel = width / (columns * CELL_WIDTH + 2 * MARGIN.0) as f32;
+    let down = height / pixel;
+    let rows = (((down - (2 * MARGIN.1) as f32) / CELL_HEIGHT as f32) as usize).max(1);
+    let vertical = ((down - (rows * CELL_HEIGHT) as f32) / 2.0)
+        .round()
+        .max(0.0) as usize;
+    let mut canvas = Canvas::new(columns, pixel);
+    canvas.padding = (MARGIN.0, vertical);
+    canvas.background = [0.02, 0.035, 0.06, 0.94];
+    canvas.border = Some(border);
+    let lines = crate::ui_text::lines(title, columns, rows);
+    let empty = rows - lines.len();
+    canvas.rows = lines
+        .iter()
+        .map(|line| Row::text(line, Style::bold(BRIGHT), columns))
+        .chain(std::iter::repeat_n(Row::new(Vec::new()), empty))
+        .collect();
+    canvas
 }
 
 /// A face drawn: the scroll, the rows marked and the frame it was drawn with, and, a chart's, where its plot is.

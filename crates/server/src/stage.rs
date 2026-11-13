@@ -77,12 +77,13 @@ use tomori_protocol::{
 /// A client is sent only those within what it states it draws. See `design/projection.md`.
 pub const ADDED_WALLS: usize = 60;
 
-/// The most walls of an environment's own that are used, the first it declares; any more are ignored. Sixteen, where
-/// six were before, so that a console of a wall for each of its stations fits with room to grow: the walls' slots
-/// together are still bounded by [`SLOTS`], which bounds the projection's size, so more walls cost only their own few
-/// hundred bytes each, and the headset and the desktop window state walls and slots enough to draw sixteen standard
-/// walls with the Tomori wall and the walls owners add. See `design/projection.md`.
-pub const DECLARED_WALLS: usize = 16;
+/// The most walls of an environment's own that are used, the first it declares; any more are ignored:
+/// [`tomori_protocol::DECLARED_WALLS`], sixty-four, where sixteen were before, so that a console of a wall for each of
+/// its stations fits with room to grow: the walls' slots together are still bounded by [`SLOTS`], which bounds the
+/// projection's size, so more walls cost only their own few hundred bytes each, and the headset and the desktop window
+/// state walls and slots enough to draw this many standard walls with the Tomori wall and the walls owners add. See
+/// `design/projection.md`.
+pub const DECLARED_WALLS: usize = tomori_protocol::DECLARED_WALLS as usize;
 
 /// The most panels left floating in one environment of a space, [`tomori_protocol::Limits::MOST`]'s; leaving another
 /// floating takes away the one that has floated longest. A client is sent the most recently left of them, as many as it

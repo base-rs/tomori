@@ -1430,15 +1430,17 @@ fn an_environment_s_changes_are_told_four_times_a_second_and_built_once_for_conn
         client.read();
     }
     let kinds = 3;
-    let panels = crate::stage::PUBLISHED;
+    // As many panels as a side showed before it showed 128, fewer than it puts up at once.
+    let panels = 32;
+    const { assert!(32 <= crate::channel::PUBLISH_PAGE) };
     let panel = |index: usize, value: usize| {
         tomori_environment::Panel::text(format!("p{index}"), format!("P{index}"), value.to_string())
             .on_wall(index as u32 % 2, None)
     };
     let start = Instant::now();
     let at = |millis: u64| start + Duration::from_millis(millis);
-    // The side puts up every panel it may show in one instant: each connection is sent them once, all of them, from
-    // one build for each kind of connection, and nothing again once the interval ends, since each has them.
+    // The side puts up those panels in one instant: each connection is sent them once, all of them, from one build
+    // for each kind of connection, and nothing again once the interval ends, since each has them.
     let built = views();
     for index in 0..panels {
         assert_eq!(
@@ -1486,10 +1488,10 @@ fn an_environment_s_changes_are_told_four_times_a_second_and_built_once_for_conn
     };
     assert_eq!(bodies(&whole)[..4], ["1", "1", "1", "0"]);
     assert_eq!(clients.each_ref().map(sends)[1..], [1; 5]);
-    // The side then changes a panel 16 times a second, as fast as a space's panels may, for five seconds, the
-    // deferred changes told as each interval ends, as the server's timer tells them. Before each connection was paced
-    // it was sent every one, 16 a second, and built the projection for itself each time, twice where it takes less
-    // than the most: 80 sends each, and 800 builds for these six.
+    // The side then changes a panel 16 times a second, as fast as a space's panels could before they were 128, for
+    // five seconds, the deferred changes told as each interval ends, as the server's timer tells them. Before each
+    // connection was paced it was sent every one, 16 a second, and built the projection for itself each time, twice
+    // where it takes less than the most: 80 sends each, and 800 builds for these six.
     let (built, mut told) = (views(), [0; 6]);
     for change in 0..80_u64 {
         let now = at(4000 + change * 1000 / 16);

@@ -22,7 +22,7 @@ use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Cell, Row, Span, Style};
 /// `tomori_environment::PANEL_LIMIT`, which this crate's tests check it against, one for each at the size it stands.
 /// Beyond them the least recent is drawn anew when its face is next made, which is only as its panel changes, since
 /// each panel's faces are kept (see [`super::faces`]).
-pub const DRAWN: usize = 32;
+pub const DRAWN: usize = tomori_environment::PANEL_LIMIT;
 
 /// A chart's legend and drawing, at a face of so many columns and rows below its heading.
 type Drawn = (Chart, (usize, usize), Rc<(Vec<Cell>, Drawing)>);

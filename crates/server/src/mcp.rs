@@ -1012,7 +1012,10 @@ async fn call(
         "panels" => session.and_then(|session| panels(hub, session, arguments)),
         "update_panel" => session.and_then(|session| update_panel(hub, session, arguments)),
         "set_wall" => session.and_then(|session| set_wall(hub, session, arguments)),
-        "contexts" => session.and_then(|session| hub.tool_contexts(session).map(structured)),
+        "contexts" => session.and_then(|session| {
+            hub.tool_contexts(session, offset(arguments)?)
+                .map(structured)
+        }),
         "set_context" => session.and_then(|session| set_context(hub, session, arguments)),
         "copy_panel" => session.and_then(|session| copy_panel(hub, session, arguments)),
         "pin_panel" => session.and_then(|session| pin_panel(hub, session, arguments)),
@@ -1080,11 +1083,16 @@ fn changed(changed: Changed, setting: (&str, &str), announcement: String) -> Val
 /// The `panels` tool: every panel listed briefly, or, with `panel`, that one read whole.
 fn panels(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
     let panel = optional_identifier(arguments, "panel")?;
-    let offset = match arguments.get("offset") {
-        None | Some(Value::Null) => 0,
-        Some(offset) => offset.as_u64().ok_or("offset is a whole number, from 0.")? as usize,
-    };
-    hub.tool_panels(session, panel, offset).map(structured)
+    hub.tool_panels(session, panel, offset(arguments)?)
+        .map(structured)
+}
+
+/// The `offset` a tool that pages is given, as `next` said it: 0 if not given.
+fn offset(arguments: Arguments<'_>) -> Result<usize, String> {
+    match arguments.get("offset") {
+        None | Some(Value::Null) => Ok(0),
+        Some(offset) => Ok(offset.as_u64().ok_or("offset is a whole number, from 0.")? as usize),
+    }
 }
 
 /// The `move_panel` tool.
@@ -1351,8 +1359,13 @@ fn context_tools(read: &Value, change: &Value) -> [Value; 4] {
     [
         json!({
             "name": "contexts",
-            "description": "The context of your space's environment's walls and panels: the parameters the environment declares its panels depend on, such as region, each with its label, the value its own selection gives it now and the values it may take; every setting each wall and panel holds, fixing a parameter to a value or time to the last live_minutes or to a window from and to, instants in UTC, a panel's own over its wall's, each with whether it is shown, those of a parameter the environment does not declare now, of a wall it does not show now and of a panel resting kept and listed; and what each panel that depends on any shows now, each parameter and time following the environment, fixed by its own setting or inherited from its wall's. Within 32 KiB: where more, the last panels and then walls are left out, as cut says. Read it before set_context, and to answer what a wall or panel is showing.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "The context of your space's environment's walls and panels: the parameters the environment declares its panels depend on, such as region, each with its label, the value its own selection gives it now and the values it may take; every setting each wall and panel holds, fixing a parameter to a value or time to the last live_minutes or to a window from and to, instants in UTC, a panel's own over its wall's, each with whether it is shown, those of a parameter the environment does not declare now, of a wall it does not show now and of a panel resting kept and listed; and what each panel that depends on any shows now, each parameter and time following the environment, fixed by its own setting or inherited from its wall's. Within 32 KiB, a page at a time, the walls and then the panels: where more, next says the offset the next page begins at. Read it before set_context, and to answer what a wall or panel is showing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "offset": { "type": "integer", "minimum": 0, "description": "How many walls and panels to pass over before telling, as next gave it, to read a space of more than one result holds. If not given, 0." },
+                },
+            },
             "annotations": read,
         }),
         json!({
