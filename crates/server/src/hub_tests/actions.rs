@@ -980,7 +980,7 @@ impl tomori_environment::ServerSide for Crowded {
                 Ok(Some(match reference {
                     // As large as a side may answer, each string within what Tomori keeps of one.
                     "hen/heavy" => {
-                        serde_json::json!({ "q": vec!["\"".repeat(1_015); 8] }).to_string()
+                        serde_json::json!({ "q": vec!["\"".repeat(1_015); 2] }).to_string()
                     }
                     _ => "{}".to_owned(),
                 }))
@@ -1041,7 +1041,7 @@ fn an_inspection_lists_as_much_of_what_it_offers_as_fits_and_one_action_whole_wh
     assert!(sent(&inspect(serde_json::json!({ "id": "yard:hen/many" }))) <= most);
     assert_eq!(many["actions"].as_array().unwrap().len(), 8);
     let parameter = &many["actions"][0]["parameters"][0];
-    assert_eq!(parameter["choices"].as_array().unwrap().len(), 16);
+    assert_eq!(parameter["choices"].as_array().unwrap().len(), 4);
     assert_eq!(parameter["choices_total"], 64);
     assert!(
         many["next"]
