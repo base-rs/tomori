@@ -252,7 +252,7 @@ jobs:
           touch "$RELEASE_ARTIFACTS/other"
           refused "must hold only tomori-$RELEASE_VERSION.apk" env RELEASE_CERTIFICATE="$RUNNER_TEMP/release-certificate.sha256" scripts/release-artifacts/verify
 
-  # That no pull request edits releases.md: each release's notes are generated from the titles of the pull requests merged since the last, and only the release commit writes them. Pushes have no base, and check nothing.
+  # That no pull request edits releases.md: each release's notes are generated from the titles of the pull requests merged since the last, and only the release commit writes them. A push to `main` checks what it landed, so a hand edit that passed its pull request's check still fails there.
   releases:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -268,8 +268,8 @@ jobs:
         run: cargo install bake --locked
       - name: Reject hand edits to the generated release notes
         env:
-          # A pull request's checkout merges it into its base branch as that is now, the merge's first parent; the event's base SHA can be older, from when the pull request was opened, and would count the base branch's own commits since.
-          BAKE_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.merge_group.base_sha }}
+          # A pull request's checkout merges it into its base branch as that is now, the merge's first parent; the event's base SHA can be older, from when the pull request was opened, and would count the base branch's own commits since. A merge group uses its own base. A push checks against the branch's tip before it, catching an edit that passed its pull request's check, such as one with a forged `Release:` trailer on the pull request's own commits. Empty on manual runs, which check nothing.
+          BAKE_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.merge_group.base_sha || github.event.before }}
         run: cargo bake --locked releases:check "$BAKE_BASE"
 
   test-result:
