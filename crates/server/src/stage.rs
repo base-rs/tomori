@@ -33,6 +33,7 @@ mod groups;
 mod held;
 mod image;
 mod layouts;
+mod pin;
 mod placement;
 mod published;
 pub(crate) use beside::spot as beside_spot;
@@ -2276,6 +2277,9 @@ pub(crate) const STALE_ROW: &str = "That row changed as you chose it; look again
 
 /// Why a size given with both hands was refused, the panel having changed since they took hold of it.
 pub(crate) const STALE_SIZE: &str = "That panel changed as you resized it; take hold of it again.";
+
+/// Why a freeze is refused where the panel changed since the participant saw it.
+pub(crate) const STALE_FREEZE: &str = "That panel changed as you froze it; look again.";
 
 /// Why a participant's change to a wall is refused when the wall changed since the version they saw, as when another
 /// participant changed it meanwhile: the client cues it, and the projection sent again shows the wall as it is, so that

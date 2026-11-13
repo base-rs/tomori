@@ -605,4 +605,90 @@ fn the_agent_copies_a_panel_with_a_context_and_builds_walls_each_with_its_own() 
         windows,
         [json!("2026-11-12T02:20:00Z"), json!("2026-11-12T04:10:00Z")]
     );
+    // Pinned by the agent, as pulling it off would, the pods are copied with what they show fixed, beside Ada.
+    let pinned =
+        tool("pin_panel", json!({"panel": "Pods", "place": "beside Ada"}))["structuredContent"]
+            .clone();
+    assert!(
+        pinned["instance"].as_str().unwrap().starts_with('~'),
+        "{pinned}"
+    );
+    let notices = tool("panels", json!({}))["structuredContent"]["panels"].to_string();
+    assert!(notices.contains("The agent pinned the panel"), "{notices}");
+    let again = failure(&tool(
+        "pin_panel",
+        json!({"panel": pinned["panel"], "place": "beside Ada"}),
+    ));
+    assert!(again.contains("follows nothing to pin"), "{again}");
+    assert!(failure(&tool("pin_panel", json!({"panel": 5}))).contains("as text"));
+    assert!(failure(&tool("pin_panel", json!({"panel": "p".repeat(2000)}))).contains("too long"));
+    assert!(
+        failure(&tool("pin_panel", json!({"panel": "Pods", "place": 5})))
+            .contains("place is text.")
+    );
+    // Its time shown, the copy of the latency chart is frozen to the window it shows, once.
+    let frozen = tool(
+        "set_context",
+        json!({"panel": copy, "parameter": "time", "shown": true}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(frozen["changed"], true, "{frozen}");
+    assert!(
+        frozen["setting"]["from"].as_str().unwrap().ends_with('Z'),
+        "{frozen}"
+    );
+    let unchanged = tool(
+        "set_context",
+        json!({"panel": copy, "parameter": "time", "shown": true}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(unchanged["changed"], false);
+    for (arguments, refused) in [
+        (
+            json!({"panel": copy, "parameter": "time", "shown": true, "follow": true}),
+            "shown true freezes a panel's time alone",
+        ),
+        (
+            json!({"wall": "environment wall 1", "parameter": "time", "shown": true}),
+            "shown true freezes a panel's time alone",
+        ),
+        (
+            json!({"panel": copy, "parameter": "region", "shown": true}),
+            "shown true freezes a panel's time alone",
+        ),
+        (
+            json!({"panel": "Pods", "parameter": "time", "shown": true}),
+            "Only a chart that shows a live window is frozen.",
+        ),
+        (
+            json!({"panel": copy, "shown": true}),
+            "This tool needs parameter",
+        ),
+        (
+            json!({"panel": copy, "parameter": "time", "shown": "yes"}),
+            "shown is true or false.",
+        ),
+        (
+            json!({"panel": "Nothing like it", "parameter": "time", "shown": true}),
+            "There is no such panel here.",
+        ),
+    ] {
+        let failed = failure(&tool("set_context", arguments.clone()));
+        assert!(failed.contains(refused), "{arguments}: {failed}");
+    }
+    let nobody = call(
+        &server,
+        &token,
+        "nobody",
+        "set_context",
+        json!({"panel": copy, "parameter": "time", "shown": true}),
+    );
+    assert_eq!(nobody["isError"], true);
+    // Following again unfreezes it.
+    let unfrozen = tool(
+        "set_context",
+        json!({"panel": copy, "parameter": "time", "follow": true}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(unfrozen["changed"], true, "{unfrozen}");
 }

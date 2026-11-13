@@ -5663,6 +5663,139 @@ fn a_copy_of_a_panel_withdrawn_says_so_and_is_taken_away_as_the_hub_sweeps() {
     )));
 }
 
+/// A participant pulling a chart off its wall pins it, as a copy its side is told of as theirs, and freezes the copy by
+/// its time chip, as it was when they saw it.
+#[test]
+fn a_participant_pins_a_chart_pulled_off_its_wall_and_freezes_the_copy() {
+    use tomori_environment::{ContextParameter, Time};
+    use tomori_protocol::context::{ChipPress, ContextSetting};
+    let Yard {
+        hub,
+        _jobs,
+        seen,
+        id,
+        _commands,
+        ada,
+        source,
+    } = yard_recording();
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    hub.channel_set_context(
+        &outlet,
+        vec![ContextParameter::new("region", "Region", "US-EAST1")],
+        start,
+    )
+    .unwrap();
+    let chart = tomori_environment::chart::Chart::new(181)
+        .with_time(tomori_environment::chart::TimeAxis::Live { step_ms: 5_000 });
+    hub.channel_publish_at(
+        &outlet,
+        tomori_environment::Panel::chart("latency", "Latency", chart).depends_on(["region"]),
+        start,
+    )
+    .unwrap();
+    hub.flush_publishes(start);
+    let latencies = |ada: &Client| -> Vec<tomori_protocol::Panel> {
+        ada.projection()
+            .panels
+            .into_iter()
+            .filter(|panel| panel.title == "Latency")
+            .collect()
+    };
+    eventually_in("the chart is shown", || latencies(&ada).len() == 1);
+    let latency = latencies(&ada)[0].id.clone();
+    let told = seen.lock().unwrap().len();
+    ada.send(ClientMessage::PlacePanel {
+        panel: latency.clone(),
+        wall: None,
+        slot: None,
+        pose: Some(tomori_protocol::Pose::at([0.4, 1.4, -1.2])),
+        size: None,
+        revision: None,
+    });
+    // The wall keeps the chart, and a copy floats where it was pulled, pinned to the region it showed.
+    let copy = latencies(&ada)
+        .into_iter()
+        .find(|panel| panel.id != latency)
+        .expect("pinned as a copy");
+    assert!(matches!(copy.place, tomori_protocol::Place::Free { .. }));
+    assert_eq!(copy.context[0].setting, ContextSetting::Fixed);
+    assert_eq!(copy.context[1].press, Some(ChipPress::Freeze));
+    // Its side is told of the copy as nobody's, as only Tomori makes one.
+    eventually_in("the side is told the copy", || {
+        seen.lock().unwrap()[told..].iter().any(|intent| {
+            intent
+                .context()
+                .is_some_and(|context| context.of() == Some("latency"))
+        })
+    });
+    // Frozen against a version since changed, it is refused, naming the panel; as seen, it is frozen.
+    ada.read();
+    ada.send(ClientMessage::FreezePanel {
+        panel: copy.id.clone(),
+        frozen: true,
+        revision: Some(copy.version + 1),
+    });
+    assert!(ada.read().iter().any(|message| matches!(
+        message,
+        ServerMessage::Error { panel: Some(panel), .. } if *panel == copy.id
+    )));
+    let told = seen.lock().unwrap().len();
+    ada.send(ClientMessage::FreezePanel {
+        panel: copy.id.clone(),
+        frozen: true,
+        revision: Some(copy.version),
+    });
+    let frozen = ada.projection().panel(&copy.id).unwrap().clone();
+    assert_eq!(frozen.context[1].setting, ContextSetting::Fixed);
+    assert_eq!(frozen.context[1].press, Some(ChipPress::Unfreeze));
+    eventually_in("the side is told the window", || {
+        seen.lock().unwrap()[told..].iter().any(|intent| {
+            intent
+                .context()
+                .is_some_and(|context| matches!(context.time(), Time::Window { .. }))
+                && intent.participant() == source
+        })
+    });
+    // Unfrozen, it follows again; frozen again, as nothing can be, a panel not here is refused.
+    ada.send(ClientMessage::FreezePanel {
+        panel: copy.id.clone(),
+        frozen: false,
+        revision: None,
+    });
+    assert_eq!(
+        ada.projection().panel(&copy.id).unwrap().context[1].press,
+        Some(ChipPress::Freeze)
+    );
+    ada.send(ClientMessage::FreezePanel {
+        panel: copy.id.clone(),
+        frozen: false,
+        revision: None,
+    });
+    ada.read();
+    ada.send(ClientMessage::FreezePanel {
+        panel: "panel-999".into(),
+        frozen: true,
+        revision: None,
+    });
+    assert_eq!(ada.errors(), ["That panel is not here."]);
+    ada.send(ClientMessage::FreezePanel {
+        panel: "p".repeat(2_000),
+        frozen: true,
+        revision: None,
+    });
+    assert!(ada.errors()[0].contains("too long"));
+    // One in no space freezes nothing.
+    let lobby = Client::projecting(&hub, Access::open(), "bob");
+    lobby.read();
+    lobby.send(ClientMessage::FreezePanel {
+        panel: copy.id.clone(),
+        frozen: true,
+        revision: None,
+    });
+    assert!(!lobby.errors().is_empty());
+}
+
 #[test]
 fn contexts_of_every_wall_and_panel_at_their_longest_are_cut_to_what_the_agent_reads() {
     use tomori_environment::ContextParameter;

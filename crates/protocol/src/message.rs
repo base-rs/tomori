@@ -939,6 +939,18 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<u64>,
     },
+    /// Freeze the panel `panel`, as `frozen` says, for everyone in the space: its time fixed to the window its chart
+    /// shows now, kept exactly as it is, or, unfrozen, following again. Pressing its time chip, pointing at it and
+    /// pressing A, Enter or a click, or pulling the trigger, where the chip says it does ([`crate::context::ChipPress`]),
+    /// which only a server that takes it says. Participants only. A client also says, as `revision`, the panel's
+    /// [`crate::Panel::version`] it saw, and the server refuses the press where it has changed since, naming the panel in
+    /// its [`ServerMessage::Error`], rather than freeze what the participant did not see. See `design/panel-context.md`.
+    FreezePanel {
+        panel: String,
+        frozen: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+    },
     /// Send the whole projection of the client's space again, as [`ServerMessage::Projection`]: the client holds
     /// `revision`, and was sent a [`ServerMessage::ProjectionPatch`] it could not apply, as one from another revision,
     /// after missing one, or naming what it does not have. Only a client whose `Hello` sets `projection_patches` sends

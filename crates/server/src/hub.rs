@@ -1383,13 +1383,18 @@ impl HubState {
     }
 
     /// Tell `space`'s environment's side what the participant `participant`'s message changed of where its panels are,
-    /// as theirs, taking one of their intents if it changed any: past their rate, nothing is told yet, and what it
+    /// or how they are bound, as theirs, taking one of their intents if it changed any: past their rate, nothing is told yet, and what it
     /// changed is told as theirs with the next telling, as the hub sweeps if nothing else changes first.
     fn tell_places_for(&mut self, space: &str, participant: &str) {
+        // A move, or a change of how its panels are bound, as by a freeze.
         let changed = self.space(space).is_some_and(|record| {
-            !Self::moved_places(record, self.sides.binding(space))
-                .0
-                .is_empty()
+            let binding = self.sides.binding(space);
+            let told = record.told.borrow();
+            let rebound = told.environment == record.model.environment
+                && told.binding == binding
+                && told.contexts != record.stage.contexts(&record.model.environment);
+            drop(told);
+            rebound || !Self::moved_places(record, binding).0.is_empty()
         });
         if !changed {
             return;
@@ -4625,10 +4630,22 @@ impl Hub {
                             .is_some_and(|shown| shown.version != seen)
                     });
                 let walls = environments.walls(&record.model.environment);
+                // Pulled off its wall, an environment's panel is pinned, a copy put there in its place. See
+                // `design/panel-context.md`.
                 let placed = if stale {
                     Err(crate::stage::STALE_SIZE)
                 } else {
-                    record.stage.place_sized(&walls, &panel, target, size)
+                    record
+                        .stage
+                        .place_pulled(&walls, &panel, target, size)
+                        .map(|(changed, copy)| {
+                            if let Some((copy, instance)) = copy {
+                                log::info!(
+                                    "Participant {participant} pulled {panel} off its wall in space {space}, pinned as {copy}, instance {instance}."
+                                );
+                            }
+                            changed
+                        })
                 };
                 match placed {
                     Ok(true) => {
@@ -4759,6 +4776,58 @@ impl Hub {
                     Ok(None) => state.touch_projection(&space),
                     // Refused, as when the panel changed since the revision they saw, it names the panel, so that their
                     // client cues it, and the projection is sent again, so that they see the panel as it is and look again.
+                    Err(error) => {
+                        state.send(
+                            participant,
+                            ServerMessage::Error {
+                                error: error.to_owned(),
+                                space: None,
+                                panel: Some(panel),
+                                wall: None,
+                            },
+                        );
+                        state.touch_projection(&space);
+                    }
+                }
+            }
+            // A participant freezes or unfreezes a panel by its time chip, for everyone, as it was when they saw it.
+            ClientMessage::FreezePanel {
+                panel,
+                frozen,
+                revision,
+            } => {
+                if let Err(error) = limits::check(&panel, limits::IDENTIFIER_BYTES, "panel") {
+                    state.error(participant, error);
+                    return;
+                }
+                let Some(space) = in_space(state) else {
+                    return;
+                };
+                let environments = self.environments();
+                let record = state.space_mut(&space).expect("checked above");
+                let stale = revision.is_some_and(|seen| {
+                    record
+                        .versioned(&environments, crate::cards::unix_now())
+                        .panel(&panel)
+                        .is_some_and(|shown| shown.version != seen)
+                });
+                let walls = environments.walls(&record.model.environment);
+                let frozen = if stale {
+                    Err(crate::stage::STALE_FREEZE)
+                } else {
+                    record.stage.freeze(&walls, &panel, frozen)
+                };
+                drop(environments);
+                match frozen {
+                    Ok(changed) => {
+                        if changed {
+                            log::info!(
+                                "Participant {participant} froze or unfroze {panel} in space {space}."
+                            );
+                            deferred.push(Deferred::Keep);
+                        }
+                        state.touch_projection(&space);
+                    }
                     Err(error) => {
                         state.send(
                             participant,

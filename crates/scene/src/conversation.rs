@@ -2286,6 +2286,7 @@ impl Conversation {
                 | ClientMessage::DismissPanel { .. }
                 | ClientMessage::CheckPanelItem { .. }
                 | ClientMessage::ChoosePanelRow { .. }
+                | ClientMessage::FreezePanel { .. }
         );
         if acts && !self.role.participates() {
             self.notice = Some(VISITING.into());

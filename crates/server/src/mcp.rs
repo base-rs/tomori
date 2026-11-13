@@ -1013,6 +1013,7 @@ async fn call(
         "contexts" => session.and_then(|session| hub.tool_contexts(session).map(structured)),
         "set_context" => session.and_then(|session| set_context(hub, session, arguments)),
         "copy_panel" => session.and_then(|session| copy_panel(hub, session, arguments)),
+        "pin_panel" => session.and_then(|session| pin_panel(hub, session, arguments)),
         "create_layout" => session.and_then(|session| create_layout(hub, session, arguments)),
         "remove_layout" => session.and_then(|session| remove_layout(hub, session, arguments)),
         "add_wall" => session.and_then(|session| add_wall(hub, session, arguments)),
@@ -1343,7 +1344,7 @@ fn set_wall(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value,
 
 /// The `contexts` and `set_context` tools' definitions, apart from the rest so that the list's macro stays within its
 /// recursion limit. See `design/panel-context.md`.
-fn context_tools(read: &Value, change: &Value) -> [Value; 3] {
+fn context_tools(read: &Value, change: &Value) -> [Value; 4] {
     let parameter_bytes = tomori_environment::CONTEXT_ID_BYTES;
     [
         json!({
@@ -1354,7 +1355,7 @@ fn context_tools(read: &Value, change: &Value) -> [Value; 3] {
         }),
         json!({
             "name": "set_context",
-            "description": "Fix what a wall or a panel of your space's environment shows, for everyone in it, as someone asks, such as \"show EU-WEST1 on this wall\" or \"line up 02:20 to 02:50 on the left wall\": wall, a wall by its identity or name as presence lists it, or looking or near, with a name or for whoever asked, or panel, a panel by its identity or title, one of them; parameter, one the environment declares, as contexts lists them, or time; and one of value, one of the parameter's choices where it has any; live_minutes, for time, the last that many minutes up to now, from 1 to 10080; from and to, for time, a window of instants with their offset from UTC, such as 2026-11-12T02:20:00Z, never a time of day alone, ending after it begins and spanning at most 31 days; or follow true, to let it follow the environment, or its wall's setting, again. A panel's own setting is over its wall's, and only a panel that depends on the parameter, or a chart for time, takes one; the Tomori wall takes none. Everyone sees it on the wall's or panel's chips, a notice on the status wall says what you set, and the environment is told and shows what it says. Only when someone in the space asks; then say in a sentence what you set.",
+            "description": "Fix what a wall or a panel of your space's environment shows, for everyone in it, as someone asks, such as \"show EU-WEST1 on this wall\" or \"line up 02:20 to 02:50 on the left wall\": wall, a wall by its identity or name as presence lists it, or looking or near, with a name or for whoever asked, or panel, a panel by its identity or title, one of them; parameter, one the environment declares, as contexts lists them, or time; and one of value, one of the parameter's choices where it has any; live_minutes, for time, the last that many minutes up to now, from 1 to 10080; from and to, for time, a window of instants with their offset from UTC, such as 2026-11-12T02:20:00Z, never a time of day alone, ending after it begins and spanning at most 31 days; or follow true, to let it follow the environment, or its wall's setting, again; or, for a panel's time alone, shown true, freezing it: its time fixed to the window its chart shows now, kept exactly as it is, which follow true unfreezes. A panel's own setting is over its wall's, and only a panel that depends on the parameter, or a chart for time, takes one; the Tomori wall takes none. Everyone sees it on the wall's or panel's chips, a notice on the status wall says what you set, and the environment is told and shows what it says. Only when someone in the space asks; then say in a sentence what you set.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1366,6 +1367,7 @@ fn context_tools(read: &Value, change: &Value) -> [Value; 3] {
                     "from": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
                     "to": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
                     "follow": { "type": "boolean" },
+                    "shown": { "type": "boolean" },
                 },
                 "required": ["parameter"],
             },
@@ -1385,6 +1387,19 @@ fn context_tools(read: &Value, change: &Value) -> [Value; 3] {
             },
             "annotations": change,
         }),
+        json!({
+            "name": "pin_panel",
+            "description": "Pin one of your space's environment's panels, for everyone in the space, as someone asks, such as \"keep this chart as it is now\": panel, by its identity or title as panels lists it; and place, where the pinned copy goes, as move_panel takes it, by default beside whoever asked. As pulling it off its wall by hand does, it copies the panel with every parameter it follows, or takes from its wall, fixed to what it shows now, and its wall's time, if it sets one; the wall keeps the panel, following on. The copy is an instance, as copy_panel makes, at most 8 in a space; set_context with shown true then freezes its time. Everyone sees its chips, and a notice on the status wall says what you pinned. Refused for a panel that fixes all it depends on already. Only when someone in the space asks; then say in a sentence what you pinned, and where.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "panel": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                    "place": { "type": "string", "maxLength": crate::limits::IDENTIFIER_BYTES },
+                },
+                "required": ["panel"],
+            },
+            "annotations": change,
+        }),
     ]
 }
 
@@ -1400,9 +1415,29 @@ fn set_context(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Val
         (None, Some(panel)) => Target::Panel(panel.to_owned()),
         _ => return Err("Say either wall or panel, one of them.".to_owned()),
     };
+    // A panel's time fixed to the window it shows, freezing it, takes nothing else.
+    if flag(arguments, "shown")? {
+        let named = ["value", "live_minutes", "from", "to", "follow"]
+            .iter()
+            .any(|name| arguments.get(name).is_some_and(|given| !given.is_null()));
+        return match (target, text(arguments, "parameter")?) {
+            (Target::Panel(panel), tomori_environment::TIME) if !named => {
+                hub.agent_freeze_panel(session, &panel).map(structured)
+            }
+            _ => Err("shown true freezes a panel's time alone: say panel, parameter time and nothing else.".to_owned()),
+        };
+    }
     let (parameter, setting) = context_setting(arguments, true)?;
     hub.agent_set_context(session, target, parameter, setting)
         .map(structured)
+}
+
+/// The `pin_panel` tool: a `panel` and, optionally, a `place`.
+fn pin_panel(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
+    let panel = text(arguments, "panel")?;
+    crate::limits::check(panel, crate::limits::IDENTIFIER_BYTES, "panel")?;
+    let place = optional_identifier(arguments, "place")?;
+    hub.agent_pin_panel(session, panel, place).map(structured)
 }
 
 /// The setting `arguments` say: its `parameter`, and one of `value`, `live_minutes`, `from` and `to` together, or,
