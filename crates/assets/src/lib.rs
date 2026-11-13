@@ -12,7 +12,8 @@
 //!   [`Model`], which it keeps by digest and shares.
 //! - **Models and instances:** a [`Model`] is validated data: nodes, meshes, materials, textures, skins and
 //!   animations; geometry built in code is checked the same way with [`Model::built`], and a large one split into
-//!   chunks across the ground with [`Model::chunked`]. An [`Instance`] places a model in a scene, with a [`Pose`] and
+//!   chunks across the ground with [`Model::chunked`], or drawn with fewer triangles far away with
+//!   [`Model::simplified`], in a level of detail a render world chooses ([`lod::Lod`]). An [`Instance`] places a model in a scene, with a [`Pose`] and
 //!   nodes it shows or hides.
 //! - **Animation:** an [`animation::Animator`] moves through an [`animation::Graph`] of states, each a clip of an
 //!   animation, on its parameters, cross-fading, firing events on clips' timelines and measuring root motion, the same
@@ -28,9 +29,11 @@ mod gltf;
 pub mod haze;
 mod instance;
 mod library;
+pub mod lod;
 mod model;
 mod pose;
 mod reference;
+mod simplify;
 
 #[cfg(feature = "gpu")]
 pub mod gpu;

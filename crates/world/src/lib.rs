@@ -15,6 +15,10 @@
 //!   [`LIGHTS`] the views may see, as [`assign`] chooses them, which a backend reads as [`World::lit`].
 //! - **Views:** this frame's eyes, two on the headset and one on the desktop window and the spectator, and one frustum
 //!   enclosing them all.
+//! - **Levels of detail:** an item may be drawn coarser far away, in [`Levels`], each with how far it strays from the
+//!   item's own; each frame, each instance seen is drawn in the coarsest whose error spans at most [`TOLERANCE`] pixels
+//!   from the nearer eye, alike in both, with [`HYSTERESIS`], fading from one level to the next over [`FADE_FRAMES`],
+//!   which a backend reads as [`World::lods`].
 //!
 //! Once a frame, after what moved is placed, [`World::cull`] finds what the views may see: static instances through a
 //! bounding volume hierarchy built when they change, and dynamic ones one by one, each item's bounds first, then its
@@ -23,12 +27,14 @@
 //! `Aabb`, `Frustum`, `NoFrustumCulling` and `VisibleEntities`, each by name and meaning where they fit.
 mod bvh;
 mod light;
+mod lod;
 mod view;
 mod world;
 
 pub use light::{
     EnvironmentLight, FADE, Falloff, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit, assign,
 };
+pub use lod::{FADE_FRAMES, HYSTERESIS, LEVELS, Levels, Lod, TOLERANCE};
 pub use tomori_assets::bounds::{Aabb, Frustum, Tally};
 pub use view::{EYES, Views, eye};
 pub use world::{Item, ItemId, Layer, MaterialId, MeshId, Mobility, RootId, World};

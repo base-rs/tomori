@@ -7,6 +7,7 @@ use glam::{Mat4, Vec3};
 
 use crate::bvh::{Bvh, Leaf};
 use crate::light::{self, EnvironmentLight, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit};
+use crate::lod::{self, Eyes, Levels, Lod, Progress};
 use crate::{Aabb, Tally, Views};
 
 /// A mesh, as the backend that uploaded it names it: the world never reads its vertices.
@@ -104,7 +105,8 @@ impl Item {
 }
 
 /// An item with its instances: where each may be drawn, or none for anywhere, the box about them all, or none if one
-/// may be anywhere, which the views may see, and the lights each is lit by, its range of `lit`, as last culled.
+/// may be anywhere, which the views may see, the lights each is lit by, its range of `lit`, and the level of detail each
+/// is drawn in, of the item's levels, and how far it is into changing it, as last culled.
 #[derive(Debug)]
 struct Entry {
     item: Item,
@@ -113,16 +115,20 @@ struct Entry {
     seen: Vec<bool>,
     lists: Vec<[u32; 2]>,
     lit: Vec<Lit>,
+    levels: Levels,
+    lods: Vec<Lod>,
+    progress: Vec<Progress>,
 }
 
-/// Coordinates, carried into the views' by `transform`; whether they are culled; the views in them, as last culled;
-/// their environment light; the hierarchy of their static instances, and whether it must be built again; and the
+/// Coordinates, carried into the views' by `transform`; whether they are culled; the views in them, as last culled, and
+/// the eyes in them that choose each instance's level of detail; their environment light; the hierarchy of their static instances, and whether it must be built again; and the
 /// lights that light their items, as last culled, with the lights' slots ranked to find them.
 #[derive(Debug)]
 struct Root {
     transform: Mat4,
     active: bool,
     views: Views,
+    eyes: Eyes,
     environment: Option<EnvironmentLight>,
     bvh: Bvh,
     built: bool,
@@ -211,6 +217,7 @@ pub struct World {
     items: Slots<Entry>,
     lights: Slots<(Light, bool)>,
     views: Views,
+    height: Option<u32>,
     culling: bool,
 }
 
@@ -228,6 +235,7 @@ impl World {
             items: Slots::default(),
             lights: Slots::default(),
             views: Views::default(),
+            height: None,
             culling: true,
         }
     }
@@ -238,6 +246,7 @@ impl World {
             transform: Mat4::IDENTITY,
             active: true,
             views: Views::default(),
+            eyes: Eyes::default(),
             environment: None,
             bvh: Bvh::default(),
             built: true,
@@ -297,6 +306,9 @@ impl World {
             seen: Vec::new(),
             lists: Vec::new(),
             lit: Vec::new(),
+            levels: Levels::default(),
+            lods: Vec::new(),
+            progress: Vec::new(),
         }))
     }
 
@@ -320,8 +332,9 @@ impl World {
     }
 
     /// Place `item`'s instances where `bounds` say each may be drawn, in its root's coordinates, or anywhere for none,
-    /// in place of those placed before, each seen, and lit by nothing, until it is culled. Placing as many as before
-    /// allocates nothing.
+    /// in place of those placed before, each seen, and lit by nothing, until it is culled, each in the level of detail
+    /// it was, as the same instance moved, or, one more than before, its own until it is culled. Placing as many as
+    /// before allocates nothing.
     ///
     /// # Panics
     ///
@@ -342,6 +355,10 @@ impl World {
         // Room for as many lights as each may be lit by, so that culling never allocates.
         entry.lit.clear();
         entry.lit.reserve(entry.bounds.len() * LIGHTS_PER_INSTANCE);
+        entry.lods.resize(entry.bounds.len(), Lod::default());
+        entry
+            .progress
+            .resize(entry.bounds.len(), Progress::Unchosen);
         let item = entry.item;
         self.changed(&item);
     }
@@ -351,6 +368,37 @@ impl World {
         if item.mobility == Mobility::Static {
             self.roots[item.root.0 as usize].built = false;
         }
+    }
+
+    /// Draw `item`'s instances in `levels`, coarser than their own, as far as each may be drawn in one, from the next
+    /// cull, each choosing anew, without fading; or in their own alone, with none.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not here.
+    pub fn set_levels(&mut self, item: ItemId, levels: Levels) {
+        let entry = self
+            .items
+            .get_mut(item.0)
+            .expect("an item given levels is here");
+        entry.levels = levels;
+        entry.lods.fill(Lod::default());
+        entry.progress.fill(Progress::Unchosen);
+    }
+
+    /// The levels of detail `item`'s instances may be drawn in, as last set; none for an item not here.
+    pub fn levels(&self, item: ItemId) -> Levels {
+        self.items
+            .get(item.0)
+            .map_or(Levels::default(), |entry| entry.levels)
+    }
+
+    /// The level of detail each of `item`'s instances is drawn in, as last culled, in the order they were placed: its
+    /// own for an instance not seen, as it was last seen, or of an item without levels; none for an item not here.
+    pub fn lods(&self, item: ItemId) -> &[Lod] {
+        self.items
+            .get(item.0)
+            .map_or(&[], |entry| entry.lods.as_slice())
     }
 
     /// How many instances `item` has, or none if it is not here.
@@ -389,6 +437,12 @@ impl World {
         self.views = Views::new(clips);
     }
 
+    /// Choose levels of detail for the eyes' images `height` pixels tall, from the next cull, or draw every instance in its
+    /// own level, with none, as by default.
+    pub fn set_height(&mut self, height: Option<u32>) {
+        self.height = height.filter(|height| *height > 0);
+    }
+
     /// Cull what the views cannot see, as by default, or see everything, `false`, to compare, from the next cull.
     pub fn set_culling(&mut self, culling: bool) {
         self.culling = culling;
@@ -408,7 +462,8 @@ impl World {
     /// they changed, and its dynamic items one by one, each item's bounds and then its instances'; which of its lights
     /// reach into the views, of which at most [`LIGHTS`] light its items, those nearest the eyes of more, those at the cut
     /// fading as they near the nearest left out ([`light::FADE`] of their reach); and, by
-    /// [`light::assign`], which of those light each instance seen.
+    /// [`light::assign`], which of those light each instance seen; and the level of detail each instance seen is drawn
+    /// in, by [`Levels::choose`], from the nearer eye, alike in both, faded over [`FADE_FRAMES`](crate::FADE_FRAMES) as it changes.
     pub fn cull(&mut self) {
         let unculled = Views::unculled(self.views.clips());
         for root in &mut self.roots {
@@ -418,6 +473,7 @@ impl World {
                 } else {
                     unculled.transformed(root.transform)
                 };
+                root.eyes = Eyes::new(root.views.clips(), self.height);
             }
         }
         for (index, root) in self.roots.iter_mut().enumerate() {
@@ -490,6 +546,7 @@ impl World {
                     [leaf.instance as usize] = true;
             });
         }
+        self.detail();
         for (_, light) in self.lights.slots.iter_mut() {
             let Some((light, seen)) = light else { continue };
             let root = &self.roots[light.root.0 as usize];
@@ -501,6 +558,45 @@ impl World {
             }
         }
         self.light();
+    }
+
+    /// Choose the level of detail of each instance seen, of an item with levels in an active root; one not seen is chosen
+    /// anew, without fading, when it is seen again.
+    fn detail(&mut self) {
+        for (_, entry) in self.items.slots.iter_mut() {
+            let Some(entry) = entry.as_mut().filter(|entry| !entry.levels.is_empty()) else {
+                continue;
+            };
+            let root = &self.roots[entry.item.root.0 as usize];
+            if !root.active {
+                continue;
+            }
+            let Entry {
+                bounds,
+                seen,
+                levels,
+                lods,
+                progress,
+                ..
+            } = entry;
+            for (((bounds, seen), lod), progress) in bounds
+                .iter()
+                .zip(seen.iter())
+                .zip(lods.iter_mut())
+                .zip(progress.iter_mut())
+            {
+                if !*seen {
+                    *progress = Progress::Unchosen;
+                    continue;
+                }
+                // Without eyes and pixels to measure by, or bounds, it is its own, chosen anew once it can be.
+                let Some((distance, density)) = root.eyes.measure(bounds.as_ref()) else {
+                    (*lod, *progress) = (Lod::default(), Progress::Unchosen);
+                    continue;
+                };
+                lod::step(lod, progress, levels.choose(distance, density, lod.level));
+            }
+        }
     }
 
     /// Choose each active root's lights, then the lights of each instance seen.

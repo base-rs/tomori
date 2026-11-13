@@ -2,14 +2,14 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! A frame costs no allocation: once what is placed stops growing, giving the world its views, placing what moves,
-//! culling and lighting each instance allocate nothing, so that the indirection costs the headset's frame no time in
+//! culling, lighting each instance and choosing its level of detail allocate nothing, so that the indirection costs the headset's frame no time in
 //! the allocator. Counted on the test's thread only, as the world uses no other, so that what the test harness
 //! allocates on its own threads meanwhile is not.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use glam::{Mat4, Quat, Vec3};
-use tomori_world::{Aabb, Item, Layer, Light, Mobility, World};
+use tomori_world::{Aabb, Item, Layer, Levels, Light, Mobility, World};
 
 /// The system's allocator, counting what each thread allocates.
 struct Counting;
@@ -76,6 +76,10 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
         }),
     );
     let hens = world.add(Item::new(scenery, Layer::Opaque, Mobility::Dynamic));
+    // Each drawn coarser far away, as the eyes walk to and fro, so that levels change and fade.
+    world.set_levels(static_item, Levels::new(&[0.01, 0.03, 0.1]));
+    world.set_levels(hens, Levels::new(&[0.005, 0.02]));
+    world.set_height(Some(1_760));
     let cubes = world.add(Item::new(space, Layer::Opaque, Mobility::Dynamic));
     let lamp = world.add_light(Light::new(
         scenery,
@@ -94,7 +98,10 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
     }
     let frame = |world: &mut World, step: usize| {
         let turned = step as f32 * 0.05;
-        world.set_views(&eyes(Vec3::new(0.0, 1.6, 0.0), turned));
+        world.set_views(&eyes(
+            Vec3::new(0.0, 1.6, (step as f32 * 0.1).sin() * 15.0),
+            turned,
+        ));
         world.set_transform(scenery, Mat4::from_translation(Vec3::new(0.0, 0.0, turned)));
         world.place(
             hens,
@@ -114,6 +121,11 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
         world.cull();
         world.seen(static_item).iter().filter(|seen| **seen).count()
             + world.lit(static_item).map(<[_]>::len).sum::<usize>()
+            + world
+                .lods(static_item)
+                .iter()
+                .filter(|lod| lod.fading())
+                .count()
     };
     // The first frames grow what the world keeps, and build the hierarchy.
     for step in 0..3 {
