@@ -189,8 +189,7 @@ fn a_flat_ground_of_one_colour_is_drawn_in_few_triangles_its_edges_as_they_were(
 #[test]
 fn a_ground_cut_into_chunks_and_each_simplified_still_meets_without_a_seam() {
     let height = |x: f32, z: f32| (x * 0.6).sin() * 0.4 + (z * 0.5).cos() * 0.3;
-    let shade = |at: Vec2| Vec4::new(0.3 + (at.x * 0.37).sin().abs() * 0.04, 0.4, 0.2, 1.0);
-    let ground = faceted(24, 0.5, height, shade);
+    let ground = faceted(24, 0.5, height, |_| Vec4::new(0.3, 0.4, 0.2, 1.0));
     let chunks = ground.chunks(4.0);
     assert!(chunks.len() >= 9);
     let open_whole = open(&ground);
@@ -274,7 +273,8 @@ fn a_rolling_ground_strays_no_further_than_asked() {
 #[test]
 fn where_faces_of_other_colours_meet_stays_where_it_was() {
     // Two colours either side of x = 2, on one flat ground: moving where they meet strays no plane, but would move
-    // colours, so it stays; faces varied a little in colour, as a model's are, are one colour's.
+    // colours, so it stays; faces varied a little in colour, as a model's are, hold a little, and faces of one colour
+    // not at all.
     let red = Vec4::new(0.6, 0.1, 0.1, 1.0);
     let green = |at: Vec2| Vec4::new(0.1, 0.5 + (at.y * 3.1).sin() * 0.03, 0.1, 1.0);
     let ground = faceted(
@@ -284,10 +284,20 @@ fn where_faces_of_other_colours_meet_stays_where_it_was() {
         |at| if at.x < 2.0 { red } else { green(at) },
     );
     let (simplified, _) = ground.simplified(0.01);
+    let triangles = |red_side: bool| {
+        simplified
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|triangle| (simplified.colors[triangle[0] as usize] == red) == red_side)
+            .count()
+    };
+    assert!(triangles(true) <= 24, "{}", triangles(true));
     assert!(
-        simplified.indices.len() / 3 <= 64,
+        triangles(false) > triangles(true) * 2,
         "{}",
-        simplified.indices.len() / 3
+        triangles(false)
     );
     let area = |primitive: &Primitive, red_side: bool| {
         primitive
