@@ -83,6 +83,23 @@ pub struct ContextChip {
     pub value: ContextValue,
     #[serde(default, skip_serializing_if = "is_follows")]
     pub setting: ContextSetting,
+    /// What pressing it does, pointing at it and pressing A, Enter or a click, or pulling the trigger, if anything: on a
+    /// copy's time chip, freezing it or unfreezing it, which the client asks with [`crate::ClientMessage::FreezePanel`].
+    /// An older server says nothing, and an older client ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub press: Option<ChipPress>,
+}
+
+/// What pressing a chip does: freezing its panel's time to the window it shows, or unfreezing it to follow again.
+/// `Unknown` stands for what a newer server sends, which a client offers nothing for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChipPress {
+    Freeze,
+    Unfreeze,
+    #[serde(other)]
+    Unknown,
 }
 
 fn is_follows(setting: &ContextSetting) -> bool {
@@ -101,7 +118,24 @@ impl ContextChip {
             label: label.into(),
             value,
             setting,
+            press: None,
         }
+    }
+
+    /// The chip, which pressing does `press`.
+    ///
+    /// ```
+    /// use tomori_protocol::context::{ChipPress, ContextChip, ContextSetting, ContextValue};
+    ///
+    /// let time = ContextChip::new("time", "Time", ContextValue::Live { minutes: 15 }, ContextSetting::Follows)
+    ///     .with_press(ChipPress::Freeze);
+    /// assert!(serde_json::to_string(&time).unwrap().ends_with(r#""press":"freeze"}"#));
+    /// let newer: ChipPress = serde_json::from_str(r#""thaw""#).unwrap();
+    /// assert_eq!(newer, ChipPress::Unknown);
+    /// ```
+    pub fn with_press(mut self, press: ChipPress) -> Self {
+        self.press = Some(press);
+        self
     }
 }
 
@@ -119,6 +153,36 @@ mod tests {
             },
             ContextSetting::Inherited,
         )
+    }
+
+    #[test]
+    fn a_chip_says_what_pressing_it_does_and_an_older_server_says_nothing() {
+        let time = ContextChip::new(
+            "time",
+            "Time",
+            ContextValue::Live { minutes: 15 },
+            ContextSetting::Follows,
+        );
+        assert_eq!(time.press, None);
+        for (press, said) in [
+            (ChipPress::Freeze, "freeze"),
+            (ChipPress::Unfreeze, "unfreeze"),
+        ] {
+            let pressed = time.clone().with_press(press);
+            let sent = serde_json::to_value(&pressed).unwrap();
+            assert_eq!(sent["press"], said);
+            assert_eq!(
+                serde_json::from_value::<ContextChip>(sent).unwrap(),
+                pressed
+            );
+        }
+        let older: ContextChip = serde_json::from_str(
+            r#"{"parameter":"time","label":"Time","value":{"kind":"live","minutes":15}}"#,
+        )
+        .unwrap();
+        assert_eq!(older, time);
+        let newer: ChipPress = serde_json::from_str(r#""thaw""#).unwrap();
+        assert_eq!(newer, ChipPress::Unknown);
     }
 
     #[test]

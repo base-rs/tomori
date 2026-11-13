@@ -33,6 +33,9 @@ mod groups;
 pub(crate) mod held;
 mod image;
 mod layouts;
+mod pin;
+#[cfg(test)]
+pub(crate) use pin::ONLY_COPIES;
 mod placement;
 mod published;
 pub(crate) use beside::spot as beside_spot;
@@ -532,6 +535,9 @@ struct Kept {
         deserialize_with = "context::read"
     )]
     context: context::Settings,
+    /// For a copy frozen, the time setting of its own it had before, which unfreezing gives it back, if it had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thaw: Option<context::Setting>,
 }
 
 impl Kept {
@@ -1419,6 +1425,7 @@ impl Stage {
             anchor: None,
             size: None,
             context: context::Settings::new(),
+            thaw: None,
         };
         self.put(walls, kept, to);
         self.bound(walls.environment);
@@ -2276,6 +2283,9 @@ pub(crate) const STALE_ROW: &str = "That row changed as you chose it; look again
 
 /// Why a size given with both hands was refused, the panel having changed since they took hold of it.
 pub(crate) const STALE_SIZE: &str = "That panel changed as you resized it; take hold of it again.";
+
+/// Why a freeze is refused where the panel changed since the participant saw it.
+pub(crate) const STALE_FREEZE: &str = "That panel changed as you froze it; look again.";
 
 /// Why a participant's change to a wall is refused when the wall changed since the version they saw, as when another
 /// participant changed it meanwhile: the client cues it, and the projection sent again shows the wall as it is, so that

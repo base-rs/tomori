@@ -528,7 +528,15 @@ impl Stage {
                     .and_then(shown_time)
                     .map(|value| (value, ContextSetting::Follows)),
             };
-            chips.extend(time.map(|(value, chosen)| ContextChip::new(TIME, "Time", value, chosen)));
+            // A copy's time chip freezes it, or unfreezes it, pressed.
+            let press = Stage::chip_press(kept, published);
+            chips.extend(time.map(|(value, chosen)| {
+                let chip = ContextChip::new(TIME, "Time", value, chosen);
+                match press {
+                    Some(press) => chip.with_press(press),
+                    None => chip,
+                }
+            }));
         }
         chips
     }
@@ -637,6 +645,19 @@ impl Stage {
         settings: Vec<(String, Setting)>,
         to: &super::Destination,
     ) -> Result<(String, String), &'static str> {
+        self.copy_as(walls, panel, settings, to, true)
+    }
+
+    /// Copy `panel` as [`Stage::copy_panel`] does, refusing a copy that shows what the panel shows only where `distinct`:
+    /// a panel pulled off its wall is pinned to what it showed there, its wall's settings among them.
+    pub(super) fn copy_as(
+        &mut self,
+        walls: &Walls<'_>,
+        panel: &str,
+        settings: Vec<(String, Setting)>,
+        to: &super::Destination,
+        distinct: bool,
+    ) -> Result<(String, String), &'static str> {
         if self.view("", walls, 0).panel(panel).is_none() {
             return Err("That panel is not here.");
         }
@@ -680,7 +701,7 @@ impl Stage {
             context.insert(parameter.clone(), setting);
         }
         // A panel shown in the context it is shown in already is that panel, not another instance of it.
-        if same {
+        if same && distinct {
             return Err(
                 "That panel shows that context already, so a copy of it would show the same.",
             );

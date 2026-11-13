@@ -29,6 +29,9 @@ pub enum ItemAction {
     Untick,
     Choose,
     Chosen,
+    /// A chip that freezes its panel's time to the window it shows, or unfreezes it.
+    Freeze,
+    Unfreeze,
 }
 
 /// The label on the ray naming `panel`, pointed at where the ray meets it, `at`, facing `viewer`: what it is called, its
@@ -117,6 +120,8 @@ fn label_face(
             ItemAction::Untick => ("untick", Style::plain(TEXT)),
             ItemAction::Choose => ("choose", Style::plain(TEXT)),
             ItemAction::Chosen => ("chosen", Style::bold(HIGHLIGHT)),
+            ItemAction::Freeze => ("freeze", Style::plain(TEXT)),
+            ItemAction::Unfreeze => ("unfreeze", Style::plain(TEXT)),
         };
         canvas.rows.push(Row::new(cut(
             &[

@@ -253,3 +253,24 @@ fn chips_stand_before_a_panel_s_metadata_where_both_fit_or_else_on_a_row_of_thei
             .starts_with(" Region EU-WEST1  · rows 1–9 of 30")
     );
 }
+
+#[test]
+fn a_frozen_copy_s_time_chip_says_so_and_one_that_freezes_says_nothing_more() {
+    // The bundled fonts draw the mark.
+    assert!(tomori_text::fonts::covers('❄'));
+    let time = |press: ChipPress| {
+        chip("time", "Time", window(140, 170), ContextSetting::Fixed).with_press(press)
+    };
+    assert_eq!(
+        plain(&lay(&[time(ChipPress::Unfreeze)], 60, 0, 0, TODAY)),
+        " ❄ Time 02:20–02:50 UTC "
+    );
+    assert_eq!(
+        plain(&lay(&[time(ChipPress::Unfreeze)], 22, 0, 0, TODAY)),
+        " ❄ 02:20–02:50 UTC "
+    );
+    assert_eq!(
+        plain(&lay(&[time(ChipPress::Freeze)], 60, 0, 0, TODAY)),
+        " Time 02:20–02:50 UTC "
+    );
+}

@@ -342,6 +342,60 @@ impl Hub {
 }
 
 impl Hub {
+    /// `set_context`'s `shown` time: freeze the panel `panel` names in the calling session's space, its time fixed to
+    /// the window it shows, for everyone in it, a notice saying so.
+    pub(crate) fn agent_freeze_panel(&self, session: &str, panel: &str) -> Result<Value, String> {
+        let mut state = self.lock();
+        let space = self.calling_space(&state, session)?;
+        let record = state.space_mut(&space).expect("found above");
+        let environments = self.environments();
+        let walls = environments.walls(&record.model.environment);
+        let projection = record.versioned(&environments, crate::cards::unix_now());
+        let id = super::agent_panels::find(&projection, panel)?;
+        let title = crate::space::one_line(
+            &crate::presence::title(projection.panel(&id).expect("a panel found is shown")),
+            80,
+        );
+        let changed = record
+            .stage
+            .freeze(&walls, &id, true)
+            .map_err(str::to_owned)?;
+        let window = record
+            .stage
+            .panel_settings(walls.environment, &id)
+            .and_then(|settings| settings.get(tomori_environment::TIME))
+            .cloned()
+            .expect("a panel frozen holds its window");
+        if changed {
+            let what = format!(
+                "the panel \"{title}\", with {}",
+                described(tomori_environment::TIME, Some(&window))
+            );
+            let content = notice(format!("The agent froze {what}."));
+            let notice =
+                record
+                    .stage
+                    .project_notice(&walls, NOTICE, content, crate::cards::unix_now());
+            log::info!("The agent of space {space} froze {what}; projected {notice}.");
+            drop(environments);
+            state.touch_projection(&space);
+            drop(state);
+            self.keep();
+        }
+        Ok(json!({
+            "space": space,
+            "panel": id,
+            "title": title,
+            "changed": changed,
+            "setting": setting_json(tomori_environment::TIME, &window),
+            "next": if changed {
+                "Everyone sees it frozen on its time chip, and a notice on the status wall says so; tell everyone in the space in a sentence what you froze. set_context with follow true unfreezes it."
+            } else {
+                "It was frozen already, so nothing changed and there is nothing to tell."
+            },
+        }))
+    }
+
     /// Take away, in every space, each copy of a panel its environment withdrew longer ago than
     /// `stage::published::WITHDRAWN_SECS` before `now`, in seconds since the epoch, its side told so; and mark how long
     /// each panel held to a window waits for its content, so that one waiting `stage::held::WAIT_SECS` says it has none.
@@ -379,6 +433,29 @@ impl Hub {
         place: Option<&str>,
         settings: Vec<(String, Setting)>,
     ) -> Result<Value, String> {
+        self.agent_copy(session, panel, place, Some(settings))
+    }
+
+    /// The `pin_panel` tool: copy the panel `panel` names, as [`Hub::agent_copy_panel`] does, with what it shows fixed,
+    /// as pulling it off its wall pins it, to where `place` says, or else beside whoever asked.
+    pub(crate) fn agent_pin_panel(
+        &self,
+        session: &str,
+        panel: &str,
+        place: Option<&str>,
+    ) -> Result<Value, String> {
+        self.agent_copy(session, panel, place, None)
+    }
+
+    /// Copy the panel `panel` names, with `settings`, or, without, pinned to what it shows, as `copy_panel` and
+    /// `pin_panel` do.
+    fn agent_copy(
+        &self,
+        session: &str,
+        panel: &str,
+        place: Option<&str>,
+        settings: Option<Vec<(String, Setting)>>,
+    ) -> Result<Value, String> {
         let mut state = self.lock();
         let space = self.calling_space(&state, session)?;
         let people = state.heads(&space);
@@ -390,11 +467,14 @@ impl Hub {
         let id = super::agent_panels::find(&projection, panel)?;
         let shown = projection.panel(&id).expect("a panel found is shown");
         let title = crate::presence::title(shown);
+        // A copy goes to its panel's wall, by default; a panel pinned is pulled off it, beside whoever asked.
         let to = match (place, &shown.place) {
-            (None, tomori_protocol::Place::Wall { wall, .. }) => crate::stage::Destination::Wall {
-                wall: wall.clone(),
-                slot: None,
-            },
+            (None, tomori_protocol::Place::Wall { wall, .. }) if settings.is_some() => {
+                crate::stage::Destination::Wall {
+                    wall: wall.clone(),
+                    slot: None,
+                }
+            }
             (place, _) => {
                 let placement = super::tools::placement(place.unwrap_or("beside"))?;
                 record.panel_destination(
@@ -410,22 +490,36 @@ impl Hub {
                 )?
             }
         };
+        let pinned = settings.is_none();
+        let (copy, instance, settings) = match settings {
+            Some(settings) => {
+                let (copy, instance) = record
+                    .stage
+                    .copy_panel(&walls, &id, settings.clone(), &to)
+                    .map_err(str::to_owned)?;
+                (copy, instance, settings)
+            }
+            None => {
+                let ((copy, instance), pinned) = record
+                    .stage
+                    .pin_copy(&walls, &id, &to)
+                    .map_err(str::to_owned)?;
+                (copy, instance, pinned)
+            }
+        };
         let described: Vec<String> = settings
             .iter()
             .map(|(parameter, setting)| described(parameter, Some(setting)))
             .collect();
-        let (copy, instance) = record
-            .stage
-            .copy_panel(&walls, &id, settings, &to)
-            .map_err(str::to_owned)?;
         let title = crate::space::one_line(&title, 80);
         // A copy is made only with a setting.
         let with = format!(", with {}", described.join(" and "));
-        let content = notice(format!("The agent copied the panel \"{title}\"{with}."));
+        let did = if pinned { "pinned" } else { "copied" };
+        let content = notice(format!("The agent {did} the panel \"{title}\"{with}."));
         let now = crate::cards::unix_now();
         let notice = record.stage.project_notice(&walls, NOTICE, content, now);
         log::info!(
-            "The agent of space {space} copied {id} as {copy}, instance {instance}{with}; projected {notice}."
+            "The agent of space {space} {did} {id} as {copy}, instance {instance}{with}; projected {notice}."
         );
         let after = record.stage.view(&space, &walls, now);
         let place = json!(after.panel(&copy).map(|panel| &panel.place));
@@ -440,7 +534,7 @@ impl Hub {
             "of": id,
             "title": title,
             "place": place,
-            "next": "Everyone sees the copy and its chips, and a notice on the status wall says what you copied; tell everyone in the space in a sentence what you copied, and where.",
+            "next": format!("Everyone sees the copy and its chips, and a notice on the status wall says what you {did}; tell everyone in the space in a sentence what you {did}, and where."),
         }))
     }
 }

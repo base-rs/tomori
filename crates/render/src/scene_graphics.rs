@@ -357,6 +357,7 @@ mod tests {
     mod cards;
     mod chart_readout;
     mod chips;
+    mod freeze;
     mod image_sharpness;
     mod linked_cursor;
     mod padlock_corner;
