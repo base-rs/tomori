@@ -138,6 +138,9 @@ pub(crate) const EVERY: [u32; 4] = tomori_assets::gpu::EVERY_LAMP;
 /// it is drawn so there, and further in a larger image. Distant, the haze has hidden three fifths of it.
 pub const FERN_DETAIL: [f32; 2] = [0.0098, 0.037];
 
+/// The height of a Quest 3's eye's image, in pixels, which [`FERN_DETAIL`] is for.
+const QUEST: u32 = 1_760;
+
 /// A point of the ranges, as their shader reads it.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -796,6 +799,8 @@ struct Ferns {
     bounds: Vec<Aabb>,
     seen: Vec<bool>,
     lods: Option<Vec<Lod>>,
+    /// The height of the eyes' images their details were last given the world for, if they were.
+    levels: Option<Option<u32>>,
     /// Whether those furthest are drawn distant, or far, as they were before they had a distant detail.
     distant: bool,
     item: Option<ItemId>,
@@ -881,6 +886,7 @@ impl Ferns {
             bounds: ferns.iter().map(fern_bounds).collect(),
             seen: vec![true; ferns.len()],
             lods: None,
+            levels: None,
             distant: true,
             item: None,
             ferns,
@@ -888,15 +894,26 @@ impl Ferns {
         }
     }
 
-    /// Add them to `world`, in `root`, once, each an instance, where it may be drawn however it sways.
+    /// Add them to `world`, in `root`, once, each an instance, where it may be drawn however it sways, in their details,
+    /// [`FERN_DETAIL`] for a Quest 3's eye, as many times larger as its image is taller than the eyes', so that each
+    /// detail is drawn about as far away whatever their height, as a fern's detail strays further than a pixel's edge.
     fn submit(&mut self, world: &mut World, root: RootId) {
-        if self.item.is_some_and(|item| world.contains(item)) {
-            return;
+        let item = match self.item.filter(|item| world.contains(*item)) {
+            Some(item) => item,
+            None => {
+                let item = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+                world.place(item, self.bounds.iter().copied().map(Some));
+                self.levels = None;
+                *self.item.insert(item)
+            }
+        };
+        if self.levels != Some(world.height()) {
+            let scale = world
+                .height()
+                .map_or(1.0, |height| QUEST as f32 / height as f32);
+            world.set_levels(item, Levels::new(&FERN_DETAIL.map(|error| error * scale)));
+            self.levels = Some(world.height());
         }
-        let item = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
-        world.set_levels(item, Levels::new(&FERN_DETAIL));
-        world.place(item, self.bounds.iter().copied().map(Some));
-        self.item = Some(item);
     }
 
     /// Draw only the ferns `views` says the eyes may see, as the world culled them, each lit by the lamps the world lists

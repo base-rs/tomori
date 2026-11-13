@@ -321,6 +321,16 @@ fn half_way_between_two_details_each_pixel_of_a_fern_is_one_detail_s() {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let size = (448, 424);
         let mut farmyard = with_hens(&device, &queue, size.0, size.1);
+        // The ferns' details are given the world for the eyes' images' height, so that each is drawn about as far away
+        // whatever it is: for half a Quest 3's, twice the errors.
+        let mut stage = Stage::new();
+        for (height, scale) in [(QUEST, 1.0), (QUEST / 2, 2.0)] {
+            stage.set_height(Some(height));
+            stage.cull(&mut farmyard, &queue, &quest_eyes(ponga(), 0.0), true);
+            let (world, _) = stage.world();
+            let errors = world.levels(farmyard.ferns.item.unwrap());
+            assert_eq!(errors.errors(), FERN_DETAIL.map(|error| error * scale));
+        }
         let (eye, target) = (ponga() + Vec3::new(4.0, -1.5, 4.0), ponga());
         let clip = tomori_scene::depth::perspective(1.2, size.0 as f32 / size.1 as f32)
             * glam::camera::rh::view::look_at_mat4(eye, target, Vec3::Y);
