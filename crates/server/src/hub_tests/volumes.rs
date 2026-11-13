@@ -30,6 +30,7 @@ impl Client {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: Some(Limits::TODAY.with_volumes(volumes, nodes)),
         });
         client.read();

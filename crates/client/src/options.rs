@@ -68,6 +68,10 @@ pub struct Options {
     /// `ProjectionPatch::apply` does, and keeps the version a place op carries, which each connection says in its Hello.
     /// `false`, the default, is sent a live panel whole at each change of its data. See `design/projection.md`.
     pub live_panels: bool,
+    /// Whether the session arrives where the server says as it joins a space, `ServerMessage::Spawn`, which each
+    /// connection says in its Hello. `false`, the default, is never told, and arrives at home, as the spectator, which
+    /// chooses where it watches from itself. See `design/environments.md`.
+    pub spawns: bool,
     /// What this client reads and draws at most, which each connection states in its Hello: by default frames of up to
     /// [`tomori_protocol::MOST_FRAME_BYTES`], which the connection reads, and a projection within today's bounds,
     /// [`tomori_protocol::Limits::TODAY`], since what a session draws is its own to say; see
@@ -101,6 +105,7 @@ impl std::fmt::Debug for Options {
             .field("environments", &self.environments)
             .field("projection_patches", &self.projection_patches)
             .field("live_panels", &self.live_panels)
+            .field("spawns", &self.spawns)
             .field("limits", &self.limits)
             .finish()
     }
@@ -130,6 +135,7 @@ impl Options {
             environments: None,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
         }
     }

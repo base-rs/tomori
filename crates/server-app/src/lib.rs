@@ -36,6 +36,9 @@ pub fn builder() -> Builder {
         .into_iter()
         .chain([farmyard_campsite()])
         .fold(farmyard, Environment::with_anchor);
+    let farmyard = farmyard_spawns()
+        .into_iter()
+        .fold(farmyard, Environment::with_spawn);
     let builder = Server::builder()
         .environment(
             Environment::new(tomori_environment_sky::ID, tomori_environment_sky::LABEL)
@@ -106,6 +109,31 @@ pub fn farmyard_trail() -> Vec<tomori_protocol::cluster::Anchor> {
         .collect()
 }
 
+/// Where people arrive as they join a space in the farmyard: visitors, and the spectator while it follows nobody, on
+/// the trail just outside the gate, looking in through it at the yard; and everyone else, owners and collaborators, at
+/// the campsite, at the two places furthest apart by the fire on the trail's side, of `campsite::standing`, facing it, so that two
+/// joining at once arrive apart. Each stands on the ground its clients walk on. See `design/farmyard.md`.
+pub fn farmyard_spawns() -> Vec<tomori_protocol::spawn::Spawn> {
+    use tomori_environment_farmyard::{campsite, layout, walkable};
+    use tomori_protocol::spawn::{self, Spawn};
+    let on_ground = |x: f32, z: f32| {
+        let y = walkable::height_at(glam::Vec2::new(x, z)).expect("the farmyard's ground is there");
+        [x, y, z]
+    };
+    let gate = on_ground(0.0, layout::FENCE.high[1] + 1.2);
+    let fire = campsite::FIRE.to_array();
+    let mut spawns = vec![
+        Spawn::new(tomori_protocol::Pose::at(gate).facing_towards(layout::ARRIVAL.to_array()))
+            .with_tag(spawn::VISITOR)
+            .with_tag(spawn::SPECTATOR),
+    ];
+    let standing = campsite::standing();
+    spawns.extend([standing[0], standing[3]].iter().map(|(middle, _)| {
+        Spawn::new(tomori_protocol::Pose::at(on_ground(middle.x, middle.y)).facing_towards(fire))
+    }));
+    spawns
+}
+
 /// Where participants arrive in the farmyard: inside its gate, facing the coop. See `design/farmyard.md`.
 pub fn farmyard_arrival() -> tomori_protocol::Pose {
     use tomori_environment_farmyard::layout::{ARRIVAL, ARRIVAL_FACING};
@@ -153,6 +181,79 @@ pub fn farmyard_noticeboard() -> tomori_server::EnvironmentWall {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn visitors_arrive_in_the_farmyard_by_its_gate_and_everyone_else_at_its_campsite() {
+        use tomori_environment::sightlines::Solid;
+        use tomori_environment_farmyard::{campsite, layout, walkable};
+        use tomori_protocol::spawn;
+        let builder = super::builder();
+        let farmyard = &builder.environments()[2];
+        let spawns = farmyard.spawns();
+        assert_eq!(spawns, super::farmyard_spawns());
+        let tags: Vec<&[String]> = spawns.iter().map(|spawn| spawn.tags.as_slice()).collect();
+        assert_eq!(
+            tags,
+            [
+                &[spawn::VISITOR.to_owned(), spawn::SPECTATOR.to_owned()][..],
+                &[],
+                &[]
+            ]
+        );
+        // Sky and the grid declare none, so everyone arrives at home there, as before.
+        assert!(
+            builder.environments()[..2]
+                .iter()
+                .all(|environment| environment.spawns().is_empty())
+        );
+        let solids: Vec<Solid> = super::farmyard_solids()
+            .into_iter()
+            .map(|(low, high)| Solid::new(low, high))
+            .collect();
+        for spawn in spawns {
+            let [x, y, z] = spawn.pose.position;
+            // On the ground participants walk on, clear of everything standing on it, eyes and all.
+            let ground = walkable::height_at(glam::Vec2::new(x, z)).expect("on the ground");
+            assert!((y - ground).abs() < 1e-4, "{spawn:?}");
+            for height in [0.5, 1.0, 1.6] {
+                let point = [x, y + height, z];
+                let inside = |solid: &Solid| {
+                    (0..3).all(|axis| (solid.low[axis]..=solid.high[axis]).contains(&point[axis]))
+                };
+                assert!(!solids.iter().any(inside), "{spawn:?}");
+            }
+        }
+        // Visitors outside the gate, looking in at the yard; the others by the fire, facing it, apart from each other.
+        let gate = glam::Vec3::from_array(spawns[0].pose.position);
+        assert!(
+            gate.z > layout::FENCE.high.y && gate.x.abs() < layout::GATE[1],
+            "{gate}"
+        );
+        let fire = campsite::FIRE;
+        let by_fire: Vec<glam::Vec3> = spawns[1..]
+            .iter()
+            .map(|spawn| glam::Vec3::from_array(spawn.pose.position))
+            .collect();
+        assert!(
+            by_fire
+                .iter()
+                .all(|at| at.with_y(0.0).distance(fire.with_y(0.0)) < campsite::WALKED)
+        );
+        assert!(by_fire[0].distance(by_fire[1]) > tomori_protocol::spawn::OCCUPIED * 2.0);
+        for spawn in &spawns[1..] {
+            let towards = (fire - glam::Vec3::from_array(spawn.pose.position))
+                .with_y(0.0)
+                .normalize();
+            let facing = spawn.pose.yaw();
+            assert!(glam::Vec3::new(facing.sin(), 0.0, facing.cos()).dot(towards) > 0.99);
+        }
+        // Carried into a space, from the arrival inside the gate, every one is within reach.
+        let carriage = tomori_protocol::Pose::carriage(&super::farmyard_arrival());
+        for spawn in spawns {
+            let carried = carriage.carry(&spawn.pose).position;
+            assert!(carried.iter().all(|axis| axis.abs() < 30.0), "{carried:?}");
+        }
+    }
+
     #[test]
     fn tomoris_own_server_offers_sky_then_the_grid_then_the_farmyard() {
         let builder = super::builder();

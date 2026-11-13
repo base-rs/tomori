@@ -56,6 +56,7 @@ fn the_welcome_says_how_long_an_utterance_may_be() {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         });
         // The welcome is the first reply to hello.
@@ -162,6 +163,7 @@ fn greet(hub: &Hub, participant: &str) -> ConnectionId {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         },
     );
@@ -238,6 +240,7 @@ fn visitors_are_not_counted_as_participants() {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         },
     );
@@ -281,6 +284,7 @@ fn only_so_many_disconnected_visitors_are_remembered() {
                 world_edges: false,
                 projection_patches: false,
                 live_panels: false,
+                spawns: false,
                 limits: None,
             },
         );
@@ -486,6 +490,7 @@ fn being_put_back_in_a_space_on_reconnecting_does_not_clear_its_attention() {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         },
     );

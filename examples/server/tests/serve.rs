@@ -157,6 +157,7 @@ fn a_space_is_created_with_the_placeholder_backend_in_the_placeholder_environmen
         world_edges: false,
         projection_patches: false,
         live_panels: false,
+        spawns: false,
         limits: None,
     });
     let (backends, environments) = client.wait_for(|message| match message {

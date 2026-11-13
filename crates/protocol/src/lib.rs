@@ -23,6 +23,7 @@ mod message;
 mod presence;
 mod projection;
 mod space;
+pub mod spawn;
 pub mod text;
 pub mod world;
 

@@ -1009,6 +1009,22 @@ pub struct Rig {
 }
 
 impl Rig {
+    /// The room arriving at `spawn`, a spawn point in the scene: its middle on the point's floor, its −Z, the way
+    /// someone at its middle looks, along the point's +Z, as every anchor faces. At home, facing −Z, it is exactly the
+    /// room at home. See `design/environments.md`.
+    pub fn arriving(spawn: &tomori_protocol::Pose) -> Self {
+        let yaw = if spawn.orientation == tomori_protocol::Pose::HOME.orientation {
+            0.0
+        } else {
+            spawn.yaw() - tomori_protocol::Pose::HOME.yaw()
+        };
+        Self {
+            translation: Vec3::from_array(spawn.position),
+            yaw: (yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI,
+        }
+    }
+
     /// The transform from the room to the scene.
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_rotation_translation(Quat::from_rotation_y(self.yaw), self.translation)
@@ -1093,6 +1109,8 @@ pub(crate) struct Input<'a> {
     /// The space the participant is in, or `None` outside a space.
     pub place: Place<'a>,
     pub locomotion: &'a Locomotion,
+    /// Where the participant arrived in the space, as [`Rig::arriving`] puts them there; home outside a space.
+    pub spawn: Rig,
     /// The left stick.
     pub stick: Vec2,
     /// The pointing ray, in the scene.
@@ -1149,6 +1167,8 @@ enum Gesture {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Travel {
     rig: Rig,
+    /// Where the participant arrived, which the rig goes back to without travel.
+    spawn: Rig,
     /// The space and environment the rig belongs to.
     place: Option<(String, Environment)>,
     gesture: Gesture,
@@ -1172,14 +1192,24 @@ impl Travel {
         self.landing = None;
     }
 
-    /// Where the participant's room is in the scene at `place`, where the profile is `locomotion`: travel belongs to one environment of one space, so anywhere else, or without travel, the room is back home.
-    pub fn settle(&mut self, place: Place, locomotion: &Locomotion) -> Rig {
+    /// Where the participant's room is in the scene at `place`, where the profile is `locomotion` and they arrived at
+    /// `spawn`: travel belongs to one environment of one space, so anywhere else, or without travel, the room is back
+    /// where they arrived, home outside a space; and arriving anew, at another spawn point, puts it there. See
+    /// `design/environments.md`.
+    pub fn settle(&mut self, place: Place, locomotion: &Locomotion, spawn: Rig) -> Rig {
         let here = self
             .place
             .as_ref()
             .map(|(space, environment)| (space.as_str(), *environment));
-        if here != place || place.is_none() || !locomotion.travels() {
+        let spawn = if place.is_some() {
+            spawn
+        } else {
+            Rig::default()
+        };
+        if here != place || place.is_none() || !locomotion.travels() || spawn != self.spawn {
             *self = Self {
+                rig: spawn,
+                spawn,
                 place: place.map(|(space, environment)| (space.to_owned(), environment)),
                 ..Self::default()
             };
@@ -1189,7 +1219,7 @@ impl Travel {
 
     /// Move on a frame, as `input` finds things.
     pub fn update(&mut self, input: Input) -> Outcome {
-        self.settle(input.place, input.locomotion);
+        self.settle(input.place, input.locomotion, input.spawn);
         let dt = if input.dt.is_finite() {
             input.dt.max(0.0)
         } else {

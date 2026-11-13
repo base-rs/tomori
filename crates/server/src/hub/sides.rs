@@ -552,6 +552,8 @@ impl Hub {
         self.reconcile_server_sides(state);
         // Everyone in the space, and the lobby's listing, see the change.
         state.touch_space(space);
+        // And arrive in it anew, after its state, which names the new environment.
+        self.arrive_everyone(state, space);
         // The status wall is where the new environment puts it, and that environment's walls show, the status panels
         // taking the status wall's free slots there.
         let environments = self.environments();

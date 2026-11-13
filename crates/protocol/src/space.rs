@@ -517,6 +517,12 @@ pub struct Anchors {
     /// client lays out what stands at each by `tomori_protocol::cluster`. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<crate::cluster::Anchor>,
+    /// Where people arrive as they join the space, its environment's spawn points, in the space's coordinates, each
+    /// upright, from which the server chooses one for each person joining, sending it to them alone as
+    /// [`crate::ServerMessage::Spawn`], and the spectator one for itself, by [`crate::spawn::choose`]. None where the
+    /// environment declares none, when everyone arrives at home. See `design/environments.md`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawns: Vec<crate::spawn::Spawn>,
 }
 
 impl Anchors {
@@ -550,6 +556,12 @@ impl Anchors {
         self
     }
 
+    /// These anchors, with people arriving at `spawn` too, in the space's coordinates.
+    pub fn with_spawn(mut self, spawn: crate::spawn::Spawn) -> Self {
+        self.spawns.push(spawn);
+        self
+    }
+
     /// The cluster anchor named `name`, if it gives one.
     pub fn cluster(&self, name: &str) -> Option<&crate::cluster::Anchor> {
         self.clusters.iter().find(|anchor| anchor.name == name)
@@ -561,6 +573,7 @@ impl Anchors {
             && self.workers.is_none()
             && self.arrival.is_none()
             && self.clusters.is_empty()
+            && self.spawns.is_empty()
     }
 }
 
@@ -1297,6 +1310,18 @@ mod tests {
         assert_eq!(json["summoned"]["position"][2], -3.0);
         assert_eq!(json["summons"], true);
         assert!(!Anchors::new().with_arrival(pose).is_empty());
+        let spawned = Anchors::new().with_spawn(crate::spawn::Spawn::new(pose));
+        assert!(!spawned.is_empty());
+        assert_eq!(
+            serde_json::to_value(&spawned).unwrap()["spawns"][0]["pose"]["position"][0],
+            1.0
+        );
+        assert!(
+            serde_json::to_value(Anchors::new())
+                .unwrap()
+                .get("spawns")
+                .is_none()
+        );
         assert_eq!(json["anchors"]["workers"]["position"][2], -3.0);
         assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), state);
         // Only those given are sent.

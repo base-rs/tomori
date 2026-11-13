@@ -52,6 +52,7 @@ mod seating;
 mod server;
 mod server_sides;
 mod space;
+mod spawns;
 mod stage;
 mod system;
 pub mod timers;

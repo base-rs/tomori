@@ -37,6 +37,8 @@ pub struct Environment {
     anchors: Vec<tomori_protocol::cluster::Anchor>,
     /// Where participants arrive in it, its `arrival` anchor, if it says, in its own coordinates.
     arrival: Option<tomori_protocol::Pose>,
+    /// Where people arrive as they join a space in it, its spawn points, in its own coordinates.
+    spawns: Vec<tomori_protocol::spawn::Spawn>,
     /// The avatar its agent shows as in its spaces, if it says, in place of the one the space's backend names.
     avatar: Option<String>,
     /// The projection walls of its own, in its own coordinates.
@@ -394,6 +396,7 @@ impl fmt::Debug for Environment {
             .field("agent", &self.agent)
             .field("anchors", &self.anchors)
             .field("arrival", &self.arrival)
+            .field("spawns", &self.spawns)
             .field("avatar", &self.avatar)
             .field("walls", &self.walls)
             .field("solids", &self.solids)
@@ -414,6 +417,7 @@ impl PartialEq for Environment {
             && self.agent == other.agent
             && self.anchors == other.anchors
             && self.arrival == other.arrival
+            && self.spawns == other.spawns
             && self.avatar == other.avatar
             && self.walls == other.walls
             && self.solids == other.solids
@@ -442,6 +446,7 @@ impl Environment {
             agent: None,
             anchors: Vec::new(),
             arrival: None,
+            spawns: Vec::new(),
             avatar: None,
             walls: Vec::new(),
             carried: Vec::new(),
@@ -548,6 +553,57 @@ impl Environment {
     /// Where participants arrive in it, if it says, in its own coordinates.
     pub fn arrival(&self) -> Option<tomori_protocol::Pose> {
         self.arrival
+    }
+
+    /// The environment, with people joining a space in it arriving at `spawn` too, a spawn point in its own
+    /// coordinates, where the middle of their room arrives on its floor, facing along the pose's +Z, as every anchor
+    /// faces, rather than all at its arrival, on top of one another. The server chooses one for each person as they
+    /// join or rejoin the space, or it changes environment, and never moves them later: of the points tagged for their
+    /// role, `tomori_protocol::spawn::OWNER`, `COLLABORATOR` or `VISITOR`, or, with none, those untagged, the one
+    /// fewest stand at, and of those the one fewest have arrived at; the spectator watches from one tagged `SPECTATOR`,
+    /// or else untagged, while it follows nobody. Someone no point suits arrives at its arrival, as everyone does in an
+    /// environment that declares none. One whose tags `tomori_protocol::spawn::Spawn::checked` refuses, whose pose is
+    /// not finite or has no orientation, or beyond `tomori_protocol::spawn::SPAWN_LIMIT`, is left out with a warning;
+    /// one beyond 30 m of its arrival on an axis, once carried, is left out of the space. See
+    /// `design/environments.md`.
+    ///
+    /// ```
+    /// use tomori_protocol::Pose;
+    /// use tomori_protocol::spawn::{self, Spawn};
+    /// use tomori_server::Environment;
+    ///
+    /// let gate = Spawn::new(Pose::at([0.0, 0.0, 6.0]).facing_towards([0.0, 0.0, 0.0])).with_tag(spawn::VISITOR);
+    /// let farm = Environment::new("farm", "Farm").with_spawn(gate.clone());
+    /// assert_eq!(farm.spawns(), [gate]);
+    /// assert!(Environment::new("farm", "Farm").spawns().is_empty());
+    /// ```
+    pub fn with_spawn(mut self, spawn: tomori_protocol::spawn::Spawn) -> Self {
+        let refused = spawn
+            .checked()
+            .err()
+            .or_else(|| {
+                crate::stage::valid_arrival(&spawn.pose)
+                    .is_none()
+                    .then_some("its pose is not finite, or has no orientation")
+            })
+            .or_else(|| {
+                (self.spawns.len() >= tomori_protocol::spawn::SPAWN_LIMIT)
+                    .then_some("it declares 32 spawn points before it")
+            });
+        match refused {
+            Some(why) => log::warn!(
+                "Environment {}'s spawn point {:?} is left out: {why}.",
+                self.id,
+                spawn.pose.position
+            ),
+            None => self.spawns.push(spawn),
+        }
+        self
+    }
+
+    /// Where people arrive as they join a space in it, its spawn points, in its own coordinates.
+    pub fn spawns(&self) -> &[tomori_protocol::spawn::Spawn] {
+        &self.spawns
     }
 
     /// The carriage from its own coordinates into a space's: [`tomori_protocol::Pose::carriage`] of its arrival, if it
@@ -1205,6 +1261,16 @@ impl Environments {
                 .arrival
                 .as_ref()
                 .and_then(crate::stage::valid_arrival);
+            // Where people arrive, each carried and bounded as the agent's home is, or left out.
+            anchors.spawns = environment
+                .spawns
+                .iter()
+                .filter_map(|spawn| {
+                    let mut carried = spawn.clone();
+                    carried.pose = environment.carried(Some(&spawn.pose))?;
+                    Some(carried)
+                })
+                .collect();
         }
         anchors
     }
@@ -1748,6 +1814,60 @@ mod tests {
         assert_eq!(offered.anchors("far"), tomori_protocol::Anchors::new());
         let plain = Environment::new("roomy", "Roomy");
         assert_ne!(plain, plain.clone().with_anchor(room));
+    }
+
+    #[test]
+    fn spawn_points_are_carried_into_the_space_and_bounded() {
+        use tomori_protocol::Pose;
+        use tomori_protocol::spawn::{self, Spawn};
+        let gate = Spawn::new(Pose::at([0.0, 0.0, 6.0]).facing_towards([0.0, 0.0, 0.0]))
+            .with_tag(spawn::VISITOR);
+        let camp = Spawn::new(Pose::at([4.0, 0.5, -2.0]));
+        // Arriving 8 m along +Z, facing −Z: the gate stands 2 m behind home, the campsite 10 m ahead.
+        let arrival = Pose::at([0.0, 0.0, 8.0]).facing_towards([0.0, 0.0, 0.0]);
+        let farm = Environment::new("farm", "Farm")
+            .with_arrival(arrival)
+            .with_spawn(gate.clone())
+            .with_spawn(camp.clone())
+            // Refused: a tag that is no slug, a pose that is not finite, one without an orientation, and one beyond
+            // reach once carried, which the space leaves out.
+            .with_spawn(Spawn::new(Pose::HOME).with_tag("by the gate"))
+            .with_spawn(Spawn::new(Pose::at([f32::NAN, 0.0, 0.0])))
+            .with_spawn(Spawn::new(Pose {
+                position: [0.0; 3],
+                orientation: [0.0; 4],
+            }))
+            .with_spawn(Spawn::new(Pose::at([0.0, 0.0, -30.0])));
+        assert_eq!(farm.spawns().len(), 3);
+        assert_eq!(farm.spawns()[..2], [gate.clone(), camp.clone()]);
+        assert!(format!("{farm:?}").contains("spawns"));
+        let offered = tomoris().with(farm);
+        let spawns = offered.anchors("farm").spawns;
+        assert_eq!(spawns.len(), 2);
+        assert_eq!(spawns[0].tags, [spawn::VISITOR]);
+        assert!(
+            spawns[0]
+                .pose
+                .position
+                .iter()
+                .zip([0.0, 0.0, -2.0])
+                .all(|(a, b)| (a - b).abs() < 1e-4),
+            "{spawns:?}"
+        );
+        assert!(
+            (spawns[1].pose.position[2] + 10.0).abs() < 1e-4,
+            "{spawns:?}"
+        );
+        assert!((spawns[1].pose.position[1] - 0.5).abs() < 1e-4);
+        // At most 32.
+        let many = (0..40).fold(Environment::new("many", "Many"), |many, index| {
+            many.with_spawn(Spawn::new(Pose::at([index as f32 * 0.1, 0.0, 0.0])))
+        });
+        assert_eq!(many.spawns().len(), spawn::SPAWN_LIMIT);
+        // An environment declaring none sends none, and spawn points tell environments apart.
+        assert!(offered.anchors(SKY).spawns.is_empty());
+        let plain = Environment::new("farm", "Farm");
+        assert_ne!(plain, plain.clone().with_spawn(camp));
     }
 
     #[test]

@@ -188,6 +188,8 @@ impl Feed {
         let mut conversation = Conversation::new(&identity.name);
         // The spectator follows live speech, and is never played what it missed.
         conversation.follow_live_speech_only();
+        // And watches from where it chooses, standing nowhere anyone arrives. See `design/spectator.md`.
+        conversation.choose_own_arrival();
 
         // The connection enqueues a `Connect` action when a server is given,
         // so it must be created before `join_space` queues a `Send(Join)`:
@@ -346,10 +348,13 @@ impl Feed {
                 position: followed.head.position,
                 orientation: followed.head.orientation,
             },
-            None => Pose {
-                position: NEUTRAL.to_array(),
-                orientation: [0.0, 0.0, 0.0, 1.0],
-            },
+            None => {
+                let (_, orientation, position) = self.neutral().to_scale_rotation_translation();
+                Pose {
+                    position: position.to_array(),
+                    orientation: orientation.to_array(),
+                }
+            }
         };
         self.connection.listen_as(self.following);
         crate::spatial_audio::listen(
@@ -365,6 +370,19 @@ impl Feed {
             self.last_caption = Some(frame.caption.clone());
         }
         frame
+    }
+
+    /// Where it sees and hears from while it follows nobody: at standing eye height above the spawn point the joined
+    /// space's environment tags for spectators, or else its first untagged, facing its way, as a room arriving there
+    /// would; or, with none, home, facing −Z, where a participant joins as a headset starts. See `design/spectator.md`.
+    fn neutral(&self) -> Mat4 {
+        let rig = self
+            .conversation
+            .spectator_spawn()
+            .map_or(tomori_scene::locomotion::Rig::default(), |spawn| {
+                tomori_scene::locomotion::Rig::arriving(&spawn)
+            });
+        rig.matrix() * Mat4::from_translation(NEUTRAL)
     }
 
     /// Pick the participant to follow: by name if given, else the first
@@ -438,8 +456,8 @@ impl Feed {
                 (projection, head_matrix, caption)
             }
             None => {
-                // No presence yet: a neutral view from where a participant joins, looking ahead, where its audience hears.
-                let head_matrix = Mat4::from_translation(NEUTRAL);
+                // No presence yet: a neutral view from where a spectator arrives, looking ahead, where its audience hears.
+                let head_matrix = self.neutral();
                 let projection =
                     tomori_scene::depth::perspective(1.4, aspect) * head_matrix.inverse();
                 let caption = self.caption_text(&self.following_name);
@@ -1549,6 +1567,72 @@ mod tests {
                 "the image must draw over its panels: {image} pixels changed"
             );
         });
+    }
+
+    #[test]
+    fn with_nobody_to_follow_the_spectator_watches_from_its_spawn_point() {
+        use tomori_protocol::spawn::{self, Spawn};
+        let mut feed = feed(SpectatorOptions::default());
+        // The server is never asked where the spectator arrives, so it keeps no spawn point for it.
+        assert!(!tomori_client::connection::Session::spawns(
+            &feed.conversation
+        ));
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Owner,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        let joined = |feed: &mut Feed, anchors: tomori_protocol::Anchors| {
+            let mut state = SpaceState {
+                id: "space".into(),
+                environment: "sky".into(),
+                ..Default::default()
+            };
+            state.anchors = anchors;
+            feed.conversation
+                .apply(Event::Message(ServerMessage::Space {
+                    state: Box::new(state),
+                }));
+            feed.build_frame(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now())
+        };
+        // Its own point, by the gate 4 m along +X, facing +X, before the participants' at the campsite.
+        let gate = tomori_protocol::Pose::upright([4.0, 0.0, 0.0], std::f32::consts::FRAC_PI_2);
+        let camp = tomori_protocol::Pose::upright([0.0, 0.0, -6.0], 0.0);
+        let anchors = tomori_protocol::Anchors::new()
+            .with_spawn(Spawn::new(camp).with_tag(spawn::OWNER))
+            .with_spawn(Spawn::new(gate).with_tag(spawn::SPECTATOR));
+        let frame = joined(&mut feed, anchors);
+        let head = Mat4::from_cols_array(&frame.head);
+        let eye = head.transform_point3(Vec3::ZERO);
+        assert!(eye.distance(Vec3::new(4.0, 1.6, 0.0)) < 1e-4, "{eye}");
+        assert!(head.transform_vector3(Vec3::NEG_Z).distance(Vec3::X) < 1e-4);
+        let seen = tomori_render::scenery::eye(Mat4::from_cols_array(&frame.projection));
+        assert!(seen.distance(eye) < 1e-4, "{seen}");
+        // Without one of its own, the first untagged; with neither, home, as a participant joins.
+        let anchors = tomori_protocol::Anchors::new()
+            .with_spawn(Spawn::new(gate).with_tag(spawn::VISITOR))
+            .with_spawn(Spawn::new(camp));
+        let frame = joined(&mut feed, anchors);
+        assert!(
+            Mat4::from_cols_array(&frame.head)
+                .transform_point3(Vec3::ZERO)
+                .distance(Vec3::new(0.0, 1.6, -6.0))
+                < 1e-4
+        );
+        let anchors =
+            tomori_protocol::Anchors::new().with_spawn(Spawn::new(gate).with_tag(spawn::VISITOR));
+        let frame = joined(&mut feed, anchors);
+        assert_eq!(&frame.head[12..15], &NEUTRAL.to_array());
+        assert_eq!(feed.neutral(), Mat4::from_translation(NEUTRAL));
     }
 
     #[test]

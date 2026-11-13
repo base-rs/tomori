@@ -183,6 +183,7 @@ mod tests {
                 world_edges: false,
                 projection_patches: false,
                 live_panels: false,
+                spawns: false,
                 limits: None,
             },
             ClientMessage::Ping { nonce: 1 },

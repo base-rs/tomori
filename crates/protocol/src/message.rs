@@ -616,6 +616,11 @@ pub enum ClientMessage {
         /// whose version a move changed whole, as before. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         live_panels: bool,
+        /// Whether this client reads [`ServerMessage::Spawn`], arriving where it says as it joins a space. Absent from
+        /// older clients, which would refuse it and are never sent it, and from the spectator, which chooses where it
+        /// watches from itself. See `design/environments.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spawns: bool,
         /// What this client reads and draws at most. Absent from older clients, and read as [`crate::Limits::TODAY`];
         /// a field left out is today's bound too. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1127,6 +1132,16 @@ pub enum ServerMessage {
     /// The complete state of the joined space. Sent on join and whenever it changes.
     Space {
         state: Box<SpaceState>,
+    },
+    /// Where this client arrives in the space `space`, in its environment `environment`: the spawn point the server
+    /// chose for it, in the space's coordinates, upright, which its room is set on, facing along its +Z. Sent to it
+    /// alone, after the space's state, as it joins or rejoins the space and as the space changes environment, only to a
+    /// client whose Hello set `spawns` and only where the environment declares a spawn point that suits it; otherwise
+    /// it arrives at home. See `design/environments.md`.
+    Spawn {
+        space: String,
+        environment: String,
+        at: Pose,
     },
     /// This client is no longer in a space: it left, or the space it was in was deleted, as `deleted` says. Absent
     /// from older servers, and an older client, which reads none, takes it as leaving.
@@ -1980,6 +1995,7 @@ mod tests {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         };
         // A newer client lists what it presents, at each version.
@@ -2099,6 +2115,7 @@ mod tests {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
@@ -2176,6 +2193,7 @@ mod tests {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         };
         assert_eq!(
@@ -2204,6 +2222,30 @@ mod tests {
     }
 
     #[test]
+    fn spawns_are_an_addition_older_peers_never_see() {
+        let older: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"}),
+        )
+        .unwrap();
+        let ClientMessage::Hello { spawns, .. } = older else {
+            unreachable!("a hello");
+        };
+        assert!(!spawns);
+        let message = ServerMessage::Spawn {
+            space: "s".into(),
+            environment: "farmyard".into(),
+            at: Pose::upright([1.0, 0.0, 2.0], 0.5),
+        };
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["type"], "spawn");
+        assert_eq!(json["at"]["position"][2], 2.0);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            message
+        );
+    }
+
+    #[test]
     fn whether_pairing_is_open_is_an_addition_older_peers_never_see() {
         let hello = ClientMessage::Hello {
             protocol: 2,
@@ -2220,6 +2262,7 @@ mod tests {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         };
         assert_eq!(
@@ -2282,6 +2325,7 @@ mod tests {
             world_edges: false,
             projection_patches: false,
             live_panels: false,
+            spawns: false,
             limits: None,
         };
         let json = serde_json::to_value(&hello).unwrap();
@@ -2311,6 +2355,7 @@ mod tests {
                 world_edges: false,
                 projection_patches: false,
                 live_panels: false,
+                spawns: false,
                 limits: None,
             }
         );

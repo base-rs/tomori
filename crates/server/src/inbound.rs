@@ -216,6 +216,7 @@ mod tests {
             world_edges: false,
             projection_patches: true,
             live_panels: true,
+            spawns: false,
             limits: Some(tomori_protocol::Limits::MOST),
         };
         let hello = Frame::client(&hello).payload.len();
