@@ -1,10 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! A frame costs no allocation: once what is placed stops growing, giving the world its views, placing what moves and
-//! culling allocate nothing, so that the indirection costs the headset's frame no time in the allocator. Counted on the
-//! test's thread only, as the world uses no other, so that what the test harness allocates on its own threads meanwhile
-//! is not.
+//! A frame costs no allocation: once what is placed stops growing, giving the world its views, placing what moves,
+//! culling and lighting each instance allocate nothing, so that the indirection costs the headset's frame no time in
+//! the allocator. Counted on the test's thread only, as the world uses no other, so that what the test harness
+//! allocates on its own threads meanwhile is not.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -83,6 +83,15 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
         4.0,
         Vec3::ONE,
     ));
+    // And a dozen lanterns about the hens, more than light any one of them.
+    for index in 0..12 {
+        world.add_light(Light::new(
+            scenery,
+            Vec3::new(index as f32 * 0.5 - 3.0, 1.0, -2.5),
+            3.0,
+            Vec3::splat(0.5),
+        ));
+    }
     let frame = |world: &mut World, step: usize| {
         let turned = step as f32 * 0.05;
         world.set_views(&eyes(Vec3::new(0.0, 1.6, 0.0), turned));
@@ -104,11 +113,18 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
         world.light_mut(lamp).unwrap().intensity = 1.0 + turned.sin() * 0.1;
         world.cull();
         world.seen(static_item).iter().filter(|seen| **seen).count()
+            + world.lit(static_item).map(<[_]>::len).sum::<usize>()
     };
     // The first frames grow what the world keeps, and build the hierarchy.
     for step in 0..3 {
         frame(&mut world, step);
     }
+    // Facing them, the hens are lit by as many lanterns as light one.
+    frame(&mut world, 0);
+    assert_eq!(
+        world.lit(hens).map(<[_]>::len).max(),
+        Some(tomori_world::LIGHTS_PER_INSTANCE)
+    );
     let before = ALLOCATED.with(Cell::get);
     let mut seen = 0;
     for step in 3..200 {

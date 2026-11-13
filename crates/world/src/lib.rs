@@ -11,6 +11,8 @@
 //! - **Items:** something drawn, by a mesh and a material the backend names by opaque ids, in a [`Layer`], static or
 //!   dynamic, once or as many instances, each with its bounds in its root's coordinates, or none, never culled.
 //! - **Lights:** each with where it is, how far it reaches, its colour and falloff, and each root's environment light.
+//!   Each frame, each instance seen is lit by at most [`LIGHTS_PER_INSTANCE`] of its root's lights, of at most
+//!   [`LIGHTS`] the views may see, as [`assign`] chooses them, which a backend reads as [`World::lit`].
 //! - **Views:** this frame's eyes, two on the headset and one on the desktop window and the spectator, and one frustum
 //!   enclosing them all.
 //!
@@ -24,7 +26,9 @@ mod light;
 mod view;
 mod world;
 
-pub use light::{EnvironmentLight, Falloff, Light, LightId};
+pub use light::{
+    EnvironmentLight, FADE, Falloff, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit, assign,
+};
 pub use tomori_assets::bounds::{Aabb, Frustum, Tally};
 pub use view::{EYES, Views, eye};
 pub use world::{Item, ItemId, Layer, MaterialId, MeshId, Mobility, RootId, World};
