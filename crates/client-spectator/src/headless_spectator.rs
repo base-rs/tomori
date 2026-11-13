@@ -7,7 +7,6 @@ use crate::{
     pipewire_video::{self, Producer, Video},
     spectator_feed::Feed,
     spectator_view::{RenderInputs, SpectatorView},
-    swarm::Swarm,
 };
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
@@ -66,7 +65,6 @@ struct State {
     renderer: Renderer,
     video: Video,
     spectator: SpectatorView,
-    swarm: Swarm,
 }
 
 impl State {
@@ -88,7 +86,6 @@ impl State {
             renderer,
             video,
             spectator,
-            swarm: Swarm::default(),
         }
     }
 
@@ -97,7 +94,6 @@ impl State {
             device: &self.device,
             queue: &self.queue,
             renderer: &mut self.renderer,
-            swarm: &mut self.swarm,
             target: self.video.view.clone(),
             aspect: pipewire_video::WIDTH as f32 / pipewire_video::HEIGHT as f32,
         });

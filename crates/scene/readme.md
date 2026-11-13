@@ -10,7 +10,7 @@ It depends on no rendering, windowing or platform audio crate, so it builds for 
 cargo add tomori-scene
 ```
 
-A client polls its `tomori_client::connection::Connection` with its `conversation::Conversation` once a frame, turns its devices' input into `scene::Buttons` and `scene::Senses`, runs the frame step, and draws the `scene::Frame` it returns, as [`tomori-render`](https://crates.io/crates/tomori-render)'s `scene_graphics::draw` does. Most projects build on [`tomori-client-quest`](https://crates.io/crates/tomori-client-quest)'s builder rather than on this crate directly.
+A client polls its `tomori_client::connection::Connection` with its `conversation::Conversation` once a frame, turns its devices' input into `scene::Buttons` and `scene::Senses`, runs the frame step, and draws the `scene::Frame` it returns, as [`tomori-render`](https://crates.io/crates/tomori-render)'s `scene_graphics::draw` does. A spectator runs it as a watcher with `scene::Step::watch`, from a camera and without input, and its frame holds everything a participant's does but what `scene::PERSONAL` names. Most projects build on [`tomori-client-quest`](https://crates.io/crates/tomori-client-quest)'s builder rather than on this crate directly.
 
 An environment's client side, `client_side::ClientSide`, registered beside its scenery, may mark what it picks as selectable with `Picked::selectable`, and is told each frame, in its `client_side::Input`, what the participant selects with the trigger or A (`select`, one at a time, A where nothing before it in A's order takes the press), backs out of with B (`back`) and pushes the sticks to (`left_stick`, `right_stick`), only where nothing else takes them.
 

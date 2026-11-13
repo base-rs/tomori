@@ -52,7 +52,7 @@ This describes how a space's agent sets timers that wake it on a schedule, attac
 - **Pointed at.** The ray, or the desktop's mouse, points at a dial as at a worker: within 0.2 m of its middle, growing with its distance beyond 3 m as a worker's sphere does, the nearer of a dial and a worker taken, a dial leaving never. The dial pointed at is drawn paler and a quarter larger, the ray ends on it where it passes nearest its middle, a hover ticks, the recording indicator says the words are about `timer NAME`, and words begun then name it as `Resource::Timer`, as above.
 - **Cancelling.** Workers have no control of a participant's to remove them, so neither do timers: a participant cancels one by pointing at it and asking the agent, which cancels it with `cancel_timer`, needing nobody's `requested_by`, even in a turn a timer began, and everyone in the space, visitors too, sees its dial go.
 
-The spectator draws the dials it works out itself, as the headset does, and sends them in its frames as `timer_dials`, which a frame from an older sender lacks.
+The spectator draws the dials its frame step works out, as the headset's does, since it runs the frame step as a watcher (see `spectator.md`).
 
 ## Rationale
 
@@ -76,7 +76,7 @@ In November 2026 the maintainer found that the agent coordinating a space, which
 
 ## Scope
 
-`tomori-scene`'s `dials.rs`, with `delegation::Scene::set_timers`, `dials` and `pointed_timer`, the frame step's pointing and clock in `scene.rs`, and `Conversation`'s naming of a timer pointed at; `tomori-render`'s timer signs in `workspace_graphics.rs` and `Renderer::set_dials`; and `tomori-client-spectator`'s `Frame::timer_dials`. `crates/server`'s `timers.rs` and `timers/schedule.rs`, the pure scheduler; `events.rs`, the event queue; `space.rs`, which holds both and gives a prompt of notes; `hub/agent_timers.rs`, the tools and the hub looking at timers; the `set_timer`, `timers` and `cancel_timer` definitions in `mcp.rs`; `kept.rs`'s `timers`; the server's `look_at_timers` in `server.rs`; and `hub/provenance.rs`'s refusal after a prompt of notes. `tomori-protocol`'s `Timer`, `TimerState`, `SpaceState::timers` and `Resource::Timer`.
+`tomori-scene`'s `dials.rs`, with `delegation::Scene::set_timers`, `dials` and `pointed_timer`, the frame step's pointing and clock in `scene.rs`, and `Conversation`'s naming of a timer pointed at; and `tomori-render`'s timer signs in `workspace_graphics.rs` and `Renderer::set_dials`. `crates/server`'s `timers.rs` and `timers/schedule.rs`, the pure scheduler; `events.rs`, the event queue; `space.rs`, which holds both and gives a prompt of notes; `hub/agent_timers.rs`, the tools and the hub looking at timers; the `set_timer`, `timers` and `cancel_timer` definitions in `mcp.rs`; `kept.rs`'s `timers`; the server's `look_at_timers` in `server.rs`; and `hub/provenance.rs`'s refusal after a prompt of notes. `tomori-protocol`'s `Timer`, `TimerState`, `SpaceState::timers` and `Resource::Timer`.
 
 ## Validation
 

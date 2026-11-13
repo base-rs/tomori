@@ -1,12 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The frame step that the headset and the desktop window share: the controller's buttons, arrival, the hand menu, the right wrist's transcript, pointing and choosing, the swarm, the space's workers and the shared panels, from plain input. Each platform's own behaviour is in [`headset`] and [`desktop`], which turn their devices' input into [`Buttons`] and [`Senses`]; the shells in `xr.rs` and `desktop_participant.rs` make only device calls. What a frame draws is [`Frame`], which the renderer applies. This is the platform-neutral core that `design/clients.md` asks for.
+//! The frame step that the headset and the desktop window share: the controller's buttons, arrival, the hand menu, the right wrist's transcript, pointing and choosing, the swarm, the space's workers and the shared panels, from plain input. Each platform's own behaviour is in [`headset`] and [`desktop`], which turn their devices' input into [`Buttons`] and [`Senses`]; the shells in `xr.rs` and `desktop_participant.rs` make only device calls. What a frame draws is [`Frame`], which the renderer applies. A watcher, such as the spectator, runs the same step with [`Step::watch`], from a camera, without input or what [`PERSONAL`] names. This is the platform-neutral core that `design/clients.md` asks for.
 #[cfg(not(target_os = "android"))]
 pub mod desktop;
 pub mod headset;
 mod precedence;
+mod watching;
 use precedence::Ladder as _;
+pub use watching::{Element, PERSONAL};
 
 use std::time::Instant;
 
@@ -600,6 +602,11 @@ pub struct Step {
     /// the lobby and the space, and the rig going home from travel. See `design/arrival.md`.
     seen_space: Option<String>,
     seen_rig: Rig,
+    /// Whether it steps as a watcher, as [`Self::watch`] does, and how many intents its client sides asked while it
+    /// did, which were dropped, with whether that has been logged. See `design/spectator.md`.
+    watching: bool,
+    dropped: usize,
+    asked: bool,
 }
 
 /// Where a space's environment stands in the participant's room: the environment drawn, its carriage and the ring on the
@@ -772,6 +779,9 @@ impl Default for Step {
             standing: None,
             seen_space: None,
             seen_rig: Rig::default(),
+            watching: false,
+            dropped: 0,
+            asked: false,
         }
     }
 }
@@ -1982,7 +1992,12 @@ impl Step {
             scroll: scrolled(self.scroll_stick.as_ref(), self.wheel.take(), dt)
                 .as_ref()
                 .map(|(panel, rows)| (panel.as_str(), *rows)),
-            rights: conversation.wall_rights(),
+            // A watcher holds no rights over walls, whatever its role. See `design/spectator.md`.
+            rights: if self.watching {
+                crate::projection::editing::Rights::default()
+            } else {
+                conversation.wall_rights()
+            },
             surfaces: Some(&surfaces),
             left,
             now,
@@ -2085,11 +2100,11 @@ impl Step {
             .joined_space()
             .map(|(space, _)| space.id.clone());
         // The environment's ambience, too, once its scenery has grown in, carried into the space as it is drawn; and
-        // none outside a space, on the grid or in an environment without one.
+        // none outside a space, on the grid or in an environment without one, nor for a watcher.
         let ambience = conversation
             .ambience()
             .filter(|(environment, _)| {
-                scenery.reveal.is_none() && scenery.environment == *environment
+                !self.watching && scenery.reveal.is_none() && scenery.environment == *environment
             })
             .zip(space.clone());
         let playing = ambience
@@ -2721,23 +2736,36 @@ impl Step {
                         .as_participant(
                             conversation
                                 .source()
-                                .filter(|_| conversation.role().participates()),
+                                .filter(|_| !self.watching && conversation.role().participates()),
                         ),
                 );
-                for intent in output.intents {
-                    conversation.environment_intent(
-                        environment.id(),
-                        environment.version(),
-                        intent,
-                    );
-                }
-                for (sound, position) in output.sounds {
-                    let position = arrangement.carriage.place(Vec3::from_array(position));
-                    feedback.ambient(sound, position.to_array(), now);
-                }
-                // An object passed from one hand to the other is felt on the hand that took it.
-                for side in output.passed {
-                    feedback.emit_on(feedback::Event::Passed(side), side, now);
+                // A watcher asks nothing, whatever its role: what its client side asks is dropped, its sounds are not
+                // played and its passes are not felt. See `design/spectator.md`.
+                if self.watching {
+                    if !output.intents.is_empty() && !self.asked {
+                        log::info!(
+                            "Watching: dropping what the {} client side asks its server side; a watcher asks nothing.",
+                            environment.id()
+                        );
+                        self.asked = true;
+                    }
+                    self.dropped += output.intents.len();
+                } else {
+                    for intent in output.intents {
+                        conversation.environment_intent(
+                            environment.id(),
+                            environment.version(),
+                            intent,
+                        );
+                    }
+                    for (sound, position) in output.sounds {
+                        let position = arrangement.carriage.place(Vec3::from_array(position));
+                        feedback.ambient(sound, position.to_array(), now);
+                    }
+                    // An object passed from one hand to the other is felt on the hand that took it.
+                    for side in output.passed {
+                        feedback.emit_on(feedback::Event::Passed(side), side, now);
+                    }
                 }
                 output.drawn
             }

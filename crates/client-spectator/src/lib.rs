@@ -10,7 +10,6 @@ mod child_process;
 pub mod cli;
 pub mod headless_spectator;
 pub mod pipewire_video;
-pub mod spectator;
 pub mod spectator_feed;
 pub mod spectator_view;
 pub mod spectator_window;
@@ -23,9 +22,7 @@ use tomori_client_desktop::desktop_audio;
 use tomori_render::{controller, graphics};
 #[cfg(test)]
 use tomori_scene::test_support;
-use tomori_scene::{
-    conversation, delegation, environment, hands, interaction, spatial_audio, swarm,
-};
+use tomori_scene::{conversation, spatial_audio};
 
 pub use spectator_feed::SpectatorOptions;
 /// Whose voices a spectator plays, its [`SpectatorOptions::voices`].
