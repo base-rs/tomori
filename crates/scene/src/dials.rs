@@ -10,7 +10,6 @@
 use std::time::Instant;
 
 use glam::{Mat3, Quat, Vec3};
-use serde::{Deserialize, Serialize};
 use tomori_protocol::{Timer, TimerState};
 
 use crate::anchors::Anchor;
@@ -72,7 +71,7 @@ pub const DRIFT: f64 = 1.0;
 /// A dial as it is drawn this frame: the timer's name, its schedule and its condition in a few words each, as `every
 /// hour` and `when present`, what its pill says, its state, where its middle stands, the eyes it faces, how large it is
 /// drawn as a share of its own size, how opaque it is as it grows in or shrinks away, and whether it is pointed at.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Dial {
     pub name: String,
     pub schedule: String,
@@ -83,12 +82,11 @@ pub struct Dial {
     pub facing: [f32; 3],
     pub scale: f32,
     pub opacity: f32,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pointed: bool,
 }
 
 impl Dial {
-    /// Whether it is within the bounds this client draws, as the spectator checks one it is sent.
+    /// Whether it is within the bounds this client draws.
     pub fn valid(&self) -> bool {
         let finite = |point: &[f32; 3]| point.iter().all(|v| v.is_finite() && v.abs() <= 100.0);
         !self.name.is_empty()

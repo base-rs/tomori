@@ -322,20 +322,19 @@ fn error_wave_is_small_slow_zero_mean_and_does_not_close_the_fracture() {
 }
 
 #[test]
-fn cube_quaternions_are_defaulted_bounded_normalized_and_roundtrip() {
-    let legacy: Cube = serde_json::from_str(
-        r#"{"position":[0,1,-2],"scale":[0.24,0.24,0.24],"color":[0.3,0.8,0.5]}"#,
-    )
-    .unwrap();
-    assert_eq!(legacy.orientation, Quat::IDENTITY.to_array());
-    assert!(legacy.valid());
+fn cube_quaternions_are_bounded_and_normalized() {
+    let upright = Cube {
+        position: [0.0, 1.0, -2.0],
+        scale: [0.24; 3],
+        color: [0.3, 0.8, 0.5],
+        orientation: Quat::IDENTITY.to_array(),
+    };
+    assert!(upright.valid());
     let rotated = Cube {
         orientation: Quat::from_rotation_y(1.2).to_array(),
-        ..legacy
+        ..upright
     };
-    let decoded: Cube = serde_json::from_str(&serde_json::to_string(&rotated).unwrap()).unwrap();
-    assert_eq!(rotated.orientation, decoded.orientation);
-    assert!(decoded.valid());
+    assert!(rotated.valid());
     for orientation in [
         [0.0; 4],
         [1.0; 4],
@@ -347,7 +346,7 @@ fn cube_quaternions_are_defaulted_bounded_normalized_and_roundtrip() {
         assert!(
             !Cube {
                 orientation,
-                ..legacy
+                ..upright
             }
             .valid()
         );
@@ -683,21 +682,12 @@ fn resurrecting_near_the_end_of_split_does_not_snap_scale_at_zero_dt() {
 }
 
 #[test]
-fn serde_defaults_and_wire_names() {
-    let empty: Workspace = serde_json::from_str("{}").unwrap();
+fn the_defaults_are_an_empty_current_workspace_and_an_unknown_state() {
+    let empty = Workspace::default();
     assert!(empty.valid());
-    assert!(!empty.stale); // Older bridges did not send this field.
-    let n: Node = serde_json::from_str(r#"{"id":"n","parent_id":"root"}"#).unwrap();
-    assert_eq!(n.state, State::Unknown);
-    assert_eq!(
-        serde_json::to_string(&State::Completed).unwrap(),
-        "\"completed\""
-    );
-    assert_eq!(
-        serde_json::to_string(&Kind::Markdown).unwrap(),
-        "\"markdown\""
-    );
-    assert!(serde_json::from_str::<State>("\"invented\"").is_err());
+    assert!(!empty.stale);
+    assert_eq!(Node::default().state, State::Unknown);
+    assert_eq!(Kind::default(), Kind::Markdown);
 }
 
 #[test]
@@ -799,7 +789,7 @@ fn cube_validation_rejects_bad_geometry() {
 }
 
 #[test]
-fn station_wire_roundtrip_and_validation() {
+fn station_validation() {
     let station = Station {
         facing: HOME_EYES,
         id: "worker".into(),
@@ -813,27 +803,13 @@ fn station_wire_roundtrip_and_validation() {
         highlighted: false,
     };
     assert!(station.valid());
-    let encoded = serde_json::to_string(&station).unwrap();
-    let decoded: Station = serde_json::from_str(&encoded).unwrap();
-    assert!(decoded.valid());
-    assert_eq!(decoded.id, station.id);
-    assert_eq!(decoded.opacity, station.opacity);
-    let old: Station = serde_json::from_str(
-        r#"{"id":"w","position":[0,1,-2],"state":"running","title":"Worker"}"#,
-    )
-    .unwrap();
-    assert_eq!(old.opacity, 1.0);
-    assert_eq!((old.scale, old.more), (1.0, 0));
-    assert!(old.valid());
-    assert!(!encoded.contains("more"));
     // A compact sign, and one for those gathered into a cluster's "+N more", are kept, within bounds.
     let gathered = Station {
         scale: tomori_protocol::cluster::COMPACT,
         more: 3,
         ..station.clone()
     };
-    let read: Station = serde_json::from_str(&serde_json::to_string(&gathered).unwrap()).unwrap();
-    assert_eq!((read.scale, read.more), (gathered.scale, 3));
+    assert!(gathered.valid());
     for (scale, more) in [(0.05, 0), (f32::NAN, 0), (1.2, 0), (1.0, MAX_WORKERS + 1)] {
         assert!(
             !Station {
@@ -903,24 +879,6 @@ fn parentless_root_and_unrelated_entries_are_not_workers() {
 }
 
 #[test]
-fn worker_supplied_positions_are_ignored() {
-    let a: Workspace = serde_json::from_str(r#"{"nodes":[{"id":"a","parent_id":"root","title":"A","state":"running","position":[99,99,99],"xyz":[-80,80,80]}]}"#).unwrap();
-    let b = workspace(vec![Node {
-        title: "A".into(),
-        ..node("a", "root")
-    }]);
-    let mut one = Scene::new();
-    let mut two = Scene::new();
-    settle(&mut one, &a);
-    settle(&mut two, &b);
-    assert_eq!(anchors(&one), anchors(&two));
-    assert_eq!(
-        serde_json::to_string(one.cubes()).unwrap(),
-        serde_json::to_string(two.cubes()).unwrap()
-    );
-}
-
-#[test]
 fn initial_order_and_animation_are_deterministic() {
     let a = workspace(vec![node("c", "b"), node("b", "root"), node("a", "root")]);
     let b = workspace(a.nodes.iter().cloned().rev().collect());
@@ -929,10 +887,7 @@ fn initial_order_and_animation_are_deterministic() {
     settle(&mut one, &a);
     settle(&mut two, &b);
     assert_eq!(anchors(&one), anchors(&two));
-    assert_eq!(
-        serde_json::to_string(one.cubes()).unwrap(),
-        serde_json::to_string(two.cubes()).unwrap()
-    );
+    assert_eq!(format!("{:?}", one.cubes()), format!("{:?}", two.cubes()));
     assert_eq!(one.snapshot().len(), one.cubes().len());
 }
 

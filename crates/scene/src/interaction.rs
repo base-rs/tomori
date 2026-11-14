@@ -2,7 +2,6 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Observable conversational activity, independent of the XR/audio backends.
-use serde::{Deserialize, Serialize};
 use tomori_protocol::AgentState;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -27,8 +26,7 @@ pub struct SpeechActivity {
     pub failed: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     #[default]
     Neutral,
@@ -44,7 +42,7 @@ pub enum Mode {
 }
 
 /// All fields are observed status, never an estimate of hidden reasoning.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Visual {
     pub mode: Mode,
     pub level: f32,
