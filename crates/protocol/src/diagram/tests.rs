@@ -143,7 +143,7 @@ fn attributes_keep_the_first_of_each_and_name_what_they_cannot_set() {
         ],
         [
             Err("size \"9\" is not from 1 to 5".to_owned()),
-            Err("\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, grey or white".to_owned()),
+            Err("\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, yellow, grey or white".to_owned()),
             Err("\"fill\" is not an attribute of a node".to_owned()),
         ]
     );
@@ -812,6 +812,6 @@ fn a_reference_s_attributes_are_set_once_each() {
     assert_eq!(binding.colour, Some(Colour::Teal));
     assert_eq!(
         binding.set("colour", "mauve").unwrap_err(),
-        "\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, grey or white"
+        "\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, yellow, grey or white"
     );
 }

@@ -8,11 +8,13 @@
 //!
 //! **Bounded.** A chart is drawn without trusting it: [`bounded`] holds every count and string to the spec's bounds and
 //! every value to [`CHART_MAGNITUDE`] first, and the drawing holds what it makes to a fixed number of pieces, whatever
-//! the chart, so that its mesh, with every label, always fits the vertex buffer a wall's panel has: each series' line to
-//! [`LINE_VERTICES`] vertices, its points closer than [`SIMPLIFY`] to the line through their neighbours merged away and,
-//! where that is not enough, each stretch of its points kept as its lowest and highest; a dashed line's dashes to one
-//! for each period across the plot, its points, where too many, to each period's lowest and highest; every shaded
-//! region and area together to [`FILL_QUADS`] quads; and each dashed reference line to [`REFERENCE_DASHES`].
+//! the chart, so that its mesh, with every label, always fits the vertex buffer a wall's panel has: each series' line
+//! to [`LINE_VERTICES`] vertices, or its [`share`] of them in a chart of more than [`UNMARKED`] series, so that eight
+//! are drawn in no more pieces than four, its points closer than [`SIMPLIFY`] to the line through their neighbours
+//! merged away and, where that is not enough, each stretch of its points kept as its lowest and highest; a dashed
+//! line's dashes to one for each period across the plot, its points, where too many, to each period's lowest and
+//! highest; every shaded region and area together to [`FILL_QUADS`] quads; and each dashed reference line to
+//! [`REFERENCE_DASHES`].
 //!
 //! **Lines.** A segment between two points is a [`Shape::Stroke`], one piece, antialiased across its length as a rule
 //! is, so that a thin line at any angle is as steady as a rule when seen from far away; segments that meet overlap by
@@ -67,9 +69,101 @@ pub const MARKERS: usize = 16;
 /// The most dots one series' line rounds its sharpest joints with: those turning by more than a right angle, where the
 /// overlapping ends of its parts would notch the outside of the turn or overshoot it.
 pub const JOINTS: usize = 64;
+/// How many of [`LINE_VERTICES`], [`MARKERS`] or [`JOINTS`], `most`, each series of a chart of `series` may take: all
+/// of them for a chart of up to [`UNMARKED`] series, and an equal share of as many as that many take for one of more,
+/// so that a chart of eight series is drawn in no more pieces than one of four.
+pub fn share(most: usize, series: usize) -> usize {
+    most * UNMARKED / series.max(UNMARKED)
+}
+
 /// How near, in font pixels, a point may be to the line through its neighbours and be merged away: less than a pixel
 /// at any distance a panel is read from.
 pub const SIMPLIFY: f32 = 0.2;
+/// How many of a chart's series are told apart by their colour and dashes alone: those after them, the fifth to the
+/// eighth, are each marked along their line by a [`Marker`] of their own, so that a chart of eight series tells each
+/// apart without its colour.
+pub const UNMARKED: usize = 4;
+/// How many marks a marked series has across the plot, at most: one in each of as many equal columns, each series'
+/// a quarter of a column from the last's, so that two series' marks never stand at the same place.
+pub const MARKS: usize = 8;
+/// The most rows a chart's legend takes: its series wrap onto the next where they do not fit across one, and those
+/// that do not fit in all of them are said as how many more.
+pub const LEGEND_ROWS: usize = 2;
+
+/// How a marked series is marked along its line, and in its legend's key: a dot, a ring, a ring about a dot or a
+/// square.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Marker {
+    Dot,
+    Ring,
+    Ringed,
+    Square,
+}
+
+impl Marker {
+    /// The marker of the series `index`, from 0: none for the first [`UNMARKED`], and one of each after them.
+    pub fn of(index: usize) -> Option<Self> {
+        [Self::Dot, Self::Ring, Self::Ringed, Self::Square]
+            .get(index.checked_sub(UNMARKED)?)
+            .copied()
+    }
+
+    /// The mark that stands for it in a row of text, as its legend's key.
+    pub fn mark(self) -> crate::shapes::Mark {
+        match self {
+            Self::Dot => crate::shapes::Mark::Dot,
+            Self::Ring => crate::shapes::Mark::Ring { dot: false },
+            Self::Ringed => crate::shapes::Mark::Ring { dot: true },
+            Self::Square => crate::shapes::Mark::Check { ticked: false },
+        }
+    }
+
+    /// The shapes that draw it about `centre` in `color`, on a backing of the plot's colour, so that a ring or a square
+    /// reads as hollow over its line.
+    fn shapes(self, centre: [f32; 2], color: Rgba) -> Vec<Shape> {
+        let backing = Shape::Dot {
+            centre,
+            radius: 4.25,
+            color: [PLOT[0], PLOT[1], PLOT[2], 1.0],
+        };
+        let [x, y] = centre;
+        match self {
+            Self::Dot => vec![
+                backing,
+                Shape::Dot {
+                    centre,
+                    radius: 3.0,
+                    color,
+                },
+            ],
+            Self::Ring => vec![
+                backing,
+                Shape::Ring {
+                    centre,
+                    radius: 3.5,
+                    color,
+                },
+            ],
+            Self::Ringed => vec![
+                backing,
+                Shape::Ring {
+                    centre,
+                    radius: 3.5,
+                    color,
+                },
+                Shape::Dot {
+                    centre,
+                    radius: 1.25,
+                    color,
+                },
+            ],
+            Self::Square => vec![
+                backing,
+                Shape::frame(x - 2.75, y - 2.75, [5.5, 5.5], 1.25, color),
+            ],
+        }
+    }
+}
 
 /// The colour of `colour`, opaque, or `alpha` opaque.
 pub fn ink(colour: Colour, alpha: f32) -> Rgba {
@@ -221,6 +315,8 @@ pub struct PlotArea {
     /// for each part its line draws: those of more points than [`LINE_VERTICES`], which its readout reads where they
     /// are drawn rather than where their points are.
     pub thinned: Vec<(usize, Vec<Vec<[f32; 2]>>)>,
+    /// How many stretches its bars are drawn in, as [`bar_stretches`] finds them, which its readout reads.
+    pub stretches: usize,
 }
 
 impl PlotArea {
@@ -784,11 +880,12 @@ fn clip(
     Some((at(t0), at(t1), t0 > 0.0, t1 < 1.0))
 }
 
-/// The period of a dashed line in a plot `width` font pixels wide, a dash and the gap after it: [`DASH`]'s, or, where a
-/// level line across the plot would take more than half of [`LINE_VERTICES`] of them, longer in proportion, the gap
-/// still three sevenths of it; fixed by the plot's size alone, never by the line.
-fn dash_period(width: f32) -> f32 {
-    (DASH.0 + DASH.1).max(width / (LINE_VERTICES / 2) as f32)
+/// The period of a dashed line in a plot `width` font pixels wide whose series may each take `vertices`, a dash and the
+/// gap after it: [`DASH`]'s, or, where a level line across the plot would take more than half of `vertices` of them,
+/// longer in proportion, the gap still three sevenths of it; fixed by the plot's size and its count of series alone,
+/// never by the line.
+fn dash_period(width: f32, vertices: usize) -> f32 {
+    (DASH.0 + DASH.1).max(width / (vertices / 2) as f32)
 }
 
 /// The dashes of `path`, its parts, laid across the plot from `left` in periods of `period`, a dash then a gap: in each
@@ -867,6 +964,12 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         height: (area.height - 2.0 * row).max(1.0),
         range,
     };
+    let barred: Vec<_> = chart
+        .series
+        .iter()
+        .filter(|series| series.style == SeriesStyle::Bars)
+        .collect();
+    let stretches = bar_stretches(chart.points as usize, plot.width, barred.len());
     drawing.plot = Some(PlotArea {
         left: plot.left,
         top: plot.top,
@@ -875,6 +978,7 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         range,
         points: chart.points,
         thinned: Vec::new(),
+        stretches,
     });
     let shapes = &mut drawing.shapes;
     shapes.push(Shape::Fill {
@@ -967,11 +1071,15 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
             shapes.push(Shape::Quad { corners, color });
         }
     }
-    // Bars, then reference lines, then lines, the first series in front.
-    for series in &chart.series {
-        if series.style == SeriesStyle::Bars {
-            bars(&plot, series, base, shapes);
-        }
+    // Bars, side by side in each stretch, then reference lines, then lines, the first series in front.
+    for (place, series) in barred.iter().enumerate() {
+        bars(
+            &plot,
+            series,
+            base,
+            (place, barred.len(), stretches),
+            shapes,
+        );
     }
     for reference in &chart.references {
         if !within(reference.value) {
@@ -999,6 +1107,15 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
             && let Some(area) = drawing.plot.as_mut()
         {
             area.thinned.insert(0, (index, runs));
+        }
+    }
+    // The series after the first few marked along their lines, each by its own marker, on the line as it is drawn.
+    for (index, series) in chart.series.iter().enumerate().skip(UNMARKED) {
+        if let Some(marker) = Marker::of(index)
+            && series.style != SeriesStyle::Bars
+            && let Some(area) = drawing.plot.as_ref()
+        {
+            series_marks(&plot, area, index, marker, shapes);
         }
     }
     // Its badge, at the plot's top right, on a backing of its tone.
@@ -1040,17 +1157,61 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
     drawing
 }
 
-/// The bars of `series`, from `base` to each value, held within the plot: one for each point, or, for more than
-/// [`LINE_VERTICES`], one for each stretch of points, as tall as the one of them farthest from `base`.
+/// The least width of each bar, in font pixels, where a chart's series of bars stand side by side in each stretch.
+pub const BAR_WIDTH: f32 = 2.0;
+
+/// How many stretches of its points a chart of `points` points, on a plot `width` font pixels wide, draws its `bars`
+/// series of bars in: one for each point, or, for more than [`LINE_VERTICES`], one for each stretch of points; and for
+/// more than one series, which stand side by side in each stretch, as many as give each bar at least [`BAR_WIDTH`] in
+/// the narrowest stretch, a stretch of more points where they would be narrower, rather than bars stacked, which would
+/// read as a sum, or overlapping, which hide one another.
+pub fn bar_stretches(points: usize, width: f32, bars: usize) -> usize {
+    let most = points.min(LINE_VERTICES);
+    if bars <= 1 {
+        return most;
+    }
+    let pitch = width / points.saturating_sub(1).max(1) as f32;
+    (1..=most)
+        .rev()
+        .find(|stretches| (points / stretches) as f32 * pitch * BAR >= BAR_WIDTH * bars as f32)
+        .unwrap_or(1)
+}
+
+/// The value of the bar of the series `index` drawn nearest `at`, a point's index or a share of the way between two,
+/// of `chart` drawn in `stretches`, as [`bar_stretches`] finds them: as tall as the one of its stretch's points
+/// farthest from the axis's base, kept to its figures; `None` where none of them has a value.
+pub fn bar_at(chart: &Chart, index: usize, at: f32, stretches: usize) -> Option<f32> {
+    let series = chart.series.get(index)?;
+    let points = chart.points.clamp(2, CHART_POINTS) as usize;
+    let stretches = stretches.clamp(1, points);
+    let nearest = (if at.is_nan() { 0.0 } else { at })
+        .round()
+        .clamp(0.0, (points - 1) as f32) as usize;
+    let stretch = nearest * stretches / points;
+    let (low, high) = chart.range();
+    let base = 0.0_f32.clamp(low, high);
+    let values = &series.values;
+    values[(stretch * points / stretches).min(values.len())
+        ..((stretch + 1) * points / stretches).min(values.len())]
+        .iter()
+        .flatten()
+        .copied()
+        .max_by(|a, b| (a - base).abs().total_cmp(&(b - base).abs()))
+        .and_then(tomori_protocol::chart::rounded)
+}
+
+/// The bars of `series`, the `place`th of `count` series of bars, from `base` to each value, held within the plot: one
+/// for each of `stretches` of its points, as tall as the one of them farthest from `base`, side by side with the
+/// others' in each, as wide together as one series' bar alone and held within the plot.
 fn bars(
     plot: &Plot<'_>,
     series: &tomori_protocol::chart::Series,
     base: f32,
+    (place, count, stretches): (usize, usize, usize),
     shapes: &mut Vec<Shape>,
 ) {
     let color = ink(series.colour, 1.0);
     let points = plot.chart.points as usize;
-    let stretches = points.min(LINE_VERTICES);
     let pitch = plot.width / plot.chart.points.saturating_sub(1).max(1) as f32;
     let (low, high) = plot.range;
     let right = plot.left + plot.width;
@@ -1066,9 +1227,18 @@ fn bars(
             continue;
         };
         let middle = (plot.x(part.start) + plot.x(part.end - 1)) / 2.0;
-        let width = (pitch * part.len() as f32 * BAR).max(1.0);
-        let left = (middle - width / 2.0).max(plot.left);
-        let across = (middle + width / 2.0).min(right) - left;
+        let group = (pitch * part.len() as f32 * BAR).max(1.0);
+        let width = group / count as f32;
+        // A group of several held within the plot, so that none of them is cut away at either end; one alone centred
+        // on its stretch, cut at the plot's edges.
+        let first = if count > 1 {
+            (middle - group / 2.0).min(right - group).max(plot.left)
+        } else {
+            middle - group / 2.0
+        };
+        let start = first + width * place as f32;
+        let left = start.max(plot.left);
+        let across = (start + width).min(right) - left;
         let (y0, y1) = (plot.y(value.clamp(low, high)), plot.y(base));
         if y0 == y1 {
             continue;
@@ -1080,6 +1250,58 @@ fn bars(
             height: (y1 - y0).abs(),
             color,
         });
+    }
+}
+
+/// The marks of the series `index` along its line, as `marker` draws them: one in each of [`MARKS`] equal columns
+/// across the plot, placed by its index within the column, where its line is drawn there, a thinned line's where it is
+/// drawn, within the plot; none across a gap or a break, nor beyond either end of the value axis.
+fn series_marks(
+    plot: &Plot<'_>,
+    area: &PlotArea,
+    index: usize,
+    marker: Marker,
+    shapes: &mut Vec<Shape>,
+) {
+    let series = &plot.chart.series[index];
+    let color = ink(series.colour, 1.0);
+    let column = plot.width / MARKS as f32;
+    let offset = ((index - UNMARKED) as f32 + 0.5) / (CHART_SERIES - UNMARKED) as f32;
+    let last = plot.chart.points.saturating_sub(1).max(1) as f32;
+    let thinned = area.thinned.iter().find(|(thinned, _)| *thinned == index);
+    let (low, high) = plot.range;
+    for mark in 0..MARKS {
+        let x = plot.left + column * (mark as f32 + offset);
+        let value = match thinned {
+            Some((_, runs)) => area.drawn(runs, x),
+            None => plot.value(index, (x - plot.left) / plot.width * last),
+        };
+        if let Some(value) = value.filter(|value| (low..=high).contains(value)) {
+            shapes.extend(marker.shapes([x, plot.y(value)], color));
+        }
+    }
+}
+
+impl Plot<'_> {
+    /// The value of the series `index` at `at`, a point's index or a share of the way between it and the next, where
+    /// its line is drawn: on the straight line between the two, or a step's held from the first; `None` across a gap
+    /// or a break, or past its last point.
+    fn value(&self, index: usize, at: f32) -> Option<f32> {
+        let edge = Edge::Series {
+            index: index as u32,
+        };
+        let point = at.floor() as usize;
+        let first = self.edge(edge, point)?;
+        let share = at - point as f32;
+        if self.broken(edge, point) {
+            return None;
+        }
+        let next = self.edge(edge, point + 1)?;
+        Some(if self.stepped(edge) {
+            first
+        } else {
+            first + (next - first) * share
+        })
     }
 }
 
@@ -1128,19 +1350,22 @@ fn series_line(
     };
     let mut lines: Vec<Vec<[f32; 2]>> = runs.iter().map(|run| drawn(run)).collect();
     let total: usize = lines.iter().map(Vec::len).sum();
-    let period = dash_period(plot.width);
+    let count = plot.chart.series.len();
+    let vertices = share(LINE_VERTICES, count);
+    let period = dash_period(plot.width, vertices);
     if series.dashed && !stepped {
-        // Dashed, past [`LINE_VERTICES`] thinned to each period of its dashes' highest and lowest points, so that a
-        // point added at its end thins only its end, and a line however steep and noisy is a few parts in each dash.
-        if total > LINE_VERTICES {
+        // Dashed, past its share of [`LINE_VERTICES`] thinned to each period of its dashes' highest and lowest points,
+        // so that a point added at its end thins only its end, and a line however steep and noisy is a few parts in
+        // each dash.
+        if total > vertices {
             lines = runs
                 .iter()
                 .map(|run| gridded(run, plot.left, period))
                 .collect();
         }
-    } else if total > LINE_VERTICES {
+    } else if total > vertices {
         for (line, run) in lines.iter_mut().zip(&runs) {
-            let most = (line.len() * LINE_VERTICES / total).max(2);
+            let most = (line.len() * vertices / total).max(2);
             *line = if stepped {
                 simplify(&columns(run, most), SIMPLIFY)
             } else {
@@ -1148,12 +1373,12 @@ fn series_line(
             };
         }
     }
-    let thinned = (total > LINE_VERTICES && !stepped).then(|| lines.clone());
+    let thinned = (total > vertices && !stepped).then(|| lines.clone());
     let (top, bottom) = (plot.top, plot.bottom());
     let inside = |[_, y]: [f32; 2]| y >= top && y <= bottom;
     let mut markers = 0;
     let mut marker = |shapes: &mut Vec<Shape>, centre: [f32; 2]| {
-        if markers < MARKERS {
+        if markers < share(MARKERS, count) {
             markers += 1;
             shapes.push(Shape::Dot {
                 centre,
@@ -1223,12 +1448,12 @@ fn series_line(
             let ([ax, ay], [bx, by]) = (direction(here), direction(next));
             Some(ax * bx + ay * by >= 0.0)
         };
-        let count = path.len();
+        let parts = path.len();
         for (index, part) in path.iter().enumerate() {
             let (from, to, ..) = *part;
             let [dx, dy] = direction(part);
             let back = index > 0 && joined(index - 1) == Some(true);
-            let ahead = index + 1 < count && joined(index) == Some(true);
+            let ahead = index + 1 < parts && joined(index) == Some(true);
             let reach = |extended: bool| if extended { width / 2.0 } else { 0.0 };
             let (back, ahead) = (reach(back), reach(ahead));
             shapes.push(Shape::Stroke {
@@ -1237,7 +1462,7 @@ fn series_line(
                 width,
                 color,
             });
-            if index + 1 < count && joined(index) == Some(false) && joints < JOINTS {
+            if index + 1 < parts && joined(index) == Some(false) && joints < share(JOINTS, count) {
                 joints += 1;
                 shapes.push(Shape::Dot {
                     centre: to,
@@ -1326,14 +1551,17 @@ fn columns(points: &[[f32; 2]], most: usize) -> Vec<[f32; 2]> {
     drawn
 }
 
-/// The legend of `chart`, in a row `columns` wide: each series' key, a short line in its colour, its name and its latest
-/// value, `--` where its last point has none, or `no data` where it has none at all, dim; then each reference line's
-/// label and value; each whole, as many as fit, the series first, since a reference line's value is labelled beside the
-/// plot too. It shows `chart` as [`bounded`] holds it.
-pub fn legend(chart: &Chart, columns: usize) -> Vec<Cell> {
+/// The legend of `chart`, in rows `columns` wide: each series' key, a short line in its colour, two dashes for a dashed
+/// series and its marker in it for a marked one, its name and its latest value, `--` where its last point has none, or
+/// `no data` where it has none at all, dim; then each reference line's label and value. Each is whole, the series
+/// first, wrapping onto the next row where one does not fit, in at most [`LEGEND_ROWS`], and those that do not fit in
+/// them said at the end as how many more, `+3`; a reference line's only where it fits in the rows the series take,
+/// since its value is labelled beside the plot too. A series too long for a row alone is cut to fit. It shows `chart`
+/// as [`bounded`] holds it.
+pub fn legend(chart: &Chart, columns: usize) -> Vec<Vec<Cell>> {
     let chart = &bounded(chart);
     let mut items: Vec<Vec<Span>> = Vec::new();
-    for series in &chart.series {
+    for (index, series) in chart.series.iter().enumerate() {
         let color = ink(series.colour, 1.0);
         let (text, color) = match series.latest() {
             Some(value) => (format!(" {} {}", series.name, brief(value)), color),
@@ -1342,45 +1570,82 @@ pub fn legend(chart: &Chart, columns: usize) -> Vec<Cell> {
             }
             None => (format!(" {} no data", series.name), DIM),
         };
-        // Its key a short line, or, for a dashed series, two dashes, so that the legend always says its style.
+        // Its key a short line, or, for a dashed series, two dashes, so that the legend always says its style, and a
+        // marked series' marker in its middle.
         let key = Style::plain(ink(series.colour, 1.0));
-        let mut item = vec![crate::shapes::Mark::Rule.span(1, key)];
-        item.push(if series.dashed {
-            Span::new(" ", key)
-        } else {
-            crate::shapes::Mark::Rule.span(1, key)
-        });
-        if series.dashed {
-            item.push(crate::shapes::Mark::Rule.span(1, key));
+        let rule = || crate::shapes::Mark::Rule.span(1, key);
+        let mut item = vec![rule()];
+        match Marker::of(index) {
+            Some(marker) => item.extend([marker.mark().span(1, key), rule()]),
+            None if series.dashed => item.extend([Span::new(" ", key), rule()]),
+            None => item.push(rule()),
         }
         item.push(Span::new(text, Style::plain(color)));
         items.push(item);
     }
-    for reference in &chart.references {
-        let color = ink(reference.colour, 1.0);
-        items.push(vec![Span::new(
-            format!("{} {}", reference.label, brief(reference.value)),
-            Style::plain(color),
-        )]);
-    }
-    let mut cells: Vec<Cell> = Vec::new();
-    for item in items {
-        let item = cut(&item, usize::MAX);
-        let gap = if cells.is_empty() { 0 } else { 2 };
-        if cells.len() + gap + item.len() > columns {
-            // The first item is shown, cut, rather than none.
-            if cells.is_empty() {
-                cells = cut(
+    let references: Vec<Vec<Span>> = chart
+        .references
+        .iter()
+        .map(|reference| {
+            vec![Span::new(
+                format!("{} {}", reference.label, brief(reference.value)),
+                Style::plain(ink(reference.colour, 1.0)),
+            )]
+        })
+        .collect();
+    let gap = |row: &Vec<Cell>| if row.is_empty() { 0 } else { 2 };
+    let space = |row: &mut Vec<Cell>| {
+        let gap = gap(row);
+        row.extend(std::iter::repeat_n((' ', Style::plain(DIM)), gap));
+    };
+    let mut rows: Vec<Vec<Cell>> = vec![Vec::new()];
+    let count = items.len();
+    let more = |shown: usize| format!("+{}", count - shown);
+    for (index, item) in items.iter().enumerate() {
+        let item = cut(item, usize::MAX);
+        loop {
+            let last = rows.len() == LEGEND_ROWS;
+            let row = rows.last_mut().expect("a legend has a row");
+            // On the last row, room is kept for saying how many more there are after it.
+            let kept = if last && index + 1 < count {
+                2 + more(index + 1).len()
+            } else {
+                0
+            };
+            if row.len() + gap(row) + item.len() + kept <= columns {
+                space(row);
+                row.extend(item);
+            } else if !last && !row.is_empty() {
+                rows.push(Vec::new());
+                continue;
+            } else if row.is_empty() {
+                // Alone on its row and too long for it, it is cut, rather than not shown.
+                row.extend(cut(
                     &[Span::new(crate::ui_text::plain(&item), item[0].1)],
-                    columns,
-                );
+                    columns.saturating_sub(kept).max(1),
+                ));
+            } else {
+                let text = more(index);
+                if row.len() + 2 + text.len() <= columns {
+                    space(row);
+                    row.extend(cut(&[Span::new(text, Style::plain(DIM))], usize::MAX));
+                }
+                return rows;
             }
             break;
         }
-        cells.extend(std::iter::repeat_n((' ', Style::plain(DIM)), gap));
-        cells.extend(item);
     }
-    cells
+    let row = rows.last_mut().expect("a legend has a row");
+    for reference in references {
+        let item = cut(&reference, usize::MAX);
+        if row.len() + gap(row) + item.len() > columns {
+            break;
+        }
+        space(row);
+        row.extend(item);
+    }
+    rows.retain(|row| !row.is_empty());
+    rows
 }
 
 /// Charts in the states the tests and offscreen renders need: invented data, of the shapes an operations console
@@ -1524,11 +1789,12 @@ pub mod fixtures {
         chart
     }
 
-    /// A chart at every bound of the spec, as many pieces as one can be drawn with: four dashed series of 256 points
-    /// swinging from one end of the range to the other at every point, two lines, a step and an area, four shades between
-    /// them that cross at every step, four dashed reference lines, and every label, name, badge and status at its
-    /// longest. Without `gaps`, every swing passes beyond both fixed ends of the value axis, so that every segment is
-    /// clipped; with them, every third point of each series is missing, so that its line is in many short runs.
+    /// A chart at every bound of the spec, as many pieces as one can be drawn with: eight dashed series of 256 points
+    /// swinging from one end of the range to the other at every point, lines, steps and areas, the last four marked,
+    /// four shades between the first four that cross at every step, four dashed reference lines, and every label, name,
+    /// badge and status at its longest. Without `gaps`, every swing passes beyond both fixed ends of the value axis, so
+    /// that every segment is clipped; with them, every third point of each series is missing, so that its line is in
+    /// many short runs.
     pub fn largest(gaps: bool) -> Chart {
         let long = |count: usize| "W".repeat(count);
         let mut chart = Chart::new(super::CHART_POINTS)
@@ -1546,7 +1812,8 @@ pub mod fixtures {
             SeriesStyle::Area,
             SeriesStyle::Line,
         ];
-        for (index, style) in styles.into_iter().enumerate() {
+        for index in 0..super::CHART_SERIES {
+            let style = styles[index % styles.len()];
             let values = (0..super::CHART_POINTS as usize)
                 .map(|point| {
                     let high = (point + index) % 2 == 0;
@@ -1554,12 +1821,15 @@ pub mod fixtures {
                     (!(gaps && point % 3 == 2)).then_some(if high { top } else { bottom })
                 })
                 .collect();
+            chart = chart.with_series(
+                Series::new(long(32), Colour::Teal, style, values)
+                    .with_width(4.0)
+                    .with_dashed(true),
+            );
+            if index >= super::CHART_REFERENCES {
+                continue;
+            }
             chart = chart
-                .with_series(
-                    Series::new(long(32), Colour::Teal, style, values)
-                        .with_width(4.0)
-                        .with_dashed(true),
-                )
                 .with_reference(
                     Reference::new(20.0 * index as f32 + 10.0, long(32), Colour::White)
                         .with_dashed(true),
@@ -1574,6 +1844,72 @@ pub mod fixtures {
                     false,
                     Colour::Red,
                 ));
+        }
+        chart
+    }
+
+    /// Requests a second in each of eight regions over 15 minutes, a line each in the palette's colours, in its order,
+    /// the fifth to the eighth marked, one stepping, one dashed and one an area, the regions' names as long as a
+    /// console's, a gap where one stopped reporting, and a 1,000 limit across.
+    pub fn regions() -> Chart {
+        let names = [
+            "eu-west-1",
+            "us-east-1",
+            "ap-south-1",
+            "sa-east-1",
+            "us-west-2",
+            "eu-central-1",
+            "ap-northeast-1",
+            "af-south-1",
+        ];
+        let mut chart = Chart::new(POINTS)
+            .with_labels(labels())
+            .with_axis(ValueAxis::new(Some(0.0), None, "req/s"))
+            .with_reference(Reference::new(1000.0, "limit", Colour::White).with_dashed(true))
+            .with_status(Note::new("8 of 8 regions", Tone::Good));
+        for (index, (name, colour)) in names.iter().zip(Colour::SERIES).enumerate() {
+            let level = 120.0 + 105.0 * index as f32;
+            let style = match index {
+                5 => SeriesStyle::Step,
+                2 => SeriesStyle::Area,
+                _ => SeriesStyle::Line,
+            };
+            let values = (0..POINTS as usize)
+                .map(|point| {
+                    let at = point as f32 / 11.0 + index as f32;
+                    let value = level + 45.0 * at.sin() + 20.0 * (at * 2.7).cos();
+                    let value = if style == SeriesStyle::Step {
+                        (value / 50.0).round() * 50.0
+                    } else {
+                        value
+                    };
+                    (!(index == 3 && (100..118).contains(&point))).then_some(value)
+                })
+                .collect();
+            chart = chart
+                .with_series(Series::new(*name, colour, style, values).with_dashed(index == 6));
+        }
+        chart
+    }
+
+    /// Requests a second in each of `count` regions, at most eight, as bars at every one of 256 points, so that they
+    /// are drawn side by side, a stretch of points for each group of them.
+    pub fn bars(count: usize) -> Chart {
+        let mut chart =
+            Chart::new(super::CHART_POINTS).with_axis(ValueAxis::new(Some(0.0), None, "req/s"));
+        for (index, colour) in Colour::SERIES.into_iter().take(count).enumerate() {
+            let values = (0..super::CHART_POINTS as usize)
+                .map(|point| {
+                    let at = point as f32 / 23.0 + index as f32;
+                    Some(60.0 + 12.0 * index as f32 + 25.0 * at.sin())
+                })
+                .collect();
+            chart = chart.with_series(Series::new(
+                format!("region {}", index + 1),
+                colour,
+                SeriesStyle::Bars,
+                values,
+            ));
         }
         chart
     }

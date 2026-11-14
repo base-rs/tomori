@@ -148,9 +148,16 @@ pub struct Mesh {
     leaders: Vec<leaders::Leader>,
 }
 
-/// A node's or an edge's colour, as the palette has it.
+/// A node's grey, the colour a node is unless it says another: as bright as the chart palette's grey was before it was
+/// darkened to tell a chart's eighth series apart, since a lit solid in the space is not text on a dark face.
+const NODE_GREY: [f32; 3] = [0.56, 0.6, 0.66];
+
+/// A node's or an edge's colour, as the palette has it, but for grey, [`NODE_GREY`].
 fn rgb(colour: tomori_protocol::chart::Colour) -> [f32; 3] {
-    colour.rgb()
+    match colour {
+        tomori_protocol::chart::Colour::Grey => NODE_GREY,
+        colour => colour.rgb(),
+    }
 }
 
 /// The basis turning a solid's height, its Y, along `direction`.

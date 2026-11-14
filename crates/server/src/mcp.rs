@@ -1941,7 +1941,7 @@ fn show_diagram_tool() -> Value {
                             "id": { "type": "string", "maxLength": 32, "description": "Letters, digits, -, _ and ." },
                             "label": { "type": "string", "maxLength": 256 },
                             "shape": { "type": "string", "enum": ["box", "sphere", "cylinder", "prism", "diamond", "card"] },
-                            "colour": { "type": "string", "maxLength": 16, "description": "teal, amber, blue, violet, green, red, grey or white." },
+                            "colour": { "type": "string", "maxLength": 16, "description": "teal, amber, blue, violet, green, red, yellow, grey or white." },
                             "size": { "type": "integer", "minimum": 1, "maximum": 5, "description": "How important it is, drawn as large; by default 1." },
                             "detail": { "type": "string", "maxLength": 1024, "description": "A line shown on pointing." },
                             "ref": { "type": "string", "maxLength": 256, "description": "Your pointer back to what it stands for, such as a path, told you when it is pointed at." },

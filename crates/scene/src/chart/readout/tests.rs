@@ -354,3 +354,30 @@ fn a_linked_readout_reads_as_its_chart_does_with_its_line_and_frame_fainter() {
     assert!((alpha(&faint) - alpha(&own) * LINKED).abs() < 1e-6);
     assert_eq!(own.labels, faint.labels);
 }
+
+#[test]
+fn a_readout_of_eight_series_lists_every_value_where_it_fits_and_how_many_more_where_not() {
+    let chart = fixtures::regions();
+    let plot = plotted(&chart);
+    // In a slot, the time and all eight, each in its colour, inside the panel.
+    let readout = Readout::new(&chart, &plot, 90.0, BOUNDS);
+    assert_eq!(readout.lines.len(), LINES);
+    for (series, (text, color)) in chart.series.iter().zip(&readout.lines[1..]) {
+        assert!(text.starts_with(&series.name), "{text}");
+        assert_eq!(*color, ink(series.colour, 1.0));
+    }
+    let [left, top, across, down] = readout.label;
+    assert!(left >= 0.0 && top >= 0.0 && left + across <= BOUNDS.0 && top + down <= BOUNDS.1);
+    // On a face too short for them all, as many as fit and how many more, never past its edge; linked alike.
+    for height in [40.0, 64.0, 100.0] {
+        let short = Readout::new(&chart, &plot, 90.0, (BOUNDS.0, height)).linked();
+        let rows = ((height - 4.0) / 12.0) as usize;
+        assert_eq!(short.lines.len(), rows, "{height}");
+        let more = chart.series.len() - (rows - 2);
+        assert_eq!(short.lines[rows - 1], (format!("+{more} more"), DIM));
+        assert!(short.label[1] + short.label[3] <= height + 1e-3);
+    }
+    // A face of one line says its time alone.
+    let tiny = Readout::new(&chart, &plot, 90.0, (BOUNDS.0, 12.0));
+    assert_eq!(tiny.lines.len(), 1);
+}

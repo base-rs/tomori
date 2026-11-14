@@ -115,7 +115,6 @@ fn newer_styles_tones_edges_and_colours_are_read_as_what_a_client_can_draw() {
         Colour::from("#A0b1C2".to_owned()),
         Colour::Rgb([0xa0, 0xb1, 0xc2])
     );
-    assert_eq!(Colour::Rgb([255, 0, 51]).rgb(), [1.0, 0.0, 0.2]);
     for malformed in ["#12345", "#12345g", "#1234567", ""] {
         assert_eq!(
             Colour::from(malformed.to_owned()),
@@ -269,7 +268,7 @@ fn a_chart_of_every_series_at_every_point_is_a_few_kilobytes() {
         ));
     }
     let bytes = serde_json::to_vec(&chart.cleaned().unwrap()).unwrap().len();
-    assert!(bytes < 12 * 1024, "{bytes} bytes");
+    assert!(bytes < 20 * 1024, "{bytes} bytes");
 }
 
 #[test]
@@ -700,4 +699,167 @@ fn cleaning_keeps_a_time_axis_only_where_it_is_sound_and_it_is_part_of_a_chart_s
     // A window moved is another structure, as its labels moved are.
     assert!(fixed_chart.same_structure(&fixed_chart.clone()));
     assert!(!fixed_chart.same_structure(&Chart::new(181)));
+}
+
+/// A chart of `count` series, each named after its place, of 181 points.
+fn of_series(count: usize) -> Chart {
+    (0..count).fold(Chart::new(181), |chart, index| {
+        chart.with_series(Series::new(
+            format!("region {}", index + 1),
+            Colour::NAMED[index % Colour::NAMED.len()].1,
+            SeriesStyle::Line,
+            vec![Some(index as f32); 181],
+        ))
+    })
+}
+
+#[test]
+fn a_chart_keeps_eight_series_and_leaves_out_a_ninth() {
+    assert_eq!(CHART_SERIES, 8);
+    let eight = of_series(8).cleaned().unwrap();
+    assert_eq!(eight, of_series(8));
+    let nine = of_series(9).cleaned().unwrap();
+    assert_eq!(nine.series, eight.series);
+    assert!(nine.summary().contains("region 8: 7 now"));
+    assert!(!nine.summary().contains("region 9"));
+    // A shade may name the eighth, and not the ninth.
+    let shaded = of_series(9)
+        .with_shade(Shade::new(
+            Edge::Series { index: 0 },
+            Edge::Series { index: 7 },
+            false,
+            Colour::Grey,
+        ))
+        .with_shade(Shade::new(
+            Edge::Series { index: 0 },
+            Edge::Series { index: 8 },
+            false,
+            Colour::Grey,
+        ))
+        .cleaned()
+        .unwrap();
+    assert_eq!(shaded.shades.len(), 1);
+}
+
+/// How far apart two colours are as seen, in CIELAB, each linear RGB as a client draws it, seen through `sight`, a
+/// matrix in linear RGB of Machado, Oliveira and Fernandes's simulation of colour blindness at its most severe.
+fn seen_apart(a: [f32; 3], b: [f32; 3], sight: [[f32; 3]; 3]) -> f32 {
+    let lab = |rgb: [f32; 3]| {
+        let [r, g, b] =
+            sight.map(|row| (row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2]).clamp(0.0, 1.0));
+        let f = |t: f32| {
+            if t > 0.008_856 {
+                t.cbrt()
+            } else {
+                7.787 * t + 16.0 / 116.0
+            }
+        };
+        let (x, y, z) = (
+            f((0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.950_47),
+            f(0.2126 * r + 0.7152 * g + 0.0722 * b),
+            f((0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.088_83),
+        );
+        [116.0 * y - 16.0, 500.0 * (x - y), 200.0 * (y - z)]
+    };
+    let (a, b) = (lab(a), lab(b));
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+#[test]
+fn the_palette_has_a_distinct_colour_for_each_series() {
+    // A colour for each series, none of them white, which reference lines such as a target are drawn in.
+    assert_eq!(Colour::SERIES.len(), CHART_SERIES);
+    assert!(!Colour::SERIES.contains(&Colour::White));
+    for colour in Colour::SERIES {
+        assert!(Colour::NAMED.iter().any(|(_, named)| *named == colour));
+    }
+    // Each series' colour, and white, told apart from every other, at least so far apart in CIELAB, with normal sight
+    // and with each kind of colour blindness simulated; before eight series, the named colours were 2.2 apart with
+    // protanopia and 2.5 with deuteranopia.
+    let sights = [
+        (
+            "normal",
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            35.0,
+        ),
+        (
+            "deuteranopia",
+            [
+                [0.367_322, 0.860_646, -0.227_968],
+                [0.280_085, 0.672_501, 0.047_413],
+                [-0.011_82, 0.042_94, 0.968_881],
+            ],
+            15.0,
+        ),
+        (
+            "protanopia",
+            [
+                [0.152_286, 1.052_583, -0.204_868],
+                [0.114_503, 0.786_281, 0.099_216],
+                [-0.003_882, -0.048_116, 1.051_998],
+            ],
+            15.0,
+        ),
+        (
+            "tritanopia",
+            [
+                [1.255_528, -0.076_749, -0.178_779],
+                [-0.078_411, 0.930_809, 0.147_602],
+                [0.004_733, 0.691_367, 0.303_9],
+            ],
+            12.0,
+        ),
+    ];
+    let palette: Vec<Colour> = Colour::SERIES.into_iter().chain([Colour::White]).collect();
+    for (sight, matrix, least) in sights {
+        for (index, a) in palette.iter().enumerate() {
+            for b in palette.iter().skip(index + 1) {
+                let apart = seen_apart(a.rgb(), b.rgb(), matrix);
+                assert!(apart >= least, "{sight}: {a:?} and {b:?} {apart}");
+            }
+        }
+    }
+    // Green is green, its green well above its red and blue, as teal's blue is above green's.
+    let [red, green, blue] = Colour::Green.rgb();
+    assert!(green > 1.5 * red && green > 1.5 * blue);
+}
+
+#[test]
+fn a_colour_is_sent_as_srgb_and_drawn_linear_a_named_one_as_its_bytes_are() {
+    // Each named colour is drawn as `#rrggbb` of its bytes is, so `#36d9bd` as teal.
+    for (_, colour) in Colour::NAMED {
+        let written = String::from(Colour::Rgb(colour.srgb()));
+        assert_eq!(Colour::from(written).rgb(), colour.rgb());
+    }
+    assert_eq!(Colour::from("#36d9bd".to_owned()).rgb(), Colour::Teal.rgb());
+    // Bytes are sRGB, decoded to linear: black and white their ends, the middle grey about a fifth.
+    assert_eq!(Colour::Rgb([0, 0, 0]).rgb(), [0.0; 3]);
+    assert_eq!(Colour::Rgb([255, 255, 255]).rgb(), [1.0; 3]);
+    let [middle, ..] = Colour::Rgb([128, 128, 128]).rgb();
+    assert!((middle - 0.2158).abs() < 1e-3, "{middle}");
+    let [dark, ..] = Colour::Rgb([10, 10, 10]).rgb();
+    assert!((dark - 10.0 / 255.0 / 12.92).abs() < 1e-6, "{dark}");
+}
+
+#[test]
+fn a_reading_of_eight_series_says_each_whole_or_how_many_more() {
+    assert_eq!(
+        of_series(8).read_at(10.0),
+        "point 11 of 181: region 1 0, region 2 1, region 3 2, region 4 3, region 5 4, region 6 5, region 7 6, \
+         region 8 7"
+    );
+    // Names and units at their longest: as many whole as fit, then how many more, within the bound.
+    let mut long = of_series(8);
+    for series in &mut long.series {
+        series.name = "W".repeat(CHART_NAME_CHARS);
+    }
+    long.axis.unit = "u".repeat(CHART_NAME_CHARS);
+    let reading = long.read_at(10.0);
+    assert!(reading.chars().count() <= READING_CHARS, "{reading}");
+    assert!(reading.ends_with(", +5 more"), "{reading}");
+    assert_eq!(reading.matches(&"W".repeat(CHART_NAME_CHARS)).count(), 3);
+    // None that fit at all says only how many there are.
+    let mut longest = of_series(8);
+    longest.axis.unit = "u".repeat(READING_CHARS);
+    assert_eq!(longest.read_at(10.0), "point 11 of 181: +8 more");
 }

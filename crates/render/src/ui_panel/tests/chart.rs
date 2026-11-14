@@ -297,6 +297,10 @@ fn every_chart_at_the_spec_s_bounds_fits_a_wall_panel_s_buffer_whole() {
         fixtures::swinging(),
         fixtures::stepping(),
         fixtures::tracking(),
+        fixtures::regions(),
+        fixtures::bars(2),
+        fixtures::bars(4),
+        fixtures::bars(8),
     ];
     // Uploaded into a buffer of a wall card's size, as the renderer makes one, none of it is cut.
     crate::test_gpu::with(|gpu| {
@@ -417,5 +421,132 @@ fn a_chart_in_a_wide_slot_and_on_a_wall_five_times_the_size_lays_out_its_width()
         let drawn = drawn_within(&gpu, &canvas, &[view], (width, height), format, capacity);
         crate::test_support::preview("TOMORI_FIVE_CHART_PREVIEW", &drawn);
         assert!(drawn.pixels().filter(|pixel| pixel.0[1] > 120).count() > 1000);
+    });
+}
+
+/// Set `TOMORI_EIGHT_CHART_PREVIEW` to a PNG path to save what this renders: requests in eight regions, a line each in
+/// the palette's eight colours, the fifth to the eighth marked, read by pointing at its plot, in a standard slot, the
+/// same in a 4:1 slot and floating, and eight regions' bars, each face on in a panel whose buffer holds what a wall's
+/// panel's does.
+#[test]
+fn a_chart_of_eight_series_tells_each_apart_and_reads_them_all_where_pointed_at() {
+    use tomori_scene::chart::{Area, draw, legend, readout::Readout};
+    use tomori_scene::ui_text::{CELL_HEIGHT, CELL_WIDTH};
+    crate::test_gpu::with(|gpu| {
+        let wide = tomori_scene::projection::Cells::of(
+            &tomori_protocol::Wall::new(
+                "w",
+                tomori_protocol::WallKind::Added,
+                tomori_protocol::Pose::default(),
+            )
+            .with_aspect(Some(4.0)),
+        );
+        let chart = fixtures::regions();
+        let mut images = Vec::new();
+        for fit in [Fit::SLOT, Fit::Slot(wide), Fit::Text] {
+            let canvas = face(
+                &panel("Requests by region", chart.clone()),
+                false,
+                false,
+                fit,
+            );
+            assert!(canvas.mesh().len() <= crate::scene_graphics::CARD_CAPACITY);
+            let mut image = on_card(&gpu, &canvas, 2.3);
+            if fit == Fit::SLOT {
+                // Its readout, as the face lays out its plot, over the face, at about two thirds of the way along.
+                let columns = canvas.columns;
+                let top = 3 + legend(&chart, columns).len();
+                let plot = draw(
+                    &chart,
+                    Area {
+                        x: 0.0,
+                        y: (top * CELL_HEIGHT) as f32,
+                        width: (columns * CELL_WIDTH) as f32,
+                        height: ((canvas.rows.len() - top) * CELL_HEIGHT) as f32,
+                    },
+                )
+                .plot
+                .unwrap();
+                let bounds = (
+                    (columns * CELL_WIDTH) as f32,
+                    (canvas.rows.len() * CELL_HEIGHT) as f32,
+                );
+                let readout = Readout::new(&chart, &plot, 120.0, bounds);
+                assert_eq!(readout.lines.len(), tomori_scene::chart::readout::LINES);
+                // Drawn over the face, as the renderer draws a readout's overlay over the face kept.
+                let overlay = on_card(&gpu, &readout.overlay(&canvas), 2.3);
+                for (pixel, over) in image.pixels_mut().zip(overlay.pixels()) {
+                    if over.0[..3].iter().any(|&channel| channel > 0) {
+                        *pixel = *over;
+                    }
+                }
+            }
+            images.push(image);
+        }
+        crate::test_support::preview("TOMORI_EIGHT_CHART_PREVIEW", &sheet(&images, 2));
+        // Every series' colour is drawn in the standard slot.
+        let image = &images[0];
+        let rgb = |colour: tomori_protocol::chart::Colour| {
+            colour
+                .rgb()
+                .map(|value| (value.powf(1.0 / 2.2) * 255.0) as i32)
+        };
+        for (name, colour) in tomori_protocol::chart::Colour::NAMED {
+            let want = rgb(colour);
+            let drawn = image
+                .pixels()
+                .filter(|pixel| {
+                    (0..3).all(|channel| (i32::from(pixel.0[channel]) - want[channel]).abs() <= 24)
+                })
+                .count();
+            assert!(drawn > 20, "{name}: {drawn}");
+        }
+    });
+}
+
+/// Set `TOMORI_BARS_CHART_PREVIEW` to a PNG path to save what this renders: requests in two, four and eight regions as
+/// bars at every one of 256 points, side by side in each stretch, in a standard slot and a 4:1 slot, face on.
+#[test]
+fn several_series_of_bars_stand_side_by_side_and_each_is_seen() {
+    crate::test_gpu::with(|gpu| {
+        let wide = tomori_scene::projection::Cells::of(
+            &tomori_protocol::Wall::new(
+                "w",
+                tomori_protocol::WallKind::Added,
+                tomori_protocol::Pose::default(),
+            )
+            .with_aspect(Some(4.0)),
+        );
+        let mut images = Vec::new();
+        for count in [2, 4, 8] {
+            for fit in [Fit::SLOT, Fit::Slot(wide)] {
+                let chart = fixtures::bars(count);
+                let canvas = face(
+                    &panel("Requests by region", chart.clone()),
+                    false,
+                    false,
+                    fit,
+                );
+                let image = on_card(&gpu, &canvas, 2.3);
+                // Every series' colour is seen, none hidden behind another's bars.
+                for colour in &chart.series {
+                    let want = colour
+                        .colour
+                        .rgb()
+                        .map(|value| (value.powf(1.0 / 2.2) * 255.0) as i32);
+                    let seen = image
+                        .pixels()
+                        .filter(|pixel| {
+                            (0..3).all(|channel| {
+                                (i32::from(pixel.0[channel]) - want[channel]).abs() <= 24
+                            })
+                        })
+                        .count();
+                    assert!(seen > 200, "{count} {}: {seen}", colour.name);
+                }
+                images.push(image);
+            }
+        }
+        crate::test_support::preview("TOMORI_BARS_CHART_PREVIEW", &sheet(&images, 2));
     });
 }
