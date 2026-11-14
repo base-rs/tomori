@@ -3,12 +3,11 @@
 
 //! Controller and hand poses, and which index is each hand's.
 use glam::{Mat4, Quat, Vec3};
-use serde::{Deserialize, Serialize};
 
 pub const LEFT: usize = 0;
 pub const RIGHT: usize = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
     pub position: [f32; 3],
     pub orientation: [f32; 4],

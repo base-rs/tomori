@@ -408,7 +408,7 @@ fn at_most_eight_dials_each_name_once_cut_to_their_bounds() {
     // The name cut to its bounds is the same dial from frame to frame.
     let again = run(&mut dials, &timers, 0.05);
     assert_eq!(again.len(), cubes.len());
-    // Bounds a spectator checks.
+    // Bounds a client draws within.
     let mut dial = first.clone();
     assert!(dial.valid());
     dial.scale = f32::NAN;
@@ -425,10 +425,6 @@ fn at_most_eight_dials_each_name_once_cut_to_their_bounds() {
     dial = first.clone();
     dial.pill = "p".repeat(40);
     assert!(!dial.valid());
-    // A serialised dial reads back the same, and one not pointed at says nothing of it.
-    let encoded = serde_json::to_value(first).unwrap();
-    assert!(encoded.get("pointed").is_none());
-    assert_eq!(serde_json::from_value::<Dial>(encoded).unwrap(), *first);
 }
 
 #[test]

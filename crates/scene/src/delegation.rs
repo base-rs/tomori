@@ -9,7 +9,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use glam::{Quat, Vec3};
-use serde::{Deserialize, Serialize};
 
 use crate::anchors::{Anchor, Placed, Placement, Placing};
 #[cfg(test)]
@@ -104,21 +103,19 @@ const HIGHLIGHT_WHITENING: f32 = 0.45;
 /// How much larger the worker pointed at is drawn.
 const HIGHLIGHT_SCALE: f32 = 1.25;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default)]
 pub struct Workspace {
     pub nodes: Vec<Node>,
     pub presentations: Vec<Presentation>,
     pub error: Option<String>,
     /// Worker-list freshness independent of unrelated space errors. Absent in
-    /// older space and spectator snapshots.
+    /// older space snapshots.
     pub workers_authoritative: Option<bool>,
     pub truncated: bool,
     pub stale: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default)]
 pub struct Node {
     pub id: String,
     pub parent_id: Option<String>,
@@ -126,8 +123,7 @@ pub struct Node {
     pub state: State,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum State {
     Running,
     Waiting,
@@ -144,8 +140,7 @@ pub enum State {
     Unknown,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Clone, Debug, Default)]
 pub struct Presentation {
     pub id: String,
     pub source_id: String,
@@ -157,8 +152,7 @@ pub struct Presentation {
     pub rows: Vec<Vec<String>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
     #[default]
     Markdown,
@@ -325,22 +319,17 @@ impl Workspace {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug)]
 pub struct Cube {
     pub position: [f32; 3],
     pub scale: [f32; 3],
     pub color: [f32; 3],
-    /// XYZW unit quaternion; old spectator frames remain axis-aligned.
-    #[serde(default = "identity_orientation")]
+    /// XYZW unit quaternion.
     pub orientation: [f32; 4],
 }
 
-fn identity_orientation() -> [f32; 4] {
-    Quat::IDENTITY.to_array()
-}
-
 impl Cube {
-    /// Also suitable for validating geometry received by the spectator.
+    /// Whether it is within the bounds this client draws.
     pub fn valid(&self) -> bool {
         self.position
             .iter()
@@ -361,37 +350,27 @@ impl Cube {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct Station {
     pub id: String,
     pub position: [f32; 3],
     pub state: State,
     pub title: String,
-    #[serde(default = "full_opacity")]
     pub opacity: f32,
     /// Where the eyes are of whoever its sign faces, the agent's audience: those at home, or those of whoever summoned
     /// it.
-    #[serde(default = "home_eyes")]
     pub facing: [f32; 3],
     /// How large its sign is drawn, as a share of its full size: smaller in a compact cluster.
-    #[serde(default = "full_opacity")]
     pub scale: f32,
     /// How many workers its sign stands for, gathered into a cluster's "+N more" sign, or 0 for its own worker's.
-    #[serde(default, skip_serializing_if = "is_zero")]
     pub more: usize,
     /// How much larger than one within [`SIGN_REACH`] of whoever it faces its sign is drawn, where its cluster draws its
     /// signs at one size, as a ring does ([`tomori_protocol::cluster::Cluster::sign_size`]); or else, `None`, as far
     /// beyond that as it stands from them ([`sign_scale`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
     /// Whether this client's either ray points at its worker, its leader or its sign, which are drawn highlighted
     /// together. See `design/interaction.md`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub highlighted: bool,
-}
-
-fn is_zero(more: &usize) -> bool {
-    *more == 0
 }
 
 /// How far from whoever it faces a sign is drawn at its own size, in metres: the default arc's radius, within about the
@@ -415,14 +394,6 @@ pub fn sign_scale(station: [f32; 3], facing: [f32; 3]) -> f32 {
 
 /// Where the eyes are at home, which a station's sign faces unless the agent is summoned.
 pub const HOME_EYES: [f32; 3] = [0.0, 1.6, 0.0];
-
-fn full_opacity() -> f32 {
-    1.0
-}
-
-fn home_eyes() -> [f32; 3] {
-    HOME_EYES
-}
 
 impl Station {
     #[cfg(any(not(target_os = "android"), test))]

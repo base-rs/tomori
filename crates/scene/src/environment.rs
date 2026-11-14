@@ -4,7 +4,6 @@
 //! The scenery the renderer draws, by the identifier spaces name their environments by. The grid, `minimal`, is built in; every other environment is registered by the application, from the environment's own crate, with `tomori-render`, as Tomori's own app registers Sky from `tomori-environment-sky-client`.
 //!
 //! A headset follows the conversation: arrival and the lobby use the Minimal grid, and a space uses the environment it is bound to, named by the server; see `design/environments.md`. Only the desktop window, which has no server, chooses one itself.
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// An environment's scenery, by its identifier, and the protocol version this build presents it at, which its `Hello` lists so that the server offers it only environments it presents at the same version; see `design/environments.md`.
 ///
@@ -114,22 +113,6 @@ impl Environment {
     }
 }
 
-/// Serialized as its identifier, as spectator frames carry it.
-impl Serialize for Environment {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.id)
-    }
-}
-
-/// Read back only as the grid, the one environment built in, since the identifier of another is not kept.
-impl<'de> Deserialize<'de> for Environment {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let id = String::deserialize(deserializer)?;
-        Self::for_space(&id, &[])
-            .ok_or_else(|| serde::de::Error::unknown_variant(&id, &[Self::MINIMAL.id]))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,19 +153,6 @@ mod tests {
     #[test]
     fn the_default_is_the_grid_that_older_headset_builds_drew() {
         assert_eq!(Environment::default(), Environment::MINIMAL);
-    }
-
-    #[test]
-    fn selection_roundtrips_as_the_grid_and_rejects_others() {
-        let value = Environment::MINIMAL;
-        assert_eq!(
-            serde_json::from_str::<Environment>(&serde_json::to_string(&value).unwrap()).unwrap(),
-            value
-        );
-        assert!(serde_json::from_str::<Environment>("\"unknown\"").is_err());
-        assert!(serde_json::from_str::<Environment>("\"floor\"").is_err());
-        assert!(serde_json::from_str::<Environment>("null").is_err());
-        assert_eq!(serde_json::to_string(&FLOOR).unwrap(), "\"floor\"");
     }
 
     #[test]

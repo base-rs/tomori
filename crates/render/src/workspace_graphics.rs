@@ -3336,12 +3336,19 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_and_stereo_recenter_keep_world_signs() {
-        let station: Station = serde_json::from_str(
-            r#"{"id":"a","title":"Old task","state":"idle","position":[-1.0,1.4,-2.8]}"#,
-        )
-        .unwrap();
-        assert_eq!(station.opacity, 1.0);
+    fn stereo_recenter_keeps_world_signs() {
+        let station = Station {
+            id: "a".into(),
+            position: [-1.0, 1.4, -2.8],
+            state: State::Idle,
+            title: "Old task".into(),
+            opacity: 1.0,
+            facing: tomori_scene::delegation::HOME_EYES,
+            scale: 1.0,
+            more: 0,
+            size: None,
+            highlighted: false,
+        };
         let workspace = Workspace {
             nodes: vec![node("a", State::Idle)],
             ..Default::default()
