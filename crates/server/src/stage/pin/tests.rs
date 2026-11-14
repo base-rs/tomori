@@ -375,8 +375,14 @@ fn a_copy_is_frozen_to_the_window_its_chart_shows_and_unfrozen_to_follow_again()
     // Frozen to the window it shows: nine steps of 6 s, ending at the instant its last point stood for, as it was
     // published, its chart kept for exactly that window.
     let before = chart_of(&stage, &copy);
-    let to_ms = published_at(&stage, &copy);
-    assert!(to_ms > 1_700_000_000_000, "{to_ms}");
+    assert!(published_at(&stage, &copy) > 1_700_000_000_000);
+    // Published, as if, at 02:30 UTC on 14 November 2026, so that its window is within that day, whatever the clock.
+    let to_ms = 1_794_623_400_000;
+    stage
+        .here_mut("console", &copy)
+        .and_then(|kept| kept.published.as_mut())
+        .unwrap()
+        .at_ms = to_ms;
     let (from_ms, to_ms) = (to_ms - 54_000, to_ms);
     assert_eq!(stage.freeze(&walls, &copy, true), Ok(true));
     assert_eq!(
@@ -389,6 +395,26 @@ fn a_copy_is_frozen_to_the_window_its_chart_shows_and_unfrozen_to_follow_again()
         )
     );
     let frozen = chart_of(&stage, &copy);
+    // Its body, what the agent reads, says its newest value at the end of the window it is frozen to, as its legend
+    // does, rather than `now`; as participants are sent it, dated against today.
+    assert_eq!(before.summary(), "p99: 41 now");
+    let body = &stage
+        .here("console")
+        .find(|kept| kept.id == copy)
+        .unwrap()
+        .content
+        .body;
+    assert_eq!(body, "p99: 41 at its end, 11-14 02:30 UTC");
+    let sent = |now: u64| {
+        stage
+            .view("s", &walls, now)
+            .panel(&copy)
+            .unwrap()
+            .body
+            .clone()
+    };
+    assert_eq!(sent((to_ms / 1000) as u64), "p99: 41 at its end, 02:30 UTC");
+    assert_eq!(sent(0), *body);
     assert_eq!(frozen.series, before.series);
     assert_eq!(frozen.time, Some(TimeAxis::Fixed { from_ms, to_ms }));
     assert!(frozen.labels.last().unwrap().text.ends_with(" UTC"));

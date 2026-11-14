@@ -97,7 +97,8 @@ pub fn described((from_ms, to_ms): (i64, i64)) -> String {
 }
 
 /// The labels of a chart of `points` points over the window from `from_ms` to `to_ms`, against `today`, in days since
-/// the Unix epoch in UTC: its first, middle and last points' clock times in UTC, `02:20`, the last saying `UTC`; the date
+/// the Unix epoch in UTC, written as its summary writes its times, [`tomori_protocol::chart::utc_minute`]: its first,
+/// middle and last points' clock times in UTC, `02:20`, the last saying `UTC`; the date
 /// before the first where the window is not within today, `11-12 02:20`, and, across days, before any on another day than
 /// the label before it; as many as it has points, at most [`LABELS`].
 pub fn labels(points: u32, (from_ms, to_ms): (i64, i64), today: i64) -> Vec<AxisLabel> {
@@ -119,11 +120,7 @@ pub fn labels(points: u32, (from_ms, to_ms): (i64, i64), today: i64) -> Vec<Axis
         } else {
             from_ms + (to_ms - from_ms) * i64::from(at) / i64::from(last)
         };
-        let mut text = if shown == Some(day(ms)) {
-            utc(ms, "%H:%M")
-        } else {
-            utc(ms, "%m-%d %H:%M")
-        };
+        let mut text = tomori_protocol::chart::utc_minute(ms, shown != Some(day(ms)));
         shown = Some(day(ms));
         if index + 1 == count {
             text.push_str(" UTC");
@@ -190,7 +187,8 @@ impl Stage {
     }
 
     /// `panel`, `kept` as the view shows it at `now`, in seconds since the epoch, held to the window it is fixed to in
-    /// `environment`, if any: with its axis labelled in UTC where it shows that window, or else saying it is waiting for
+    /// `environment`, if any: with its axis labelled in UTC where it shows that window, and its body the summary of its
+    /// chart against today, so that its times say their dates as its labels do, or else saying it is waiting for
     /// that window's data, or, once it has waited [`WAIT_SECS`], that it has none, a chart without values over the
     /// window, which says it has no data, or a body saying so, without rows.
     pub(super) fn held(
@@ -215,6 +213,7 @@ impl Stage {
         if published.shows_window(window) {
             if let Some(chart) = &mut panel.chart {
                 chart.labels = labels(chart.points, window, today);
+                panel.body = super::clean_body(&chart.summary_on(Some(today)));
             }
             return panel;
         }

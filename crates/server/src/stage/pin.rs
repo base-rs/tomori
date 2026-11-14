@@ -223,6 +223,9 @@ impl Stage {
             .and_then(|published| published.chart.as_mut())
             .expect("a copy frozen is of a chart");
         chart.time = Some(TimeAxis::Fixed { from_ms, to_ms });
+        // Its body, what the agent reads, says what its chart now shows, each series' newest value and when, as its
+        // legend does, never `now`.
+        kept.content.body = super::clean_body(&chart.summary());
         Ok(true)
     }
 
