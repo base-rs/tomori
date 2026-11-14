@@ -753,6 +753,13 @@ pub enum ClientMessage {
         /// Not relayed. See `design/interaction.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rays: Option<[bool; 2]>,
+        /// Each of this participant's rays drawn in full on their headset, left then right, from its aim pose, which the
+        /// server relays to the others and resolves what each points at from. Sent whenever a ray is shown, each one
+        /// shown as a stub `null`, so that the server tells a current client from an older one, which sends none and
+        /// whose rays it resolves from its controllers' grip poses as before. Absent while no ray is shown, and from
+        /// older clients. See `design/people.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pointing: Option<Box<crate::presence::Pointing>>,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -1206,6 +1213,10 @@ pub enum ServerMessage {
         /// The participant's tracked hand skeletons, left then right. Absent from older servers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         hands: Option<Box<[Option<crate::presence::Hand>; 2]>>,
+        /// The participant's rays drawn in full on their headset, left then right, as the server sounded them, which
+        /// the others draw. Absent while none is, and from older servers. See `design/people.md`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pointing: Option<Box<crate::presence::Pointing>>,
     },
     /// A request could not be completed. The connection stays open.
     Error {
@@ -1905,6 +1916,7 @@ mod tests {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         };
         let client_json =
             serde_json::json!({"type": "presence", "head": head_json, "hands": hands_json});
@@ -1920,6 +1932,7 @@ mod tests {
             left: None,
             right: None,
             hands: Some(Box::new(hands)),
+            pointing: None,
         };
         let server_json = serde_json::json!({"type": "presence", "source": 3, "head": head_json, "hands": hands_json});
         assert_eq!(serde_json::to_value(&server).unwrap(), server_json);
@@ -1937,6 +1950,7 @@ mod tests {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         };
         assert_eq!(
             serde_json::to_value(&bare).unwrap(),
@@ -1951,6 +1965,7 @@ mod tests {
             carrying: Some("panel-3".into()),
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         };
         let carrying_json =
             serde_json::json!({"type": "presence", "head": head_json, "carrying": "panel-3"});
@@ -1969,6 +1984,7 @@ mod tests {
             carrying: Some("panel-3".into()),
             carried: vec!["panel-3".into(), "panel-4".into()],
             rays: Some([false, true]),
+            pointing: None,
         };
         let both_json = serde_json::json!({
             "type": "presence",
@@ -1982,6 +1998,68 @@ mod tests {
             serde_json::from_value::<ClientMessage>(both_json).unwrap(),
             both
         );
+        // Each ray drawn in full, from its aim, a stub as `null`, which older peers ignore; without it, as from older
+        // clients and servers, none is said.
+        let ray = crate::Ray {
+            aim: Pose {
+                position: [0.25, 1.25, -0.5],
+                orientation: [0.0, 0.0, 0.0, 1.0],
+            },
+            length: 2.5,
+            meets: true,
+        };
+        let ray_json = serde_json::json!({
+            "aim": {"position": [0.25, 1.25, -0.5], "orientation": [0.0, 0.0, 0.0, 1.0]},
+            "length": 2.5,
+            "meets": true,
+        });
+        let aimed = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            carrying: None,
+            carried: Vec::new(),
+            rays: Some([true, true]),
+            pointing: Some(Box::new([None, Some(ray)])),
+        };
+        let aimed_json = serde_json::json!({
+            "type": "presence",
+            "head": head_json,
+            "rays": [true, true],
+            "pointing": [null, ray_json],
+        });
+        assert_eq!(serde_json::to_value(&aimed).unwrap(), aimed_json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(aimed_json).unwrap(),
+            aimed
+        );
+        let relayed = ServerMessage::Presence {
+            source: 3,
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            pointing: Some(Box::new([Some(ray), None])),
+        };
+        let relayed_json = serde_json::json!({
+            "type": "presence",
+            "source": 3,
+            "head": head_json,
+            "pointing": [ray_json, null],
+        });
+        assert_eq!(serde_json::to_value(&relayed).unwrap(), relayed_json);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(relayed_json).unwrap(),
+            relayed
+        );
+        let ServerMessage::Presence { pointing, .. } = serde_json::from_value::<ServerMessage>(
+            serde_json::json!({"type": "presence", "source": 3, "head": head_json}),
+        )
+        .unwrap() else {
+            unreachable!("presence reads as presence")
+        };
+        assert!(pointing.is_none());
     }
 
     #[test]

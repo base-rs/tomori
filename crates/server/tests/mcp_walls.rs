@@ -134,6 +134,7 @@ fn the_agent_changes_no_locked_wall_and_locks_unlocks_and_puts_one_back_only_whe
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     let moved = eventually(|| {
         let moved = tool(

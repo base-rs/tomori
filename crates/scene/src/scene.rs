@@ -156,6 +156,9 @@ pub struct Presence {
     pub carried: Vec<String>,
     /// Which rays are shown, left then right, so that the space's agent is told what each shown one points at.
     pub rays: [bool; 2],
+    /// Each ray drawn in full, left then right, from its aim, which the others draw and the space's agent is told what
+    /// it points at from: never a stub, the hand menu's ray or a teleport's aim. See `design/people.md`.
+    pub pointing: tomori_protocol::Pointing,
 }
 
 impl Presence {
@@ -168,6 +171,7 @@ impl Presence {
             self.hands,
             &self.carried,
             self.rays,
+            self.pointing,
         );
     }
 }
@@ -2894,6 +2898,16 @@ impl Step {
         });
         // Every source is heard from where it is, relative to the head; see `design/spatial-audio.md`.
         let agent = self.coordinator.voice();
+        // Each ray drawn in full in a space, from its aim, for the others to draw and the space's agent to be told what it
+        // points at: never a stub, nor the hand menu's ray or a teleport's aim, which are this participant's own. See
+        // `design/people.md`.
+        let pointing = Hands::from_fn(|side| {
+            let menus = menu_shown && !(side == Side::Left && menu_on_palm);
+            let own = menus || in_arrival || (side == aimer && travel.aiming);
+            beams[side]
+                .filter(|beam| !own && (beam.hit || self.hands[side].full))
+                .and_then(|beam| beam.sent())
+        });
         // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates, and the server alone the panels they carry and which rays they show. Visitors send no presence; see `design/security.md`.
         let presence = senses
             .head_pose
@@ -2908,6 +2922,7 @@ impl Step {
                     .filter_map(|side| self.projector.held_in(side).map(str::to_owned))
                     .collect(),
                 rays: [ray_shown.left, ray_shown.right],
+                pointing: [pointing.left, pointing.right],
             });
         // Arrival hides the panel; entering a space places it in front of the participant again.
         if in_arrival {

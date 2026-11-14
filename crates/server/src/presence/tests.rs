@@ -436,6 +436,42 @@ fn a_headset_is_reported_with_its_hands_and_ray_and_a_desktop_with_its_head_alon
     assert_eq!(report_left["pointing"]["left"]["slot"], 4);
     assert_eq!(report_left["pointing"]["right"], Value::Null);
     assert_eq!(report_left["pointing_at"], Value::Null);
+    // A current client says each ray drawn in full from its aim, which is what it points at, not its controller's grip:
+    // here the right grip faces slot 2, but its ray is aimed at slot 4.
+    let ray = |from: [f32; 3], at: [f32; 3]| {
+        Some(tomori_protocol::Ray {
+            aim: looking(from, at),
+            length: 2.0,
+            meets: true,
+        })
+    };
+    let aimed = ada
+        .clone()
+        .showing(Some([true, true]))
+        .aiming(Some(&[None, ray([0.2, 1.1, -0.3], slots[4].middle)]));
+    let report_aimed = pointed(&aimed);
+    assert_eq!(report_aimed["pointing"]["right"]["slot"], 4);
+    assert_eq!(report_aimed["pointing_at"]["slot"], 4);
+    // Its rays shown only as stubs point at nothing, wherever its grips face, and a ray that is no ray, nowhere.
+    let stubs = aimed.clone().aiming(Some(&[None, None]));
+    assert_eq!(
+        pointed(&stubs)["pointing"],
+        json!({"left": null, "right": null})
+    );
+    let no_ray = Some(tomori_protocol::Ray {
+        length: -1.0,
+        ..ray([0.0; 3], slots[4].middle).unwrap()
+    });
+    let broken = aimed.clone().aiming(Some(&[no_ray, None]));
+    assert_eq!(pointed(&broken)["pointing"]["left"], Value::Null);
+    // The others are told only the rays that are sound, and nothing where none is.
+    let sounded = super::sounded(Some(&[no_ray, ray([0.2, 1.1, -0.3], slots[4].middle)]));
+    assert_eq!(
+        sounded.map(|rays| (rays[0], rays[1].is_some())),
+        Some((None, true))
+    );
+    assert_eq!(super::sounded(Some(&[None, None])), None);
+    assert_eq!(super::sounded(None), None);
     assert_eq!(report["left_hand"]["tracked"], "controller");
     assert_eq!(report["left_hand"]["yaw"], 0.0);
     assert_eq!(report["right_hand"]["position"], json!([0.2, 1.1, -0.3]));

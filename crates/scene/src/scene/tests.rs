@@ -2159,11 +2159,19 @@ fn aiming_a_teleport_takes_the_ray_from_workers_and_the_hand_menu_or_focus_cance
         );
     };
     conversation.take_actions();
-    step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+    let sent = |frame: &Frame<'_>| frame.presence.as_ref().map(|presence| presence.pointing);
+    // On the worker, the ray is sent to the others, meeting it.
+    let met = sent(&step.update(&senses, &mut conversation, &mut feedback, now, FRAME));
+    assert!(
+        met.is_some_and(|[_, right]| right.is_some_and(|ray| ray.meets)),
+        "{met:?}"
+    );
     assert_eq!(attending(&mut conversation), [Resource::worker("ses_a")]);
     // Aiming, the worker is no longer pointed at. The ray at it meets the floor only beyond travel's reach, so it has nowhere to land, and is drawn plain and short of it.
     stick(&mut step, &mut conversation, Vec2::Y);
     let output = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+    // A teleport's aim is this participant's own, and never sent.
+    assert_eq!(sent(&output), Some([None, None]));
     let beam = output
         .arrival
         .as_ref()
@@ -8309,6 +8317,9 @@ fn each_ray_is_drawn_in_full_while_it_has_something_to_say_a_stub_otherwise_and_
     assert!(!right.hit && !left.hit);
     assert_eq!(right.end, ahead.unwrap().at(STUB));
     assert_eq!(left.end, left_ahead.unwrap().at(STUB));
+    // A stub is never sent to the others.
+    let sent = |frame: &Frame<'_>| frame.presence.as_ref().map(|presence| presence.pointing);
+    assert_eq!(sent(&frame), Some([None, None]));
     assert_eq!(
         frame.presence.map(|presence| presence.rays),
         Some([true, true])
@@ -8327,6 +8338,17 @@ fn each_ray_is_drawn_in_full_while_it_has_something_to_say_a_stub_otherwise_and_
         ahead.unwrap().at(crate::pointing::SPACE_RAY_LENGTH)
     );
     assert_eq!(left.unwrap().end, left_ahead.unwrap().at(STUB));
+    // Drawn in full, the right ray is sent from its aim, as far as it reaches, meeting nothing; the stub is not.
+    assert_eq!(
+        sent(&frame),
+        Some([None, right.unwrap().sent()]),
+        "the right ray in full"
+    );
+    let [_, right_sent] = sent(&frame).unwrap();
+    let right_sent = right_sent.expect("sent");
+    assert_eq!(right_sent.aim.position, arrival::HOME.to_array());
+    assert!((right_sent.length - crate::pointing::SPACE_RAY_LENGTH).abs() < 1e-5);
+    assert!(!right_sent.meets);
     let soon = now + LIT / 2;
     let frame = step.update(
         &pointing(0.0, left_ahead, 1.0),
@@ -8431,6 +8453,8 @@ fn each_ray_is_drawn_in_full_while_it_has_something_to_say_a_stub_otherwise_and_
     let (right, left) = rays(&frame);
     assert!(right.is_some());
     assert_eq!(left, None);
+    // The hand menu's ray is this participant's own, and never sent.
+    assert_eq!(sent(&frame), Some([None, None]));
     assert_eq!(
         frame.presence.map(|presence| presence.rays),
         Some([false, true])

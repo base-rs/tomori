@@ -20,6 +20,23 @@ pub struct Beam {
     pub hit: bool,
 }
 
+impl Beam {
+    /// It as presence carries it to the others, from its aim, pointing along the pose's −Z, as far as it reaches; or
+    /// nothing, should it reach nowhere. See `design/people.md`.
+    pub fn sent(&self) -> Option<tomori_protocol::Ray> {
+        let along = self.end - self.origin;
+        let direction = along.try_normalize()?;
+        Some(tomori_protocol::Ray {
+            aim: tomori_protocol::Pose {
+                position: self.origin.to_array(),
+                orientation: Quat::from_rotation_arc(Vec3::NEG_Z, direction).to_array(),
+            },
+            length: along.length(),
+            meets: self.hit,
+        })
+    }
+}
+
 /// A pull starts once the trigger passes this, and attracts the swarm when it does not choose.
 pub(crate) const PULL: f32 = 0.2;
 /// A pull that began on a target chooses it once the trigger passes this.
@@ -564,6 +581,38 @@ mod tests {
         assert_eq!(
             pointer.update(Some(forward()), Some(1.0), &targets).chosen,
             Some("space")
+        );
+    }
+
+    #[test]
+    fn a_beam_is_sent_from_its_aim_as_far_as_it_reaches() {
+        let beam = Beam {
+            origin: Vec3::new(0.2, 1.2, -0.3),
+            end: Vec3::new(0.2, 1.2, -2.3),
+            hit: true,
+        };
+        let sent = beam.sent().expect("it reaches");
+        assert_eq!(sent.aim.position, [0.2, 1.2, -0.3]);
+        assert!((sent.length - 2.0).abs() < 1e-5);
+        assert!(sent.meets);
+        // Its aim points along its −Z, at where it ends.
+        let along = Quat::from_array(sent.aim.orientation) * Vec3::NEG_Z;
+        assert!(along.distance(Vec3::NEG_Z) < 1e-5);
+        let turned = Beam {
+            end: beam.origin + Vec3::X,
+            ..beam
+        }
+        .sent()
+        .unwrap();
+        assert!((Quat::from_array(turned.aim.orientation) * Vec3::NEG_Z).distance(Vec3::X) < 1e-5);
+        // One that reaches nowhere is not sent.
+        assert_eq!(
+            Beam {
+                end: beam.origin,
+                ..beam
+            }
+            .sent(),
+            None
         );
     }
 }

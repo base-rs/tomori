@@ -250,6 +250,7 @@ mod tests {
             carrying: Some("panel-1".repeat(20)),
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         };
         let presence = Frame::client(&presence).payload.len();
         let audio = Frame::audio(&AudioFrame {

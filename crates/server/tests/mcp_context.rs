@@ -580,6 +580,7 @@ fn the_agent_copies_a_panel_with_a_context_and_builds_walls_each_with_its_own() 
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     eventually(|| {
         tool("presence", json!({}))["structuredContent"]["people"][0]

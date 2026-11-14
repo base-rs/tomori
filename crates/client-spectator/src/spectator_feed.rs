@@ -168,6 +168,7 @@ impl Feed {
                 left,
                 right,
                 hands,
+                ..
             } => {
                 hook.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -575,6 +576,7 @@ mod tests {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         }
     }
 
@@ -669,6 +671,7 @@ mod tests {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         });
         // Cy travelled to stand 1 m in front of her, as she now faces.
         let ahead = head + Quat::from_array(orientation) * -Vec3::Z;
@@ -683,6 +686,7 @@ mod tests {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         });
         let seen = until(&mut feed, |feed| {
             feed.following.is_some() && feed.connection.placed().position(cy_source).is_some()

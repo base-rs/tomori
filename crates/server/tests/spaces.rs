@@ -73,6 +73,7 @@ fn participant_identities_are_never_sent_to_other_clients() {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         });
     }
 
@@ -2233,6 +2234,19 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         },
     };
 
+    // Her right ray drawn in full is relayed from its aim; her left, which is no ray, is not.
+    let aimed = tomori_protocol::Ray {
+        aim: Pose {
+            position: [0.2, 1.25, -0.25],
+            orientation: [0.0, 0.0, 0.0, 2.0],
+        },
+        length: 1.5,
+        meets: true,
+    };
+    let broken = tomori_protocol::Ray {
+        length: tomori_protocol::RAY_REACH * 2.0,
+        ..aimed
+    };
     ada.send(&ClientMessage::Presence {
         head,
         left: Some(head),
@@ -2240,7 +2254,8 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         hands: Some(Box::new([Some(left_hand), None])),
         carrying: None,
         carried: Vec::new(),
-        rays: None,
+        rays: Some([true, true]),
+        pointing: Some(Box::new([Some(broken), Some(aimed)])),
     });
 
     bob.wait_for(|message| match message {
@@ -2250,12 +2265,40 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
             left,
             right,
             hands,
+            pointing,
         } => {
             assert_eq!(*source, ada_source);
             assert_eq!(*relayed_head, head);
             assert_eq!(*left, Some(head));
             assert_eq!(*right, None);
             assert_eq!(hands.as_deref(), Some(&[Some(left_hand), None]));
+            // Sounded, its rotation made unit.
+            let sounded = tomori_protocol::Ray {
+                aim: Pose {
+                    orientation: [0.0, 0.0, 0.0, 1.0],
+                    ..aimed.aim
+                },
+                ..aimed
+            };
+            assert_eq!(pointing.as_deref(), Some(&[None, Some(sounded)]));
+            Some(())
+        }
+        _ => None,
+    });
+    // Shown only as stubs, her rays are relayed as none at all.
+    ada.send(&ClientMessage::Presence {
+        head,
+        left: None,
+        right: None,
+        hands: None,
+        carrying: None,
+        carried: Vec::new(),
+        rays: Some([true, true]),
+        pointing: Some(Box::new([None, None])),
+    });
+    bob.wait_for(|message| match message {
+        ServerMessage::Presence { pointing, left, .. } if left.is_none() => {
+            assert!(pointing.is_none());
             Some(())
         }
         _ => None,
@@ -2271,6 +2314,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {
