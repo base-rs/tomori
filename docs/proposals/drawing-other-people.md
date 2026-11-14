@@ -16,6 +16,8 @@ On this proposal's review they said:
 
 ## Recommendation in brief
 
+> **Revised after stage 1:** a person is now a small swarm of cubes shaped as a head, shoulders, a torso and arms, with no legs, its head a rounded cluster with two eyes that warm as they look at you and an orbit that quickens as they speak. See **The look, revised after stage 1** in section 1 and Decision 8. What follows is the recommendation as first approved.
+
 - **A person is a head, two hands and their rays.** There is no body. Each part is built from the cubes Tomori already draws everything with.
   - **The head** is a rounded block about the size of a head, in the person's colour, with a dark visor band across the front, like a headset. It faces where they look. It is stylised for fun, not a human or photo-realistic likeness, and needs no face.
   - **A gaze cue:** while someone looks at you, their visor band glows towards you, so eye contact reads in conversation. It is worked out from the head pose already relayed, so nothing more is sent.
@@ -67,6 +69,23 @@ On this proposal's review they said:
 
 **No body.** A floating head and hands is the convention people already read in social VR. A body would have to be guessed from three poses. A faint disc on the floor beneath the head, as the agent's home ring sits, may help judge distance. It is left to stage 4 for a look on the headset.
 
+### The look, revised after stage 1
+
+Seeing stage 1's visor block on the headset's preview, the maintainer found it minimal and asked for something more suited to Tomori: "We use a swarm for you, why not a simpler swarm for humans, roughly showing body and arms at least. Legs are less interesting. Head — maybe we can spend a bit more effort on it." Of three concepts, a torso and arms of glowing cubes dissolving below the chest, three heads, and a person whose eyes warm as they look at you beside the agent's violet cloud, they found all three "very cool, even if we had to use a few less cubes", and chose the second head: a rounded, dense cluster with two soft glowing eyes and a small orbit of tiny cubes. Option B above, a flock of cubes, was set aside for being confused with the agent; shaped as a person, structured where the agent is shapeless, and in a person's colour, far from its violet, it is not.
+
+- **The head** is a rounded, dense cluster of cubes a little larger than a head, facing where they look, with **two eyes** on its face, soft and cool, and a little **orbit** of tiny cubes circling it.
+- **The gaze cue is the eyes:** while someone looks at you, by stage 1's rule (within 10°, holding to 15°, within 8 m, easing in over 0.2 s and out over 0.4 s), their eyes warm clearly, to a warm cream, brighter and a little larger, with no halo, the eye towards you a little warmer.
+- **Speaking is the orbit:** while their voice plays on your headset, which the client knows by source, their orbit quickens and brightens, calming over half a second once it stops. Stage 3's label will show it too.
+- **The body** is shoulders and a torso, below and behind the head, turning with its yaw alone, damped, so that nodding and looking down bend nothing. It thins below the chest into a few cubes that drift down and fade: **no legs**, since nothing tracks them.
+- **The arms** reach from each shoulder to each hand by two-bone inverse kinematics, the elbows bending out and down, to the controller's grip or a tracked hand's palm; a hand neither tracks hangs at the side. Each hand is a small, brighter cluster; tracked joints may become a few cubes of it in stage 2.
+- **Motion:** every cube drifts a little about where it rests, cheaply, with a phase of its own, on stage 1's timeline, and every fade dissolves the cubes where they rest.
+- **Light, refined after the first build:** the cubes are the person's own light in their colour, brightest at each part's middle as seen and dimmer and smaller at its outline, shimmering a little, so that a person glows as the concepts did, translucent-looking at the edges by brightness alone, with no blending, sorting or pass. They are small and of many sizes, with air between them, and dissolve strongly below the chest into cubes that fall and fade; the eyes are small, round and soft, never two flat squares. Everyone is a warm coral until stage 3's colours, which the swarm takes whole (`Cues::colour`).
+- **Readable at a distance, refined again:** the second build went too sparse to read as a person from 3.6 m, so the third is the middle ground: a head twice as dense, packed round like head B; dense shoulders and upper chest, sparse only at the edges and below the chest; arms of a few slender rods along each bone, as the maintainer suggested, tapering to the wrist, which read as one limb where small cubes broke into dots; the hands small, bright clusters; two crisp, round eyes, each three flat boxes in a socket that frames it, warming to gold with a halo behind; and a tidy orbit. With no bloom pass, glow is a larger, dimmer copy behind the hands, by brightness and size alone.
+- **Friendlier eyes, refined a third time:** the third build's eyes, dots in dark sockets turning gold with a halo, read as a skull, "a bit scary looking", so the fourth follows head B: two small, soft eye dots of a warm off-white flush on the face, in no socket, a little below its middle and set wide; a gentle warm brightening on eye contact, with no halo; and a natural blink every 2 to 6 s, at times of each person's own. The arms' rods are a little thicker and tapered, thickest at the shoulder and the elbow, with a few loose cubes about them, so that figures read less as stick figures.
+- **Budget:** 399 cubes a person in full, 173 beyond 5 m, and the head's 43 alone beyond 15 m, in the batch Tomori's cubes already draw, with no new draw call. On the desktop's RTX 4090, two eyes of 1832 by 1920 with four samples, eight people in view add about 0.07 ms of the GPU's frame and about 38,000 triangles an eye; a Quest 3 would spend roughly 0.75 ms for four people and 1 ms for eight, and about 0.4 and 0.7 ms of its CPU, which its frame log is to confirm. A frame with others in the space allocates nothing.
+
+`design/people.md` describes it as built.
+
 **Not "avatars".** `avatars.md` uses "avatar" for the agent's representation. These would live in a `tomori_scene::people` module and a `Frame::people` element, so the two never mix.
 
 ## 2. Identity and colour
@@ -107,7 +126,7 @@ Neither choice changes your role or what you may do.
 
 **Network.** Drawing adds nothing to what is sent in stages 2–4 beyond the tag, a few bytes once in the space state. Stage 1's rays add about 130 B a frame for each ray drawn in full, about 9 KiB/s while pointing, and nothing otherwise. Today's load is the concern, and it is unchanged. Four people with both hands tracked each download about 830 KiB/s, and the server sends about 3.3 MiB/s. If that matters, a later change can send presence in a compact binary form (joints as 16-bit offsets from the wrist cut it about fourfold) or relay hands less often to someone far away. Neither is needed to draw people.
 
-**GPU, per person on a Quest 3:**
+**GPU, per person on a Quest 3** (as first proposed; the swarm, revised after stage 1, is 399 cubes in full and 173 beyond 5 m, about 4.8 k and 2.1 k triangles, as **The look, revised after stage 1** says):
 
 | Part | Instances |
 | --- | --- |
@@ -124,8 +143,8 @@ That is about 110 instances and ~1.3 k triangles, in the instanced cube batch al
 
 **Level of detail by distance:**
 
-- beyond 5 m, a tracked hand is drawn as one palm block;
-- beyond 15 m, only the head and label are drawn;
+- beyond 5 m, a tracked hand is drawn as one palm block, and the swarm with fewer, larger cubes, 173 of its 399 (built with the swarm, revised after stage 1);
+- beyond 15 m, only the head and label are drawn, the swarm's head alone, 43 cubes;
 - beyond 40 m, only the label is drawn;
 - labels fade out beyond 6 m unless the person speaks or is pointed at.
 
@@ -176,6 +195,7 @@ The maintainer agreed with the recommendation, November 2026:
 5. **Pointing at a person** as attention: later, in stage 4.
 6. **A build registering a person's look:** later, not staged here.
 7. **New, a gaze cue:** someone looking at you is shown on their head, from the head pose already relayed, with hysteresis (stage 1, the label's part in stage 3).
+8. **Revised after stage 1, the look:** a simpler swarm than the agent's, shaped as a person, in their colour: a body and arms, by two-bone inverse kinematics to each hand, and no legs, dissolving below the chest; the head the second concept's rounded cluster, its eyes the gaze cue and its orbit quickening while they speak; about 400 cubes a person in full, fewer beyond 5 m and the head alone beyond 15 m (**The look, revised after stage 1**).
 
 ## Design documents this would change
 

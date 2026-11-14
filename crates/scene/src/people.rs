@@ -1,13 +1,14 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The others in a space as this participant sees them: each a head, a stylised block with a visor, facing where they
-//! look, and their rays while drawn in full on their own headset, built of the cubes Tomori draws everything with. Each
-//! is drawn from their presence between its updates, one update behind, by the same tracks an environment's client side
-//! is given their hands from (`relayed`), with no extrapolation; faded out where they were and in where they are when
-//! they jump, faded out once silent, faded where they last were as they leave, and fainter close to the eyes. Someone
-//! whose head faces this participant's lights their visor, so that eye contact reads in conversation. See
-//! `design/people.md`.
+//! The others in a space as this participant sees them: each a small swarm of cubes shaped as a person, a head facing
+//! where they look, shoulders, a torso and arms reaching for their hands (`swarm`), and their rays while drawn in full on
+//! their own headset, built of the cubes Tomori draws everything with. Each is drawn from their presence between its
+//! updates, one update behind, by the same tracks an environment's client side is given their hands from (`relayed`),
+//! with no extrapolation; faded out where they were and in where they are when they jump, faded out once silent, faded
+//! where they last were as they leave, and fainter close to the eyes. Someone whose head faces this participant's warms
+//! their eyes, so that eye contact reads in conversation, and someone whose voice plays quickens the orbit about their
+//! head. See `design/people.md`.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,8 @@ use glam::{Quat, Vec3};
 use crate::client_side::Hand;
 use crate::delegation::Cube;
 use crate::relayed::{Between, Relayed};
+
+pub mod swarm;
 
 /// How far someone's head moves between two updates, in metres, for it to be a jump, as a teleport is, faded out where
 /// they were and in where they are rather than drawn gliding between: as far as a sign moves to be cut.
@@ -31,119 +34,17 @@ pub const LEAVING: Duration = Duration::from_millis(300);
 /// people arriving at one place are never inside each other's heads.
 pub const NEAR: f32 = 0.6;
 pub const NEAREST: f32 = 0.3;
-/// Within how many degrees of where someone's head faces this participant's head must be for their visor to light, and
-/// beyond how many for it to go out again, so that a glance at the edge does not flicker; and within how far, in metres.
+/// Within how many degrees of where someone's head faces this participant's head must be for their eyes to warm, and
+/// beyond how many for them to cool again, so that a glance at the edge does not flicker; and within how far, in metres.
 pub const GAZE: f32 = 10.0;
 pub const GAZE_LEFT: f32 = 15.0;
 pub const GAZE_REACH: f32 = 8.0;
-/// How long the visor takes to light fully, and to go out.
+/// How long the eyes take to warm fully, and to cool.
 pub const GLOW_RISE: f32 = 0.2;
 pub const GLOW_FALL: f32 = 0.4;
-/// How much less the half of a lit visor away from this participant glows than the half towards them, at most.
-const GLOW_SIDE: f32 = 0.15;
 
-/// The head's shell, its lighter top, its side pods and antenna, its visor, dark, with the sheen along its top edge, and
-/// the antenna's tip, and how the visor, its sheen and the tip glow while the head faces this participant: neutral until
-/// people have colours of their own.
-pub const SHELL: [f32; 3] = [0.6, 0.61, 0.66];
-const TOP: [f32; 3] = [0.8, 0.8, 0.84];
-const POD: [f32; 3] = [0.4, 0.41, 0.47];
-const VISOR: [f32; 3] = [0.035, 0.04, 0.055];
-const SHEEN: [f32; 3] = [0.2, 0.22, 0.28];
-const TIP: [f32; 3] = [0.5, 0.52, 0.6];
-pub const VISOR_GLOW: [f32; 3] = [0.95, 0.76, 0.46];
-const SHEEN_GLOW: [f32; 3] = [1.0, 0.93, 0.78];
-/// How much of the visor's glow the side pods catch.
-const POD_GLOW: f32 = 0.3;
-/// The middle of the head from its eyes, in its own coordinates, which faces along −Z, about which it fades.
-const MIDDLE: Vec3 = Vec3::new(0.0, 0.0, 0.05);
-
-/// The head's parts, each from its middle, as large as it is, and how it is coloured: about 18 by 14 by 16 cm, a
-/// rounded block of three overlapping, with a lighter top, a pod on either side, a visor across its front in two halves,
-/// with a sheen along its top, and a little antenna, off to one side, that catches the visor's glow.
-const PARTS: [(Vec3, Vec3, Part); 11] = [
-    (Vec3::ZERO, Vec3::new(0.18, 0.12, 0.14), Part::Shell),
-    (Vec3::ZERO, Vec3::new(0.16, 0.14, 0.14), Part::Shell),
-    (Vec3::ZERO, Vec3::new(0.16, 0.12, 0.16), Part::Shell),
-    (
-        Vec3::new(0.0, 0.07, 0.01),
-        Vec3::new(0.14, 0.008, 0.12),
-        Part::Top,
-    ),
-    (
-        Vec3::new(0.093, -0.005, 0.005),
-        Vec3::new(0.016, 0.05, 0.06),
-        Part::Pod,
-    ),
-    (
-        Vec3::new(-0.093, -0.005, 0.005),
-        Vec3::new(0.016, 0.05, 0.06),
-        Part::Pod,
-    ),
-    (
-        Vec3::new(-0.042, 0.004, -0.082),
-        Vec3::new(0.084, 0.058, 0.012),
-        Part::Visor(-1.0),
-    ),
-    (
-        Vec3::new(0.042, 0.004, -0.082),
-        Vec3::new(0.084, 0.058, 0.012),
-        Part::Visor(1.0),
-    ),
-    (
-        Vec3::new(0.0, 0.03, -0.0885),
-        Vec3::new(0.15, 0.004, 0.002),
-        Part::Sheen,
-    ),
-    (
-        Vec3::new(0.045, 0.088, 0.04),
-        Vec3::new(0.006, 0.03, 0.006),
-        Part::Pod,
-    ),
-    (
-        Vec3::new(0.045, 0.108, 0.04),
-        Vec3::new(0.018, 0.018, 0.018),
-        Part::Tip,
-    ),
-];
-
-/// How many cubes one person is drawn with at most: their head and two rays, each with the dot where it ends.
-pub const CUBES: usize = PARTS.len() + 4;
-
-/// What each part of the head is: a half of the visor on its left, −1, or right, 1.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Part {
-    Shell,
-    Top,
-    Pod,
-    Visor(f32),
-    Sheen,
-    Tip,
-}
-
-impl Part {
-    /// Its colour, `glow` of the way to glowing, towards this participant on the head's right, `towards` 1, or its left,
-    /// −1, or between.
-    fn color(self, glow: f32, towards: f32) -> [f32; 3] {
-        let mix = |from: [f32; 3], to: [f32; 3], t: f32| {
-            Vec3::from_array(from)
-                .lerp(Vec3::from_array(to), t)
-                .to_array()
-        };
-        match self {
-            Part::Shell => SHELL,
-            Part::Top => TOP,
-            Part::Pod => mix(POD, VISOR_GLOW, glow * POD_GLOW),
-            Part::Visor(side) => mix(
-                VISOR,
-                VISOR_GLOW,
-                glow * (1.0 - GLOW_SIDE * (1.0 - side * towards) / 2.0),
-            ),
-            Part::Sheen => mix(SHEEN, SHEEN_GLOW, glow),
-            Part::Tip => mix(TIP, SHEEN_GLOW, glow),
-        }
-    }
-}
+/// How many cubes one person is drawn with at most: their swarm and two rays, each with the dot where it ends.
+pub const CUBES: usize = swarm::MOST + 4;
 
 /// A ray's colour, as this participant's own is drawn, meeting something or not, and a little fainter; and how thick
 /// it is, and how large the dot where it ends on what it meets.
@@ -300,7 +201,7 @@ impl Between for Present {
     }
 }
 
-/// One person as drawn this frame, in the space's scene coordinates: their head's cubes, unless theirs is the head a
+/// One person as drawn this frame, in the space's scene coordinates: their swarm's cubes, unless theirs is the head a
 /// watcher sees from, and their rays'.
 #[derive(Clone, Debug, Default)]
 pub struct Figure {
@@ -309,8 +210,8 @@ pub struct Figure {
 }
 
 /// Someone in the space as drawn: when their latest report arrived, how many had, when their track last cut and what was
-/// drawn before it, what was drawn last frame, how much, and whether their head faces this participant's and how much
-/// their visor glows.
+/// drawn before it, what was drawn last frame, how much, whether their head faces this participant's and how much their
+/// eyes glow, and their body.
 #[derive(Clone, Debug)]
 struct Known {
     reports: u64,
@@ -321,6 +222,7 @@ struct Known {
     shown: f32,
     gazing: bool,
     glow: f32,
+    body: swarm::Body,
 }
 
 /// Someone who left the space, fading where they last were.
@@ -331,6 +233,7 @@ struct Leaving {
     drawn: Present,
     shown: f32,
     glow: f32,
+    body: swarm::Body,
 }
 
 /// The others in the space, as drawn each frame.
@@ -342,9 +245,25 @@ pub struct People {
     leaving: Vec<Leaving>,
     figures: Vec<Figure>,
     drawn: Vec<(u32, Present)>,
+    /// Whose voices play, by their numbers, and how long the others have been drawn, in seconds, which their cubes
+    /// drift by.
+    voices: Vec<u32>,
+    time: f32,
+    /// What each frame is drawn from, kept from frame to frame: how many reports have arrived from each of the others,
+    /// and their presence, by their numbers, as it says and as it is drawn.
+    reports: Vec<u64>,
+    presents: Vec<(u32, Present)>,
+    tracked: Vec<(u32, Present)>,
 }
 
 impl People {
+    /// Hear `voices` playing, by their numbers, as the player says, for the next update: the orbit about each one's
+    /// head quickens and brightens while it plays.
+    pub fn hear(&mut self, voices: &[u32]) {
+        self.voices.clear();
+        self.voices.extend_from_slice(voices);
+    }
+
     /// The others at `now`, `dt` seconds after the last frame, from `heard`, each as their presence last said, by their
     /// numbers, once the conversation has forgotten them `forgotten` times, seen from `eyes`, where this participant's
     /// eyes are, and leaving out the head of `followed`, the participant a watcher sees from.
@@ -364,17 +283,22 @@ impl People {
             self.leaving.clear();
         }
         self.relayed.since(forgotten);
-        let heard: Vec<(u32, u64, Present)> = heard
-            .into_iter()
-            .filter_map(|(source, heard)| Some((source, heard.reports, Present::of(heard)?)))
-            .collect();
-        let drawn = self.relayed.update(
-            now,
-            heard
-                .iter()
-                .map(|(source, _, present)| (*source, *present))
-                .collect(),
+        self.time += dt;
+        // Into buffers kept from frame to frame, so that a frame allocates nothing once everyone is known.
+        let (mut reports, mut presents, mut drawn) = (
+            std::mem::take(&mut self.reports),
+            std::mem::take(&mut self.presents),
+            std::mem::take(&mut self.tracked),
         );
+        reports.clear();
+        presents.clear();
+        for (source, heard) in heard {
+            if let Some(present) = Present::of(heard) {
+                reports.push(heard.reports);
+                presents.push((source, present));
+            }
+        }
+        self.relayed.update(now, &presents, &mut drawn);
         // Whoever is no longer here leaves, fading where they last were.
         let leaving = &mut self.leaving;
         self.known.retain(|source, known| {
@@ -386,6 +310,7 @@ impl People {
                     drawn: known.drawn,
                     shown: known.shown,
                     glow: known.glow,
+                    body: known.body,
                 });
             }
             here
@@ -395,9 +320,9 @@ impl People {
         self.drawn.clear();
         let mut figures = std::mem::take(&mut self.figures);
         let mut used = 0;
-        for ((source, present), (_, reports, _)) in drawn.into_iter().zip(&heard) {
+        for (&(source, present), reports) in drawn.iter().zip(&reports) {
             let cut = self.relayed.cut(source);
-            let known = self.known.entry(source).or_insert(Known {
+            let known = self.known.entry(source).or_insert_with(|| Known {
                 reports: *reports,
                 heard: now,
                 cut,
@@ -406,6 +331,7 @@ impl People {
                 shown: 1.0,
                 gazing: false,
                 glow: 0.0,
+                body: swarm::Body::new(&present, eyes, source),
             });
             if known.reports != *reports {
                 known.reports = *reports;
@@ -440,6 +366,9 @@ impl People {
             } else {
                 (known.glow - dt / GLOW_FALL).max(0.0)
             };
+            known
+                .body
+                .follow(&shown, dt, eyes, self.voices.contains(&source));
             known.drawn = shown;
             known.shown = fade;
             self.drawn.push((source, shown));
@@ -448,9 +377,15 @@ impl People {
                 used,
                 source,
                 &shown,
-                fade,
-                known.glow,
-                eyes,
+                &known.body,
+                swarm::Cues {
+                    // Everyone's colour alike, until people have colours of their own.
+                    colour: swarm::COLOUR,
+                    fade,
+                    glow: known.glow,
+                    eyes,
+                    time: self.time,
+                },
                 followed != Some(source),
             );
         }
@@ -462,14 +397,21 @@ impl People {
                 used,
                 leaving.source,
                 &leaving.drawn,
-                leaving.shown * (1.0 - t),
-                leaving.glow,
-                eyes,
+                &leaving.body,
+                swarm::Cues {
+                    // Everyone's colour alike, until people have colours of their own.
+                    colour: swarm::COLOUR,
+                    fade: leaving.shown * (1.0 - t),
+                    glow: leaving.glow,
+                    eyes,
+                    time: self.time,
+                },
                 followed != Some(leaving.source),
             );
         }
         figures.truncate(used);
         self.figures = figures;
+        (self.reports, self.presents, self.tracked) = (reports, presents, drawn);
     }
 
     /// Each person as drawn this frame.
@@ -498,51 +440,24 @@ fn gazes(head: &Hand, eyes: Option<Vec3>, gazing: bool) -> bool {
     facing.dot(towards) >= within.to_radians().cos()
 }
 
-/// How someone looks, `present`, as cubes pushed onto `cubes`: today the visor block, about `middle`, shrunk about it to
-/// `fade` of its size, its visor `glow` of the way lit and a little lighter on the side towards `eyes`. It is the one
-/// place a person's look is made, so that another look replaces it alone. See `design/people.md`.
-fn look(
-    cubes: &mut Vec<Cube>,
-    present: &Present,
-    middle: Vec3,
-    fade: f32,
-    glow: f32,
-    eyes: Option<Vec3>,
-) {
-    let turn = present.head.orientation;
-    let towards = eyes
-        .and_then(|eyes| (eyes - present.head.position).try_normalize())
-        .map_or(0.0, |towards| {
-            ((turn * Vec3::X).dot(towards) / GAZE_LEFT.to_radians().sin()).clamp(-1.0, 1.0)
-        });
-    cubes.extend(PARTS.iter().map(|(offset, size, part)| Cube {
-        position: (middle + turn * (*offset * fade)).to_array(),
-        scale: (*size * fade).to_array(),
-        color: part.color(glow, towards),
-        orientation: turn.to_array(),
-    }));
-}
-
-/// Draw `present`, of `source`, into `figures` at `index`, `fade` of the way in, its visor `glow` of the way lit, seen
-/// from `eyes`, with its head if `head`: saying how many figures it drew, none where nothing of it shows.
-#[allow(clippy::too_many_arguments)]
+/// Draw `present`, of `source`, with `body`, into `figures` at `index`, as `cues` say, with their look unless theirs is
+/// the head a watcher sees from, `shown` false: saying how many figures it drew, none where nothing of it shows.
 fn figure(
     figures: &mut Vec<Figure>,
     index: usize,
     source: u32,
     present: &Present,
-    fade: f32,
-    glow: f32,
-    eyes: Option<Vec3>,
-    head: bool,
+    body: &swarm::Body,
+    cues: swarm::Cues,
+    shown: bool,
 ) -> usize {
-    let middle = present.head.position + present.head.orientation * MIDDLE;
-    // Fainter close to the eyes, and not drawn at all closer still; but for the one a watcher sees from, whose head is
+    let middle = present.head.position + present.head.orientation * swarm::MIDDLE;
+    // Fainter close to the eyes, and not drawn at all closer still; but for the one a watcher sees from, whose look is
     // left out and whose rays are drawn whole, close as their head is to its eyes.
-    let near = eyes.filter(|_| head).map_or(1.0, |eyes| {
+    let near = cues.eyes.filter(|_| shown).map_or(1.0, |eyes| {
         ((eyes.distance(middle) - NEAREST) / (NEAR - NEAREST)).clamp(0.0, 1.0)
     });
-    let fade = fade.clamp(0.0, 1.0) * near;
+    let fade = cues.fade.clamp(0.0, 1.0) * near;
     if fade <= 0.01 {
         return 0;
     }
@@ -552,8 +467,14 @@ fn figure(
     let figure = &mut figures[index];
     figure.source = source;
     figure.cubes.clear();
-    if head {
-        look(&mut figure.cubes, present, middle, fade, glow, eyes);
+    // How someone looks is made in `swarm::look` alone, so that another look replaces it alone.
+    if shown {
+        swarm::look(
+            &mut figure.cubes,
+            present,
+            body,
+            &swarm::Cues { fade, ..cues },
+        );
     }
     for ray in present.pointing.iter().flatten() {
         let color = if ray.meets { RAY_MEETS } else { RAY };

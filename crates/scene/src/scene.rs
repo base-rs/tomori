@@ -519,6 +519,9 @@ pub struct Step {
     /// The others in the space, drawn between the presence updates that bring them, of whom the environment's client
     /// side is given the hands. See `design/people.md`.
     people: crate::people::People,
+    /// The others' right and left hands, as the people are drawn, for the environment's client side, kept from frame to
+    /// frame.
+    others: crate::relayed::Others,
     /// The hand whose trigger began drawing the swarm first, outside a space, while either does.
     attracting: Option<Side>,
     /// The agent as this client shows it: the swarm, or the avatar the joined space's backend names. See
@@ -614,7 +617,7 @@ pub struct Step {
     watching: bool,
     dropped: usize,
     asked: bool,
-    /// The participant a watcher sees from, whose head it does not draw. See `design/spectator.md`.
+    /// The participant a watcher sees from, whose swarm it does not draw. See `design/spectator.md`.
     followed: Option<u32>,
 }
 
@@ -745,6 +748,7 @@ impl Default for Step {
             indicator: Indicator::default(),
             hands: Hands::default(),
             people: crate::people::People::default(),
+            others: Default::default(),
             followed: None,
             attracting: None,
             coordinator: crate::avatar::Coordinator::default(),
@@ -2654,7 +2658,9 @@ impl Step {
         conversation.point(attended(Side::Right));
         conversation.point_left(attended(Side::Left), left_first);
         // The others, each drawn between the presence updates that bring them, about a frame behind, from the same tracks
-        // an environment's client side is given their hands from. See `design/people.md`.
+        // an environment's client side is given their hands from, their orbits quick while their voices play. See
+        // `design/people.md`.
+        self.people.hear(conversation.voices());
         self.people.update(
             now,
             dt,
@@ -2743,8 +2749,8 @@ impl Step {
                     self.hands.left.grip_closed,
                     Side::Left,
                 );
-                // The others' hands, as the people holding them are drawn.
-                let (hands, left_hands) = crate::relayed::others(self.people.drawn(), carriage);
+                // The others' hands, as the people holding them are drawn, into buffers kept from frame to frame.
+                crate::relayed::others(self.people.drawn(), carriage, &mut self.others);
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(
@@ -2757,8 +2763,8 @@ impl Step {
                         .with_scroll(scroll)
                         .with_grab(grab)
                         .with_left_grab(left_grab)
-                        .with_hands(hands)
-                        .with_left_hands(left_hands)
+                        .with_hands(&self.others.0)
+                        .with_left_hands(&self.others.1)
                         .as_participant(
                             conversation
                                 .source()

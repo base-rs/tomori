@@ -542,6 +542,15 @@ impl Mixer {
             .is_some_and(|source| source.buffer.is_playing())
     }
 
+    /// The others whose voices are contributing audio now, by their numbers: every source but the agent's speech, live or
+    /// played again, that [`Self::is_source_playing`] says plays.
+    pub fn voices(&self) -> impl Iterator<Item = u32> + '_ {
+        self.sources
+            .iter()
+            .filter(|(source, playing)| !is_agent(**source) && playing.buffer.is_playing())
+            .map(|(source, _)| *source)
+    }
+
     /// Whether `source` has played or buffered audio within `within`: true through the short silences of a stream, such as the breath between spoken segments, when [`Self::is_source_playing`] is false.
     pub fn is_source_recent(&self, source: u32, within: Duration) -> bool {
         let within = (within.as_secs_f64() * f64::from(self.options.sample_rate)) as u64;

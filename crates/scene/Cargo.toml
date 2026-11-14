@@ -39,3 +39,9 @@ unicode-width = "0.2"
 [dev-dependencies]
 # A server on a loopback port, with a scripted backend, for the tests that take part in its spaces.
 tomori-server = { version = "0.2.0", path = "../server", default-features = false, features = ["fake"] }
+
+# A frame with others in the space allocates nothing, counted with an allocator of its own, from the conversation's
+# fixtures.
+[[test]]
+name = "people_allocations"
+required-features = ["testing"]

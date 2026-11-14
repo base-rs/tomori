@@ -1,5 +1,6 @@
-// Tomori's own cubes: the swarm, workers, satellites, rings, pads, rays and volumes' solids, each an instance of a unit
-// cube, self-lit, and hazed by the scene's shared haze, as everything is. See `design/rendering.md`.
+// Tomori's own cubes: the swarm, workers, satellites, rings, pads, rays, volumes' solids and the others in a space, each
+// an instance of a unit cube, self-lit, and hazed by the scene's shared haze, as everything is. See
+// `design/rendering.md`.
 struct Camera {
     view_projection: mat4x4<f32>,
     // Where the eye is in the scene, in `xyz`.
@@ -21,6 +22,8 @@ struct VertexOutput {
     @location(0) color: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) world: vec3<f32>,
+    // How much of its colour is its own light, unshaded by the soft light from above: the others' swarms glow.
+    @location(3) @interpolate(flat) glow: f32,
 }
 
 // How many times larger a cube of `scale` at `position` is drawn so that its largest side spans at least `SMALLEST`
@@ -43,6 +46,7 @@ fn vs_main(
     @location(2) position: vec3<f32>,
     @location(3) scale: vec3<f32>,
     @location(4) color: vec3<f32>,
+    @location(8) glow: f32,
 ) -> VertexOutput {
     let grown = growth(position, scale);
     let drawn = scale * grown;
@@ -52,11 +56,13 @@ fn vs_main(
     out.normal = normal;
     out.color = color / (grown * grown);
     out.world = world;
+    out.glow = glow;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let light = 0.5 + 0.5 * max(dot(normalize(in.normal), normalize(vec3<f32>(0.4, 0.8, 0.5))), 0.0);
+    let shaded = 0.5 + 0.5 * max(dot(normalize(in.normal), normalize(vec3<f32>(0.4, 0.8, 0.5))), 0.0);
+    let light = mix(shaded, 1.0, in.glow);
     return vec4<f32>(hazed(in.color * light, camera.haze, distance(in.world, camera.eye.xyz)), 1.0);
 }

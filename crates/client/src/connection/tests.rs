@@ -333,7 +333,10 @@ fn until(
                 .iter()
                 .filter(|report| !matches!(
                     report,
-                    Report::Tick { .. } | Report::Replaying(_) | Report::AgentSpeech { .. }
+                    Report::Tick { .. }
+                        | Report::Replaying(_)
+                        | Report::AgentSpeech { .. }
+                        | Report::Voices(_)
                 ))
                 .collect::<Vec<_>>()
         );
@@ -658,7 +661,10 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     assert!(felt(&mut connection).is_empty());
     assert!(session.reports.iter().all(|report| matches!(
         report,
-        Report::Tick { .. } | Report::Replaying(false) | Report::AgentSpeech { playing: false, .. }
+        Report::Tick { .. }
+            | Report::Replaying(false)
+            | Report::AgentSpeech { playing: false, .. }
+            | Report::Voices(_)
     )));
     // Words never begun end as X is released, felt, and nothing is sent or reported.
     session.push(Action::EndUtterance);
@@ -667,7 +673,10 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     assert_eq!(felt(&mut connection), [Hand::Left]);
     assert!(session.reports.iter().all(|report| matches!(
         report,
-        Report::Tick { .. } | Report::Replaying(false) | Report::AgentSpeech { playing: false, .. }
+        Report::Tick { .. }
+            | Report::Replaying(false)
+            | Report::AgentSpeech { playing: false, .. }
+            | Report::Voices(_)
     )));
     // Without a speaker, cues and ambient sounds have nowhere to play, and are dropped.
     session.listening = false;
@@ -1569,6 +1578,7 @@ fn a_server_that_is_not_there_is_retried_without_a_report() {
                 | Report::Tick { .. }
                 | Report::Replaying(false)
                 | Report::AgentSpeech { playing: false, .. }
+                | Report::Voices(_)
         )),
         "{:?}",
         session.reports
@@ -1740,7 +1750,7 @@ fn a_token_is_ignored_without_a_connection_over_tls_to_keep_it_for() {
     assert_eq!(peer.ended.load(Ordering::Relaxed), 0);
     assert!(session.reports.iter().all(|report| matches!(
         report,
-        Report::Tick { .. } | Report::Replaying(_) | Report::AgentSpeech { .. }
+        Report::Tick { .. } | Report::Replaying(_) | Report::AgentSpeech { .. } | Report::Voices(_)
     )));
     // Nor while connecting, before the server has presented anything.
     session.push(Action::Connect(peer.choice()));

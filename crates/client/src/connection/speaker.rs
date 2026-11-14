@@ -161,6 +161,12 @@ impl Speaker {
             .map_or((false, 0.0), PlayerControl::agent_speech)
     }
 
+    /// The others whose voices are playing, by their numbers: none without a player.
+    pub(super) fn voices(&self) -> crate::playback::Voices {
+        self.control()
+            .map_or_else(Default::default, PlayerControl::voices)
+    }
+
     /// The client is going away: stop playing and forget its audio.
     pub(super) fn detach(&mut self) {
         self.output = None;

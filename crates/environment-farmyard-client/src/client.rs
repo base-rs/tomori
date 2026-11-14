@@ -349,13 +349,13 @@ impl ClientSide for FarmyardClient {
         }
         let stones = self
             .stones
-            .shown(&input.hands, &input.left_hands, input.now, clock);
+            .shown(input.hands, input.left_hands, input.now, clock);
         let sticks = self
             .sticks
-            .shown(&input.hands, &input.left_hands, input.now, clock);
+            .shown(input.hands, input.left_hands, input.now, clock);
         let logs = self
             .sticks
-            .logs_shown(&input.hands, &input.left_hands, input.now, clock);
+            .logs_shown(input.hands, input.left_hands, input.now, clock);
         output.drawing(Arc::new(Drawn {
             chickens: self
                 .controllers

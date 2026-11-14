@@ -403,7 +403,7 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_eithe
             ))],
             epoch,
         )
-        .with_hands(vec![(7, theirs)]),
+        .with_hands(&[(7, theirs)]),
     );
     let shown = &drawn(&output).sticks[3];
     let held = Pose::held(theirs.position, theirs.orientation);

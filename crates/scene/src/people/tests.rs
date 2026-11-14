@@ -25,28 +25,52 @@ fn heard(x: f32, reports: u64) -> Heard {
 /// Eyes far enough from everyone not to make anyone fainter, behind them.
 const AWAY: Vec3 = Vec3::new(0.0, 1.6, 10.0);
 
-/// How far in each figure is drawn, by its number, from how large its head's first part is.
+/// How far in each figure is drawn, by its number, from how large its head's core, its first cube, is.
 fn shown(people: &People) -> Vec<(u32, f32)> {
     people
         .figures()
         .iter()
-        .map(|figure| (figure.source, figure.cubes[0].scale[0] / PARTS[0].1.x))
+        .map(|figure| {
+            (
+                figure.source,
+                figure.cubes[0].scale[0] / swarm::MOTES[0].size.x,
+            )
+        })
         .collect()
 }
 
-/// Where in a head's cubes its visor's halves, left and right, and its sheen are.
-const VISOR_LEFT: usize = 6;
-const VISOR_RIGHT: usize = 7;
-const SHEEN_AT: usize = 8;
+/// Where in a swarm's cubes the first of `part` is.
+fn index(part: swarm::Part) -> usize {
+    swarm::MOTES
+        .iter()
+        .position(|mote| mote.part == part)
+        .expect("a part of the swarm")
+}
 
-/// How lit the visor of the first figure is, from its sheen's colour.
+/// How warm the eyes of the first figure are, eased, from how much wider the first cube of their left eye is, among the
+/// cubes drawn at the detail it is drawn at.
 fn lit(people: &People) -> f32 {
-    let sheen = people.figures()[0].cubes[SHEEN_AT].color;
-    (sheen[0] - SHEEN[0]) / (SHEEN_GLOW[0] - SHEEN[0])
+    let cubes = &people.figures()[0].cubes;
+    let detail = [swarm::Detail::Full, swarm::Detail::Fewer]
+        .into_iter()
+        .find(|detail| swarm::cubes(*detail) == cubes.len())
+        .expect("drawn at a detail");
+    let (at, mote) = swarm::MOTES
+        .iter()
+        .filter(|mote| mote.from <= detail)
+        .enumerate()
+        .find(|(_, mote)| mote.part == swarm::Part::Eye(0))
+        .expect("an eye");
+    (cubes[at].scale[0] / mote.size.x - 1.0) / swarm::EYE_GROW
+}
+
+/// How far eye contact has eased in, `t` of the way.
+fn eased(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[test]
-fn a_head_is_drawn_as_a_visor_block_facing_where_they_look_and_rays_drawn_in_full_end_in_a_dot() {
+fn a_person_is_drawn_as_a_swarm_facing_where_they_look_and_rays_drawn_in_full_end_in_a_dot() {
     let start = Instant::now();
     let mut people = People::default();
     let mut bob = heard(1.0, 0);
@@ -58,34 +82,30 @@ fn a_head_is_drawn_as_a_visor_block_facing_where_they_look_and_rays_drawn_in_ful
         })
     };
     bob.pointing = [ray(false), ray(true)];
-    people.update(start, FRAME, 0, [(2, &bob)], Some(AWAY), None);
+    // Seen from three metres behind, in full.
+    let behind = Some(Vec3::new(1.0, 1.6, 3.0));
+    people.update(start, FRAME, 0, [(2, &bob)], behind, None);
     let figure = &people.figures()[0];
     assert_eq!(figure.source, 2);
-    // The head's parts, the ray meeting nothing, and the one meeting something with its dot.
-    assert_eq!(figure.cubes.len(), PARTS.len() + 3);
+    // The swarm in full, the ray meeting nothing, and the one meeting something with its dot.
+    let look = swarm::cubes(swarm::Detail::Full);
+    assert_eq!(figure.cubes.len(), look + 3);
     assert!(figure.cubes.len() <= CUBES);
-    // The head stands about its eyes, a little behind them, its visor at its front, facing where they look.
+    // The head's core stands about its eyes, a little behind them, its eyes at its front, cool, facing where they look.
     let middle = Vec3::from_array(figure.cubes[0].position);
     assert!(
         middle.distance(Vec3::new(1.0, 1.6, 0.05)) < 1e-4,
         "{middle}"
     );
-    let visor = &figure.cubes[VISOR_LEFT];
-    assert!(visor.position[2] < -0.02, "{:?}", visor.position);
-    assert_eq!(visor.color, VISOR);
-    let turned = Quat::from_array(visor.orientation);
+    let eye = &figure.cubes[index(swarm::Part::Eye(0))];
+    assert!(eye.position[2] < -0.02, "{:?}", eye.position);
+    assert!(eye.position[0] < 1.0, "the left eye on the left");
+    assert_eq!(eye.color, swarm::eyes(swarm::COLOUR));
+    let turned = Quat::from_array(figure.cubes[0].orientation);
     assert!((turned * Vec3::NEG_Z).distance(Vec3::NEG_Z) < 1e-4);
-    // About 18 by 14 by 16 cm.
-    let extent = |axis: usize| {
-        figure.cubes[..3]
-            .iter()
-            .map(|cube| cube.scale[axis])
-            .fold(0.0f32, f32::max)
-    };
-    assert_eq!([extent(0), extent(1), extent(2)], [0.18, 0.14, 0.16]);
     // Each ray reaches from its aim as far as it was drawn, fainter than this participant's own; only the one that
     // meets something is highlighted, and ends in a dot there.
-    let rays = &figure.cubes[PARTS.len()..];
+    let rays = &figure.cubes[look..];
     let (idle, meets, dot) = (&rays[0], &rays[1], &rays[2]);
     assert!(Vec3::from_array(idle.position).distance(Vec3::new(1.2, 1.2, -1.3)) < 1e-4);
     assert!((idle.scale[2] - 2.0).abs() < 1e-5);
@@ -182,6 +202,7 @@ fn whole_presence_keeps_the_hands_figures_and_the_hand_drawn_is_the_one_a_client
     let mut hands = crate::relayed::Relayed::<Hand>::new();
     let mut bob = heard(0.0, 0);
     let mut drawn = Vec::new();
+    let (mut others, mut tracked) = (crate::relayed::Others::default(), Vec::new());
     for frame in 0..360 {
         let now = frame as f32 * interval + 7.0;
         while let Some((_, arrived)) = sends.next_if(|(at, _)| *at <= now) {
@@ -191,7 +212,8 @@ fn whole_presence_keeps_the_hands_figures_and_the_hand_drawn_is_the_one_a_client
         people.update(at, FRAME, 0, [(2, &bob)], Some(AWAY), None);
         let present = people.drawn()[0].1;
         // The hand an environment's client side is given is the one drawn, carried into its coordinates.
-        let (right, left) = crate::relayed::others(people.drawn(), carriage);
+        crate::relayed::others(people.drawn(), carriage, &mut others);
+        let (right, left) = &others;
         let held = present.controllers[1].unwrap();
         assert_eq!(right[0].0, 2);
         assert!(
@@ -204,7 +226,8 @@ fn whole_presence_keeps_the_hands_figures_and_the_hand_drawn_is_the_one_a_client
         assert!(left.is_empty());
         // And it is drawn as the hand alone would be, between its updates.
         let alone = Present::of(&bob).unwrap().controllers[1].unwrap();
-        let hand = hands.update(at, vec![(2, alone)])[0].1;
+        hands.update(at, &[(2, alone)], &mut tracked);
+        let hand = tracked[0].1;
         assert!(hand.position.distance(held.position) < 1e-5);
         drawn.push(present.head.position.x);
     }
@@ -304,7 +327,7 @@ fn someone_who_leaves_fades_where_they_last_were_and_a_number_forgotten_is_drawn
             .map(|figure| {
                 (
                     figure.cubes[0].position[0],
-                    figure.cubes[0].scale[0] / PARTS[0].1.x,
+                    figure.cubes[0].scale[0] / swarm::MOTES[0].size.x,
                 )
             })
     };
@@ -345,14 +368,18 @@ fn someone_close_to_the_eyes_is_drawn_fainter_and_not_at_all_closer_still() {
     assert!((seen_from(&mut people, 0.45) - 0.5).abs() < 1e-3);
     assert_eq!(seen_from(&mut people, NEAREST), 0.0);
     assert_eq!(seen_from(&mut people, 0.1), 0.0);
-    // Fainter, a figure shrinks about its middle.
+    // Fainter, a figure's cubes shrink where they rest.
+    let eye = index(swarm::Part::Eye(0));
+    seen_from(&mut people, 0.8);
+    let whole = people.figures()[0].cubes[eye];
     seen_from(&mut people, 0.45);
-    let visor = Vec3::from_array(people.figures()[0].cubes[VISOR_LEFT].position);
-    assert!((visor.z - (0.05 - 0.082 * 0.5)).abs() < 1e-4, "{visor}");
+    let fainter = people.figures()[0].cubes[eye];
+    assert_eq!(fainter.position, whole.position);
+    assert!((fainter.scale[0] - whole.scale[0] * 0.5).abs() < 1e-5);
 }
 
 #[test]
-fn a_visor_lights_while_its_head_faces_this_participant_within_a_cone_that_holds_at_its_edge() {
+fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at_its_edge() {
     let now = Instant::now();
     let mut people = People::default();
     // Bob, at home facing −Z, and this participant two metres ahead of him, at an angle from where he faces.
@@ -371,10 +398,11 @@ fn a_visor_lights_while_its_head_faces_this_participant_within_a_cone_that_holds
     };
     // Twelve degrees off is not yet eye contact.
     assert_eq!(look(&mut people, 12.0, 30), 0.0);
-    // Within ten it lights, over 0.2 s.
+    let cool = people.figures()[0].cubes.clone();
+    // Within ten it lights, over 0.2 s, eased.
     let lighting = look(&mut people, 8.0, 5);
     assert!(
-        (lighting - 5.0 * FRAME / GLOW_RISE).abs() < 1e-3,
+        (lighting - eased(5.0 * FRAME / GLOW_RISE)).abs() < 1e-3,
         "{lighting}"
     );
     assert!((look(&mut people, 8.0, 10) - 1.0).abs() < 1e-5);
@@ -382,7 +410,7 @@ fn a_visor_lights_while_its_head_faces_this_participant_within_a_cone_that_holds
     assert!((look(&mut people, 12.0, 30) - 1.0).abs() < 1e-5);
     let going = look(&mut people, 20.0, 9);
     assert!(
-        (going - (1.0 - 9.0 * FRAME / GLOW_FALL)).abs() < 1e-3,
+        (going - eased(1.0 - 9.0 * FRAME / GLOW_FALL)).abs() < 1e-3,
         "{going}"
     );
     assert_eq!(look(&mut people, 20.0, 30), 0.0);
@@ -397,24 +425,23 @@ fn a_visor_lights_while_its_head_faces_this_participant_within_a_cone_that_holds
         let wavering = look(&mut people, [9.5, 14.5][frame % 2], 1);
         assert!((wavering - 1.0).abs() < 1e-5, "{wavering}");
     }
-    // Lit, looking straight at this participant, the visor glows, both halves alike, with its sheen, the antenna's tip
-    // and a little of its pods.
+    // Warm, looking straight at this participant, both eyes warm alike, a little brighter and larger, but not the head's
+    // core.
     look(&mut people, 0.0, 30);
     let cubes = &people.figures()[0].cubes;
-    let near = |a: [f32; 3], b: [f32; 3]| Vec3::from_array(a).distance(Vec3::from_array(b)) < 1e-5;
-    assert!(near(cubes[SHEEN_AT].color, SHEEN_GLOW));
-    assert!(near(cubes[PARTS.len() - 1].color, SHEEN_GLOW));
-    assert_eq!(cubes[VISOR_LEFT].color, cubes[VISOR_RIGHT].color);
-    let half = 1.0 - GLOW_SIDE / 2.0;
-    assert!(
-        (cubes[VISOR_LEFT].color[0] - (VISOR[0] + (VISOR_GLOW[0] - VISOR[0]) * half)).abs() < 1e-5
-    );
-    assert!(cubes[4].color[0] > POD[0]);
-    assert_eq!(cubes[0].color, SHELL);
-    // Seen from their left, the left half is the lighter.
+    let (left, right) = (index(swarm::Part::Eye(0)), index(swarm::Part::Eye(1)));
+    assert_eq!(cubes[left].color, cubes[right].color);
+    let cool_eyes = swarm::eyes(swarm::COLOUR);
+    assert!(cubes[left].color[0] > cool_eyes[0] && cubes[left].color[1] > cool_eyes[1]);
+    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.0 - swarm::EYE_GROW).abs() < 1e-4);
+    // The core keeps its colour, shimmering as it does, rather than warming.
+    let core = cubes[0].color;
+    assert!((core[2] / core[1] - swarm::COLOUR[2] / swarm::COLOUR[1]).abs() < 1e-4);
+    assert!((cool[0].color[2] / cool[0].color[1] - core[2] / core[1]).abs() < 1e-4);
+    // Seen from their left, the left eye is the warmer.
     look(&mut people, 8.0, 1);
     let cubes = &people.figures()[0].cubes;
-    assert!(cubes[VISOR_LEFT].color[0] > cubes[VISOR_RIGHT].color[0]);
+    assert!(cubes[left].color[0] > cubes[right].color[0]);
     // Only this participant, whom they look at, sees it: another, beside them, does not.
     let mut beside = People::default();
     for _ in 0..30 {

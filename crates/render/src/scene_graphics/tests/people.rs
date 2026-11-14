@@ -2,10 +2,14 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The others in a space are drawn among Tomori's cubes, in their one draw, each person culled whole and then cube by
-//! cube: their heads, the visor of one looking this way lit, and a ray drawn in full ending on the wall it meets. See
+//! cube: their swarms, the eyes of one looking this way warm, and a ray drawn in full ending on the wall it meets. See
 //! `design/people.md`.
 use super::*;
-use tomori_protocol::{Panel, Participant, Place, Pose as Placed, Ray, ServerMessage};
+use tomori_client::connection::{Report, Session};
+use tomori_protocol::{
+    Activity, AgentState, AgentStatus, Panel, Participant, Place, Pose as Placed, Ray,
+    ServerMessage,
+};
 
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 720;
@@ -19,16 +23,36 @@ fn looking(at: [f32; 3], target: [f32; 3]) -> Placed {
     )
 }
 
-/// Someone's presence, `source`'s, their head as `head`, and their right ray, if any.
-fn presence(source: u32, head: Placed, ray: Option<Ray>) -> tomori_client::Event {
-    tomori_client::Event::Message(ServerMessage::Presence {
-        source,
-        head,
-        left: None,
-        right: None,
-        hands: None,
-        pointing: ray.map(|ray| Box::new([None, Some(ray)])),
-    })
+/// Someone in the space: their number, their head, their controllers, left then right, and their right ray, if any.
+#[derive(Clone, Copy)]
+struct Someone {
+    source: u32,
+    head: Placed,
+    controllers: [Option<Placed>; 2],
+    ray: Option<Ray>,
+}
+
+impl Someone {
+    /// Their presence.
+    fn presence(&self) -> tomori_client::Event {
+        tomori_client::Event::Message(ServerMessage::Presence {
+            source: self.source,
+            head: self.head,
+            left: self.controllers[0],
+            right: self.controllers[1],
+            hands: None,
+            pointing: self.ray.map(|ray| Box::new([None, Some(ray)])),
+        })
+    }
+
+    /// Their controller at `at` from their head, in its own coordinates, turned as it is.
+    fn holding(head: Placed, at: Vec3) -> Option<Placed> {
+        let turn = glam::Quat::from_array(head.orientation);
+        Some(Placed {
+            position: (Vec3::from_array(head.position) + turn * at).to_array(),
+            orientation: head.orientation,
+        })
+    }
 }
 
 /// How many of `image`'s pixels are within `within` of `color`, in linear light, written as sRGB.
@@ -44,23 +68,25 @@ fn near(image: &image::RgbaImage, color: [f32; 3], within: i32) -> usize {
 }
 
 /// Set `TOMORI_PEOPLE_PREVIEW` to a PNG path to save what this renders: two people at the Tomori wall, seen from home,
-/// Bob on the left looking this way, his visor lit, and Cleo on the right, seen from behind, pointing at a panel on the
-/// wall, her ray ending in a dot on it; then the two from beside them.
+/// with the agent's swarm at work behind them, Bob on the left looking this way, his eyes warm, gesturing as he speaks,
+/// his orbit quick, and Cleo on the right pointing at a panel on the wall, her ray ending in a dot on it; then the two
+/// from beside them; then Bob's head up close, looking this way as he speaks.
 #[test]
 fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_whole() {
-    let eye = Vec3::new(0.0, 1.6, 0.0);
-    let bob_head = [-0.55, 1.68, -1.35];
-    let cleo_head = [0.6, 1.55, -1.45];
+    let eye = Vec3::new(0.0, 1.6, 0.4);
+    let bob_head = [-0.6, 1.68, -1.35];
+    let cleo_head = [0.62, 1.55, -1.5];
     // The panel Cleo points at, in the Tomori wall's fifth slot, right of its middle.
     let slot = tomori_wall().slot_pose(4).expect("a fifth slot");
     let facing = glam::Quat::from_array(slot.orientation) * Vec3::Z;
     let on_wall = (Vec3::from_array(slot.position) + facing * 0.03).to_array();
-    let aim = Vec3::new(0.78, 1.25, -1.3);
+    let aim = Vec3::new(0.86, 1.32, -1.8);
     let along = Vec3::from_array(on_wall) - aim;
+    let pointing = glam::Quat::from_rotation_arc(Vec3::NEG_Z, along.normalize());
     let ray = Ray {
         aim: Placed {
             position: aim.to_array(),
-            orientation: glam::Quat::from_rotation_arc(Vec3::NEG_Z, along.normalize()).to_array(),
+            orientation: pointing.to_array(),
         },
         length: along.length(),
         meets: true,
@@ -101,15 +127,21 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
             50.0,
         );
         let now = Instant::now();
-        // Ada, at home, with Bob, Cleo, and Dan, who stands behind her, out of view, in the space; each of the others'
-        // presence as `others` says.
+        // Ada, at `seen_from`, with Bob, Cleo, and Dan, who stands behind her, out of view, in the space, the agent at
+        // work; each of the others as `others` says, Bob's voice playing; seen from `looked_from`, looking at `at`.
         let culling = std::cell::Cell::new(true);
-        let mut capture = |others: &[(u32, Placed, Option<Ray>)], looked_from: Vec3, at: Vec3| {
+        let mut capture = |others: &[Someone], seen_from: Vec3, looked_from: Vec3, at: Vec3| {
             renderer.set_culling(culling.get());
             let mut conversation = joined();
             show_projection(&mut conversation, Vec::new(), panels.clone());
             conversation.apply(space(|state| {
                 state.projection = true;
+                state.activity = Activity::Running;
+                state.agent = Some(AgentStatus {
+                    state: AgentState::Working,
+                    detail: None,
+                    sequence: 1,
+                });
                 for (name, source) in [("Bob", 2), ("Cleo", 3), ("Dan", 4)] {
                     state.participants.push(Participant {
                         name: name.into(),
@@ -118,15 +150,16 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                     });
                 }
             }));
-            for (source, head, ray) in others {
-                conversation.apply(presence(*source, *head, *ray));
+            for someone in others {
+                conversation.apply(someone.presence());
             }
-            let head = Mat4::from_translation(eye);
+            conversation.report(Report::Voices([2].into_iter().collect()));
+            let head = Mat4::from_translation(seen_from);
             let senses = Senses {
                 focused: true,
                 head: Some(head),
                 head_pose: Pose::from_transform(head),
-                viewer: Some(eye),
+                viewer: Some(seen_from),
                 space_head: head,
                 trigger: Some(0.0),
                 ..Default::default()
@@ -137,6 +170,19 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                 frame = step.update(&senses, &mut conversation, &mut felt(), now, 1.0 / 72.0);
             }
             assert_eq!(frame.people.len(), others.len());
+            // What of each person the renderer can draw: every cube but those of no size, as a falling cube's as it
+            // begins.
+            let drawable: Vec<usize> = frame
+                .people
+                .iter()
+                .map(|figure| {
+                    figure
+                        .cubes
+                        .iter()
+                        .filter(|cube| cube.scale.iter().all(|side| *side > 0.0))
+                        .count()
+                })
+                .collect();
             draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
             renderer.render(
                 &device,
@@ -150,78 +196,128 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                 read_back(&device, &queue, &texture, (WIDTH, HEIGHT)),
                 renderer.tally(),
                 renderer.figures(),
+                drawable,
             )
         };
-        let ahead = Vec3::new(0.0, 1.4, -2.3);
-        let bob = (2, looking(bob_head, eye.to_array()), None);
-        let cleo = (3, looking(cleo_head, on_wall), Some(ray));
-        let dan = (4, looking([0.0, 1.6, 2.5], [0.0, 1.6, 4.0]), None);
-        let (nobody, alone, _) = capture(&[], eye, ahead);
-        let (people, tally, figures) = capture(&[bob, cleo, dan], eye, ahead);
+        let ahead = Vec3::new(0.0, 1.35, -2.3);
+        let bob_looking = looking(bob_head, eye.to_array());
+        let bob = Someone {
+            source: 2,
+            head: bob_looking,
+            controllers: [
+                Someone::holding(bob_looking, Vec3::new(-0.2, -0.52, -0.26)),
+                Someone::holding(bob_looking, Vec3::new(0.24, -0.42, -0.3)),
+            ],
+            ray: None,
+        };
+        let cleo_looking = looking(cleo_head, on_wall);
+        let cleo = Someone {
+            source: 3,
+            head: cleo_looking,
+            controllers: [
+                None,
+                Some(Placed {
+                    position: (aim - along.normalize() * 0.06).to_array(),
+                    orientation: pointing.to_array(),
+                }),
+            ],
+            ray: Some(ray),
+        };
+        let dan = Someone {
+            source: 4,
+            head: looking([0.0, 1.6, 2.9], [0.0, 1.6, 4.0]),
+            controllers: [None, None],
+            ray: None,
+        };
+        let (nobody, alone, ..) = capture(&[], eye, eye, ahead);
+        let (people, tally, figures, drawable) = capture(&[bob, cleo, dan], eye, eye, ahead);
         let (beside, ..) = capture(
             &[bob, cleo],
-            Vec3::new(-2.2, 1.7, -0.9),
-            Vec3::new(0.0, 1.5, -1.5),
+            eye,
+            Vec3::new(-2.4, 1.55, -0.3),
+            Vec3::new(0.0, 1.3, -1.5),
         );
-        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+        // Bob up close, looking at Ada a little under a metre away as he speaks.
+        let close = Vec3::from_array(bob_head) + Vec3::new(0.25, -0.05, 0.75);
+        let (head, ..) = capture(
+            &[Someone {
+                head: looking(bob_head, close.to_array()),
+                ..bob
+            }],
+            close,
+            close,
+            Vec3::from_array(bob_head) + Vec3::new(0.0, -0.12, 0.0),
+        );
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
         image::imageops::replace(&mut sheet, &people, 0, 0);
         image::imageops::replace(&mut sheet, &beside, 0, HEIGHT.into());
+        image::imageops::replace(&mut sheet, &head, 0, (HEIGHT * 2).into());
         crate::test_support::preview("TOMORI_PEOPLE_PREVIEW", &sheet);
-        // Bob looks at Ada, so his visor is lit, as it is not while he looks at the wall, as Cleo does.
+        // Bob looks at Ada, so his eyes are warm, as they are not while he looks at the wall, as Cleo does.
         let (away, ..) = capture(
-            &[(2, looking(bob_head, on_wall), None), cleo, dan],
+            &[
+                Someone {
+                    head: looking(bob_head, on_wall),
+                    ..bob
+                },
+                cleo,
+                dan,
+            ],
+            eye,
             eye,
             ahead,
         );
-        // The visor's glow is warm, where everything else here is grey or blue.
+        // The eyes are a bright, warm off-white, where the rest of a person glows in their colour, dimmer at their
+        // outline.
         let glow = |image: &image::RgbaImage| {
             image
                 .pixels()
                 .filter(|pixel| {
-                    let [r, _, b, _] = pixel.0.map(i32::from);
-                    r > 150 && r - b > 40
+                    let [r, g, b, _] = pixel.0.map(i32::from);
+                    g > 190 && r - b > 40
                 })
                 .count()
         };
         assert!(
-            glow(&people) > glow(&away) + 400,
+            glow(&people) > glow(&away) + 150,
             "{} {}",
             glow(&people),
             glow(&away)
         );
+        let body = |image: &image::RgbaImage| {
+            near(
+                image,
+                tomori_scene::people::swarm::COLOUR.map(|value| value * 0.75),
+                30,
+            )
+        };
         assert!(
-            glow(&away) <= glow(&nobody) + 40,
+            body(&people) > body(&nobody) + 2_000,
             "{} {}",
-            glow(&away),
-            glow(&nobody)
+            body(&people),
+            body(&nobody)
         );
-        let shell = |image: &image::RgbaImage| near(image, [0.5, 0.5, 0.55], 40);
-        assert!(
-            shell(&people) > shell(&nobody) + 400,
-            "{} {}",
-            shell(&people),
-            shell(&nobody)
-        );
-        assert!(shell(&beside) > 400);
+        assert!(body(&beside) > 2_000);
         // In the one draw Tomori's cubes already make, each person an item of the world of their own: Dan, behind Ada,
-        // culled whole, and nothing drawn for whoever is not here.
+        // culled whole, with no more than a few of the others' falling cubes, below the view, and nothing drawn for
+        // whoever is not here.
         assert_eq!(tally.draws, alone.draws);
-        let head = tomori_scene::people::CUBES - 4;
-        assert_eq!(tally.culled, alone.culled + head, "{tally:?} {alone:?}");
+        let others = tally.culled - alone.culled - drawable[2];
+        assert!(others < 20, "{tally:?} {alone:?} {drawable:?}");
         assert!(
-            tally.drawn >= alone.drawn + head * 2 + 2,
-            "{tally:?} {alone:?}"
+            tally.drawn >= alone.drawn + drawable[0] + drawable[1] * 3 / 4,
+            "{tally:?} {alone:?} {drawable:?}"
         );
         assert_eq!(figures.len(), 3);
         assert!(figures.iter().all(|cubes| !cubes.is_empty()));
         // With one person left, the rest of the items are kept, holding nothing.
-        let (_, after, figures) = capture(&[cleo], eye, ahead);
+        let (_, after, figures, _) = capture(&[cleo], eye, eye, ahead);
         assert_eq!(figures[1..], [0..0, 0..0]);
         assert_eq!(after.draws, alone.draws);
         // Culling changes nothing of what is seen of them, drawn after the rest of the cubes, culled or not.
         culling.set(false);
-        let (whole, ..) = capture(&[bob, cleo, dan], eye, ahead);
-        let (again, unculled, _) = capture(&[bob, cleo, dan], eye, ahead);
+        let (whole, ..) = capture(&[bob, cleo, dan], eye, eye, ahead);
+        let (again, unculled, ..) = capture(&[bob, cleo, dan], eye, eye, ahead);
         assert_eq!(unculled.culled, 0);
         assert!(
             whole == people && again == people,
@@ -258,5 +354,12 @@ fn a_person_s_cubes_that_are_not_numbers_are_not_drawn_and_at_most_so_many_peopl
         assert_eq!(figures.len(), crate::graphics::MOST_PEOPLE);
         assert_eq!(figures[3], 3..4);
         assert_eq!(figures.last().unwrap().end, crate::graphics::MOST_PEOPLE);
+        // Each glows, its colour its own light rather than shaded by the light from above the rest are drawn with.
+        assert!(
+            renderer
+                .people
+                .iter()
+                .all(|instance| instance.glow == crate::graphics::PEOPLE_GLOW)
+        );
     });
 }
