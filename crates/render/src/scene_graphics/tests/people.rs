@@ -267,7 +267,7 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
             eye,
             ahead,
         );
-        // The eyes' glow is warm and bright, where the rest of a person is a darker peach and their orbit paler.
+        // The eyes' glow is warm and bright, where the rest of a person glows in their colour, dimmer at their outline.
         let glow = |image: &image::RgbaImage| {
             image
                 .pixels()
@@ -286,7 +286,7 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
         let body = |image: &image::RgbaImage| {
             near(
                 image,
-                tomori_scene::people::swarm::BODY.map(|value| value * 0.75),
+                tomori_scene::people::swarm::COLOUR.map(|value| value * 0.75),
                 30,
             )
         };
@@ -353,5 +353,12 @@ fn a_person_s_cubes_that_are_not_numbers_are_not_drawn_and_at_most_so_many_peopl
         assert_eq!(figures.len(), crate::graphics::MOST_PEOPLE);
         assert_eq!(figures[3], 3..4);
         assert_eq!(figures.last().unwrap().end, crate::graphics::MOST_PEOPLE);
+        // Each glows, its colour its own light rather than shaded by the light from above the rest are drawn with.
+        assert!(
+            renderer
+                .people
+                .iter()
+                .all(|instance| instance.glow == crate::graphics::PEOPLE_GLOW)
+        );
     });
 }

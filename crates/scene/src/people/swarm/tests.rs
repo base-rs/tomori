@@ -29,6 +29,7 @@ const EYES: Option<Vec3> = Some(Vec3::new(0.0, 1.6, -2.0));
 
 fn cues(glow: f32, time: f32) -> Cues {
     Cues {
+        colour: COLOUR,
         fade: 1.0,
         glow,
         eyes: EYES,
@@ -277,7 +278,9 @@ fn the_body_turns_after_the_head_s_yaw_damped_and_never_with_its_pitch_or_roll()
     let cubes = drawn(&ahead, &body, &cues(0.0, 0.0));
     let (torso, _) = parts().find(|(_, part)| *part == Part::Torso).unwrap();
     assert!(
-        Quat::from_array(cubes[torso].orientation).angle_between(Quat::from_rotation_y(0.6)) < 1e-5
+        Quat::from_array(cubes[torso].orientation)
+            .angle_between(Quat::from_rotation_y(0.6) * MOTES[torso].turn)
+            < 1e-5
     );
 }
 
@@ -324,13 +327,13 @@ fn hands_come_up_as_they_are_tracked_and_fall_back_to_rest_as_they_are_lost() {
     tracked.joints[1] = Some(joints);
     assert_eq!(super::hand(&tracked, 1), Some(palm));
     assert_eq!(super::hand(&tracked, 0), None);
-    // The hand's cluster is about where it reaches, bright.
+    // The hand's cluster is about where it reaches, paler than the body.
     let body = Body::new(&tracked, EYES);
     let cubes = drawn(&tracked, &body, &cues(0.0, 0.0));
     for (index, part) in parts() {
         if part == Part::Hand(1) {
             assert!(at(&cubes[index]).distance(palm) < 0.06);
-            assert!(cubes[index].color[0] > BODY[0]);
+            assert!(cubes[index].color[1] > COLOUR[1] && cubes[index].color[2] > COLOUR[2]);
         }
     }
 }
@@ -412,9 +415,9 @@ fn fewer_cubes_are_drawn_farther_away_and_a_head_alone_beyond_and_none_below_whe
             lowest = lowest.min(cube.position[1]);
         }
     }
-    assert!(lowest > neck.y - 0.62 - FALL - 0.06, "{lowest}");
-    assert!(lowest < neck.y - 0.62 - FALL * 0.6, "{lowest}");
-    // And thinner below the chest than above it.
+    assert!(lowest > neck.y - 0.62 - FALL.1 - 0.08, "{lowest}");
+    assert!(lowest < neck.y - 0.62 - FALL.1 * 0.6, "{lowest}");
+    // And thinner below the chest than above it, its cubes there smaller and dimmer.
     let torso: Vec<f32> = MOTES
         .iter()
         .filter(|mote| mote.part == Part::Torso)
@@ -426,6 +429,20 @@ fn fewer_cubes_are_drawn_farther_away_and_a_head_alone_beyond_and_none_below_whe
         "{chest} of {}",
         torso.len()
     );
+    let mean = |above: bool| {
+        let chosen: Vec<&Mote> = MOTES
+            .iter()
+            .filter(|mote| mote.part == Part::Torso && (mote.at.y > -0.25) == above)
+            .collect();
+        let count = chosen.len() as f32;
+        (
+            chosen.iter().map(|mote| mote.size.x).sum::<f32>() / count,
+            chosen.iter().map(|mote| mote.tone).sum::<f32>() / count,
+        )
+    };
+    let ((chest_size, chest_tone), (waist_size, waist_tone)) = (mean(true), mean(false));
+    assert!(waist_size < chest_size * 0.9, "{waist_size} {chest_size}");
+    assert!(waist_tone < chest_tone * 0.9, "{waist_tone} {chest_tone}");
 }
 
 #[test]
@@ -439,21 +456,30 @@ fn eyes_warm_and_brighten_as_the_head_faces_this_participant_and_the_face_about_
         let (cool, warm) = (&cool[index], &warm[index]);
         match part {
             Part::Eye(_) => {
-                assert_eq!(cool.color, EYE);
+                // Soft while cool, paler than the face and no brighter than the core.
+                assert_eq!(cool.color, eyes(COLOUR));
+                assert!(cool.color[1] > COLOUR[1] && cool.color[0] <= COLOUR[0]);
                 // Facing straight at them, both eyes glow alike, nearly fully.
                 let glow = 1.0 - GLOW_SIDE / 2.0;
-                let expected = mix(EYE, EYE_GLOW, glow);
+                let expected = mix(eyes(COLOUR), EYE_GLOW, glow);
                 assert!(Vec3::from_array(warm.color).distance(Vec3::from_array(expected)) < 1e-5);
-                assert!((warm.scale[0] / cool.scale[0] - 1.25).abs() < 1e-5);
-                // On the face, ahead of the head's middle.
+                assert!((warm.scale[0] / cool.scale[0] - 1.3).abs() < 1e-5);
+                // On the face, ahead of the head's middle, small and round: a cube turned on its corner.
                 assert!(warm.position[2] < -0.03);
+                assert!(cool.scale[0] < 0.02);
+                let corner = Quat::from_array(cool.orientation) * Vec3::X;
+                assert!(corner.y.abs() > 0.6, "{corner}");
+            }
+            Part::Ring(_) => {
+                assert!((warm.scale[0] / cool.scale[0] - 1.25).abs() < 1e-5);
+                assert!(warm.color[1] > cool.color[1] && warm.color[2] < cool.color[2]);
             }
             Part::Halo(_) => {
                 assert_eq!(cool.scale, [0.0; 3]);
-                assert!(warm.scale[0] > 0.01);
+                assert!(warm.scale[0] > 0.004);
             }
             Part::Shell if warm.color != cool.color => {
-                assert!(warm.color[0] > cool.color[0] && warm.color[2] > cool.color[2]);
+                assert!(warm.color[1] > cool.color[1]);
                 assert!(warm.position[2] < 0.05, "only the face warms");
                 warmed += 1;
             }
@@ -539,7 +565,8 @@ fn cubes_drift_about_where_they_rest_shrink_where_they_rest_as_they_fade_and_fal
         let moved = at(was).distance(at(is));
         match part {
             Part::Drift => {}
-            Part::Core | Part::Eye(_) => assert_eq!(moved, 0.0),
+            Part::Eye(_) => assert_eq!(moved, 0.0),
+            Part::Core if index == 0 => assert_eq!(moved, 0.0),
             _ => {
                 assert!(moved < 0.04, "{index} {part:?} {moved}");
                 drifted += usize::from(moved > 1e-4);
@@ -555,9 +582,16 @@ fn cubes_drift_about_where_they_rest_shrink_where_they_rest_as_they_fade_and_fal
         .unwrap();
     let falling = |time: f32| drawn(&person, &body, &cues(0.0, time))[index];
     let start = (1.0 - mote.offset) * mote.fall;
-    let (top, low) = (falling(start + 0.01), falling(start + mote.fall * 0.8));
-    assert!(top.position[1] - low.position[1] > FALL * 0.6);
+    let (born, top, low) = (
+        falling(start + 0.01),
+        falling(start + mote.fall * BORN),
+        falling(start + mote.fall * 0.9),
+    );
+    assert!(top.position[1] - low.position[1] > mote.drop * 0.7);
+    // Growing in from nothing, so that none appears at once, and shrinking and fading as it falls.
+    assert!(born.scale[0] < top.scale[0] * 0.1);
     assert!(low.scale[0] < top.scale[0] * 0.5);
+    assert!(low.color[1] < top.color[1] * 0.8);
     // Fading, each cube shrinks where it rests.
     let faded = drawn(
         &person,
@@ -609,10 +643,103 @@ fn a_person_reads_as_one_a_head_above_shoulders_above_a_torso_with_the_eyes_wher
         .filter(|(_, part)| *part == Part::Torso)
         .map(|(index, _)| (at(&cubes[index]) - torso).dot(across).abs())
         .fold(0.0, f32::max);
-    assert!(width > 0.17 && width < 0.25, "{width}");
+    assert!(width > 0.15 && width < 0.25, "{width}");
     assert!(
         cubes
             .iter()
             .all(|cube| cube.color.iter().all(|value| (0.0..=1.0).contains(value)))
     );
+}
+
+#[test]
+fn each_cube_glows_brightest_at_the_middle_of_its_part_as_seen_dimmer_and_smaller_at_its_outline_and_shimmers()
+ {
+    let person = standing([
+        Some(Vec3::new(-0.25, 1.15, -0.3)),
+        Some(Vec3::new(0.25, 1.15, -0.3)),
+    ]);
+    let body = Body::new(&person, EYES);
+    let cubes = drawn(&person, &body, &cues(0.0, 0.0));
+    // How bright each cube of the head's shell and the torso is for its own tone, and how large for its own size, by
+    // which way its part's outside faces the eyes, ahead along −Z: its middle as seen, or its outline.
+    let ahead = (EYES.unwrap() - (Vec3::new(0.0, 1.6, 0.0) + NECK)).normalize();
+    for part in [Part::Shell, Part::Torso] {
+        let mean = |middle: bool| {
+            let chosen: Vec<(f32, f32)> = MOTES
+                .iter()
+                .zip(&cubes)
+                .filter(|(mote, _)| mote.part == part)
+                .filter(|(mote, _)| {
+                    let facing = mote.out.dot(ahead);
+                    if middle {
+                        facing > 0.7
+                    } else {
+                        facing.abs() < 0.2
+                    }
+                })
+                .map(|(mote, cube)| (cube.color[1] / mote.tone, cube.scale[0] / mote.size.x))
+                .collect();
+            let count = chosen.len() as f32;
+            assert!(count >= 3.0, "{part:?}: {count}");
+            (
+                chosen.iter().map(|(light, _)| light).sum::<f32>() / count,
+                chosen.iter().map(|(_, large)| large).sum::<f32>() / count,
+            )
+        };
+        let ((middle, middle_size), (outline, outline_size)) = (mean(true), mean(false));
+        assert!(outline < middle * 0.6, "{part:?}: {outline} {middle}");
+        assert!(
+            outline_size < middle_size * 0.8,
+            "{part:?}: {outline_size} {middle_size}"
+        );
+    }
+    // Seen from behind, their back is the brighter.
+    let behind = Cues {
+        eyes: Some(Vec3::new(0.0, 1.6, 2.0)),
+        ..cues(0.0, 0.0)
+    };
+    let from_behind = drawn(&person, &body, &behind);
+    let back = |cubes: &[Cube]| {
+        MOTES
+            .iter()
+            .zip(cubes)
+            .filter(|(mote, _)| mote.part == Part::Torso && mote.out.z > 0.8)
+            .map(|(_, cube)| cube.color[1])
+            .sum::<f32>()
+    };
+    assert!(back(&from_behind) > back(&cubes) * 1.5);
+    // Each shimmers a little over time, about its own brightness, no more than SHIMMER either way.
+    let later = drawn(&person, &body, &cues(0.0, 0.4));
+    let mut shimmered = 0;
+    for ((mote, was), is) in MOTES.iter().zip(&cubes).zip(&later) {
+        if mote.part == Part::Core {
+            let (was, is) = (was.color[1], is.color[1]);
+            assert!(is / was < (1.0 + SHIMMER) / (1.0 - SHIMMER) + 1e-4);
+            shimmered += usize::from((is - was).abs() > 1e-3);
+        }
+    }
+    assert!(shimmered > 5, "{shimmered}");
+    // Every colour is the person's, so that their own replaces it alone: a cube of the core is their colour, as bright as
+    // the core is.
+    let colour = [0.1, 0.3, 0.45];
+    let theirs = drawn(
+        &person,
+        &body,
+        &Cues {
+            colour,
+            ..cues(0.0, 0.0)
+        },
+    );
+    for (mote, cube) in MOTES.iter().zip(&theirs) {
+        if matches!(mote.part, Part::Core | Part::Torso | Part::Upper(_)) {
+            let ratio = cube.color[2] / colour[2];
+            assert!(
+                (cube.color[1] - colour[1] * ratio).abs() < 1e-5,
+                "{:?}",
+                cube.color
+            );
+        }
+    }
+    assert!(theirs[0].color[1] / colour[1] > CORE * 0.8);
+    assert_ne!(theirs[MOTES.len() - 1].color, cubes[MOTES.len() - 1].color);
 }

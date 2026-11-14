@@ -28,6 +28,9 @@ pub(crate) struct Instance {
     pub(crate) scale: [f32; 3],
     pub(crate) color: [f32; 3],
     pub(crate) basis: [[f32; 3]; 3],
+    /// How much of its colour is its own light, unshaded by the soft light from above the rest of Tomori's cubes are
+    /// drawn with: the others' swarms glow (see `design/people.md`).
+    pub(crate) glow: f32,
 }
 
 impl Default for Instance {
@@ -37,6 +40,7 @@ impl Default for Instance {
             scale: [1.0; 3],
             color: [1.0; 3],
             basis: glam::Mat3::IDENTITY.to_cols_array_2d(),
+            glow: 0.0,
         }
     }
 }
@@ -45,6 +49,9 @@ impl Default for Instance {
 /// of Tomori's cubes, in the same draw. See `design/people.md`.
 pub const MOST_PEOPLE: usize = 16;
 const PEOPLE_INSTANCES: usize = MOST_PEOPLE * tomori_scene::people::CUBES;
+/// How much of the others' cubes' colour is their own light, so that their swarms glow, as a volume of light, rather
+/// than stand shaded as solids: nearly all of it, keeping a hint of their faces so that they still read as cubes.
+pub const PEOPLE_GLOW: f32 = 0.85;
 
 // Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm. The grid takes up to twice its lines while an environment grows through it.
 const MAX_INSTANCES: usize = AGENT_COUNT
@@ -97,7 +104,7 @@ const TRANSIENT: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TRANSIENT_ATTACHMENT);
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 6 => Float32x3, 7 => Float32x3];
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![2 => Float32x3, 3 => Float32x3, 4 => Float32x3, 5 => Float32x3, 6 => Float32x3, 7 => Float32x3, 8 => Float32];
 
 // Keep the shared cube lighting shader, extending its instance transform here.
 // The source shader is also used independently by offscreen reference tests.
@@ -277,7 +284,7 @@ pub struct Renderer {
     solids: crate::solids::Solids,
     /// The others in the space, as cubes after [`Self::scene`]'s, each person an item of the world of their own, culled
     /// whole and then cube by cube, with the cubes of [`Self::people`] that are theirs this frame.
-    people: Vec<Instance>,
+    pub(crate) people: Vec<Instance>,
     figures: Vec<(tomori_world::ItemId, std::ops::Range<usize>)>,
 }
 
@@ -572,6 +579,7 @@ impl Renderer {
                             glam::Quat::from_array(cube.orientation).normalize(),
                         )
                         .to_cols_array_2d(),
+                        glow: PEOPLE_GLOW,
                     }),
             );
             let range = start..self.people.len();
@@ -1071,6 +1079,7 @@ impl Renderer {
                     color: cube.color,
                     basis: glam::Mat3::from_quat(glam::Quat::from_array(cube.orientation))
                         .to_cols_array_2d(),
+                    glow: 0.0,
                 });
             }
         }
@@ -1580,6 +1589,7 @@ fn pad_cubes(pad: &tomori_scene::pads::Shown, scene: &mut Vec<Instance>) {
                 scale: [across, 0.012, chord * 0.8],
                 color,
                 basis: turned(-angle),
+                glow: 0.0,
             });
         }
     };
@@ -1595,6 +1605,7 @@ fn pad_cubes(pad: &tomori_scene::pads::Shown, scene: &mut Vec<Instance>) {
             scale: [side, 0.006, side],
             color: plate,
             basis: turned(n as f32 * std::f32::consts::FRAC_PI_2 / PAD_PLATE as f32),
+            glow: 0.0,
         });
     }
     // Chevrons pointing the way the pad paired with it goes, each of four bars rising, or falling, in to its middle from
@@ -1610,6 +1621,7 @@ fn pad_cubes(pad: &tomori_scene::pads::Shown, scene: &mut Vec<Instance>) {
                     * Quat::from_rotation_x(std::f32::consts::FRAC_PI_4),
             )
             .to_cols_array_2d(),
+            glow: 0.0,
         });
         return;
     };
@@ -1626,6 +1638,7 @@ fn pad_cubes(pad: &tomori_scene::pads::Shown, scene: &mut Vec<Instance>) {
                 scale: [size, 0.035, 0.035],
                 color: chevron,
                 basis: Mat3::from_quat(around * Quat::from_rotation_z(lean)).to_cols_array_2d(),
+                glow: 0.0,
             });
         }
     }
@@ -1695,6 +1708,7 @@ fn worker_instance(cube: &crate::delegation::Cube) -> Option<Instance> {
         color: cube.color,
         basis: glam::Mat3::from_quat(glam::Quat::from_array(cube.orientation).normalize())
             .to_cols_array_2d(),
+        glow: 0.0,
     })
 }
 

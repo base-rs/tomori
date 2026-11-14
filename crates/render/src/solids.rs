@@ -222,6 +222,7 @@ impl Solids {
                 scale: instance.scale.to_array(),
                 color: instance.colour,
                 basis: instance.basis.to_cols_array_2d(),
+                glow: 0.0,
             })
             .collect();
         self.drawn.clear();

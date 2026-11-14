@@ -95,7 +95,7 @@ fn a_person_is_drawn_as_a_swarm_facing_where_they_look_and_rays_drawn_in_full_en
     let eye = &figure.cubes[index(swarm::Part::Eye(0))];
     assert!(eye.position[2] < -0.02, "{:?}", eye.position);
     assert!(eye.position[0] < 1.0, "the left eye on the left");
-    assert_eq!(eye.color, swarm::EYE);
+    assert_eq!(eye.color, swarm::eyes(swarm::COLOUR));
     let turned = Quat::from_array(figure.cubes[0].orientation);
     assert!((turned * Vec3::NEG_Z).distance(Vec3::NEG_Z) < 1e-4);
     // Each ray reaches from its aim as far as it was drawn, fainter than this participant's own; only the one that
@@ -425,9 +425,13 @@ fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at
     let cubes = &people.figures()[0].cubes;
     let (left, right) = (index(swarm::Part::Eye(0)), index(swarm::Part::Eye(1)));
     assert_eq!(cubes[left].color, cubes[right].color);
-    assert!(cubes[left].color[0] > swarm::EYE[0] && cubes[left].color[2] < swarm::EYE[2]);
-    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.25).abs() < 1e-4);
-    assert_eq!(cubes[0].color, cool[0].color);
+    let cool_eyes = swarm::eyes(swarm::COLOUR);
+    assert!(cubes[left].color[0] > cool_eyes[0] && cubes[left].color[2] < cool_eyes[2]);
+    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.3).abs() < 1e-4);
+    // The core keeps its colour, shimmering as it does, rather than warming.
+    let core = cubes[0].color;
+    assert!((core[2] / core[1] - swarm::COLOUR[2] / swarm::COLOUR[1]).abs() < 1e-4);
+    assert!((cool[0].color[2] / cool[0].color[1] - core[2] / core[1]).abs() < 1e-4);
     // Seen from their left, the left eye is the warmer.
     look(&mut people, 8.0, 1);
     let cubes = &people.figures()[0].cubes;

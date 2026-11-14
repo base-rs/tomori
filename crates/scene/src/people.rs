@@ -379,6 +379,8 @@ impl People {
                 &shown,
                 &known.body,
                 swarm::Cues {
+                    // Everyone's colour alike, until people have colours of their own.
+                    colour: swarm::COLOUR,
                     fade,
                     glow: known.glow,
                     eyes,
@@ -397,6 +399,8 @@ impl People {
                 &leaving.drawn,
                 &leaving.body,
                 swarm::Cues {
+                    // Everyone's colour alike, until people have colours of their own.
+                    colour: swarm::COLOUR,
                     fade: leaving.shown * (1.0 - t),
                     glow: leaving.glow,
                     eyes,
