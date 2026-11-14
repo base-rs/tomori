@@ -1,11 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The others' hands as an environment's client side is given them: from the presence the server relays, drawn between
-//! the updates that brought them, as long behind as they come apart, about a frame, so that what someone else holds
-//! moves every frame rather than holding still while an update is late and jumping as two arrive at once. Presence
-//! carries no time, so each update is placed when it arrived, and a late one moves the hand on a little faster; how
-//! often they come is followed as they do. See `design/environments.md`.
+//! The others as they are drawn between the updates of their presence: each one's whole presence, their head,
+//! controllers, hands and rays, drawn between the updates that brought it, as long behind as they come apart, about a
+//! frame, so that what someone else holds, and they themselves, move every frame rather than holding still while an
+//! update is late and jumping as two arrive at once. Presence carries no time, so each update is placed when it arrived,
+//! and a late one moves them on a little faster; how often they come is followed as they do. An environment's client
+//! side is given the others' hands from these same tracks, and people are drawn from them, so that what someone holds
+//! and the hand holding it are the same pose in the same frame. See `design/environments.md` and `design/people.md`.
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -19,16 +21,48 @@ pub const MOST: Duration = Duration::from_millis(50);
 /// How many of a hand's updates are kept.
 const KEPT: usize = 8;
 
-/// One participant's hand: its updates as they arrived, and how far apart they come, on average.
-#[derive(Clone, Debug, Default)]
-struct Track {
-    updates: VecDeque<(Instant, Hand)>,
-    interval: Option<Duration>,
+/// What is drawn between the updates that bring it: a hand, or someone's whole presence.
+pub trait Between: Copy + PartialEq {
+    /// It a share `t` of the way from it to `will`.
+    fn between(&self, will: &Self, t: f32) -> Self;
+
+    /// Whether moving from `was` to it is a cut, drawn at once rather than between, as a teleport is. Nothing is, by
+    /// default.
+    fn cuts(&self, _was: &Self) -> bool {
+        false
+    }
 }
 
-impl Track {
+impl Between for Hand {
+    fn between(&self, will: &Self, t: f32) -> Self {
+        Hand::new(
+            self.position.lerp(will.position, t),
+            self.orientation.slerp(will.orientation, t).normalize(),
+        )
+    }
+}
+
+/// One participant's track: its updates as they arrived, how far apart they come, on average, and when it last cut.
+#[derive(Clone, Debug)]
+struct Track<T> {
+    updates: VecDeque<(Instant, T)>,
+    interval: Option<Duration>,
+    cut: Option<Instant>,
+}
+
+impl<T> Default for Track<T> {
+    fn default() -> Self {
+        Self {
+            updates: VecDeque::new(),
+            interval: None,
+            cut: None,
+        }
+    }
+}
+
+impl<T: Between> Track<T> {
     /// An update that arrived by `now`, `hand`, if it moved the hand; one that did not changes nothing.
-    fn arrived(&mut self, now: Instant, hand: Hand) {
+    fn arrived(&mut self, now: Instant, hand: T) {
         let Some(&(then, was)) = self.updates.back() else {
             self.updates.push_back((now, hand));
             return;
@@ -37,7 +71,11 @@ impl Track {
             return;
         }
         let gap = now.saturating_duration_since(then);
-        if gap > PAUSE {
+        if hand.cuts(&was) {
+            // Drawn where it now is at once, never between.
+            self.updates.clear();
+            self.cut = Some(now);
+        } else if gap > PAUSE {
             // After a pause, from where it was, an interval before.
             let interval = self.interval.unwrap_or(gap.min(MOST));
             self.updates.clear();
@@ -63,7 +101,7 @@ impl Track {
 
     /// The hand at `now`, [`Track::delay`] behind it, between the updates either side; before the first, at it, and
     /// beyond the latest, at that.
-    fn at(&self, now: Instant) -> Hand {
+    fn at(&self, now: Instant) -> T {
         let at = now.checked_sub(self.delay()).unwrap_or(now);
         let (first, last) = (self.updates[0], self.updates[self.updates.len() - 1]);
         if at <= first.0 {
@@ -79,29 +117,35 @@ impl Track {
             .expect("before the latest");
         let ((from, was), (to, will)) = (self.updates[after - 1], self.updates[after]);
         let t = (at - from).as_secs_f32() / (to - from).as_secs_f32();
-        Hand::new(
-            was.position.lerp(will.position, t),
-            was.orientation.slerp(will.orientation, t).normalize(),
-        )
+        was.between(&will, t)
     }
 }
 
-/// The others' hands, one of each, by their numbers.
-#[derive(Clone, Debug, Default)]
-pub struct Relayed {
-    tracks: BTreeMap<u32, Track>,
-    /// How many times the conversation had forgotten the others' hands when these were drawn.
+/// The others' hands, or their whole presence, one of each, by their numbers.
+#[derive(Clone, Debug)]
+pub struct Relayed<T = Hand> {
+    tracks: BTreeMap<u32, Track<T>>,
+    /// How many times the conversation had forgotten the others when these were drawn.
     forgotten: u64,
 }
 
-impl Relayed {
+impl<T> Default for Relayed<T> {
+    fn default() -> Self {
+        Self {
+            tracks: BTreeMap::new(),
+            forgotten: 0,
+        }
+    }
+}
+
+impl<T: Between> Relayed<T> {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Forget every hand once the conversation has forgotten them, `forgotten` times, on connecting and on leaving or
-    /// joining a space: a number may then be someone else's, whose hand is drawn where it first is rather than moving
-    /// there from where the last one's was.
+    /// Forget everyone once the conversation has forgotten them, `forgotten` times, on connecting and on leaving or
+    /// joining a space: a number may then be someone else's, who is drawn where they first are rather than moving there
+    /// from where the last one was.
     pub fn since(&mut self, forgotten: u64) {
         if self.forgotten != forgotten {
             self.tracks.clear();
@@ -109,9 +153,9 @@ impl Relayed {
         }
     }
 
-    /// The hands at `now`, from `hands`, each as their presence last said it, by their numbers: each drawn between the
-    /// updates that brought it, a little behind. A hand no longer among them is forgotten.
-    pub fn update(&mut self, now: Instant, hands: Vec<(u32, Hand)>) -> Vec<(u32, Hand)> {
+    /// Each at `now`, from `hands`, each as their presence last said it, by their numbers: each drawn between the
+    /// updates that brought it, a little behind. One no longer among them is forgotten.
+    pub fn update(&mut self, now: Instant, hands: Vec<(u32, T)>) -> Vec<(u32, T)> {
         self.tracks
             .retain(|source, _| hands.iter().any(|(number, _)| number == source));
         hands
@@ -123,41 +167,37 @@ impl Relayed {
             })
             .collect()
     }
+
+    /// When the track of `source` last cut, drawn at once where an update put it rather than between, if it has.
+    pub fn cut(&self, source: u32) -> Option<Instant> {
+        self.tracks.get(&source).and_then(|track| track.cut)
+    }
 }
 
 /// The others' right hands and left hands, by their numbers.
 pub(crate) type Others = (Vec<(u32, Hand)>, Vec<(u32, Hand)>);
 
-/// The others' right and left hands at `now`, as `conversation` last heard them, carried out of the space's coordinates
-/// into the environment's own by `carriage`, each drawn between the updates that brought it by `relayed`: as the frame
-/// step and the spectator give an environment's client side them.
+/// The others' right and left hands, from their controllers, as `drawn` draws them this frame, in the space's
+/// coordinates, carried out of them into the environment's own by `carriage`: as the frame step and the spectator give an
+/// environment's client side them, from the same tracks the people are drawn from.
 pub(crate) fn others(
-    relayed: &mut crate::sides::Hands<Relayed>,
-    conversation: &crate::conversation::Conversation,
+    drawn: &[(u32, crate::people::Present)],
     carriage: crate::anchors::Anchor,
-    now: Instant,
 ) -> Others {
     let unturn = carriage.orientation.inverse();
-    let relay = |relayed: &mut Relayed, hands: Vec<(u32, tomori_protocol::Pose)>| {
-        relayed.since(conversation.hands_forgotten());
-        let hands = hands
-            .into_iter()
-            .map(|(source, pose)| {
-                (
-                    source,
-                    Hand::new(
-                        carriage.unplace(glam::Vec3::from_array(pose.position)),
-                        unturn * glam::Quat::from_array(pose.orientation).normalize(),
-                    ),
-                )
+    let carried = |index: usize| {
+        drawn
+            .iter()
+            .filter_map(|(source, present)| {
+                let hand = present.controllers[index]?;
+                Some((
+                    *source,
+                    Hand::new(carriage.unplace(hand.position), unturn * hand.orientation),
+                ))
             })
-            .collect();
-        relayed.update(now, hands)
+            .collect()
     };
-    (
-        relay(&mut relayed.right, conversation.right_hands()),
-        relay(&mut relayed.left, conversation.left_hands()),
-    )
+    (carried(1), carried(0))
 }
 
 #[cfg(test)]
@@ -322,9 +362,17 @@ mod tests {
             })
         };
         let mut conversation = joined();
-        let mut relayed = crate::sides::Hands::<Relayed>::default();
+        let mut people = crate::people::People::default();
         let mut drawn = |conversation: &crate::conversation::Conversation, milliseconds: u64| {
-            others(&mut relayed, conversation, carriage, at(milliseconds))
+            people.update(
+                at(milliseconds),
+                0.007,
+                conversation.hands_forgotten(),
+                conversation.people(),
+                None,
+                None,
+            );
+            others(people.drawn(), carriage)
                 .0
                 .iter()
                 .map(|(_, hand)| hand.position.x)

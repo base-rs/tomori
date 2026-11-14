@@ -46,6 +46,7 @@ pub enum Element {
     Carriage,
     Avatar,
     HomeRing,
+    People,
 }
 
 /// What a watcher leaves out of a participant's frame, as the participant's own: the attractor, arrival's objects with
@@ -70,7 +71,7 @@ impl Frame<'_> {
     /// named, so that a field added to [`Frame`] is named here too, and a watcher draws it unless [`PERSONAL`] says
     /// otherwise. What an environment's client side or an avatar shows is the client side's own, and is told only by
     /// whether there is any.
-    pub fn elements(&self) -> [(Element, String); 29] {
+    pub fn elements(&self) -> [(Element, String); 30] {
         let Frame {
             scenery,
             swarm,
@@ -104,6 +105,7 @@ impl Frame<'_> {
             carriage,
             avatar,
             home_ring,
+            people,
         } = self;
         let agents: Vec<_> = swarm.agents.iter().map(|agent| agent.position).collect();
         [
@@ -147,6 +149,7 @@ impl Frame<'_> {
                 ),
             ),
             (Element::HomeRing, format!("{home_ring:?}")),
+            (Element::People, format!("{people:?}")),
         ]
     }
 
@@ -182,7 +185,8 @@ impl Frame<'_> {
             | Element::Environment
             | Element::Carriage
             | Element::Avatar
-            | Element::HomeRing => return false,
+            | Element::HomeRing
+            | Element::People => return false,
         }
         true
     }
@@ -225,6 +229,12 @@ impl Step {
             frame.withhold(element);
         }
         frame
+    }
+
+    /// Follow `source`, the participant a watcher sees from, whose head it then leaves out of the people it draws, since
+    /// it sees from inside it; their rays it draws, as everyone's. See `design/spectator.md`.
+    pub fn follow(&mut self, source: Option<u32>) {
+        self.followed = source;
     }
 
     /// How many intents its environment's client sides have asked while it watched, all dropped, since a watcher asks

@@ -231,6 +231,12 @@ fn a_watcher_draws_what_a_participant_does_but_what_is_theirs_alone() {
         }
         assert!(frame.presence.is_none() && frame.panels.pill.model.is_none());
         assert!(frame.arrival.is_none() && frame.pads.is_empty() && frame.landing.is_none());
+        // The other participant is drawn as the participant sees them, until, silent for 2 s, they fade out over 0.5 s.
+        assert_eq!(
+            frame.people.len(),
+            usize::from(index <= 180),
+            "at frame {index}"
+        );
         if index % 120 == 0 {
             compared += 1;
             // The participant reports their presence and sees the pill, as the owner sees their wall's handles, which
@@ -260,6 +266,42 @@ fn a_watcher_draws_what_a_participant_does_but_what_is_theirs_alone() {
             .haptics(start + std::time::Duration::from_secs(7))
             .is_empty()
     );
+}
+
+#[test]
+fn a_watcher_leaves_out_the_head_it_sees_from_and_draws_the_rest_of_whom_it_follows() {
+    let mut conversation = furnished(ConnectionRole::Owner);
+    conversation.apply(Event::Message(ServerMessage::Presence {
+        source: 2,
+        head: tomori_protocol::Pose::at([0.5, 1.6, -1.0]),
+        left: None,
+        right: None,
+        hands: None,
+        pointing: Some(Box::new([
+            None,
+            Some(tomori_protocol::Ray {
+                aim: tomori_protocol::Pose::at([0.6, 1.2, -1.3]),
+                length: 1.0,
+                meets: false,
+            }),
+        ])),
+    }));
+    let mut watcher = clocked();
+    let start = Instant::now();
+    let head = crate::people::CUBES - 4;
+    let frame = watcher.watch(camera(), &mut conversation, &mut felt(), start, FRAME);
+    assert_eq!(frame.people[0].cubes.len(), head + 1);
+    // Following them, it sees from inside their head, which it leaves out, and draws their ray.
+    watcher.follow(Some(2));
+    let later = start + std::time::Duration::from_secs_f32(FRAME);
+    let frame = watcher.watch(camera(), &mut conversation, &mut felt(), later, FRAME);
+    assert_eq!(frame.people[0].source, 2);
+    assert_eq!(frame.people[0].cubes.len(), 1);
+    // A participant's own step draws everyone's head, whatever it was told to follow.
+    let mut step = clocked();
+    step.follow(Some(2));
+    let frame = step.update(&participant(), &mut conversation, &mut felt(), later, FRAME);
+    assert_eq!(frame.people[0].cubes.len(), head + 1);
 }
 
 #[test]

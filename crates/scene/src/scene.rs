@@ -241,6 +241,8 @@ pub struct Frame<'a> {
     pub avatar: Option<crate::avatar::Shown<'a>>,
     /// The ring drawn on the floor at home, which stays there wherever the agent goes. See `design/environments.md`.
     pub home_ring: crate::anchors::HomeRing,
+    /// The others in the space, each as drawn this frame, in the scene. See `design/people.md`.
+    pub people: &'a [crate::people::Figure],
 }
 
 /// Whose a push of a stick is: each push belongs to what took it as it left the middle, until it returns there, as
@@ -514,8 +516,9 @@ pub struct Step {
     indicator: Indicator,
     /// What each hand's ray points at, chooses and takes hold of. See `design/interaction.md`.
     hands: Hands<HandState>,
-    /// The others' hands, drawn between the presence updates that bring them, for the environment's client side.
-    relayed: Hands<crate::relayed::Relayed>,
+    /// The others in the space, drawn between the presence updates that bring them, of whom the environment's client
+    /// side is given the hands. See `design/people.md`.
+    people: crate::people::People,
     /// The hand whose trigger began drawing the swarm first, outside a space, while either does.
     attracting: Option<Side>,
     /// The agent as this client shows it: the swarm, or the avatar the joined space's backend names. See
@@ -611,6 +614,8 @@ pub struct Step {
     watching: bool,
     dropped: usize,
     asked: bool,
+    /// The participant a watcher sees from, whose head it does not draw. See `design/spectator.md`.
+    followed: Option<u32>,
 }
 
 /// Where a space's environment stands in the participant's room: the environment drawn, its carriage and the ring on the
@@ -739,7 +744,8 @@ impl Default for Step {
             wrist: Wrist::default(),
             indicator: Indicator::default(),
             hands: Hands::default(),
-            relayed: Hands::default(),
+            people: crate::people::People::default(),
+            followed: None,
             attracting: None,
             coordinator: crate::avatar::Coordinator::default(),
             signals: interaction::Signals::default(),
@@ -2647,6 +2653,16 @@ impl Step {
         } && ray_shown.left;
         conversation.point(attended(Side::Right));
         conversation.point_left(attended(Side::Left), left_first);
+        // The others, each drawn between the presence updates that bring them, about a frame behind, from the same tracks
+        // an environment's client side is given their hands from. See `design/people.md`.
+        self.people.update(
+            now,
+            dt,
+            conversation.hands_forgotten(),
+            conversation.people(),
+            senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
+            self.followed.filter(|_| self.watching),
+        );
         // What the environment's server side sent reaches its client side, which says what to ask, what it sounds and
         // what its scenery draws.
         let drawn = match self.client.as_mut() {
@@ -2727,9 +2743,8 @@ impl Step {
                     self.hands.left.grip_closed,
                     Side::Left,
                 );
-                // The others' hands, each drawn between the presence updates that bring it, about a frame behind.
-                let (hands, left_hands) =
-                    crate::relayed::others(&mut self.relayed, conversation, carriage, now);
+                // The others' hands, as the people holding them are drawn.
+                let (hands, left_hands) = crate::relayed::others(self.people.drawn(), carriage);
                 let output = client.side.update(
                     crate::client_side::Input::new(updates, now)
                         .pointing(
@@ -2975,6 +2990,7 @@ impl Step {
             carriage,
             avatar: self.coordinator.shown(),
             home_ring,
+            people: self.people.figures(),
         }
     }
 }

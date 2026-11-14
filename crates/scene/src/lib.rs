@@ -47,6 +47,7 @@ pub mod pads;
 pub mod panel;
 mod panel_anchor;
 mod patched;
+pub mod people;
 pub mod pill;
 pub mod playback;
 pub mod pointing;
