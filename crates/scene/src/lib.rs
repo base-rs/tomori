@@ -11,6 +11,7 @@
 /// An environment's ambience, which its client crate declares and registers beside its scenery: `tomori-client`'s. See
 /// `design/environments.md`.
 pub use tomori_client::playback::ambience;
+pub mod agent_view;
 pub mod anchors;
 pub mod arrival;
 pub mod arrival_motion;

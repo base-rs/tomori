@@ -786,6 +786,17 @@ fn worker_events_without_what_they_are_about_or_changing_nothing_are_passed_over
         &mut registrations,
     );
     assert_eq!(registrations["parent"].children, stopped);
+    // A run cancelled deliberately, that noticed it as a failure, stopped rather than failed.
+    apply_worker_event(
+        &json!({"type":"session.execution.started","data":{"sessionID":"child"}}),
+        &mut registrations,
+    );
+    assert_ne!(registrations["parent"].children, stopped);
+    apply_worker_event(
+        &json!({"type":"session.execution.failed","data":{"sessionID":"child","error":{"type":"aborted","message":"Stopped"}}}),
+        &mut registrations,
+    );
+    assert_eq!(registrations["parent"].children, stopped);
 }
 
 #[test]

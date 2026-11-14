@@ -486,6 +486,8 @@ pub struct Conversation {
     speech: SpeechActivity,
     /// Whether the agent is still speaking here, whether it is the participant's turn, and what they spoke over. See `design/speech.md`.
     turn: crate::turn::Turn,
+    /// The agent's state as the server says it, smoothed for showing. See `design/agent-state.md`.
+    agent: crate::agent_view::AgentView,
     /// This device's Feedback setting, which the hand menu and console change.
     feedback: feedback::Settings,
     /// Whether the last [`Self::accept`] refused, saying why, rather than acting or having nothing to do.
@@ -643,6 +645,7 @@ impl Conversation {
             replaying: false,
             speech: SpeechActivity::default(),
             turn: crate::turn::Turn::default(),
+            agent: crate::agent_view::AgentView::default(),
             feedback: feedback::Settings::default(),
             refused: false,
             problem_seen: None,
@@ -1637,6 +1640,11 @@ impl Conversation {
         if self.turn.to_come(self.speech_to_come()) {
             self.actions.push(Action::SetAgentSkipped(false));
         }
+        let now = self.turn_clock();
+        let said = self.agent_said().cloned();
+        let space = self.space.as_ref().map_or("", |space| space.id.as_str());
+        // Each space's state is smoothed afresh, as its sequence numbers are its own.
+        self.agent.observe(space, said.as_ref(), now);
         self.turn.played(playing, audible);
         let free = self.turn_free();
         self.turn.settle(self.turn_clock(), free);
@@ -1647,7 +1655,7 @@ impl Conversation {
         self.turn.now().unwrap_or_else(Instant::now)
     }
 
-    /// Whether the agent is free for the participant to speak to: one who takes part, in a space, idle, with no request waiting, nothing queued, and none of their own words being recorded or on their way.
+    /// Whether the agent is free for the participant to speak to: one who takes part, in a space, idle, with no request waiting, nothing queued, and none of their own words being recorded or on their way. Idle is as the server's agent state says it, as it last said it, where it says one, and otherwise as its session's activity, requests and queue say. See `design/agent-state.md`.
     fn turn_free(&self) -> bool {
         self.talk.is_none()
             && self.role.participates()
@@ -1656,11 +1664,44 @@ impl Conversation {
                 .as_ref()
                 .filter(|_| self.mode == Mode::Space)
                 .is_some_and(|space| {
-                    space.activity == tomori_protocol::Activity::Idle
-                        && space.approval.is_none()
-                        && space.question.is_none()
-                        && space.queue.is_empty()
+                    let idle = match self.agent_said() {
+                        Some(said) => said.state == tomori_protocol::AgentState::Idle,
+                        None => {
+                            space.activity == tomori_protocol::Activity::Idle
+                                && space.approval.is_none()
+                                && space.question.is_none()
+                        }
+                    };
+                    idle && space.queue.is_empty()
                 })
+    }
+
+    /// The agent's state as the server last said it, in a space while connected, where it says one this build knows.
+    fn agent_said(&self) -> Option<&tomori_protocol::AgentStatus> {
+        self.space
+            .as_ref()
+            .filter(|_| {
+                self.mode == Mode::Space
+                    && matches!(self.state, Some(ConnectionState::Connected { .. }))
+            })
+            .and_then(|space| space.agent.as_ref())
+            .filter(|said| crate::agent_view::rank(said.state).is_some())
+    }
+
+    /// The agent's state to show, as the server says it, smoothed so that a state lasting a moment does not flicker
+    /// through, or as last said before any frame smoothed it; none from an older server, or while not connected, when
+    /// what the agent is doing is worked out from
+    /// its session's activity and speech as before. The status pill, the swarm and the turn's cue all follow it. See
+    /// `design/agent-state.md`.
+    pub fn agent(&self) -> Option<&tomori_protocol::AgentStatus> {
+        let space = self.space.as_ref()?;
+        self.agent_said()
+            .map(|said| self.agent.shown(&space.id).unwrap_or(said))
+    }
+
+    /// The state of [`Self::agent`], as the swarm shows it.
+    pub fn agent_state(&self) -> Option<tomori_protocol::AgentState> {
+        self.agent().map(|agent| agent.state)
     }
 
     /// The participant starts speaking: if the agent is speaking here, the rest of what it is saying is skipped, faded out as push-to-talk silences playback and left silent after, and a replay or catch-up is stopped, so that they take the turn rather than talk over it. Its words stay in the transcript, and the right stick plays them again. See `design/speech.md`.
@@ -3444,6 +3485,7 @@ impl Conversation {
         };
         Some(Status {
             activity: space.activity,
+            agent: self.agent().cloned(),
             speaking: self.turn.speaking_as(now, self.muted),
             // A space that closes plays nothing more.
             waiting: self.turn.waiting(now) && space.activity != tomori_protocol::Activity::Closed,

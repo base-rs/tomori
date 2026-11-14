@@ -242,6 +242,18 @@ fn a_running_tool_is_seen_until_it_ends() {
 }
 
 #[test]
+fn a_run_cancelled_deliberately_shows_no_failure() {
+    let mut tracker = tracker(&[("session.execution.started", json!({}), 1_000)]);
+    tracker.apply(
+        "session.execution.failed",
+        &json!({"error": {"type": "aborted", "message": "Tool execution interrupted"}}),
+        2_000,
+    );
+    assert_eq!(tracker.current.error, None);
+    assert_eq!(tracker.running, Some(false));
+}
+
+#[test]
 fn a_failure_says_why_until_the_worker_runs_again() {
     let mut tracker = tracker(&[
         (
