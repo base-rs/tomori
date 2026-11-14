@@ -447,7 +447,7 @@ fn fewer_cubes_are_drawn_farther_away_and_a_head_alone_beyond_and_none_below_whe
 }
 
 #[test]
-fn eyes_warm_gently_and_brighten_a_little_as_the_head_faces_this_participant_never_turning_gold() {
+fn eyes_warm_and_brighten_clearly_as_the_head_faces_this_participant_never_turning_gold() {
     let person = standing([None, None]);
     let body = Body::new(&person, EYES, 2);
     let cool = drawn(&person, &body, &cues(0.0, 1.0));
@@ -468,12 +468,20 @@ fn eyes_warm_gently_and_brighten_a_little_as_the_head_faces_this_participant_nev
                 );
                 assert!(cool.color[1] > COLOUR[1] * 1.5 && cool.color[2] > COLOUR[2] * 2.0);
                 assert!(cool.color.iter().all(|value| (0.55..0.95).contains(value)));
-                // Looked at, a little warmer and brighter, still near white rather than gold, and a little larger.
+                // Looked at, clearly warmer and brighter, so that it reads from across a space, still a pale cream
+                // rather than gold, and larger.
                 let expected = mix(eyes(COLOUR), warm_eyes(COLOUR), glow);
                 assert!(Vec3::from_array(warm.color).distance(Vec3::from_array(expected)) < 1e-5);
-                let brighter = sum(warm.color) / sum(cool.color);
-                assert!(brighter > 1.04 && brighter < 1.15, "{brighter}");
-                assert!(warm.color[0] - warm.color[2] > cool.color[0] - cool.color[2]);
+                let brighter = luminance(warm.color) / luminance(cool.color);
+                assert!(brighter > 1.12 && brighter < 1.3, "{brighter}");
+                assert!(sum(warm.color) > sum(cool.color));
+                assert!(
+                    warm.color[0] - warm.color[2] > cool.color[0] - cool.color[2] + 0.1,
+                    "{:?}",
+                    warm.color
+                );
+                let grown = warm.scale[0] / cool.scale[0];
+                assert!(grown > 1.15 && grown < 1.25, "{grown}");
                 assert!(
                     warm.color[2] > 0.5 && warm.color[1] > 0.75,
                     "{:?}",
@@ -894,7 +902,7 @@ fn the_eyes_are_small_soft_rounds_on_the_face_s_surface_a_little_low_and_set_wid
         let proud = eye.at.dot(axis) - front;
         assert!(proud < 0.01, "{proud}");
         for mote in MOTES.iter().filter(|mote| mote.part == Part::Core) {
-            assert!(mote.at.dot(axis) + mote.size.x < eye.at.dot(axis) - 0.02);
+            assert!(mote.at.dot(axis) + reaching(mote, axis) < eye.at.dot(axis) - 0.02);
         }
     }
     // The head's shell is dense, its cubes packed on its outside so that its outline is round.
@@ -1035,4 +1043,51 @@ fn each_hand_is_a_small_bright_cluster_with_a_larger_dimmer_gleam_behind_it_as_s
         cubes.iter().map(|cube| -cube.position[2]).sum::<f32>() / cubes.len() as f32
     };
     assert!(ahead(&gleams) < ahead(&hands));
+}
+
+/// The relative luminance of `color`, in linear light.
+fn luminance(color: [f32; 3]) -> f32 {
+    0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+}
+
+/// How far `mote` reaches from where it rests along `axis`, turned as it is.
+fn reaching(mote: &Mote, axis: Vec3) -> f32 {
+    [Vec3::X, Vec3::Y, Vec3::Z]
+        .into_iter()
+        .zip(mote.size.to_array())
+        .map(|(edge, size)| (mote.turn * edge).dot(axis).abs() * size / 2.0)
+        .sum()
+}
+
+#[test]
+fn the_head_s_middle_is_a_block_filling_it_within_its_shell_so_nothing_behind_shows_through() {
+    // The first cube, still at the head's middle, unturned, at every detail.
+    let block = &MOTES[0];
+    assert_eq!(block.part, Part::Core);
+    assert_eq!(block.at, Vec3::ZERO);
+    assert_eq!(block.turn, Quat::IDENTITY);
+    assert_eq!(block.wobble, Vec3::ZERO);
+    assert_eq!(block.from, Detail::Head);
+    assert_eq!(block.size, MIDDLE_BLOCK);
+    // Across most of the head's width and height, and between, and a good part of its depth, so that from ahead, and
+    // from well to either side, the gaps between the shell's cubes show its glow rather than what is behind the head.
+    for (across, most) in [
+        (Vec3::X, 0.55),
+        (Vec3::Y, 0.55),
+        (Vec3::new(1.0, 0.0, 1.0), 0.6),
+        (Vec3::new(1.0, 0.0, -1.0), 0.6),
+        (Vec3::Z, 0.35),
+    ] {
+        let across = across.normalize();
+        let head = (across * HEAD).length();
+        assert!(reaching(block, across) > head * most, "{across}");
+    }
+    // Within the inside of the shell everywhere, so that it never shows as a block.
+    let inside = MOTES
+        .iter()
+        .filter(|mote| mote.part == Part::Shell)
+        .map(|mote| (mote.at / HEAD).length())
+        .fold(f32::MAX, f32::min);
+    let corner = (MIDDLE_BLOCK / 2.0 / (HEAD * inside)).length();
+    assert!(corner < 1.0, "{corner} {inside}");
 }

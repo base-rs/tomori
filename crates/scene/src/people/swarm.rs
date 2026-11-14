@@ -4,7 +4,7 @@
 //! How a person looks: a small swarm of glowing cubes in their colour, shaped as a person where the agent's is a
 //! shapeless cloud. A rounded head, dense, its cubes packed on its outside and its core the brightest, with two small,
 //! soft, round eyes of a warm off-white on its face's surface, a little below its middle and set wide, that blink now
-//! and then and warm gently while it faces this participant, and a tidy little orbit of tiny cubes about it that
+//! and then and warm clearly while it faces this participant, and a tidy little orbit of tiny cubes about it that
 //! quickens and brightens while their voice plays; shoulders and a torso below it, dense at the shoulders and the upper
 //! chest, turning with the head's yaw, damped, and never with its pitch or roll, dissolving below the chest into cubes
 //! that fall, shrink and fade, with no legs; and an arm from each shoulder to each hand by two bones, each a few rods
@@ -39,12 +39,12 @@ const SHIMMERS: [f32; 3] = [2.3, 3.4, 5.1];
 /// this way: soft, paler and a little brighter than the face about them.
 pub const EYE_WHITE: [f32; 3] = [1.0, 0.9, 0.78];
 const EYE_TINT: f32 = 0.12;
-const EYE_DIM: f32 = 0.88;
+const EYE_DIM: f32 = 0.85;
 /// The warmth the eyes take on while the head faces this participant, how far towards it they go, and how much larger
-/// they are then: a gentle brightening, never a glare.
-pub const EYE_WARM: [f32; 3] = [1.0, 0.8, 0.5];
-const EYE_WARMTH: f32 = 0.4;
-pub const EYE_GROW: f32 = 0.08;
+/// they are then: a clear, warm brightening that reads from across a space, with no halo, never a glare.
+pub const EYE_WARM: [f32; 3] = [1.0, 0.82, 0.5];
+const EYE_WARMTH: f32 = 0.7;
+pub const EYE_GROW: f32 = 0.18;
 /// How far from where each eye looks out of the head, in degrees, the head's shell leaves a gap for it, which the eye
 /// covers, and how far beyond that its cubes are smaller, so that the face about the eye is even and none covers it.
 const EYE_GAP: f32 = 7.0;
@@ -81,6 +81,9 @@ pub const ORBIT_SPEAKING_PALE: f32 = 0.4;
 /// by 20 by 19 cm, a little larger than a head, so that it reads from across a space.
 pub const MIDDLE: Vec3 = Vec3::new(0.0, 0.0, 0.05);
 pub const HEAD: Vec3 = Vec3::new(0.092, 0.1, 0.095);
+/// How wide, high and deep the block at the head's middle is: nearly as large as fits within its shell, so that the
+/// shell's gaps show the core's glow rather than what is behind the head.
+pub const MIDDLE_BLOCK: Vec3 = Vec3::new(0.11, 0.12, 0.07);
 /// Where the neck turns, from the eyes, in the head's coordinates, below and behind them: the body hangs from it.
 pub const NECK: Vec3 = Vec3::new(0.0, -0.09, 0.1);
 /// The right shoulder from the neck, in the body's coordinates, which turn with the head's yaw alone; the left is its
@@ -344,28 +347,21 @@ fn dissolved(down: f32) -> f32 {
 fn layout() -> Vec<Mote> {
     let mut dice = Dice(0x7f4a_7c15);
     let mut motes = Vec::new();
-    // The head's core, cubes filling it, its brightest, glowing between the shell's, the first still at its middle.
+    // The head's core, cubes filling it, its brightest, glowing between the shell's, the first a still block at its
+    // middle that fills what the shell leaves between its cubes, so that nothing behind the head shows through it.
     let core = 16;
     for index in 0..core {
         let (at, size, wobble) = if index == 0 {
-            (Vec3::ZERO, 0.036, 0.0)
+            (Vec3::ZERO, MIDDLE_BLOCK, 0.0)
         } else {
             (
                 dice.direction() * dice.within(0.25, 0.7) * HEAD,
-                dice.within(0.024, 0.036),
+                Vec3::splat(dice.within(0.024, 0.036)),
                 0.002,
             )
         };
         let from = every(index, 4, Detail::Head, Detail::Fewer);
-        let mote = mote(
-            &mut dice,
-            Part::Core,
-            at,
-            Vec3::splat(size),
-            from,
-            Vec3::ZERO,
-            wobble,
-        );
+        let mote = mote(&mut dice, Part::Core, at, size, from, Vec3::ZERO, wobble);
         motes.push(if index == 0 {
             Mote {
                 turn: Quat::IDENTITY,
@@ -894,7 +890,7 @@ pub fn eyes(colour: [f32; 3]) -> [f32; 3] {
     toned(mix(EYE_WHITE, colour, EYE_TINT), EYE_DIM)
 }
 
-/// Their eyes' colour while they look this way: a little warmer, and a little brighter.
+/// Their eyes' colour while they look this way: warmer, and brighter.
 pub fn warm_eyes(colour: [f32; 3]) -> [f32; 3] {
     mix(mix(EYE_WHITE, colour, EYE_TINT), EYE_WARM, EYE_WARMTH)
 }
