@@ -249,6 +249,39 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
+    assert!(
+        errors[0].ends_with("Please update the server."),
+        "{errors:?}"
+    );
+    assert!(matches!(client.outbox.pop(), Popped::Closed));
+
+    // An older client, as one from before protocol 3, is told to update itself, in the error its release shows.
+    let client = Client::connect(&hub, Access::open());
+    client.send(ClientMessage::Hello {
+        protocol: PROTOCOL_VERSION - 1,
+        participant: "eve".to_owned(),
+        name: "Eve".to_owned(),
+        names: false,
+        environments: None,
+        environment_state: false,
+        projection: false,
+        pairing_window: false,
+        speech_held: false,
+        images: false,
+        diagrams: false,
+        world_edges: false,
+        projection_patches: false,
+        live_panels: false,
+        spawns: false,
+        limits: None,
+    });
+    assert_eq!(
+        client.errors(),
+        [format!(
+            "Unsupported protocol {}; this server speaks {PROTOCOL_VERSION}. Please update this client.",
+            PROTOCOL_VERSION - 1
+        )]
+    );
     assert!(matches!(client.outbox.pop(), Popped::Closed));
 
     let client = Client::connect(&hub, Access::open());

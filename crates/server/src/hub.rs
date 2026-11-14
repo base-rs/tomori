@@ -794,8 +794,7 @@ struct SpaceRecord {
     /// the same second, so that every connection told of one change shares one build. See [`SpaceRecord::built`].
     built: std::cell::RefCell<Option<Built>>,
     /// Where the agent stands away from its home, in the space's coordinates, as it follows the speaker or was called or
-    /// asked to go there:
-    /// for this run and this environment only, so the agent is at home whenever the space opens. See
+    /// asked to go there: for this run and this environment only, so the agent is at home whenever the space opens. See
     /// `design/environments.md`.
     away: Option<tomori_protocol::Pose>,
     /// While the agent is away, the eyes of whoever it stands for, as it was placed from them, so that clients draw the
@@ -3277,8 +3276,14 @@ impl Hub {
             return;
         }
         if protocol != PROTOCOL_VERSION {
+            // Shown as it is by a client of any release, older ones included, so it says which of the two to update.
+            let update = if protocol < PROTOCOL_VERSION {
+                "this client"
+            } else {
+                "the server"
+            };
             outbox.message(error_message(format!(
-                "Unsupported protocol {protocol}; this server speaks {PROTOCOL_VERSION}."
+                "Unsupported protocol {protocol}; this server speaks {PROTOCOL_VERSION}. Please update {update}."
             )));
             outbox.close();
             return;

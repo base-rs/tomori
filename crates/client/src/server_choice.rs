@@ -192,7 +192,12 @@ pub fn choices(
             Source::Discovered,
         );
         choice.unavailable = Some(match server.protocol {
-            Some(version) => format!("protocol {version}, needs {PROTOCOL_VERSION}"),
+            Some(version) if version < PROTOCOL_VERSION => {
+                format!("protocol {version}, needs {PROTOCOL_VERSION}: update the server")
+            }
+            Some(version) => {
+                format!("protocol {version}, needs {PROTOCOL_VERSION}: update this app")
+            }
             None => "unknown protocol".into(),
         });
         unavailable.push(choice);
@@ -316,25 +321,35 @@ mod tests {
     #[test]
     fn lists_incompatible_servers_last_with_their_version() {
         let found = servers(&[
-            server("old", "Old", "10.0.0.3:8765", Some(PROTOCOL_VERSION + 1)),
+            server("new", "New", "10.0.0.3:8765", Some(PROTOCOL_VERSION + 1)),
             server("odd", "Odd", "10.0.0.4:8765", None),
+            server("old", "Old", "10.0.0.5:8765", Some(PROTOCOL_VERSION - 1)),
             server("alpha", "Alpha", "10.0.0.1:8765", Some(PROTOCOL_VERSION)),
         ]);
-        let choices = choices(None, Some("old"), &found);
+        let choices = choices(None, Some("new"), &found);
         assert_eq!(
             summary(&choices),
             [
                 ("10.0.0.1:8765", Source::Discovered, true),
                 (USB, Source::Usb, true),
-                ("10.0.0.4:8765", Source::Discovered, false),
                 ("10.0.0.3:8765", Source::Discovered, false),
+                ("10.0.0.4:8765", Source::Discovered, false),
+                ("10.0.0.5:8765", Source::Discovered, false),
             ]
         );
-        assert_eq!(choices[2].unavailable.as_deref(), Some("unknown protocol"));
+        assert_eq!(choices[3].unavailable.as_deref(), Some("unknown protocol"));
+        // Each says which of the two to update.
         assert_eq!(
-            choices[3].unavailable,
+            choices[4].unavailable,
             Some(format!(
-                "protocol {}, needs {PROTOCOL_VERSION}",
+                "protocol {}, needs {PROTOCOL_VERSION}: update the server",
+                PROTOCOL_VERSION - 1
+            ))
+        );
+        assert_eq!(
+            choices[2].unavailable,
+            Some(format!(
+                "protocol {}, needs {PROTOCOL_VERSION}: update this app",
                 PROTOCOL_VERSION + 1
             ))
         );
