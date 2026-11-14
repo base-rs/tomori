@@ -11,6 +11,8 @@ mod builder;
 #[cfg(not(target_os = "android"))]
 mod cli;
 mod foveation;
+#[cfg(test)]
+mod test_log;
 mod vulkan;
 mod xr;
 mod xr_types;

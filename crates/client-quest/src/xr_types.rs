@@ -572,6 +572,7 @@ mod tests {
 
     #[test]
     fn the_compositor_filter_is_off_unless_asked_for() {
+        let warned = crate::test_log::watch("Ignored compositor filter");
         use xr::CompositionLayerSettingsFlagsFB as Flags;
         assert_eq!(compositor_filter(None), Flags::EMPTY);
         assert_eq!(compositor_filter(Some(" ")), Flags::EMPTY);
@@ -590,6 +591,14 @@ mod tests {
             Flags::QUALITY_SUPER_SAMPLING | Flags::QUALITY_SHARPENING
         );
         assert_eq!(compositor_filter(Some("quality+blur")), Flags::EMPTY);
+        // What is not understood is said, once, and nothing else.
+        assert_eq!(
+            warned.records(),
+            [(
+                log::Level::Warn,
+                "Ignored compositor filter \"quality+blur\": use off, or normal, quality, sharpen or quality-sharpen, joined by +".to_owned()
+            )]
+        );
         assert_eq!(
             compositor_summary(Flags::EMPTY, true),
             "compositor filter off"
@@ -653,6 +662,7 @@ mod tests {
 
     #[test]
     fn the_resolution_is_a_scale_of_the_recommendation_within_reason() {
+        let warned = crate::test_log::watch("Ignored resolution");
         assert_eq!(resolution(None, 1.0), 1.0);
         assert_eq!(resolution(None, 2.0), 2.0);
         assert_eq!(resolution(Some(" "), 1.0), 1.0);
@@ -663,6 +673,16 @@ mod tests {
         for ignored in ["0.4", "2.1", "high", "NaN"] {
             assert_eq!(resolution(Some(ignored), 2.0), 2.0, "{ignored:?}");
         }
+        // Each value ignored is said, and nothing taken.
+        let said: Vec<_> = ["0.4", "2.1", "high", "NaN"]
+            .map(|ignored| {
+                (
+                    log::Level::Warn,
+                    format!("Ignored resolution {ignored:?}: use a scale from 0.5 to 2"),
+                )
+            })
+            .into();
+        assert_eq!(warned.records(), said);
     }
 
     #[test]
