@@ -20,10 +20,10 @@ pub const USAGE: &str =
             using it is known by, in spaces and to the agent.
   revoke    Revoke the token with this identifier; its connections end.";
 
-/// The default state directory: `$XDG_STATE_HOME/tomori`, or else `~/.local/state/tomori`.
+/// The default state directory: `$XDG_STATE_HOME/tomori`, or else `~/.local/state/tomori`. A relative `XDG_STATE_HOME` is ignored, as the XDG Base Directory specification requires, so that the token store never lands relative to the working directory.
 pub fn default_state_directory(state_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
     match (
-        state_home.filter(|path| !path.is_empty()),
+        state_home.filter(|path| Path::new(path).is_absolute()),
         home.filter(|path| !path.is_empty()),
     ) {
         (Some(state_home), _) => Some(Path::new(state_home).join("tomori")),
@@ -187,6 +187,18 @@ mod tests {
             Some(PathBuf::from("/home/ada/.local/state/tomori"))
         );
         assert_eq!(default_state_directory(None, None), None);
+    }
+
+    #[test]
+    fn a_relative_xdg_state_home_is_ignored() {
+        for relative in ["state", "./state", "../state", "."] {
+            assert_eq!(
+                default_state_directory(Some(relative), Some("/home/ada")),
+                Some(PathBuf::from("/home/ada/.local/state/tomori")),
+                "{relative:?}"
+            );
+            assert_eq!(default_state_directory(Some(relative), None), None);
+        }
     }
 
     #[test]

@@ -39,7 +39,8 @@ pub const DEFAULT_URL: &str = "http://127.0.0.1:4096";
 
 /// The directory `opencode serve --service` writes its registration file to,
 /// in the XDG state directory: `$XDG_STATE_HOME/opencode`, else
-/// `$HOME/.local/state/opencode`.
+/// `$HOME/.local/state/opencode`. A relative or empty `XDG_STATE_HOME` is
+/// ignored, as the XDG Base Directory specification requires.
 pub fn xdg_state_dir() -> Option<std::path::PathBuf> {
     state_dir_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
 }
@@ -51,6 +52,7 @@ fn state_dir_from(
 ) -> Option<std::path::PathBuf> {
     let base = state_home
         .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
         .or_else(|| home.map(|home| std::path::PathBuf::from(home).join(".local").join("state")))?;
     Some(base.join("opencode"))
 }
@@ -277,6 +279,17 @@ mod tests {
             Some(std::path::PathBuf::from("/home/ada/.local/state/opencode"))
         );
         assert_eq!(state_dir_from(None, None), None);
+    }
+
+    #[test]
+    fn a_relative_or_empty_xdg_state_home_is_ignored() {
+        for ignored in ["", "state", "./state"] {
+            assert_eq!(
+                state_dir_from(Some(ignored.into()), Some("/home/ada".into())),
+                Some(std::path::PathBuf::from("/home/ada/.local/state/opencode")),
+                "{ignored:?}"
+            );
+        }
     }
 
     #[test]
