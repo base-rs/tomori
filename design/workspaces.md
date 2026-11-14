@@ -1,6 +1,6 @@
 # Workspaces
 
-This describes the Rust server, which replaced the legacy Node bridge in `bridge/`. Changes to the bridge are not reviewed against this document.
+This describes the Rust server, which replaced the legacy Node bridge, since removed.
 
 ## Requirement
 
