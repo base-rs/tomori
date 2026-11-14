@@ -61,6 +61,8 @@ pub struct Command {
     pub audio_output: Option<String>,
     /// Whose voices a spectator plays: everyone's, unless `--voices` says otherwise.
     pub voices: tomori_client_spectator::Hearing,
+    /// Whether a spectator's window, or its PipeWire preview's, is borderless, as `--borderless` asks, rather than decorated.
+    pub borderless: bool,
 }
 
 impl Command {
@@ -75,6 +77,7 @@ impl Command {
         overrides.token = token;
         let (mut space, mut follow, mut audio_output, mut mode) = (None, None, None, None);
         let mut voices = None;
+        let mut borderless = false;
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let mut value = |what: &str| {
@@ -89,6 +92,7 @@ impl Command {
                 "--space" => space = Some(value("a space id")?),
                 "--follow" => follow = Some(value("a participant name")?),
                 "--audio-output" => audio_output = Some(value("an output's name")?),
+                "--borderless" => borderless = true,
                 "--voices" => {
                     voices = Some(tomori_client_spectator::cli::parse_voices(&value(
                         "all, agent or none",
@@ -125,6 +129,11 @@ impl Command {
             voices.is_none() || mode.spectator(),
             "--voices applies only to the spectator modes; use --help"
         );
+        // The headless PipeWire source has no window to be borderless.
+        ensure!(
+            !borderless || matches!(mode, Mode::Spectator | Mode::SpectatorPipewirePreview),
+            "--borderless applies only to --spectator and --spectator-pipewire-preview; use --help"
+        );
         // The same setting would also choose the microphone, which only the participant modes open.
         ensure!(
             audio_output.is_none() || mode.spectator(),
@@ -151,6 +160,7 @@ impl Command {
             follow,
             audio_output,
             voices: voices.unwrap_or_default(),
+            borderless,
         })
     }
 
@@ -175,6 +185,7 @@ impl Command {
         options.follow = self.follow.clone();
         options.token = self.overrides.token.clone();
         options.voices = self.voices;
+        options.borderless = self.borderless;
         options
     }
 
@@ -233,7 +244,7 @@ pub fn help(program: &str, drawable: &[tomori_scene::environment::Environment]) 
         .map(|environment| environment.id())
         .collect();
     format!(
-        "{program} [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--voices all|agent|none] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `{program} discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --voices WHICH    with the spectator modes, play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
+        "{program} [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--voices all|agent|none] [--borderless] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view, in a window to move, resize or make full screen.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `{program} discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --voices WHICH    with the spectator modes, play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.\n  --borderless      with --spectator or --spectator-pipewire-preview, show its window without a title bar or border, at least 1080p, for a clean capture into OBS or a shared screen.\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
         crate::DESKTOP_CONTROLS,
         choices.join("|"),
         Environment::first(drawable).id()
@@ -395,6 +406,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_spectators_window_is_decorated_unless_borderless() {
+        assert!(
+            !parse(&["--spectator"])
+                .unwrap()
+                .spectator_options()
+                .borderless
+        );
+        let borderless = parse(&["--spectator", "--borderless"]).unwrap();
+        assert!(borderless.spectator_options().borderless);
+        // The preview window is decorated too, unless borderless.
+        #[cfg(target_os = "linux")]
+        {
+            let preview = |arguments: &[&str]| parse(arguments).unwrap().spectator_options();
+            assert!(!preview(&["--spectator-pipewire-preview"]).borderless);
+            assert!(preview(&["--spectator-pipewire-preview", "--borderless"]).borderless);
+        }
+        // The headless PipeWire source, and every other mode, has no spectator's window to be borderless.
+        for mode in ["--spectator-pipewire", "--desktop", "discover"] {
+            assert_eq!(
+                error(&[mode, "--borderless"]),
+                "--borderless applies only to --spectator and --spectator-pipewire-preview; use --help",
+                "{mode}"
+            );
+        }
+        assert!(error(&["--borderless"]).starts_with("--borderless applies only to"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_spectator_is_given_its_output_and_its_audio_name() {
@@ -461,6 +500,9 @@ mod tests {
         assert!(help.starts_with("tomori [MODE]"));
         assert!(help.contains("(see `tomori discover --server ADDRESS`)"));
         assert!(help.contains("also the tomori-spectator executable"));
+        assert!(
+            help.contains("--borderless      with --spectator or --spectator-pipewire-preview")
+        );
         // It names the build's environments, starting with the first after the grid.
         assert!(help.contains(
             "TOMORI_ENVIRONMENT=deck|minimal selects the desktop window's initial environment (default deck);"
