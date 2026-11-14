@@ -1482,6 +1482,11 @@ fn placed() -> Vec<Fern> {
 /// half the time, mamaku, each reaching as far as the plant does, so that they read as the ferns near the trail do,
 /// rather than as palms, and sway with them.
 pub fn bush() -> Vec<Fern> {
+    static BUSH: OnceLock<Vec<Fern>> = OnceLock::new();
+    BUSH.get_or_init(placed_in_the_bush).clone()
+}
+
+fn placed_in_the_bush() -> Vec<Fern> {
     let (reach, _) = backdrop::Kind::Fern.size();
     backdrop::plants()
         .iter()

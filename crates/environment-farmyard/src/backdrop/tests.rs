@@ -8,7 +8,8 @@ use crate::trail;
 /// Where the eyes may be: above every corner of the ground participants land on, in the yard, along the trail and
 /// round its clearings, and of the way out through the gate; but the upper terrace's, from which the bound is
 /// checked as it is from the waterfall rock ([`beyond_from_the_terrace`]), and the campsite's clearing, from which it is
-/// checked a metre short of it rather than two ([`campsite_eyes`]).
+/// checked a metre short of it rather than two ([`campsite_eyes`]). The eyes stand as high above the beach's slope as
+/// above the yard.
 fn eyes() -> Vec<Vec3> {
     let ground = crate::walkable::navmesh()
         .triangles()
@@ -22,7 +23,14 @@ fn eyes() -> Vec<Vec3> {
         .flat_map(|(outline, _)| outline);
     ground
         .chain(way_out)
-        .map(|corner| Vec3::new(corner.x, tomori_environment::sightlines::EYES, corner.y))
+        .map(|corner| {
+            let above = crate::beach::height(corner).unwrap_or(0.0).min(0.0);
+            Vec3::new(
+                corner.x,
+                tomori_environment::sightlines::EYES + above,
+                corner.y,
+            )
+        })
         .collect()
 }
 
@@ -30,9 +38,7 @@ fn eyes() -> Vec<Vec3> {
 /// river, on the foothills' outer rings across the yard from it, or the bush on them, 46 m and more away, deep in the
 /// haze, within the bound or less than 1.5 m beyond it, as from the waterfall rock.
 fn beyond_from_the_beach(eye: Vec3, position: Vec3) {
-    // The eyes stand as high above the beach's slope as above the yard.
     let ground = Vec2::new(eye.x, eye.z);
-    let eye = eye + Vec3::Y * crate::beach::height(ground).unwrap_or(0.0).min(0.0);
     let distance = eye.distance(position);
     if distance < BOUND - 2.0 {
         return;
@@ -146,11 +152,12 @@ fn the_backdrop_stands_within_its_bound_from_where_participants_stand_at_the_cam
     let eyes = campsite_eyes();
     assert!(eyes.len() > 60);
     let foothills = model();
+    let plants = plants();
     for eye in &eyes {
         for position in &foothills.meshes[0].primitives[0].positions {
             assert!(eye.distance(*position) < BOUND - 1.0, "{eye} {position}");
         }
-        for plant in plants() {
+        for plant in &plants {
             let (_, height) = plant.size();
             assert!(
                 eye.distance(plant.at + Vec3::Y * height) < BOUND - 1.0,
