@@ -111,21 +111,25 @@ pub enum QueryMethod {
     Get,
 }
 
-/// How one call is sent, for [`Client::query_with`] and [`Client::query_range_with`]: its own time-out, whether it is a background request, and, with a client's [`Cache`], how long its answer is fresh and the bucket an instant query's time is rounded down to.
+/// How one call is sent, for [`Client::query_with`] and [`Client::query_range_with`]: its own time-out, whether it is a background request, the labels kept of its answer, and, with a client's [`Cache`], how long its answer is fresh and the bucket an instant query's time is rounded down to.
 ///
 /// ```
 /// use std::time::Duration;
-/// let fleet = tomori_prometheus::Call::new()
+/// use tomori_prometheus::{Call, LabelFilter};
+///
+/// let fleet = Call::new()
 ///     .timeout(Duration::from_secs(60))
 ///     .background()
 ///     .bucket(Duration::from_secs(60));
+/// let chart = Call::new().labels(LabelFilter::only(["location"]));
 /// ```
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Call {
     timeout: Option<Duration>,
     background: bool,
     fresh: Option<Duration>,
     bucket: Option<Duration>,
+    labels: Option<LabelFilter>,
 }
 
 impl Call {
@@ -155,6 +159,14 @@ impl Call {
     /// Evaluate an instant query at the start of the `bucket`-long slot, counted from the epoch, that holds the time it is given ([`Timestamp::floor`]), so that every call within the slot asks the same, and with a client's cache, its answer fresh for the bucket unless [`Call::fresh`] says otherwise, is read once a slot by them all. A range query ignores it: give it a range whose start and end are steps from the epoch ([`Range::aligned`]) for a query cache in front of the source to help.
     pub fn bucket(mut self, bucket: Duration) -> Self {
         self.bucket = Some(bucket);
+        self
+    }
+
+    /// Keep the labels `filter` keeps of this call's answer, in place of the client's [`Builder::labels`], so that one client can serve consumers that need different labels, such as a chart grouped by a label the client's own filter leaves out. The filter replaces the client's rather than adding to it: list every label the call needs.
+    ///
+    /// **It can widen what the client keeps.** A call's filter may keep labels the client's filter removes, and [`LabelFilter::all`] keeps every label, which loosens the protection the client's filter gives: labels can carry URLs, user identifiers or secrets, so give a call only the labels it needs and may pass on, never a filter built from what a client or the agent asked for unchecked. With a client's cache, an answer is kept under the filter it was read with, so calls with different filters never share an answer, nor a request in flight, and each filter's answers count towards the cache's bounds.
+    pub fn labels(mut self, filter: LabelFilter) -> Self {
+        self.labels = Some(filter);
         self
     }
 }
@@ -235,7 +247,7 @@ impl Builder {
         self
     }
 
-    /// The labels kept of every answer; every label otherwise.
+    /// The labels kept of every answer, unless a call gives its own ([`Call::labels`]); every label otherwise.
     pub fn labels(mut self, filter: LabelFilter) -> Self {
         self.labels = filter;
         self
@@ -490,7 +502,7 @@ impl Client {
         call: Call,
     ) -> Result<Response<Data>, Error> {
         let at = call.bucket.map_or(at, |bucket| at.floor(bucket));
-        let fetch = || self.call("query", expression, &[("time", at.to_string())], call);
+        let fetch = || self.call("query", expression, &[("time", at.to_string())], &call);
         let Some(cache) = &self.shared.cache else {
             return fetch();
         };
@@ -498,10 +510,11 @@ impl Client {
         let key = Key::Instant {
             expression: expression.to_owned(),
             at: at.millis(),
+            labels: self.keyed_labels(&call),
         };
-        match cache.begin_instant(key, fresh, self.sending(call)) {
+        match cache.begin_instant(key, fresh, self.sending(&call)) {
             Begin::Hit(response) => Ok(response),
-            Begin::Follow(flight) => flight.wait(self.follow_timeout(call)),
+            Begin::Follow(flight) => flight.wait(self.follow_timeout(&call)),
             Begin::Lead(landing, ()) => {
                 let outcome = fetch();
                 cache.finish_instant(landing, fresh, &outcome);
@@ -520,7 +533,7 @@ impl Client {
     }
 
     /// How `call`'s request is sent, which decides whose identical request in flight it may wait for.
-    fn sending(&self, call: Call) -> cache::Sending {
+    fn sending(&self, call: &Call) -> cache::Sending {
         cache::Sending {
             background: call.background,
             timeout: self.follow_timeout(call),
@@ -528,8 +541,21 @@ impl Client {
     }
 
     /// A call's time-out, which bounds its wait for an identical call's request in flight as it would its own request.
-    fn follow_timeout(&self, call: Call) -> Duration {
+    fn follow_timeout(&self, call: &Call) -> Duration {
         call.timeout.unwrap_or(self.shared.timeout).min(MAX_TIMEOUT)
+    }
+
+    /// The labels kept of `call`'s answer: its own filter's, or the client's.
+    fn labels<'a>(&'a self, call: &'a Call) -> &'a LabelFilter {
+        call.labels.as_ref().unwrap_or(&self.shared.labels)
+    }
+
+    /// What `call`'s answers are kept under in the cache besides their expression: its own filter where it differs from the client's, `None` for the client's, so that a call without a filter of its own copies none.
+    fn keyed_labels(&self, call: &Call) -> Option<LabelFilter> {
+        call.labels
+            .as_ref()
+            .filter(|labels| **labels != self.shared.labels)
+            .cloned()
     }
 
     /// Evaluate `expression` at every step of `range`, a range query, whose series have at most [`MAX_POINTS`] points.
@@ -550,19 +576,19 @@ impl Client {
     ) -> Result<Response<Vec<Series>>, Error> {
         Self::check(&range)?;
         let Some(cache) = &self.shared.cache else {
-            return self.fetch_range(expression, range, call);
+            return self.fetch_range(expression, range, &call);
         };
         let fresh = call.fresh.unwrap_or(cache.config_fresh());
         match cache.begin_range(
-            Key::range(expression, &range),
+            Key::range(expression, &range, self.keyed_labels(&call)),
             &range,
             fresh,
-            self.sending(call),
+            self.sending(&call),
         ) {
             Begin::Hit(response) => Ok(response),
             Begin::Follow(flight) => {
                 flight
-                    .wait(self.follow_timeout(call))
+                    .wait(self.follow_timeout(&call))
                     .map(|response| match response.data {
                         Data::Matrix(series) => Response {
                             data: series,
@@ -574,7 +600,7 @@ impl Client {
             }
             Begin::Lead(landing, plan) => {
                 let tail = Range::new(Timestamp::from_millis(plan.from), range.end, range.step);
-                let fetched = self.fetch_range(expression, tail, call);
+                let fetched = self.fetch_range(expression, tail, &call);
                 cache.finish_range(landing, &range, plan, fetched)
             }
         }
@@ -582,9 +608,21 @@ impl Client {
 
     /// Keep `series`, the answer to a range query of `expression` over `range` that the application kept itself, such as across a restart, in the client's cache as though read, though never fresh: the next range of the same expression and step whose steps coincide with it, and whose start it holds, asks only for the steps after its last, with the cache's overlap. Its points outside `range` are left out, and any the cache has read itself are kept in place of those remembered for the same steps, being newer. Each series' points must be in order and on `range`'s steps, else it is refused as [`Error::Invalid`], keeping nothing. An expression evaluated at its range's start or end is never kept. Give only what this client answered, whole and not partial, so that it has the client's labels; a client without a cache keeps nothing.
     pub fn remember(&self, expression: &str, range: Range, series: &[Series]) -> Result<(), Error> {
+        self.remember_with(expression, range, series, Call::new())
+    }
+
+    /// Keep `series` in the client's cache as [`Client::remember`] does, for the range queries made with `call`'s label filter ([`Call::labels`]): give only what a call with the same filter answered. The call's other settings are not used.
+    pub fn remember_with(
+        &self,
+        expression: &str,
+        range: Range,
+        series: &[Series],
+        call: Call,
+    ) -> Result<(), Error> {
         Self::check(&range)?;
         if let Some(cache) = &self.shared.cache {
-            cache.remember(Key::range(expression, &range), &range, series)?;
+            let key = Key::range(expression, &range, self.keyed_labels(&call));
+            cache.remember(key, &range, series)?;
         }
         Ok(())
     }
@@ -608,7 +646,7 @@ impl Client {
         &self,
         expression: &str,
         range: Range,
-        call: Call,
+        call: &Call,
     ) -> Result<Response<Vec<Series>>, Error> {
         let response = self.call(
             "query_range",
@@ -637,7 +675,7 @@ impl Client {
         call: &str,
         expression: &str,
         parameters: &[(&str, String)],
-        options: Call,
+        options: &Call,
     ) -> Result<Response<Data>, Error> {
         let shared = &self.shared;
         let timeout = options.timeout.unwrap_or(shared.timeout).min(MAX_TIMEOUT);
@@ -704,7 +742,7 @@ impl Client {
                 token: token.as_ref().map(|(token, _)| token.expose()),
                 ..self.scrub()
             };
-            return data::read(answer, &shared.labels, &scrub);
+            return data::read(answer, self.labels(options), &scrub);
         }
     }
 

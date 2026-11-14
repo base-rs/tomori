@@ -527,6 +527,50 @@ fn labels_are_filtered_by_the_client() {
 }
 
 #[test]
+fn a_call_s_own_label_filter_replaces_the_client_s() {
+    let fake = Fake::start();
+    let client = fake
+        .client()
+        .labels(LabelFilter::only(["pod"]))
+        .build()
+        .unwrap();
+    fake.success(vector());
+    let call = Call::new().labels(LabelFilter::only(["url"]));
+    let samples = client
+        .query_with("up", at(), call.clone())
+        .unwrap()
+        .data
+        .into_vector()
+        .unwrap();
+    fake.next();
+    assert_eq!(
+        samples[0].metric,
+        Labels::from([("url".into(), "https://x/?key=k".into())])
+    );
+    assert_eq!(samples[1].metric, Labels::new());
+    // A range query keeps the call's labels too, and the client's filter is kept for calls without their own.
+    fake.success(json!({"resultType": "matrix", "result": [
+        {"metric": {"pod": "web-1", "url": "u"}, "values": [[1700000000.25, "1"]]},
+    ]}));
+    let range = Range::new(at(), at(), Duration::from_secs(1));
+    let series = client.query_range_with("up", range, call).unwrap().data;
+    fake.next();
+    assert_eq!(series[0].metric, Labels::from([("url".into(), "u".into())]));
+    fake.success(vector());
+    let samples = client
+        .query("up", at())
+        .unwrap()
+        .data
+        .into_vector()
+        .unwrap();
+    fake.next();
+    assert_eq!(
+        samples[0].metric,
+        Labels::from([("pod".into(), "web-1".into())])
+    );
+}
+
+#[test]
 fn a_large_answer_is_refused_and_the_next_call_succeeds() {
     let fake = Fake::start();
     let client = fake.client().max_response_bytes(100).build().unwrap();
@@ -1349,7 +1393,7 @@ fn background_requests_leave_a_slot_for_others() {
     let fake = Scripted::start(slow_and_fast(Duration::from_millis(800)));
     let client = Client::builder(&fake.url).concurrency(2).build().unwrap();
     let background = Call::new().background();
-    let slow = spawn_query(&client, "slow", background);
+    let slow = spawn_query(&client, "slow", background.clone());
     fake.wait_for(1);
     let short = Duration::from_millis(100);
     assert_eq!(
@@ -1398,7 +1442,7 @@ fn dropping_a_client_with_requests_in_flight_stops_it_promptly() {
     let client = builder.build().unwrap();
     let short = Call::new().timeout(Duration::from_millis(200));
     let requests: Vec<_> = (0..3)
-        .map(|_| spawn_query(&client, "slow", short))
+        .map(|_| spawn_query(&client, "slow", short.clone()))
         .collect();
     for request in requests {
         assert_eq!(
