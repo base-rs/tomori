@@ -170,8 +170,8 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                 frame = step.update(&senses, &mut conversation, &mut felt(), now, 1.0 / 72.0);
             }
             assert_eq!(frame.people.len(), others.len());
-            // What of each person the renderer can draw: every cube but those of no size, as the halo of eyes not
-            // warm.
+            // What of each person the renderer can draw: every cube but those of no size, as a falling cube's as it
+            // begins.
             let drawable: Vec<usize> = frame
                 .people
                 .iter()
@@ -267,7 +267,8 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
             eye,
             ahead,
         );
-        // The eyes' glow is warm and bright, where the rest of a person glows in their colour, dimmer at their outline.
+        // The eyes are a bright, warm off-white, where the rest of a person glows in their colour, dimmer at their
+        // outline.
         let glow = |image: &image::RgbaImage| {
             image
                 .pixels()

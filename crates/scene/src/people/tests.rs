@@ -47,21 +47,26 @@ fn index(part: swarm::Part) -> usize {
         .expect("a part of the swarm")
 }
 
-/// How warm the eyes of the first figure are, from how large the first cube of their halo is, among the cubes drawn at
-/// the detail it is drawn at.
+/// How warm the eyes of the first figure are, eased, from how much wider the first cube of their left eye is, among the
+/// cubes drawn at the detail it is drawn at.
 fn lit(people: &People) -> f32 {
     let cubes = &people.figures()[0].cubes;
     let detail = [swarm::Detail::Full, swarm::Detail::Fewer]
         .into_iter()
         .find(|detail| swarm::cubes(*detail) == cubes.len())
-        .expect("drawn at a detail with a halo");
+        .expect("drawn at a detail");
     let (at, mote) = swarm::MOTES
         .iter()
         .filter(|mote| mote.from <= detail)
         .enumerate()
-        .find(|(_, mote)| mote.part == swarm::Part::Halo(0))
-        .expect("a halo");
-    cubes[at].scale[0] / mote.size.x
+        .find(|(_, mote)| mote.part == swarm::Part::Eye(0))
+        .expect("an eye");
+    (cubes[at].scale[0] / mote.size.x - 1.0) / swarm::EYE_GROW
+}
+
+/// How far eye contact has eased in, `t` of the way.
+fn eased(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[test]
@@ -394,10 +399,10 @@ fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at
     // Twelve degrees off is not yet eye contact.
     assert_eq!(look(&mut people, 12.0, 30), 0.0);
     let cool = people.figures()[0].cubes.clone();
-    // Within ten it lights, over 0.2 s.
+    // Within ten it lights, over 0.2 s, eased.
     let lighting = look(&mut people, 8.0, 5);
     assert!(
-        (lighting - 5.0 * FRAME / GLOW_RISE).abs() < 1e-3,
+        (lighting - eased(5.0 * FRAME / GLOW_RISE)).abs() < 1e-3,
         "{lighting}"
     );
     assert!((look(&mut people, 8.0, 10) - 1.0).abs() < 1e-5);
@@ -405,7 +410,7 @@ fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at
     assert!((look(&mut people, 12.0, 30) - 1.0).abs() < 1e-5);
     let going = look(&mut people, 20.0, 9);
     assert!(
-        (going - (1.0 - 9.0 * FRAME / GLOW_FALL)).abs() < 1e-3,
+        (going - eased(1.0 - 9.0 * FRAME / GLOW_FALL)).abs() < 1e-3,
         "{going}"
     );
     assert_eq!(look(&mut people, 20.0, 30), 0.0);
@@ -420,14 +425,15 @@ fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at
         let wavering = look(&mut people, [9.5, 14.5][frame % 2], 1);
         assert!((wavering - 1.0).abs() < 1e-5, "{wavering}");
     }
-    // Warm, looking straight at this participant, both eyes glow alike, larger, with their halo, but not the head's core.
+    // Warm, looking straight at this participant, both eyes warm alike, a little brighter and larger, but not the head's
+    // core.
     look(&mut people, 0.0, 30);
     let cubes = &people.figures()[0].cubes;
     let (left, right) = (index(swarm::Part::Eye(0)), index(swarm::Part::Eye(1)));
     assert_eq!(cubes[left].color, cubes[right].color);
     let cool_eyes = swarm::eyes(swarm::COLOUR);
-    assert!(cubes[left].color[0] > cool_eyes[0] && cubes[left].color[2] < cool_eyes[2]);
-    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.25).abs() < 1e-4);
+    assert!(cubes[left].color[0] > cool_eyes[0] && cubes[left].color[1] > cool_eyes[1]);
+    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.0 - swarm::EYE_GROW).abs() < 1e-4);
     // The core keeps its colour, shimmering as it does, rather than warming.
     let core = cubes[0].color;
     assert!((core[2] / core[1] - swarm::COLOUR[2] / swarm::COLOUR[1]).abs() < 1e-4);
@@ -435,7 +441,7 @@ fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at
     // Seen from their left, the left eye is the warmer.
     look(&mut people, 8.0, 1);
     let cubes = &people.figures()[0].cubes;
-    assert!(cubes[left].color[2] < cubes[right].color[2]);
+    assert!(cubes[left].color[0] > cubes[right].color[0]);
     // Only this participant, whom they look at, sees it: another, beside them, does not.
     let mut beside = People::default();
     for _ in 0..30 {

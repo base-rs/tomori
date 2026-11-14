@@ -331,7 +331,7 @@ impl People {
                 shown: 1.0,
                 gazing: false,
                 glow: 0.0,
-                body: swarm::Body::new(&present, eyes),
+                body: swarm::Body::new(&present, eyes, source),
             });
             if known.reports != *reports {
                 known.reports = *reports;

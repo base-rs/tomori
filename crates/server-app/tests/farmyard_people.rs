@@ -4,7 +4,8 @@
 //! The others in a farmyard space, at dusk, as a participant sees them: two people at the Tomori wall, the agent at
 //! work above it, Bob looking this way as he speaks and Cleo pointing at a panel, each a swarm of cubes glowing in their
 //! colour against the evening, hazed as everything is, drawn by Tomori's own spectator's sceneries, as the app draws
-//! them. Set `TOMORI_FARMYARD_PEOPLE_PREVIEW` to a path to save `at-the-wall.png`, `near.png` and `head.png` after it.
+//! them. Set `TOMORI_FARMYARD_PEOPLE_PREVIEW` to a path to save `at-the-wall.png`, `near.png`, `head.png` and
+//! `head-away.png` after it.
 //! See `design/people.md`.
 use std::time::Instant;
 
@@ -156,13 +157,13 @@ fn differing(image: &image::RgbaImage, without: &image::RgbaImage) -> (f32, usiz
     (sum / count.max(1) as f32, count)
 }
 
-/// How many of `image`'s pixels are a bright, warm gold, as the eyes glow.
-fn gold(image: &image::RgbaImage) -> usize {
+/// How many of `image`'s pixels are a soft, warm off-white, as the eyes are.
+fn off_white(image: &image::RgbaImage) -> usize {
     image
         .pixels()
         .filter(|pixel| {
             let [r, g, b, _] = pixel.0.map(i32::from);
-            r > 230 && g > 200 && g - b > 60
+            g > 200 && r - g < 30 && b > 170
         })
         .count()
 }
@@ -318,7 +319,12 @@ fn the_others_glow_in_the_farmyard_at_dusk_their_eyes_warm_as_they_look_this_way
         let head_away = up_close(&bob_away);
         if let Some(prefix) = std::env::var_os("TOMORI_FARMYARD_PEOPLE_PREVIEW") {
             let prefix = prefix.to_string_lossy();
-            for (name, image) in [("at-the-wall", &wide), ("near", &near), ("head", &head)] {
+            for (name, image) in [
+                ("at-the-wall", &wide),
+                ("near", &near),
+                ("head", &head),
+                ("head-away", &head_away),
+            ] {
                 image
                     .save(format!("{prefix}{name}.png"))
                     .expect("the preview is saved");
@@ -329,13 +335,18 @@ fn the_others_glow_in_the_farmyard_at_dusk_their_eyes_warm_as_they_look_this_way
         let (dusk, _) = differing(&nobody, &image::RgbaImage::new(WIDTH, HEIGHT));
         assert!(count > 4_000, "{count}");
         assert!(lit > dusk * 3.0, "{lit} against {dusk}");
-        // Bob's eyes glow gold as he looks this way, and not as he looks at the wall.
-        assert!(gold(&wide) > gold(&away), "{} {}", gold(&wide), gold(&away));
+        // Bob's eyes, a soft off-white, show as he looks this way, and not as he looks at the wall.
         assert!(
-            gold(&head) > gold(&head_away) + 300,
+            off_white(&wide) > off_white(&away),
             "{} {}",
-            gold(&head),
-            gold(&head_away)
+            off_white(&wide),
+            off_white(&away)
+        );
+        assert!(
+            off_white(&head) > off_white(&head_away) + 600,
+            "{} {}",
+            off_white(&head),
+            off_white(&head_away)
         );
         assert!(pollster::block_on(scope.pop()).is_none());
     });
