@@ -6,13 +6,13 @@
 use tomori_protocol::{CODE_LINES, Code, Panel, TokenKind};
 
 use super::{
-    CODE_PADDING, CODE_PIXEL, CODE_ROOM, CONTINUED, CONTINUED_COLOR, FIT_CODE_ROWS, Fit, GUTTER,
-    about, palette, scroll_bar,
+    CODE_PADDING, CODE_PIXEL, CONTINUED, CONTINUED_COLOR, FIT_CODE_ROWS, Fit, GUTTER, about,
+    palette, scroll_bar,
 };
 use crate::{
     canvas::Canvas,
     shapes::Mark,
-    transcript::{BRIGHT, DIM, TEXT},
+    transcript::{BRIGHT, DIM},
     ui_text::{Row, Style, cut},
 };
 
@@ -25,7 +25,7 @@ pub(super) struct CodeRow {
     cells: Vec<crate::ui_text::Cell>,
 }
 
-/// A code panel's code laid out: every row its lines take, each wrapped as [`wrap_code`] wraps it at its columns of code,
+/// A code panel's code laid out: every row its lines take, each wrapped as [`wrap_code`](crate::ui_text::wrap_code) wraps it at its columns of code,
 /// coloured by kind as [`palette`] colours them, and how many of its block's lines it holds and was not sent, so that
 /// its face shows any part of it. Spans that are not valid for its body, as `valid_spans` checks them, are ignored, and
 /// the code laid out plain. Laid out once for each panel's code, rather than each frame, as a panel holds up to
@@ -51,7 +51,7 @@ impl CodeLayout {
         }
         let mut at = 0;
         let lines: Vec<&str> = panel.body.split('\n').take(CODE_LINES).collect();
-        let step = indent_step(&lines);
+        let step = crate::ui_text::indent_step(lines.iter().copied());
         let room = columns - GUTTER;
         let mut rows = Vec::new();
         for (number, line) in lines.iter().enumerate() {
@@ -65,7 +65,7 @@ impl CodeLayout {
                 }
             }
             at += line.chars().count() + 1;
-            let mut wrapped = wrap_code(&cut(&spans, usize::MAX), room, step);
+            let mut wrapped = crate::ui_text::wrap_code(&cut(&spans, usize::MAX), room, step, None);
             // A line cut by the server ends with a dim "…": past what the panel holds, or, from an older server, at 64
             // characters.
             if let Some(last) = wrapped
@@ -222,75 +222,4 @@ fn around(layout: &CodeLayout, scroll: usize, end: usize) -> String {
         (below, unsent) => parts.push(format!("↓ {} more", below + unsent)),
     }
     parts.join(" · ")
-}
-
-/// The indent step of code's `lines`: the least indentation any line has, of two to four spaces, or four where none is
-/// indented.
-pub(super) fn indent_step(lines: &[&str]) -> usize {
-    lines
-        .iter()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.chars().take_while(|c| *c == ' ').count())
-        .filter(|indent| *indent > 0)
-        .min()
-        .map_or(4, |step| step.clamp(2, 4))
-}
-
-/// Whether a line of code may break between `before` and `after`: after a space, or after punctuation that ends or
-/// opens a part of it, such as a comma, an operator or an opening bracket, unless a closing one follows.
-fn code_breaks(before: char, after: char) -> bool {
-    before == ' '
-        || (",;([{.:=&|+-*/<>!?".contains(before) && !")]}>,;.:".contains(after) && after != ' ')
-}
-
-/// One line of code's `cells`, as drawn, on rows of `room` cells: as it is where it fits, and otherwise broken where
-/// [`code_breaks`] allows, in the latter half of the row, or else at the row's end, never through a wide character.
-/// Its later rows hang one indent `step` under its own indentation, keeping at least [`CODE_ROOM`] cells for its code,
-/// and the spaces at each break are dropped. Each cell keeps its style, so that highlighting carries across a break.
-pub(super) fn wrap_code(
-    cells: &[crate::ui_text::Cell],
-    room: usize,
-    step: usize,
-) -> Vec<Vec<crate::ui_text::Cell>> {
-    use crate::ui_text::WIDE;
-    let indent = cells.iter().take_while(|(c, _)| *c == ' ').count();
-    let hanging = (indent + step).min(room.saturating_sub(CODE_ROOM));
-    let mut rows = Vec::new();
-    let mut rest = cells;
-    let mut width = room;
-    loop {
-        let prefix = if rows.is_empty() { 0 } else { hanging };
-        if rest.len() <= width {
-            rows.push(blank(prefix).chain(rest.iter().copied()).collect());
-            return rows;
-        }
-        // The last break the line allows in the latter half of the row, after its indentation, or else the row's end,
-        // before a wide character that would not fit.
-        let first = (width / 2).max(if rows.is_empty() { indent + 1 } else { 1 });
-        let at = (first..=width)
-            .rev()
-            .find(|&at| rest[at].0 != WIDE && code_breaks(rest[at - 1].0, rest[at].0))
-            .unwrap_or(if rest[width].0 == WIDE {
-                width - 1
-            } else {
-                width
-            });
-        let mut row: Vec<_> = blank(prefix).chain(rest[..at].iter().copied()).collect();
-        while row.len() > prefix && row.last().is_some_and(|(c, _)| *c == ' ') {
-            row.pop();
-        }
-        rows.push(row);
-        rest = &rest[at..];
-        let spaces = rest.iter().take_while(|(c, _)| *c == ' ').count();
-        rest = &rest[spaces..];
-        if rest.is_empty() {
-            return rows;
-        }
-        width = room - hanging;
-    }
-}
-
-/// `count` plain spaces.
-fn blank(count: usize) -> impl Iterator<Item = crate::ui_text::Cell> {
-    std::iter::repeat_n((' ', Style::plain(TEXT)), count)
 }
