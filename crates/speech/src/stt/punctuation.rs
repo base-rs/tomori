@@ -370,6 +370,7 @@ mod tests {
 
     #[test]
     fn a_failure_sends_the_transcript_as_recognized() {
+        log::set_max_level(log::LevelFilter::Trace);
         let (punctuator, calls) = fake(|_| Err(Error::Engine("no result".into())));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));
@@ -381,6 +382,7 @@ mod tests {
 
     #[test]
     fn changed_words_send_the_transcript_as_recognized() {
+        log::set_max_level(log::LevelFilter::Trace);
         let (punctuator, _) = fake(|_| Ok("Run the test.".into()));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));
@@ -389,6 +391,7 @@ mod tests {
 
     #[test]
     fn a_panic_disables_punctuation_but_not_recognition() {
+        log::set_max_level(log::LevelFilter::Trace);
         let (punctuator, calls) = fake(|_| panic!("the punctuator crashed"));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));

@@ -345,6 +345,7 @@ fn finishing_takes_priority_over_partials() {
 
 #[test]
 fn an_utterance_that_falls_behind_fails() {
+    log::set_max_level(log::LevelFilter::Trace);
     let gate = Gate::closed();
     let mut recognition = Recognition::spawn(Scripted::new(Script {
         gate: Some(Arc::clone(&gate)),
