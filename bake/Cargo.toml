@@ -9,6 +9,8 @@ bake = ">=0.20.2"
 base-project = ">=0.1.13"
 # 0.3.12 counts a `Release:` trailer in `releases:check` only on a commit that writes exactly the generated notes.
 bake-releases = ">=0.3.12"
+# 0.3.10 runs `test:coverage --nextest true`, which the Test workflow uses.
+bake-test = ">=0.3.10"
 
 [dev-dependencies]
 # Reads `cargo metadata`, for the dependency rule between the core, environments and apps.
