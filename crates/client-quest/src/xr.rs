@@ -31,10 +31,14 @@ use tomori_render::scenery::Sceneries;
 /// Run against the desktop's active OpenXR runtime, connected as `conversation` and `connection` describe.
 #[cfg(not(target_os = "android"))]
 pub fn run_desktop(
-    conversation: crate::conversation::Conversation,
+    mut conversation: crate::conversation::Conversation,
     connection: crate::connection::Connection,
     sceneries: &Sceneries,
 ) -> Result<()> {
+    // `TOMORI_PANEL_LOD`, as the headset's `tomori.panel_lod`: `off` draws every panel whole, to measure what it costs.
+    conversation.set_panel_lod(tomori_scene::projection::PanelLod::parse(
+        std::env::var("TOMORI_PANEL_LOD").ok().as_deref(),
+    ));
     run(
         &(),
         crate::graphics::SAMPLES,
@@ -257,6 +261,9 @@ pub fn run(
     let mut frame_log = Cadence::new(log_cadence::FRAME_SUMMARY);
     // What each frame costs this thread, summarized beside the frame log; see `design/rendering.md`.
     let mut frame_times = frame_timing::FrameTimes::default();
+    // Whether panels too small to read are drawn as their titles, said as the headset starts and in each summary, so that frames with it and without are told apart from the log alone.
+    log::info!("{}", conversation.panel_lod().describe());
+    frame_times.set_panel_lod(conversation.panel_lod());
     let mut refreshes = xr_types::Refreshes::default();
     // The last frame's rendering, which may still be on the GPU while this frame's work is done on the CPU.
     let mut rendering: Option<wgpu::SubmissionIndex> = None;
@@ -447,6 +454,8 @@ pub fn run(
                 &panels.list(scene_to_space),
             )
         });
+        let (drawn_panels, culled_panels) = renderer.panels_seen();
+        timer.panels(drawn_panels, culled_panels);
         // The frame's budget is the display's period for the CPU's work and the GPU's each, rather than for both one after the other: the last frame's rendering has had all of this frame's CPU work, its eyes' draws encoded too, to finish in, and is waited for only to submit this frame's, so that at most one frame is on the GPU at once and the GPU waits for no more than the submission. A frame later than the display's refresh is shown again turned but not moved, so near things shake as the head moves; see `design/rendering.md`.
         if let Some(previous) = rendering.take() {
             timer

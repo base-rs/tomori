@@ -261,6 +261,8 @@ pub struct Renderer {
     scenery_roots: Vec<tomori_world::RootId>,
     /// What the last frame drew in each eye, and how much it culled.
     tally: tomori_assets::bounds::Tally,
+    /// The panels' faces the last frame drew, and culled.
+    panels_seen: (usize, usize),
     /// The cubes drawn this frame, of [`Self::scene`], those the eyes may see, and whether the cubes' buffer holds only
     /// those rather than the whole scene, as `update` and the rest write it.
     shown: Vec<Instance>,
@@ -514,6 +516,7 @@ impl Renderer {
             submitted,
             scenery_roots,
             tally: Default::default(),
+            panels_seen: (0, 0),
             shown: Vec::with_capacity(MAX_INSTANCES),
             cubes_culled: false,
             // Marks within a pass mean little on the headset's tiled GPU, which draws a pass's tiles one by one.
@@ -537,6 +540,12 @@ impl Renderer {
     /// the panels.
     pub fn tally(&self) -> tomori_assets::bounds::Tally {
         self.tally
+    }
+
+    /// How many projected panels' faces the last frame drew, and how many it culled, as neither eye could see them: of
+    /// the panels alone, not the walls' boards, labels, cards and other surfaces drawn with them.
+    pub fn panels_seen(&self) -> (usize, usize) {
+        self.panels_seen
     }
 
     /// A line summarizing what the GPU took for the frames since the last summary, and what they drew, for the frame log
@@ -1328,7 +1337,20 @@ impl Renderer {
             triangles: shown.len() * self.vertex_count as usize / 3,
         };
         // The panels, each a draw of its face, and its backing's into depth.
-        for ((panel, _), seen) in panels.iter().zip(world.seen(submitted.panels)) {
+        let seen = world.seen(submitted.panels);
+        // Of them, the projected panels' faces, apart from walls' boards, labels, cards and the rest, for the frame log.
+        self.panels_seen = panels
+            .iter()
+            .zip(seen)
+            .filter(|((panel, _), _)| panel.panel_face())
+            .fold((0, 0), |(drawn, culled), (_, seen)| {
+                if *seen {
+                    (drawn + 1, culled)
+                } else {
+                    (drawn, culled + 1)
+                }
+            });
+        for ((panel, _), seen) in panels.iter().zip(seen) {
             tally += if *seen {
                 tomori_assets::bounds::Tally {
                     drawn: 1,
@@ -3966,22 +3988,39 @@ mod tests {
             let projection = glam::camera::rh::proj::directx::perspective(1.2, 1.0, 0.05, 50.0);
             let matrices = [-0.032, 0.032]
                 .map(|x| projection * Mat4::from_translation(glam::Vec3::new(-x, -1.6, 0.0)));
-            // A panel before the eyes, and one behind them.
+            // A panel before the eyes, and one behind them, and behind them too another surface, such as a wall's board,
+            // the same but for what it is drawn as.
             let mut canvas = crate::ui_panel::Canvas::new(20, 0.004);
             canvas.rows = vec![crate::ui_text::Row::text(
                 "Seen",
                 crate::ui_text::Style::plain([1.0; 4]),
                 20,
             )];
+            let mut board = renderer.panel(&device, 6_000);
+            board.set(&queue, &canvas);
+            canvas.kind = tomori_scene::canvas::Kind::PanelFace;
             let mut ahead = renderer.panel(&device, 6_000);
             ahead.set(&queue, &canvas);
             let mut behind = renderer.panel(&device, 6_000);
             behind.set(&queue, &canvas);
             assert!(!ahead.bounds().is_empty() && ahead.triangles() > 0);
+            assert!(ahead.panel_face() && !board.panel_face());
+            // Shown the same canvas as a panel's face, a surface is counted as one.
+            let mut surface = renderer.panel(&device, 6_000);
+            surface.set(&queue, &crate::ui_panel::Canvas::new(20, 0.004));
+            assert!(!surface.panel_face());
+            let mut retold = crate::ui_panel::Canvas::new(20, 0.004);
+            retold.kind = tomori_scene::canvas::Kind::PanelFace;
+            surface.set(&queue, &retold);
+            assert!(surface.panel_face());
             let panels = [
                 (
                     &behind,
                     Mat4::from_translation(glam::Vec3::new(0.0, 1.6, 2.0)),
+                ),
+                (
+                    &board,
+                    Mat4::from_translation(glam::Vec3::new(0.5, 1.6, 2.0)),
                 ),
                 (
                     &ahead,
@@ -4003,20 +4042,24 @@ mod tests {
             };
             let culled = draw(&mut renderer);
             let tally = renderer.tally();
-            // The ring's cubes and the panel behind are culled, and the rest drawn.
+            // The ring's cubes and the panel and the surface behind are culled, and the rest drawn.
             let cubes = renderer.scene.len();
             assert!(renderer.shown.len() <= cubes - LANDING_CUBES);
-            assert_eq!(tally.culled, cubes - renderer.shown.len() + 1, "{tally:?}");
+            assert_eq!(tally.culled, cubes - renderer.shown.len() + 2, "{tally:?}");
             assert_eq!(tally.drawn, renderer.shown.len() + 1);
             assert_eq!(tally.draws, 2);
             assert_eq!(
                 tally.triangles,
                 renderer.shown.len() * 12 + ahead.triangles()
             );
+            // Of the panels' faces alone, the one ahead drawn and the one behind culled, as the frame log counts them, the
+            // surface behind not among them.
+            assert_eq!(renderer.panels_seen(), (1, 1));
             // Drawn without culling, both eyes look the same, and nothing is culled.
             renderer.set_culling(false);
             let whole = draw(&mut renderer);
             assert_eq!(renderer.tally().culled, 0);
+            assert_eq!(renderer.panels_seen(), (2, 0));
             assert_eq!(renderer.shown.len(), cubes);
             assert!(whole == culled, "culling changed what the eyes see");
             renderer.set_culling(true);

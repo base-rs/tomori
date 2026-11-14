@@ -8,7 +8,8 @@
 //! their faces to the GPU, the renderer's encoding of both eyes' draws and their submission, without waiting for the GPU
 //! to draw them, and then that wait, on whatever adapter the render tests use (set `VK_ICD_FILENAMES` to lavapipe's to
 //! use it), with the vertices of the faces handed over. Its projector is paced, as the frame step's is, so that a panel
-//! in a slot too far away to read is drawn as its title alone. See `design/rendering.md`.
+//! in a slot too far away to read is drawn as its title alone, unless `TOMORI_PANEL_LOD=off` says to draw every panel
+//! whole, as the headset's `tomori.panel_lod` does. See `design/rendering.md`.
 //!
 //! ```text
 //! cargo run --release -p tomori-render --features test-gpu --example panel_frames [frames] [panels] [walls]
@@ -28,7 +29,7 @@ use tomori_render::{graphics::Renderer, scene_graphics::Panels};
 use tomori_scene::{
     arrival::HOME,
     pointing::Ray,
-    projection::{Controls, Input, Projector, editing::Rights},
+    projection::{Controls, Input, PanelLod, Projector, editing::Rights},
 };
 
 const TEXT: &str = "## Release checklist\n\nThe **workspace** builds on every platform, and the headset's APK is signed with the release key. Each crate's version moves together, with one `releases.md` and one tag.\n\n- Bump the version.\n- Update `releases.md`.\n- Tag the release, and push the tag.\n- Attach the APK to the GitHub Release.\n\n> Every step is reviewed before it is merged, and the headset is checked by hand.\n\nThe last paragraph wraps across several rows so that the panel has more than it shows at once, and scrolls: it goes on, and on, about what the release does and why, until it is longer than a slot.";
@@ -174,6 +175,8 @@ fn main() {
     let mut projection = projection(walls);
     projection.panels.truncate(shown);
     let mut projector = Projector::paced();
+    let lod = PanelLod::parse(std::env::var("TOMORI_PANEL_LOD").ok().as_deref());
+    projector.set_lod(lod);
     let start = Instant::now();
     let (mut scene, mut upload, mut render) = (Vec::new(), Vec::new(), Vec::new());
     let (mut encode, mut submit, mut gpu_wait) = (Vec::new(), Vec::new(), Vec::new());
@@ -263,7 +266,7 @@ fn main() {
     let total = summary(&mut total);
     let count = projection.panels.len().max(1) as f64;
     println!(
-        "{} panels on {} walls, {sheets} sheets of {vertices} vertices, {frames} frames: projector {:.3} ms (p95 {:.3}), uploads {:.3} ms (p95 {:.3}), together {:.3} ms (p95 {:.3}), {:.4} ms a panel; drawing both eyes {:.3} ms (p95 {:.3}), {:.4} ms a sheet, of which encoding {:.3} ms (p95 {:.3}) and submitting {:.3} ms (p95 {:.3}); waiting for the GPU {:.3} ms (p95 {:.3})",
+        "{} panels on {} walls, panel LOD {lod}, {sheets} sheets of {vertices} vertices, {frames} frames: projector {:.3} ms (p95 {:.3}), uploads {:.3} ms (p95 {:.3}), together {:.3} ms (p95 {:.3}), {:.4} ms a panel; drawing both eyes {:.3} ms (p95 {:.3}), {:.4} ms a sheet, of which encoding {:.3} ms (p95 {:.3}) and submitting {:.3} ms (p95 {:.3}); waiting for the GPU {:.3} ms (p95 {:.3})",
         projection.panels.len(),
         projection.walls.len(),
         scene.0,

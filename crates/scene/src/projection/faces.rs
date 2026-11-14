@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     board,
-    canvas::Canvas,
+    canvas::{Canvas, Kind},
     chart::{PlotArea, readout::Readout},
     transcript::{BRIGHT, Line},
     ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style},
@@ -57,13 +57,15 @@ pub(super) const LAYOUTS: usize = 2;
 pub(super) const ARRIVALS: usize = 8;
 
 /// The angle, in radians, a row of a panel's text subtends from the viewer below which a paced projector draws its face
-/// in a wall's slot far: its title alone, [`FAR_SCALE`] times as large, rather than text that could not be read there,
-/// and lays nothing of it out. A quarter of a degree, about six of a Quest 3's pixels for a row of twelve font pixels,
-/// so that a standard slot's text is drawn far beyond about 5 m and a wall of twice the scale beyond about 10 m. What
-/// the panel shows changing while it is far draws nothing until it comes near, so that a console of 128 panels, most
-/// of them across the room, costs the frame what those near enough to read cost, and the title of each of the others.
-/// See `design/rendering.md`.
-pub(super) const FAR: f32 = 0.25 * std::f32::consts::PI / 180.0;
+/// in a wall's slot far: its title alone, [`FAR_SCALE`] times as large, rather than text that could not be resolved
+/// there, and lays nothing of it out. 0.09°, about 2.2 of a Quest 3's pixels at the centre of its lenses, about 25 to
+/// a degree, 0.04° each, and fewer away from it, for a row of twelve font pixels, so that its glyphs are a blur of a
+/// pixel or two whichever is drawn; a standard slot's
+/// text is drawn far beyond about 14.5 m, a wall's of 1.22 times the scale beyond about 17.7 m and of 2.26 times
+/// beyond about 33 m, and a code panel's, of a smaller font pixel, beyond about 10 m. What the panel shows changing
+/// while it is far draws nothing until it comes near. Until November 2026 it was a quarter of a degree, beyond about
+/// 5.2 m for a standard slot, which drew text still read at an ordinary distance as titles. See `design/rendering.md`.
+pub(super) const FAR: f32 = 0.09 * std::f32::consts::PI / 180.0;
 
 /// The angle above which a face drawn far is drawn whole again: a fifth more than [`FAR`], so that a head swaying at
 /// the threshold does not switch it back and forth.
@@ -420,6 +422,7 @@ fn far(title: &str, (width, height): (f32, f32), border: [f32; 4]) -> Canvas {
         .round()
         .max(0.0) as usize;
     let mut canvas = Canvas::new(columns, pixel);
+    canvas.kind = Kind::PanelFace;
     canvas.padding = (MARGIN.0, vertical);
     canvas.background = [0.02, 0.035, 0.06, 0.94];
     canvas.border = Some(border);
@@ -535,7 +538,8 @@ impl Layout {
                 }
             }
             _ => {
-                let (canvas, plot) = self.draw(panel, view, border);
+                let (mut canvas, plot) = self.draw(panel, view, border);
+                canvas.kind = Kind::PanelFace;
                 Face {
                     view,
                     border,

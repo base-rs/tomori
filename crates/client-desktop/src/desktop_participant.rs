@@ -17,6 +17,7 @@ use anyhow::Result;
 use glam::{Mat4, Vec2};
 use std::time::{Duration, Instant};
 use tomori_render::scenery::Sceneries;
+use tomori_scene::projection::PanelLod;
 use winit::{dpi::LogicalSize, event::MouseButton, keyboard::KeyCode};
 
 /// What each key does, shown at startup and by `--help`; the keys stand for the headset's controls in `design/interaction.md`.
@@ -105,6 +106,10 @@ impl Participant {
         conversation.set_worker_placements(sceneries.worker_placements());
         conversation.set_avatars(sceneries.avatars());
         conversation.set_avatar_failures(sceneries.avatar_failures());
+        // `TOMORI_PANEL_LOD`, as the headset's `tomori.panel_lod`: `off` draws every panel whole, to measure what it costs.
+        conversation.set_panel_lod(PanelLod::parse(
+            std::env::var("TOMORI_PANEL_LOD").ok().as_deref(),
+        ));
         let samples = gpu.samples(gpu.format);
         let renderer = Renderer::with_sceneries(
             &gpu.device,
@@ -123,6 +128,9 @@ impl Participant {
             gpu.height
         );
         log::info!("{CONTROLS}");
+        log::info!("{}", conversation.panel_lod().describe());
+        let mut frame_times = FrameTimes::default();
+        frame_times.set_panel_lod(conversation.panel_lod());
         let desktop = Desktop::new(&mut conversation, Instant::now());
         Self {
             conversation,
@@ -136,7 +144,7 @@ impl Participant {
             occluded: false,
             desktop,
             first_frame: true,
-            frame_times: FrameTimes::default(),
+            frame_times,
             frame_log: Cadence::new(log_cadence::FRAME_SUMMARY),
         }
     }
@@ -249,6 +257,8 @@ impl Participant {
                 &self.panels.list(scene_to_space),
             )
         });
+        let (drawn, culled) = self.renderer.panels_seen();
+        timer.panels(drawn, culled);
         surface.present();
         if self.first_frame {
             log::info!("Presented first desktop frame");

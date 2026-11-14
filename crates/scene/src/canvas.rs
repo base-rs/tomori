@@ -53,6 +53,22 @@ impl Label {
     }
 }
 
+/// What a canvas is drawn as: a projected panel's face, drawn whole or as its title, or any other surface, a wall's
+/// board, a label, a card, the pill or the wrist's transcript among them, so that the frame log counts the panels apart.
+/// It says nothing of what the canvas shows, so canvases of either are equal where they show the same.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Kind {
+    #[default]
+    Surface,
+    PanelFace,
+}
+
+impl PartialEq for Kind {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 /// What a panel shows. Non-exhaustive, so that it can gain a field without breaking its makers: make one with
 /// [`Canvas::new`].
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +92,8 @@ pub struct Canvas {
     pub image: Option<CanvasImage>,
     /// Text placed anywhere, drawn with the rows' text, over the shapes.
     pub labels: Vec<Label>,
+    /// What it is drawn as, which changes nothing it shows.
+    pub kind: Kind,
 }
 
 impl Canvas {
@@ -90,6 +108,7 @@ impl Canvas {
             shapes: Vec::new(),
             image: None,
             labels: Vec::new(),
+            kind: Kind::Surface,
         }
     }
 
@@ -150,6 +169,7 @@ impl Canvas {
             shapes,
             image,
             labels,
+            kind: _,
         } = self;
         border.is_some()
             && other.border.is_some()

@@ -209,7 +209,9 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
         Ok(android) => {
             let samples = android_samples(&android);
             let foveation = android_foveation(&android);
+            let panel_lod = android_panel_lod(&android);
             let (mut conversation, connection) = android_connection(android);
+            conversation.set_panel_lod(panel_lod);
             conversation.set_drawable(sceneries.environments());
             conversation.set_over_grid(sceneries.over_grid());
             conversation.set_locomotion(sceneries.locomotion());
@@ -260,6 +262,18 @@ fn android_foveation(android: &android::Android) -> foveation::Request {
             None
         });
     foveation::Request::parse(value.as_deref())
+}
+
+/// Whether panels too small to read are drawn as their titles: the intent extra `tomori.panel_lod`, as with `am start -e tomori.panel_lod off` to draw every panel whole, and `angle` when absent; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_panel_lod(android: &android::Android) -> tomori_scene::projection::PanelLod {
+    let value = android
+        .intent_extra("tomori.panel_lod")
+        .unwrap_or_else(|error| {
+            log::warn!("Cannot read the tomori.panel_lod intent extra: {error:#}");
+            None
+        });
+    tomori_scene::projection::PanelLod::parse(value.as_deref())
 }
 
 /// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
