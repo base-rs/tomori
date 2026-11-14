@@ -396,9 +396,9 @@ dependencies = [
 
 [[package]]
 name = "bake-releases"
-version = "0.3.11"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9995082bef1cf14572bffba6d76b913b8cbfe526985a6958793d289728f2892"
+checksum = "d77ed3e945747af8af100ffb7e65ba985b912dfa5f110347d70392634a5a90f7"
 dependencies = [
  "bake",
  "base-markdown",
@@ -528,9 +528,9 @@ dependencies = [
 
 [[package]]
 name = "base-project"
-version = "0.1.12"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d9030dfa8bb7bf86d73e45dcc5a2426c4f88051334c5cb46bab7f457aae8090"
+checksum = "246663d0f2ab448944b9e260b9aa0a7a14f150437eeafbd34f12d7aff3ec5cf7"
 dependencies = [
  "bake",
  "bake-agent-context",
