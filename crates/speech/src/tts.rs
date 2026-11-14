@@ -285,6 +285,7 @@ mod tests {
 
     #[test]
     fn a_failed_segment_is_reported_and_later_segments_continue() {
+        let said = crate::test_log::watch("cannot say that");
         let (mut speech, receiver, _) = spawn(Duration::ZERO);
         speech.speak("please fail now");
         speech.speak("recovered");
@@ -295,6 +296,12 @@ mod tests {
             error: Error::Engine("cannot say that".into())
         }));
         assert!(events.contains(&SpeechEvent::Finished { segment: 2 }));
+        assert!(
+            said.records()
+                .iter()
+                .any(|(level, line)| *level == log::Level::Warn
+                    && line.starts_with("Speech synthesis of segment 1 failed: "))
+        );
     }
 
     #[test]

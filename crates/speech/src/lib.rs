@@ -12,6 +12,8 @@ mod error;
 pub mod speakable;
 mod stop;
 pub mod stt;
+#[cfg(test)]
+mod test_log;
 #[cfg(any(test, feature = "test-models"))]
 pub mod test_models;
 pub mod tts;

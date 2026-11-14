@@ -29,6 +29,8 @@ mod resolve;
 mod session;
 mod system;
 #[cfg(test)]
+mod test_log;
+#[cfg(test)]
 mod test_support;
 
 pub use backoff::Backoff;

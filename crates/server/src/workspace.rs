@@ -530,10 +530,15 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_refused_like_a_forbidden_one() {
+        crate::test_log::record();
         let scratch = Scratch::new("missing");
         let root = scratch.directory("root");
         std::fs::write(root.join("file"), "").unwrap();
         let roots = WorkspaceRoots::new([&root]).unwrap();
+        let said = crate::test_log::watch(format!(
+            "Refused directory {:?}: not a directory.",
+            format!("{}/file", text(&root))
+        ));
         for directory in [
             format!("{}/missing", text(&root)),
             format!("{}/file", text(&root)),
@@ -544,6 +549,7 @@ mod tests {
             assert_eq!(roots.resolve(&directory), Err(Unavailable), "{directory}");
         }
         assert_eq!(Unavailable.to_string(), DIRECTORY_UNAVAILABLE);
+        assert!(said.seen());
     }
 
     #[test]
@@ -618,9 +624,14 @@ mod tests {
 
     #[test]
     fn a_check_whose_thread_cannot_start_refuses_the_directory_and_gives_back_its_place() {
+        crate::test_log::record();
         let scratch = Scratch::new("unstarted");
         let root = scratch.directory("root");
         let roots = WorkspaceRoots::new([&root]).unwrap();
+        let said = crate::test_log::watch(format!(
+            "Refused directory {:?}: could not start a check: ",
+            text(&root)
+        ));
         let resolving = Arc::new(Resolving::default());
         crate::system::refuse("tomori-directory");
         assert_eq!(
@@ -636,6 +647,7 @@ mod tests {
             resolved.recv_blocking().unwrap(),
             Ok(text(&root).to_owned())
         );
+        assert!(said.seen());
     }
 
     #[test]
@@ -696,6 +708,7 @@ mod tests {
         ignore = "macOS's file systems refuse a name that is not UTF-8, so the directory cannot be made"
     )]
     fn a_directory_whose_canonical_path_is_not_utf_8_is_refused() {
+        crate::test_log::record();
         use std::os::unix::ffi::OsStrExt;
         let scratch = Scratch::new("utf-8");
         let named = scratch.0.join(std::ffi::OsStr::from_bytes(b"\xff"));
@@ -703,11 +716,14 @@ mod tests {
         std::os::unix::fs::symlink(&named, scratch.0.join("link")).unwrap();
         let roots = WorkspaceRoots::new([&scratch.0]).unwrap();
         let link = scratch.0.join("link");
+        let said = crate::test_log::watch(format!("Refused directory {:?}: ", text(&link)));
         assert_eq!(roots.resolve_str(text(&link)), Err(Unavailable));
+        assert!(said.seen());
     }
 
     #[test]
     fn checks_beyond_the_limit_are_refused_and_a_dot_is_no_component() {
+        crate::test_log::record();
         let scratch = Scratch::new("limit");
         let roots = WorkspaceRoots::new([&scratch.0]).unwrap();
         let busy = Arc::new(Resolving(AtomicUsize::new(MAX_RESOLVING)));

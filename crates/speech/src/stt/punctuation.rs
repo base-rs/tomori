@@ -370,6 +370,7 @@ mod tests {
 
     #[test]
     fn a_failure_sends_the_transcript_as_recognized() {
+        let said = crate::test_log::watch("no result), so the transcript is sent as recognized.");
         let (punctuator, calls) = fake(|_| Err(Error::Engine("no result".into())));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));
@@ -377,18 +378,27 @@ mod tests {
         // A failure affects only its own transcript.
         assert_eq!(transcribe(&mut recognition), "run the tests");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Each failure is said, as a warning.
+        let records = said.records();
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[0].0, log::Level::Warn);
     }
 
     #[test]
     fn changed_words_send_the_transcript_as_recognized() {
+        let said = crate::test_log::watch("Transcript punctuation changed the words (3 to 3)");
         let (punctuator, _) = fake(|_| Ok("Run the test.".into()));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));
         assert_eq!(transcribe(&mut recognition), "run the tests");
+        assert!(said.seen());
     }
 
     #[test]
     fn a_panic_disables_punctuation_but_not_recognition() {
+        let said = crate::test_log::watch(
+            "Transcript punctuation stopped after a panic (the punctuator crashed)",
+        );
         let (punctuator, calls) = fake(|_| panic!("the punctuator crashed"));
         let mut recognition =
             Recognition::spawn(Punctuated::new(Fixed("run the tests"), punctuator));
@@ -396,6 +406,10 @@ mod tests {
         // Later transcripts are sent as recognized without reaching the punctuator.
         assert_eq!(transcribe(&mut recognition), "run the tests");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Said once, as an error.
+        let records = said.records();
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].0, log::Level::Error);
     }
 
     /// A punctuator that changes nothing and records the thread it is dropped on.
@@ -521,6 +535,7 @@ mod tests {
 
     #[test]
     fn a_recognizer_that_cannot_open_or_finish_fails_the_utterance_without_punctuating() {
+        log::set_max_level(log::LevelFilter::Trace);
         for recognizer in [
             Box::new(Refusing) as Box<dyn StreamingRecognizer>,
             Box::new(Unfinished),

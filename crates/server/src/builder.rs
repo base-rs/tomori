@@ -432,6 +432,9 @@ mod tests {
 
     #[test]
     fn the_help_names_the_program_it_is_given() {
+        let said = crate::test_log::watch(
+            "The program name \"observe server\" is ignored, since it holds whitespace.",
+        );
         // Whether or not the server is built with speech, whose options the synopsis starts with.
         let second = |usage: &str| usage.lines().nth(1).unwrap().to_owned();
         let usage = Server::builder().usage();
@@ -493,6 +496,7 @@ mod tests {
                 .program(),
             "observe-server"
         );
+        assert!(said.seen());
     }
 
     #[test]
@@ -755,6 +759,7 @@ mod tests {
 
     #[test]
     fn engines_that_do_not_stop_end_the_process_at_once_with_its_status() {
+        crate::test_log::record();
         let exited = RefCell::new(Vec::new());
         let exit = |code| exited.borrow_mut().push(code);
         assert_eq!(

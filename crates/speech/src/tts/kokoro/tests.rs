@@ -315,6 +315,8 @@ fn the_model_is_given_the_phonemes_it_knows() {
 
 #[test]
 fn a_model_that_panics_disables_synthesis() {
+    let said =
+        crate::test_log::watch("Kokoro speech synthesis stopped after a panic (the model broke)");
     let mut synthesizer = faked(|_| panic!("the model broke"));
     let Err(Error::Stopped(_)) = spoken(&mut synthesizer, "Hello.") else {
         unreachable!("a panic stops synthesis");
@@ -325,6 +327,10 @@ fn a_model_that_panics_disables_synthesis() {
     let Err(Error::Stopped(_)) = spoken(&mut synthesizer, "Hello.") else {
         unreachable!("synthesis stays stopped");
     };
+    // Said once, as an error.
+    let records = said.records();
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].0, log::Level::Error);
 }
 
 #[test]

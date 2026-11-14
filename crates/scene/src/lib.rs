@@ -62,6 +62,8 @@ pub mod spatial_audio;
 mod speakers;
 pub mod swarm;
 mod table;
+#[cfg(test)]
+mod test_log;
 /// Devices and connections for tests, shared with the other client crates' tests through the `testing` feature.
 #[cfg(all(any(test, feature = "testing"), not(target_os = "android")))]
 pub mod test_support;

@@ -337,6 +337,7 @@ fn an_utterance_longer_than_the_limit_fails_as_it_passes_it() {
 
 #[test]
 fn a_failed_segment_fails_the_utterance() {
+    let said = crate::test_log::watch("the decoder broke");
     let (recorder, calls) = Recorder::new(|index, _| match index {
         1 => Err(Error::Engine("the decoder broke".to_owned())),
         _ => Ok("words".to_owned()),
@@ -355,6 +356,12 @@ fn a_failed_segment_fails_the_utterance() {
     assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
     // The rest of the utterance is not decoded.
     assert_eq!(calls.lock().unwrap().len(), 2);
+    assert!(
+        said.records()
+            .iter()
+            .any(|(level, line)| *level == log::Level::Warn
+                && line.starts_with("Transcription of utterance "))
+    );
 }
 
 #[test]
