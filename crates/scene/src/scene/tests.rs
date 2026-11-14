@@ -1827,6 +1827,25 @@ fn code_ahead(conversation: &mut Conversation, lines: u32) {
     );
 }
 
+/// The frame step's projector draws panels too small to read as their titles as the client's setting says, from the
+/// next frame.
+#[test]
+fn the_projector_follows_the_client_s_panel_level_of_detail() {
+    use crate::projection::PanelLod;
+    let (mut conversation, mut step, senses, _) = lit(crate::locomotion::Locomotion::None);
+    assert_eq!(conversation.panel_lod(), PanelLod::Angle);
+    assert_eq!(step.projector.lod(), PanelLod::Angle);
+    conversation.set_panel_lod(PanelLod::Off);
+    step.update(
+        &senses,
+        &mut conversation,
+        &mut felt(),
+        Instant::now(),
+        FRAME,
+    );
+    assert_eq!(step.projector.lod(), PanelLod::Off);
+}
+
 #[test]
 fn pointing_at_a_panel_the_sticks_are_tomori_s_and_never_the_environment_s() {
     use crate::locomotion::Locomotion;

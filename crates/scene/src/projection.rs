@@ -1509,6 +1509,8 @@ pub struct Projector {
     /// Whether it lays out at most [`faces::LAYOUTS`] panels a frame for what the server changed, as the frame step's
     /// does, or every one in the frame it changes, as by default. See [`Projector::paced`].
     paced: bool,
+    /// Whether a paced projector draws a panel whose text is too small to resolve as its title alone. See [`PanelLod`].
+    lod: PanelLod,
     /// Where among the projection's panels the next frame begins following them, after the last panel this one laid
     /// out in its turn, so that where more panels changed than a frame lays out, each is laid out in turn.
     turn: usize,
@@ -1547,6 +1549,79 @@ pub enum Part {
 
 /// A panel as it stands this frame: where, how its face is sized, and how large it is.
 type Standing<'a> = (&'a Panel, Mat4, Fit);
+
+/// Whether a paced projector draws a panel in a wall's slot as its title alone where a row of its text subtends too
+/// small an angle from the eye to be resolved ([`PanelLod::Angle`], the default), or every panel whole however far
+/// ([`PanelLod::Off`]), as a client's setting, the headset's `tomori.panel_lod` intent extra or `TOMORI_PANEL_LOD`,
+/// chooses, so that a frame's cost can be measured with it and without. See `design/rendering.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelLod {
+    Off,
+    #[default]
+    Angle,
+}
+
+impl PanelLod {
+    /// What `value` asks for: `off`, `none`, `0` or `false` for [`PanelLod::Off`], and [`PanelLod::Angle`] for `angle`,
+    /// `on`, when absent, and, with a warning, when not understood.
+    ///
+    /// ```
+    /// use tomori_scene::projection::PanelLod;
+    ///
+    /// assert_eq!(PanelLod::parse(Some("off")), PanelLod::Off);
+    /// assert_eq!(PanelLod::parse(Some("angle")), PanelLod::Angle);
+    /// assert_eq!(PanelLod::parse(None), PanelLod::Angle);
+    /// ```
+    pub fn parse(value: Option<&str>) -> Self {
+        match value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            None | Some("" | "angle" | "on" | "1" | "true") => Self::Angle,
+            Some("off" | "none" | "0" | "false") => Self::Off,
+            Some(other) => {
+                log::warn!("Panel level of detail {other:?} is not off or angle; drawing by angle");
+                Self::Angle
+            }
+        }
+    }
+
+    /// How it is named in the log: `off` or `angle`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Angle => "angle",
+        }
+    }
+
+    /// What it does, as a client logs it as it starts.
+    ///
+    /// ```
+    /// use tomori_scene::projection::PanelLod;
+    ///
+    /// assert_eq!(PanelLod::Off.describe(), "Panel level of detail: off, every panel drawn whole");
+    /// assert_eq!(
+    ///     PanelLod::Angle.describe(),
+    ///     "Panel level of detail: angle, a wall's panel drawn as its title once a row of its text subtends under 0.090°, whole again over 0.108°"
+    /// );
+    /// ```
+    pub fn describe(self) -> String {
+        match self {
+            Self::Off => "Panel level of detail: off, every panel drawn whole".to_owned(),
+            Self::Angle => format!(
+                "Panel level of detail: angle, a wall's panel drawn as its title once a row of its text subtends under {:.3}°, whole again over {:.3}°",
+                faces::FAR.to_degrees(),
+                faces::NEAR.to_degrees()
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for PanelLod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
 
 impl Projector {
     /// A projector that lays out at most a few panels a frame of those the server sent or changed, each in its turn:
@@ -1600,6 +1675,17 @@ impl Projector {
             paced: true,
             ..Self::default()
         }
+    }
+
+    /// Draw panels too small to read as their titles by angle, as by default, or every panel whole: from the next
+    /// frame, a panel drawn as its title drawn whole again at once.
+    pub fn set_lod(&mut self, lod: PanelLod) {
+        self.lod = lod;
+    }
+
+    /// Whether panels too small to read are drawn as their titles. See [`Projector::set_lod`].
+    pub fn lod(&self) -> PanelLod {
+        self.lod
     }
 
     /// Follow `input`, and say what to draw and send.
@@ -2348,6 +2434,7 @@ impl Projector {
                 let scroll = self.scroll(&panel.id);
                 let faces = self.faces_for(panel);
                 if faces.far {
+                    crate::frame_timing::titles(1);
                     let (columns, rows) = self::fit(panel, *fit);
                     return faces.far_face(sized(columns, rows), border);
                 }
@@ -2738,8 +2825,10 @@ impl Projector {
     }
 
     /// Which of `standing`'s panels a paced projector draws far, as a row of each one's text subtends from `viewer`
-    /// (see [`faces::FAR`]): only one in a wall's slot, and never a volume, whose diagram stands before its face, nor
-    /// one carried or let go; at most [`faces::NEARING`] drawn whole again in a frame, the nearest first.
+    /// (see [`faces::FAR`]), at its size on its wall, its wall's text scale and its font's pixel included: only one in
+    /// a wall's slot, and never a volume, whose diagram stands before its face, nor one carried or let go, nor any with
+    /// [`PanelLod::Off`]; at most [`faces::NEARING`] drawn whole again in a frame, the nearest first, but all at once as
+    /// it is turned off.
     fn distances(&mut self, standing: &[Standing], viewer: Vec3) {
         if !self.paced {
             return;
@@ -2761,7 +2850,8 @@ impl Projector {
         // panel taken hold of is laid out in its frame.
         let mut nearing: Vec<(f32, &Panel)> = Vec::new();
         for (panel, model, fit) in standing {
-            let far = matches!(fit, Fit::Slot(_))
+            let far = self.lod == PanelLod::Angle
+                && matches!(fit, Fit::Slot(_))
                 && panel.diagram.is_none()
                 && !moved.contains(&panel.id);
             let pixel = if panel.code.is_some() {

@@ -6,8 +6,9 @@
 //! a client times, such as polling the connection, the frame step, the projector within it, the renderer's update and
 //! its encoding of the eyes' draws, the glyphs drawn into the atlas, and, apart, the waits for the GPU, the compositor
 //! and the display, each as the mean, the 95th
-//! percentile and the longest; and how many faces were drawn, meshes built and glyphs drawn a frame. The headset and the
-//! desktop window each keep one. See `design/rendering.md`.
+//! percentile and the longest; how many faces were drawn, meshes built and glyphs drawn a frame; and how many panels
+//! were drawn, culled and drawn as their titles alone a frame, with whether panels too small to read are drawn so. The
+//! headset and the desktop window each keep one. See `design/rendering.md`.
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
@@ -114,17 +115,33 @@ impl Segment {
     }
 }
 
-/// What the frame step's projector did in a frame: how long it took, and how many faces it, the labels about it and the
-/// cards drew, rather than handing over those it kept.
+/// What the frame step's projector did in a frame: how long it took, how many faces it, the labels about it and the
+/// cards drew, rather than handing over those it kept, and how many panels it handed over as their titles alone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Work {
     pub projection: Duration,
     pub faces: usize,
+    pub titles: usize,
 }
 
 thread_local! {
     /// The projector's work on this thread since it was last taken: the frame loop's, which is one thread.
-    static WORK: Cell<Work> = const { Cell::new(Work { projection: Duration::ZERO, faces: 0 }) };
+    static WORK: Cell<Work> = const {
+        Cell::new(Work {
+            projection: Duration::ZERO,
+            faces: 0,
+            titles: 0,
+        })
+    };
+}
+
+/// Count `titles` more panels handed over as their titles alone on this thread.
+pub(crate) fn titles(titles: usize) {
+    WORK.with(|work| {
+        let mut counted = work.get();
+        counted.titles += titles;
+        work.set(counted);
+    });
 }
 
 /// Count `faces` more faces drawn on this thread.
@@ -165,6 +182,11 @@ pub struct Sample {
     pub faces: usize,
     pub meshes: usize,
     pub glyphs: usize,
+    /// The panels' faces drawn in the eyes, and culled as neither eye could see them.
+    pub panels: usize,
+    pub culled: usize,
+    /// The panels handed over as their titles alone, drawn or culled.
+    pub titles: usize,
 }
 
 impl Sample {
@@ -216,6 +238,12 @@ impl Timer {
         self.sample.meshes += meshes;
     }
 
+    /// Count the panels' faces the renderer drew, `drawn`, and culled, `culled`.
+    pub fn panels(&mut self, drawn: usize, culled: usize) {
+        self.sample.panels += drawn;
+        self.sample.culled += culled;
+    }
+
     /// The frame's sample: what was timed, the frame's busy time, the frame less the waits for the GPU and the compositor
     /// within it, where the frame was timed, the projector's work since it started, and the glyphs drawn meanwhile.
     pub fn finish(mut self) -> Sample {
@@ -227,6 +255,7 @@ impl Timer {
         }
         self.sample.add(Segment::Projection, work.projection);
         self.sample.faces += work.faces;
+        self.sample.titles += work.titles;
         let (count, time) = tomori_text::atlas::drawn();
         self.sample
             .add(Segment::Glyphs, time.saturating_sub(self.glyphs.1));
@@ -248,13 +277,19 @@ pub fn rate(rate: Option<f64>) -> String {
     }
 }
 
-/// The frames' costs since the last summary.
+/// The frames' costs since the last summary, and the panels' level of detail they were drawn with, where a client says.
 #[derive(Clone, Debug, Default)]
 pub struct FrameTimes {
     samples: Vec<Sample>,
+    lod: Option<crate::projection::PanelLod>,
 }
 
 impl FrameTimes {
+    /// Say in each summary that the frames drew panels with `lod`.
+    pub fn set_panel_lod(&mut self, lod: crate::projection::PanelLod) {
+        self.lod = Some(lod);
+    }
+
     /// Keep one frame's costs, `sample`.
     pub fn record(&mut self, sample: Sample) {
         self.samples.push(sample);
@@ -262,7 +297,8 @@ impl FrameTimes {
 
     /// A line summarizing the frames kept since the last, which are then forgotten, or `None` if there were none: of
     /// each segment any of them timed, its mean, its 95th percentile and its longest, in milliseconds, the waits apart,
-    /// and of each count, its mean, its 95th percentile and its most a frame.
+    /// and of each count, its mean, its 95th percentile and its most a frame: the panels' faces drawn and culled, and
+    /// those drawn as titles, among them; and the panels' level of detail, where it was set.
     ///
     /// ```
     /// use std::time::Duration;
@@ -277,9 +313,12 @@ impl FrameTimes {
     /// times.record(sample);
     /// assert_eq!(
     ///     times.summary().unwrap(),
-    ///     "CPU over 1 frames, ms mean/p95/max: frame 4.00/4.00/4.00; waits: gpu 1.00/1.00/1.00; a frame: faces 0.0/0/0, meshes 2.0/2/2, glyphs 0.0/0/0"
+    ///     "CPU over 1 frames, ms mean/p95/max: frame 4.00/4.00/4.00; waits: gpu 1.00/1.00/1.00; a frame: faces 0.0/0/0, meshes 2.0/2/2, glyphs 0.0/0/0, panels drawn 0.0/0/0, culled 0.0/0/0, titles 0.0/0/0"
     /// );
     /// assert_eq!(times.summary(), None);
+    /// times.set_panel_lod(tomori_scene::projection::PanelLod::Off);
+    /// times.record(sample);
+    /// assert!(times.summary().unwrap().ends_with(", titles 0.0/0/0; panel LOD off"));
     /// ```
     pub fn summary(&mut self) -> Option<String> {
         if self.samples.is_empty() {
@@ -314,9 +353,16 @@ impl FrameTimes {
             count("faces", |sample| sample.faces),
             count("meshes", |sample| sample.meshes),
             count("glyphs", |sample| sample.glyphs),
+            count("panels drawn", |sample| sample.panels),
+            count("culled", |sample| sample.culled),
+            count("titles", |sample| sample.titles),
         ];
+        let lod = self
+            .lod
+            .map(|lod| format!("; panel LOD {lod}"))
+            .unwrap_or_default();
         let line = format!(
-            "CPU over {} frames, ms mean/p95/max: {}; waits: {}; a frame: {}",
+            "CPU over {} frames, ms mean/p95/max: {}; waits: {}; a frame: {}{lod}",
             self.samples.len(),
             work.join(", "),
             waits.join(", "),
@@ -360,7 +406,7 @@ mod tests {
         }
         assert_eq!(
             times.summary().unwrap(),
-            "CPU over 100 frames, ms mean/p95/max: frame 50.50/96.00/100.00, poll 0.50/0.00/50.00, step 1.00/1.00/1.00; waits: image 2.00/2.00/2.00; a frame: faces 0.1/0/7, meshes 0.1/1/1, glyphs 0.0/0/0"
+            "CPU over 100 frames, ms mean/p95/max: frame 50.50/96.00/100.00, poll 0.50/0.00/50.00, step 1.00/1.00/1.00; waits: image 2.00/2.00/2.00; a frame: faces 0.1/0/7, meshes 0.1/1/1, glyphs 0.0/0/0, panels drawn 0.0/0/0, culled 0.0/0/0, titles 0.0/0/0"
         );
         assert_eq!(times.summary(), None, "summarized frames are forgotten");
     }
@@ -372,7 +418,9 @@ mod tests {
         assert_eq!(timer.time(Segment::Step, || 3), 3);
         timer.add(Segment::Draw, Duration::from_millis(2));
         timer.meshes(4);
+        timer.panels(5, 3);
         faces(2);
+        titles(1);
         projection(Duration::from_millis(3));
         let mut atlas = tomori_text::atlas::Atlas::default();
         atlas.glyph('鳥');
@@ -385,6 +433,7 @@ mod tests {
             "the work of a frame not finished is forgotten"
         );
         assert_eq!((sample.faces, sample.meshes, sample.glyphs), (2, 4, 1));
+        assert_eq!((sample.panels, sample.culled, sample.titles), (5, 3, 1));
         assert!(sample.time(Segment::Glyphs) > Duration::ZERO);
         assert_eq!(take(), Work::default());
     }
@@ -443,6 +492,27 @@ mod tests {
             sample.timed & (1 << Segment::Busy as usize),
             0,
             "a frame not timed is not busy"
+        );
+    }
+
+    #[test]
+    fn the_summary_counts_the_panels_drawn_culled_and_drawn_as_titles_with_the_level_of_detail() {
+        let mut times = FrameTimes::default();
+        times.set_panel_lod(crate::projection::PanelLod::Angle);
+        for frame in 0..20 {
+            times.record(Sample {
+                panels: 100 + frame,
+                culled: 28 - frame,
+                titles: 40,
+                ..Sample::default()
+            });
+        }
+        let line = times.summary().unwrap();
+        assert!(
+            line.ends_with(
+                ", panels drawn 109.5/119/119, culled 18.5/28/28, titles 40.0/40/40; panel LOD angle"
+            ),
+            "{line}"
         );
     }
 

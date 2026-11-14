@@ -404,6 +404,8 @@ pub struct Conversation {
     over_grid: Vec<Environment>,
     /// The locomotion profiles this build declares, by environment; see `design/locomotion.md`.
     locomotion: Vec<(Environment, Locomotion)>,
+    /// Whether panels too small to read are drawn as their titles, as this client was started. See `design/rendering.md`.
+    panel_lod: crate::projection::PanelLod,
     /// The client sides this build registers, by environment. See `design/environments.md`.
     client_sides: Vec<(Environment, crate::client_side::Factory)>,
     /// The ambiences this build registers, by environment. See `design/environments.md`.
@@ -606,6 +608,7 @@ impl Conversation {
             drawable: Vec::new(),
             over_grid: Vec::new(),
             locomotion: Vec::new(),
+            panel_lod: crate::projection::PanelLod::default(),
             client_sides: Vec::new(),
             ambiences: Vec::new(),
             worker_placements: Vec::new(),
@@ -2577,6 +2580,17 @@ impl Conversation {
     /// Let the participant travel as `locomotion` declares, for each environment it names, in a space bound to it whose scenery this build draws. An environment it does not name has none, as Tomori's own do.
     pub fn set_locomotion(&mut self, locomotion: Vec<(Environment, Locomotion)>) {
         self.locomotion = locomotion;
+    }
+
+    /// Draw panels too small to read as their titles, by angle, as by default, or every panel whole, as a client is
+    /// started to measure what that costs. See `design/rendering.md`.
+    pub fn set_panel_lod(&mut self, lod: crate::projection::PanelLod) {
+        self.panel_lod = lod;
+    }
+
+    /// Whether panels too small to read are drawn as their titles. See [`Self::set_panel_lod`].
+    pub fn panel_lod(&self) -> crate::projection::PanelLod {
+        self.panel_lod
     }
 
     /// How the participant may travel: as declared for the joined space's environment, when this build draws it and travel is not turned off on this headset, and otherwise not at all. See `design/locomotion.md`.

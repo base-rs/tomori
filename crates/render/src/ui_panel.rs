@@ -253,10 +253,23 @@ impl Panel {
 
     /// Show `canvas`, rebuilding the mesh only if it changed, or if glyphs it needs were waiting for the atlas when it was last built.
     pub fn set(&mut self, queue: &wgpu::Queue, canvas: &Canvas) {
-        if self.complete && self.canvas.as_deref() == Some(canvas) {
+        if self.complete
+            && self.canvas.as_deref().is_some_and(|shown| {
+                shown == canvas
+                    && std::mem::discriminant(&shown.kind) == std::mem::discriminant(&canvas.kind)
+            })
+        {
             return;
         }
         self.show(queue, &Arc::new(canvas.clone()));
+    }
+
+    /// Whether what it shows is a projected panel's face, as the frame log counts the panels apart from every other
+    /// surface.
+    pub fn panel_face(&self) -> bool {
+        self.canvas
+            .as_ref()
+            .is_some_and(|canvas| matches!(canvas.kind, tomori_scene::canvas::Kind::PanelFace))
     }
 
     /// Show `canvas`, shared with whoever drew it: as [`Self::set`] does, but knowing it at once, without comparing it,

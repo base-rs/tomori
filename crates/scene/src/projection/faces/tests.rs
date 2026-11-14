@@ -12,8 +12,8 @@ use tomori_protocol::{
 };
 
 use super::super::{
-    Cells, Controls, FRAME, HIGHLIGHT, Input, NEWEST, Projector, code_columns, editing, model,
-    scrolled_face, slot_frames,
+    Cells, Controls, FRAME, HIGHLIGHT, Input, NEWEST, PanelLod, Projector, code_columns, editing,
+    model, scrolled_face, slot_frames,
 };
 use super::*;
 use crate::{arrival::HOME, pointing::Ray};
@@ -1417,7 +1417,7 @@ fn far_wall(away: f32, version: u64) -> Projection {
 /// whole a few a frame, the nearest first, and not again where it stays within the margin.
 #[test]
 fn a_panel_too_far_away_to_read_is_drawn_as_its_title_alone_until_it_comes_near() {
-    let shown = far_wall(12.0, 5);
+    let shown = far_wall(40.0, 5);
     // What the volume and the floating panel cost alone, laid out and drawn whole.
     let mut whole = shown.clone();
     whole
@@ -1465,7 +1465,7 @@ fn a_panel_too_far_away_to_read_is_drawn_as_its_title_alone_until_it_comes_near(
     assert!(chart.linked(Fit::SLOT, 3.0).is_none());
     // What they show changing, at a new version, draws and lays out nothing, and takes no turn; a title changing draws
     // that one again.
-    let mut changed = far_wall(12.0, 6);
+    let mut changed = far_wall(40.0, 6);
     for (panel, was) in changed.panels.iter_mut().zip(&shown.panels) {
         if ["volume", "aside"].contains(&panel.id.as_str()) {
             panel.version = was.version;
@@ -1478,14 +1478,15 @@ fn a_panel_too_far_away_to_read_is_drawn_as_its_title_alone_until_it_comes_near(
     retitled.panels[0].title = "Queue zero".into();
     projector.update(input(&retitled, HOME, None));
     assert_eq!(counts(), (before.0, before.1 + 1));
-    // Halfway between where it is drawn far and whole again, nothing changes.
-    let between = HOME - Vec3::Z * (12.0 - 5.0);
+    // Between where a list is drawn far, beyond about 14.5 m, and whole again, within about 12.1 m, nothing changes,
+    // and the code, of a smaller font pixel, is drawn far still.
+    let between = HOME - Vec3::Z * (40.0 - 13.3);
     let before = counts();
     projector.update(input(&retitled, between, None));
     assert!(projector.faces["list-0"].far);
     assert_eq!(counts(), before);
     // Near, a few a frame are laid out to be drawn whole, the nearest first, until every one is, as they are now.
-    let near = HOME - Vec3::Z * (12.0 - 2.5);
+    let near = HOME - Vec3::Z * (40.0 - 2.5);
     let mut frames = 0;
     while ["list-0", "code", "chart", "list-4", "list-5"]
         .iter()
@@ -1501,6 +1502,229 @@ fn a_panel_too_far_away_to_read_is_drawn_as_its_title_alone_until_it_comes_near(
     // Far again, each is drawn as its title, forgetting what was laid out of it.
     projector.update(input(&retitled, HOME, None));
     assert!(projector.faces["list-4"].far && projector.faces["list-4"].sizes.is_empty());
+}
+
+/// A wall of one list in its first slot, `id`, of `scale` times a standard slot's size, `away` metres ahead of home and
+/// `aside` to its right.
+fn scaled_wall(id: &str, scale: f32, away: f32, aside: f32) -> (Wall, Panel) {
+    let pose = Pose::upright_facing([aside, 1.6, -away], [aside, 1.6, 0.0]);
+    let wall = Wall::new(id, WallKind::Added, pose).with_scale(scale);
+    let panel = Panel::new(
+        format!("{id}-list"),
+        "Queue",
+        "- [ ] first\n- [ ] second",
+        on(id, 0),
+    );
+    (wall, panel)
+}
+
+/// Whether each of `projection`'s panels is drawn as its title, by identity.
+fn titles(projector: &Projector, projection: &Projection) -> Vec<(String, bool)> {
+    projection
+        .panels
+        .iter()
+        .map(|panel| (panel.id.clone(), projector.faces[&panel.id].far))
+        .collect()
+}
+
+/// Whether a panel is drawn as its title is decided by the angle a row of its text subtends, its slot's scale included:
+/// at 12 m, where until November 2026 every standard slot was drawn as its title, a standard slot's text is drawn
+/// whole; at 20 m it is drawn as its title, while a slot 2.26 times as large is drawn whole to beyond 30 m.
+#[test]
+fn a_larger_panel_is_drawn_whole_further_away_than_a_standard_one() {
+    let lists = |away: f32| {
+        let (standard, one) = scaled_wall("standard", 1.0, away, -6.0);
+        let (large, two) = scaled_wall("large", 2.26, away, 6.0);
+        Projection::new("s", "sky")
+            .with_walls(vec![standard, large])
+            .with_panels(vec![one, two])
+    };
+    let far = |away: f32| {
+        let projection = lists(away);
+        let mut projector = Projector::paced();
+        projector.update(input(&projection, HOME, None));
+        titles(&projector, &projection)
+            .into_iter()
+            .map(|(_, far)| far)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(far(12.0), [false, false]);
+    assert_eq!(far(20.0), [true, false]);
+    assert_eq!(far(30.0), [true, false]);
+    assert_eq!(far(36.0), [true, true]);
+    // A row of a standard slot's text, 12 font pixels of 1.9 mm, is drawn as its title beyond about 14.5 m, and one
+    // 2.26 times as large beyond about 33 m.
+    let row = CELL_HEIGHT as f32 * PIXEL;
+    assert!((row / FAR - 14.5).abs() < 0.1, "{}", row / FAR);
+    assert!(
+        (2.26 * row / FAR - 32.8).abs() < 0.2,
+        "{}",
+        2.26 * row / FAR
+    );
+}
+
+/// A wall's content scale sizes its text, and so the angle a row of it subtends: at a content scale of 2, a slot's text
+/// is drawn whole at about 21 m, where at 1 it is drawn as its title; at a half, as its title at about 12 m, where at 1
+/// it is drawn whole.
+#[test]
+fn a_wall_s_content_scale_changes_how_far_its_panels_are_drawn_whole() {
+    let far = |away: f32, content: f32| {
+        let (standard, one) = scaled_wall("standard", 1.0, away, -6.0);
+        let (scaled, two) = scaled_wall("scaled", 1.0, away, 6.0);
+        let projection = Projection::new("s", "sky")
+            .with_walls(vec![standard, scaled.with_content_scale(Some(content))])
+            .with_panels(vec![one, two]);
+        assert_eq!(projection.walls[1].text_scale(), content);
+        let mut projector = Projector::paced();
+        projector.update(input(&projection, HOME, None));
+        titles(&projector, &projection)
+            .into_iter()
+            .map(|(_, far)| far)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(far(20.0, 2.0), [true, false]);
+    assert_eq!(far(10.0, 0.5), [false, true]);
+}
+
+/// A panel's face, drawn whole or as its title, is drawn as a panel's face, which the renderer counts apart from every
+/// other surface, as a wall's board is.
+#[test]
+fn a_panel_s_faces_are_drawn_as_panel_faces() {
+    use crate::canvas::Kind;
+    let face_of = |away: f32| {
+        let (wall, panel) = scaled_wall("wall-1", 1.0, away, 0.0);
+        let projection = Projection::new("s", "sky")
+            .with_walls(vec![wall])
+            .with_panels(vec![panel]);
+        let output = Projector::paced().update(input(&projection, HOME, None));
+        let kinds: Vec<(bool, bool)> = output
+            .sheets
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_ref())
+            .map(|canvas| {
+                (
+                    canvas.plain().contains("Queue"),
+                    matches!(canvas.kind, Kind::PanelFace),
+                )
+            })
+            .collect();
+        kinds
+    };
+    for away in [3.0, 30.0] {
+        let kinds = face_of(away);
+        assert!(kinds.contains(&(true, true)), "{away}: {kinds:?}");
+        assert!(
+            kinds.iter().all(|(queue, panel)| queue == panel),
+            "{away}: {kinds:?}"
+        );
+    }
+}
+
+/// A panel drawn as its title is drawn whole again only once a row of its text subtends a fifth more than the angle it
+/// went at, so that a head swaying about the threshold does not switch it back and forth.
+#[test]
+fn a_panel_drawn_as_its_title_is_drawn_whole_again_only_past_the_margin() {
+    let (wall, panel) = scaled_wall("wall-1", 1.0, 30.0, 0.0);
+    let projection = Projection::new("s", "sky")
+        .with_walls(vec![wall])
+        .with_panels(vec![panel]);
+    let mut projector = Projector::paced();
+    let mut far_at = |distance: f32| {
+        let viewer = Vec3::new(0.0, 1.6, -30.0 + distance);
+        projector.update(input(&projection, viewer, None));
+        projector.faces["wall-1-list"].far
+    };
+    // Whole until beyond 14.5 m; then drawn as its title until within 12.1 m; then whole until beyond 14.5 m again.
+    assert!(!far_at(14.0));
+    assert!(far_at(15.0));
+    assert!(far_at(13.0));
+    assert!(far_at(12.3));
+    assert!(!far_at(11.8));
+    assert!(!far_at(13.0));
+    assert!(!far_at(14.3));
+    assert!(far_at(14.8));
+    assert!((NEAR / FAR - 1.2).abs() < 1e-6);
+}
+
+/// Turned off, as `tomori.panel_lod off` turns it off, no panel is drawn as its title however far, and turned off while
+/// some are, every one is drawn whole again at once, not a few a frame; turned on again, they are drawn as their titles.
+#[test]
+fn with_the_level_of_detail_off_every_panel_is_drawn_whole() {
+    let shown = far_wall(40.0, 1);
+    let mut projector = Projector::paced();
+    assert_eq!(projector.lod(), PanelLod::Angle);
+    projector.update(input(&shown, HOME, None));
+    let far = || {
+        ["list-0", "code", "chart", "list-4", "list-5"]
+            .into_iter()
+            .map(|id| projector.faces[id].far)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(far(), [true; 5]);
+    projector.set_lod(PanelLod::Off);
+    assert_eq!(projector.lod(), PanelLod::Off);
+    let output = projector.update(input(&shown, HOME, None));
+    let far = || {
+        ["list-0", "code", "chart", "list-4", "list-5"]
+            .into_iter()
+            .map(|id| projector.faces[id].far)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(far(), [false; 5]);
+    assert!(output.sheets.iter().any(|sheet| {
+        sheet
+            .canvas
+            .as_ref()
+            .is_some_and(|face| face.plain().contains("first at 1"))
+    }));
+    let mut fresh = Projector::paced();
+    fresh.set_lod(PanelLod::Off);
+    fresh.update(input(&shown, HOME, None));
+    assert!(fresh.faces.values().all(|faces| !faces.far));
+    projector.set_lod(PanelLod::Angle);
+    projector.update(input(&shown, HOME, None));
+    assert!(projector.faces["list-0"].far);
+}
+
+/// The frame log counts the panels handed over as their titles each frame.
+#[test]
+fn the_panels_drawn_as_titles_are_counted_for_the_frame_log() {
+    let shown = far_wall(40.0, 1);
+    let mut projector = Projector::paced();
+    crate::frame_timing::take();
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(crate::frame_timing::take().titles, 5);
+    projector.set_lod(PanelLod::Off);
+    projector.update(input(&shown, HOME, None));
+    assert_eq!(crate::frame_timing::take().titles, 0);
+}
+
+/// The level of detail is read from a client's setting, `off` or `angle`, and said as it starts.
+#[test]
+fn the_level_of_detail_is_parsed_and_described() {
+    for (value, lod) in [
+        (None, PanelLod::Angle),
+        (Some("angle"), PanelLod::Angle),
+        (Some(" ON "), PanelLod::Angle),
+        (Some("off"), PanelLod::Off),
+        (Some("None"), PanelLod::Off),
+        (Some("0"), PanelLod::Off),
+        (Some("sideways"), PanelLod::Angle),
+    ] {
+        assert_eq!(PanelLod::parse(value), lod, "{value:?}");
+    }
+    assert_eq!(PanelLod::Off.to_string(), "off");
+    assert_eq!(PanelLod::Angle.to_string(), "angle");
+    assert!(
+        PanelLod::Off
+            .describe()
+            .ends_with("off, every panel drawn whole")
+    );
+    assert!(
+        PanelLod::Angle
+            .describe()
+            .contains("under 0.090°, whole again over 0.108°")
+    );
 }
 
 /// Paced, of the panels that arrive together, more than a frame lays out, those nearest stand first: the nearest
