@@ -324,29 +324,71 @@ fn a_fixed_window_s_summary_says_each_series_newest_value_and_when() {
                 to_ms: from_ms + 8 * 3_600_000,
             })
     };
-    // Filling until its end: read to 05:54, the rest a gap to come, never a value gone.
+    let today = Some(from_ms / 86_400_000);
+    // Filling until its end: read to 05:54, the rest a gap to come, never a value gone; today's, its clock time alone.
     let filling = window((0..81).map(|at| (at <= 39).then_some(0.194)).collect())
         .with_status(Note::new("filling until 10:00 UTC", Tone::Neutral));
     assert_eq!(
-        filling.summary(),
-        "filling until 10:00 UTC\ndw2 trial: 0.194 at 05:54"
+        filling.summary_on(today),
+        "filling until 10:00 UTC\ndw2 trial: 0.194 at 05:54 UTC"
     );
     assert_eq!(filling.current(&filling.series[0]), Some((39, 0.194)));
-    // Ended and read whole, at its end; a series that stopped within it, when it stopped.
-    let ended = window(vec![Some(0.2); 81]);
-    assert_eq!(ended.summary(), "dw2 trial: 0.2 at its end, 10:00");
-    let stopped = window((0..81).map(|at| (at < 40).then_some(0.5)).collect());
-    assert_eq!(stopped.summary(), "dw2 trial: 0.5 at 05:54");
-    // Off the minute, to the second; not begun, no data.
-    let mut fine = window(vec![None; 81]);
-    fine.time = Some(TimeAxis::Fixed {
-        from_ms: from_ms + 15_000,
-        to_ms: from_ms + 15_000 + 8 * 3_600_000,
-    });
-    fine.series[0].values[1] = Some(1.0);
-    assert_eq!(fine.summary(), "dw2 trial: 1 at 02:06:15");
+    // Not today's, or today not known, with its date.
     assert_eq!(
-        window(vec![None; 81]).summary(),
+        filling.summary_on(today.map(|day| day + 1)),
+        "filling until 10:00 UTC\ndw2 trial: 0.194 at 11-14 05:54 UTC"
+    );
+    assert!(filling.summary().ends_with("at 11-14 05:54 UTC"));
+    // Ended and read whole, at its end.
+    let ended = window(vec![Some(0.2); 81]);
+    assert_eq!(
+        ended.summary_on(today),
+        "dw2 trial: 0.2 at its end, 10:00 UTC"
+    );
+    // A series that stopped early within it, when it stopped, though the other read on to the end.
+    let mut stopped = window((0..81).map(|at| (at < 10).then_some(0.5)).collect());
+    stopped.series.push(Series::new(
+        "dw1",
+        Colour::Red,
+        SeriesStyle::Line,
+        vec![Some(1.5); 81],
+    ));
+    assert_eq!(
+        stopped.summary_on(today),
+        "dw2 trial: 0.5 at 02:54 UTC\ndw1: 1.5 at its end, 10:00 UTC"
+    );
+    // Gaps between its values: its newest, past the gaps before and after it.
+    let gappy = window(
+        (0..81)
+            .map(|at| match at {
+                5 => Some(1.0),
+                20 => Some(2.0),
+                _ => None,
+            })
+            .collect(),
+    );
+    assert_eq!(gappy.current(&gappy.series[0]), Some((20, 2.0)));
+    assert_eq!(gappy.summary_on(today), "dw2 trial: 2 at 04:00 UTC");
+    // A window across midnight is dated even today, at each end's own date.
+    let mut overnight = window(vec![Some(3.0); 81]);
+    overnight.time = Some(TimeAxis::Fixed {
+        from_ms: from_ms - 4 * 3_600_000,
+        to_ms: from_ms + 4 * 3_600_000,
+    });
+    overnight.series[0].values[80] = None;
+    assert_eq!(
+        overnight.summary_on(today),
+        "dw2 trial: 3 at 11-14 05:54 UTC"
+    );
+    overnight.series[0].values.truncate(10);
+    overnight.series[0].values.extend([None; 71]);
+    assert_eq!(
+        overnight.summary_on(today),
+        "dw2 trial: 3 at 11-13 22:54 UTC"
+    );
+    // Not begun, no data.
+    assert_eq!(
+        window(vec![None; 81]).summary_on(today),
         "No data.\ndw2 trial: no data"
     );
     // A live chart whose last point has no value still says it has none now.
@@ -356,6 +398,11 @@ fn a_fixed_window_s_summary_says_each_series_newest_value_and_when() {
     assert_eq!(live.current(&live.series[0]), None);
     live.series[0].values[80] = Some(0.3);
     assert_eq!(live.summary(), "dw2 trial: 0.3 now");
+    // Its times as the axis labels write them, to the minute, dated on every calendar day.
+    assert_eq!(utc_minute(0, true), "01-01 00:00");
+    assert_eq!(utc_minute(951_782_400_000, true), "02-29 00:00");
+    assert_eq!(utc_minute(CHART_INSTANT_MS, true), "12-31 23:59");
+    assert_eq!(utc_minute(CHART_EARLIEST_MS, true), "01-01 00:00");
 }
 
 /// Root admissions a minute, as a line, at 5 seconds over 15 minutes, with a gap and a break; and rejections as bars.

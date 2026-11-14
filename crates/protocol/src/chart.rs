@@ -464,7 +464,7 @@ impl TimeAxis {
     /// It as a chart keeps it once cleaned: a live step from 1 ms to [`CHART_STEP_MS`], and a fixed window that ends
     /// after it begins, within the years 0 to 9999, from [`CHART_EARLIEST_MS`] to [`CHART_INSTANT_MS`], however few
     /// points it has, as a week's window of a few points is still that window; none otherwise.
-    fn cleaned(self) -> Option<Self> {
+    pub fn cleaned(self) -> Option<Self> {
         match self {
             Self::Live { step_ms } => (1..=CHART_STEP_MS).contains(&step_ms).then_some(self),
             Self::Fixed { from_ms, to_ms } => {
@@ -739,10 +739,18 @@ impl Chart {
     }
 
     /// What the chart shows now, in plain text, for a reader that cannot draw it, as an older client, and for the
-    /// agent: each series' latest value, or that it has none, each reference line, its badge and its status, a line
-    /// each; or that it has no data. On a fixed window, each series' newest value, at the time of day it is at in UTC,
-    /// `0.194 at 05:56`, or at its end, `0.194 at its end, 10:00`, whether or not the window is still filling.
+    /// agent, as [`Chart::summary_on`] says it without knowing today, so that a fixed window's times say their dates.
     pub fn summary(&self) -> String {
+        self.summary_on(None)
+    }
+
+    /// What the chart shows now, in plain text, for a reader that cannot draw it, as an older client, and for the
+    /// agent: each series' latest value, or that it has none, each reference line, its badge and its status, a line
+    /// each; or that it has no data. On a fixed window, each series' newest value, whether or not the window is still
+    /// filling, and the instant it is at in UTC as the window's axis labels write it against `today`, in days since the
+    /// Unix epoch in UTC, [`utc_minute`]: `0.194 at 05:56 UTC` within today, `0.194 at 11-13 05:56 UTC` for a window not
+    /// within it, or spanning days, or where today is not known, or at its end, `0.194 at its end, 10:00 UTC`.
+    pub fn summary_on(&self, today: Option<i64>) -> String {
         let unit = if self.axis.unit.is_empty() {
             String::new()
         } else {
@@ -759,11 +767,20 @@ impl Chart {
         for series in &self.series {
             lines.push(match self.current(series) {
                 Some((at, value)) => {
-                    let when = match self.time_of(at as f32) {
-                        Some(ChartTime::Instant { utc_ms }) if at >= last => {
-                            format!("at its end, {}", clock(utc_ms))
+                    let when = match self.time {
+                        Some(TimeAxis::Fixed { from_ms, to_ms }) => {
+                            let day = |ms: i64| ms.div_euclid(DAY_MS);
+                            let dated = today != Some(day(from_ms)) || today != Some(day(to_ms));
+                            let span = i128::from(to_ms) - i128::from(from_ms);
+                            let ms =
+                                i128::from(from_ms) + span * at.min(last) as i128 / last as i128;
+                            let instant = utc_minute(ms as i64, dated);
+                            if at >= last {
+                                format!("at its end, {instant} UTC")
+                            } else {
+                                format!("at {instant} UTC")
+                            }
                         }
-                        Some(ChartTime::Instant { utc_ms }) => format!("at {}", clock(utc_ms)),
                         _ => "now".to_owned(),
                     };
                     format!("{}: {value}{unit} {when}", series.name)
@@ -789,16 +806,41 @@ impl Chart {
     }
 }
 
-/// The time of day of `utc_ms`, milliseconds since the Unix epoch, in UTC, to the nearest second: `05:56`, or
-/// `05:56:15` off the minute.
-fn clock(utc_ms: f64) -> String {
-    let seconds = (utc_ms / 1000.0).round().rem_euclid(86_400.0) as u64 % 86_400;
-    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
-    if seconds == 0 {
-        format!("{hours:02}:{minutes:02}")
-    } else {
-        format!("{hours:02}:{minutes:02}:{seconds:02}")
+/// Milliseconds in a day.
+const DAY_MS: i64 = 86_400_000;
+
+/// The instant `ms`, in milliseconds since the Unix epoch, in UTC, to the minute, as a fixed window's axis labels and
+/// summary write it: its clock time, `05:56`, or, `dated`, its month and day before it, `11-13 05:56`.
+///
+/// ```
+/// use tomori_protocol::chart::utc_minute;
+///
+/// assert_eq!(utc_minute(1_794_642_959_999, false), "07:55");
+/// assert_eq!(utc_minute(1_794_642_959_999, true), "11-14 07:55");
+/// assert_eq!(utc_minute(-1, true), "12-31 23:59");
+/// ```
+pub fn utc_minute(ms: i64, dated: bool) -> String {
+    let minutes = ms.div_euclid(60_000);
+    let (hours, minute) = (
+        minutes.div_euclid(60).rem_euclid(24),
+        minutes.rem_euclid(60),
+    );
+    if !dated {
+        return format!("{hours:02}:{minute:02}");
     }
+    // The civil date of a day since the epoch, in the proleptic Gregorian calendar (Howard Hinnant's algorithm).
+    let shifted = ms.div_euclid(DAY_MS) + 719_468;
+    let of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let day_of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    format!("{month:02}-{day:02} {hours:02}:{minute:02}")
 }
 
 /// How many parts a chart's time axis is read in, from its oldest point at 0 to its newest at `ACROSS`, where a

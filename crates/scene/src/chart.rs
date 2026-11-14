@@ -188,7 +188,9 @@ pub fn bounded(chart: &Chart) -> Chart {
         name(&chart.axis.unit),
     );
     bounded.legend = chart.legend;
-    bounded.time = chart.time;
+    bounded.time = chart
+        .time
+        .and_then(tomori_protocol::chart::TimeAxis::cleaned);
     bounded.badge = chart
         .badge
         .as_ref()

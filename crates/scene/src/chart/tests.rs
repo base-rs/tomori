@@ -665,6 +665,18 @@ fn a_legend_shows_whole_items_as_they_fit_and_says_what_is_missing() {
         plain(legend(&filling, 60)),
         "── mean 0.50  ── greatest 1.2  target 1"
     );
+    // A window ending before it begins is no time it can read, so it reads as one saying none, by its last point.
+    let backwards = filling
+        .clone()
+        .with_time(tomori_protocol::chart::TimeAxis::Fixed {
+            from_ms: 3_600_000,
+            to_ms: 0,
+        });
+    assert_eq!(bounded(&backwards).time, None);
+    assert_eq!(
+        plain(legend(&backwards, 60)),
+        "── mean --  ── greatest --  target 1"
+    );
     let live = filling.with_time(tomori_protocol::chart::TimeAxis::Live { step_ms: 5_000 });
     assert_eq!(
         plain(legend(&live, 60)),
