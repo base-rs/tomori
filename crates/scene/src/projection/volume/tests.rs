@@ -723,3 +723,11 @@ fn a_leader_ends_on_its_mark_nearest_where_it_comes_from() {
     let last = paths[2][paths[2].len() - 2];
     assert!(last.y > end(2).y);
 }
+
+#[test]
+fn a_node_s_default_grey_keeps_its_brightness_and_other_colours_are_the_palette_s() {
+    use tomori_protocol::chart::Colour;
+    assert_eq!(rgb(Colour::Grey), NODE_GREY);
+    assert!(NODE_GREY[0] > Colour::Grey.rgb()[0]);
+    assert_eq!(rgb(Colour::Teal), Colour::Teal.rgb());
+}

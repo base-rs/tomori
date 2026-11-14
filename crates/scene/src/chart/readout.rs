@@ -6,11 +6,11 @@
 //! and each series' name and value in its unit, in its colour, or that it has no data there, kept inside the panel. It
 //! is drawn each frame as an overlay of its own over the chart's face, from where the face's plot is and the chart's
 //! values, so that the chart is never laid out again as the ray scans it: a line, a dot or two for each series, a
-//! backing and at most [`LINES`] lines of at most [`READOUT_CHARS`], from glyphs the atlas holds. Each participant sees
-//! their own. See `design/projection.md`.
+//! backing and at most [`LINES`] lines of at most [`READOUT_CHARS`], the series that do not fit said as how many more,
+//! from glyphs the atlas holds. Each participant sees their own. See `design/projection.md`.
 use tomori_protocol::chart::{CHART_SERIES, Chart};
 
-use super::{PlotArea, ink};
+use super::{DIM, PlotArea, ink};
 use crate::canvas::{Canvas, Label};
 use crate::shapes::Shape;
 use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Rgba, Row, Span, Style, cut};
@@ -65,6 +65,9 @@ impl Readout {
             Some((_, runs)) => plot
                 .drawn(runs, x)
                 .and_then(tomori_protocol::chart::rounded),
+            None if chart.series[index].style == tomori_protocol::chart::SeriesStyle::Bars => {
+                super::bar_at(chart, index, at, plot.stretches)
+            }
             None => chart.value_at(index, at),
         };
         for (index, series) in chart.series.iter().take(CHART_SERIES).enumerate() {
@@ -75,9 +78,18 @@ impl Readout {
             }
             lines.push((format!("{} {}", series.name, chart.amount(value)), color));
         }
-        // As many lines as fit down the face, each as many characters as fit across it.
+        // As many lines as fit down the face, each as many characters as fit across it, the series that do not fit
+        // said in the last as how many more.
         let rows = ((height - 2.0 * INSET.1) / CELL_HEIGHT as f32).max(1.0) as usize;
-        lines.truncate(rows.min(LINES));
+        let most = rows.min(LINES);
+        if lines.len() > most {
+            let shown = most.saturating_sub(2);
+            let more = lines.len() - 1 - shown;
+            lines.truncate(1 + shown);
+            if most >= 2 {
+                lines.push((format!("+{more} more"), DIM));
+            }
+        }
         let most =
             (((width - 2.0 * INSET.0) / CELL_WIDTH as f32).max(1.0) as usize).min(READOUT_CHARS);
         let cells: Vec<usize> = lines

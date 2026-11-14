@@ -453,7 +453,7 @@ impl Attributes {
             }
             "colour" | "color" => {
                 let colour = colour(value).ok_or_else(|| {
-                    format!("\"{}\" is not a colour of the palette: teal, amber, blue, violet, green, red, grey or white", clean(value))
+                    format!("\"{}\" is not a colour of the palette: teal, amber, blue, violet, green, red, yellow, grey or white", clean(value))
                 })?;
                 self.colour.get_or_insert(colour);
             }
@@ -625,7 +625,7 @@ impl Binding {
             }
             "colour" | "color" => {
                 let colour = colour(value).ok_or_else(|| {
-                    format!("\"{}\" is not a colour of the palette: teal, amber, blue, violet, green, red, grey or white", clean(value))
+                    format!("\"{}\" is not a colour of the palette: teal, amber, blue, violet, green, red, yellow, grey or white", clean(value))
                 })?;
                 self.colour.get_or_insert(colour);
             }

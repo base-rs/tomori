@@ -248,18 +248,23 @@ fn a_chart_is_drawn_without_trusting_it_bounded_whatever_a_server_sends() {
     let drawing = draw(&hostile, AREA);
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     assert!(finite(&drawing));
-    assert!(pieces(&drawing) < 1_500, "{}", pieces(&drawing));
+    assert!(pieces(&drawing) < 2_500, "{}", pieces(&drawing));
     let legend = legend(&hostile, 34);
-    assert!(legend.len() <= 34);
+    assert!(legend.len() <= LEGEND_ROWS && legend.iter().all(|row| row.len() <= 34));
 }
 
 #[test]
 fn the_largest_charts_are_drawn_in_a_bounded_number_of_pieces() {
     for chart in [fixtures::largest(false), fixtures::largest(true)] {
         let drawing = draw(&chart, AREA);
-        // Each series' line and dashes, the fills together, the reference lines' dashes, the markers and the rest.
-        let most =
-            CHART_SERIES * (2 * LINE_VERTICES + MARKERS) + FILL_QUADS + 4 * REFERENCE_DASHES + 64;
+        // Each series' line and dashes, as many in all for eight series as for four, the fills together, the reference
+        // lines' dashes, the dots where lines leave the plot, the marks of the last four and the rest.
+        let marks = (CHART_SERIES - UNMARKED) * MARKS * 3;
+        let most = UNMARKED * (2 * LINE_VERTICES + MARKERS)
+            + marks
+            + FILL_QUADS
+            + 4 * REFERENCE_DASHES
+            + 64;
         assert!(pieces(&drawing) <= most, "{} of {most}", pieces(&drawing));
         assert!(finite(&drawing));
     }
@@ -632,7 +637,12 @@ fn a_chart_without_values_says_so_and_never_draws_an_empty_plot_as_quiet() {
 
 #[test]
 fn a_legend_shows_whole_items_as_they_fit_and_says_what_is_missing() {
-    let plain = |cells: Vec<Cell>| crate::ui_text::plain(&cells);
+    let plain = |rows: Vec<Vec<Cell>>| {
+        rows.iter()
+            .map(|row| crate::ui_text::plain(row))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     assert_eq!(
         plain(legend(&fixtures::pressure(), 34)),
         "── mean 0.79  ── greatest 1.3"
@@ -645,7 +655,7 @@ fn a_legend_shows_whole_items_as_they_fit_and_says_what_is_missing() {
         plain(legend(&fixtures::stale(), 60)),
         "── mean --  ── greatest no data  target 1"
     );
-    assert_eq!(plain(legend(&fixtures::pressure(), 6)), "── me…");
+    assert_eq!(plain(legend(&fixtures::pressure(), 6)), "── me…\n── gr…");
     assert!(legend(&Chart::new(2), 10).is_empty());
 }
 
@@ -1117,7 +1127,7 @@ fn a_dashed_line_is_always_dashed_its_dashes_bounded_and_its_legend_says_so() {
         ] {
             let drawing = draw(&chart, area);
             let (.., left, right) = plot(&drawing);
-            let period = dash_period(right - left);
+            let period = dash_period(right - left, LINE_VERTICES);
             let on = period * DASH.0 / (DASH.0 + DASH.1);
             let periods = ((right - left) / period).ceil() as usize;
             for colour in colours {
@@ -1186,14 +1196,14 @@ fn a_dashed_line_is_always_dashed_its_dashes_bounded_and_its_legend_says_so() {
         .into_iter()
         .filter(|(.., color)| *color == teal)
         .collect();
-    let expected = ((right - left) / dash_period(right - left)).ceil() as usize;
+    let expected = ((right - left) / dash_period(right - left, LINE_VERTICES)).ceil() as usize;
     assert_eq!(dashes.len(), expected);
     assert!(expected > 50 && expected <= LINE_VERTICES / 2 + 1);
     // Its key in the legend is two dashes, a solid series' a line.
-    let legend = crate::ui_text::plain(&legend(&zigzag(4), 34));
+    let legend = crate::ui_text::plain(&legend(&zigzag(4), 34)[0]);
     assert!(legend.starts_with("─ ─ a"), "{legend}");
     assert!(
-        crate::ui_text::plain(&super::legend(&fixtures::pressure(), 34)).starts_with("── mean")
+        crate::ui_text::plain(&super::legend(&fixtures::pressure(), 34)[0]).starts_with("── mean")
     );
 }
 
@@ -1385,4 +1395,343 @@ fn two_spikes_with_a_dip_between_are_each_shaded_to_their_peak_and_the_dip_not_a
             "{spike}: {highest} of {peak}"
         );
     }
+}
+
+#[test]
+fn the_palette_s_colours_are_legible_on_the_plot() {
+    // Each of the series' colours, and white, the reference lines', at least 4.5 times as bright as the plot over the
+    // face, as text must be to be legible. How far apart they are is `tomori-protocol`'s to check.
+    let luminance = |[r, g, b]: [f32; 3]| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let face = [0.02, 0.035, 0.06];
+    let plot =
+        std::array::from_fn(|channel| PLOT[channel] * PLOT[3] + face[channel] * (1.0 - PLOT[3]));
+    for (name, colour) in Colour::NAMED {
+        let contrast = (luminance(colour.rgb()) + 0.05) / (luminance(plot) + 0.05);
+        assert!(contrast >= 4.5, "{name}: {contrast}");
+    }
+}
+
+#[test]
+fn the_series_after_the_fourth_are_each_marked_along_their_line_by_a_marker_of_their_own() {
+    assert_eq!(
+        (0..CHART_SERIES).map(Marker::of).collect::<Vec<_>>(),
+        [
+            None,
+            None,
+            None,
+            None,
+            Some(Marker::Dot),
+            Some(Marker::Ring),
+            Some(Marker::Ringed),
+            Some(Marker::Square)
+        ]
+    );
+    assert_eq!(Marker::of(CHART_SERIES), None);
+    let chart = fixtures::regions();
+    let drawing = draw(&chart, AREA);
+    let (top, bottom, left, right) = plot(&drawing);
+    let area = drawing.plot.clone().unwrap();
+    let rings: Vec<_> = drawing
+        .shapes
+        .iter()
+        .filter_map(|shape| match *shape {
+            Shape::Ring { centre, color, .. } => Some((centre, color)),
+            _ => None,
+        })
+        .collect();
+    let squares = drawing
+        .shapes
+        .iter()
+        .filter(|shape| {
+            matches!(
+                shape,
+                Shape::Rect {
+                    outline: Some(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    let colour = |index: usize| ink(chart.series[index].colour, 1.0);
+    // A ring for each mark of the sixth and seventh, a square for the eighth's and a dot for the fifth's, one in each
+    // column across the plot, where its line is drawn there, within the plot.
+    let sixth: Vec<_> = rings
+        .iter()
+        .filter(|(_, color)| *color == colour(5))
+        .collect();
+    assert_eq!(sixth.len(), MARKS);
+    assert_eq!(
+        rings
+            .iter()
+            .filter(|(_, color)| *color == colour(6))
+            .count(),
+        MARKS
+    );
+    assert_eq!(squares, MARKS);
+    let fifth: Vec<_> = dots(&drawing)
+        .into_iter()
+        .filter(|(_, radius, color)| *color == colour(4) && *radius == 3.0)
+        .collect();
+    assert_eq!(fifth.len(), MARKS);
+    let column = (right - left) / MARKS as f32;
+    for (mark, (centre, _)) in sixth.iter().enumerate() {
+        assert!((centre[0] - (left + column * (mark as f32 + 1.5 / 4.0))).abs() < 1e-3);
+        assert!(centre[1] >= top && centre[1] <= bottom);
+        let at = area.at([centre[0], top]).unwrap();
+        // A step's held from its point, as its line is drawn.
+        let value = chart.series[5].values[at.floor() as usize].unwrap();
+        assert!((centre[1] - area.y(value)).abs() < 1e-3, "{mark}");
+    }
+    // None for the first four, nor in any colour of theirs but their lines'.
+    for index in 0..UNMARKED {
+        assert!(rings.iter().all(|(_, color)| *color != colour(index)));
+    }
+    // None across a gap, beyond a fixed end of the axis, nor for bars, which are told apart by their colour.
+    let mut gapped = fixtures::regions();
+    gapped.series[4].values = vec![None; fixtures::POINTS as usize];
+    gapped.series[5].values = vec![Some(1.0e6); fixtures::POINTS as usize];
+    gapped.axis.max = Some(2000.0);
+    gapped.series[6].style = SeriesStyle::Bars;
+    let drawing = draw(&gapped, AREA);
+    assert!(
+        drawing
+            .shapes
+            .iter()
+            .all(|shape| !matches!(shape, Shape::Ring { .. }))
+    );
+    assert!(
+        dots(&drawing)
+            .iter()
+            .all(|(_, radius, color)| *color != colour(4) || *radius != 3.0)
+    );
+    // Nor across a break: a few points, each its own run, too few to be thinned.
+    let mut broken = Chart::new(9);
+    for (index, colour) in Colour::SERIES.into_iter().enumerate() {
+        broken = broken.with_series(
+            Series::new("a", colour, SeriesStyle::Line, vec![Some(1.0); 9]).with_breaks(
+                if index == 7 {
+                    (0..9).collect()
+                } else {
+                    Vec::new()
+                },
+            ),
+        );
+    }
+    let squares = |drawing: &Drawing| {
+        drawing
+            .shapes
+            .iter()
+            .filter(|shape| {
+                matches!(
+                    shape,
+                    Shape::Rect {
+                        outline: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    assert_eq!(squares(&draw(&broken, AREA)), 0);
+    broken.series[7].breaks.clear();
+    assert_eq!(squares(&draw(&broken, AREA)), MARKS);
+    // A line thinned to be drawn is marked where it is drawn.
+    let mut thinned = fixtures::regions();
+    for series in &mut thinned.series {
+        series.values = (0..fixtures::POINTS as usize)
+            .map(|point| Some(if point % 2 == 0 { 100.0 } else { 900.0 }))
+            .collect();
+    }
+    let drawing = draw(&thinned, AREA);
+    let area = drawing.plot.clone().unwrap();
+    let (_, runs) = area.thinned.iter().find(|(index, _)| *index == 7).unwrap();
+    let frames: Vec<_> = drawing
+        .shapes
+        .iter()
+        .filter_map(|shape| match *shape {
+            Shape::Rect {
+                x,
+                y,
+                width,
+                outline: Some(_),
+                ..
+            } => Some([x + width / 2.0, y + width / 2.0]),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(frames.len(), MARKS);
+    for [x, y] in frames {
+        assert!((area.y(area.drawn(runs, x).unwrap()) - y).abs() < 1e-2);
+    }
+}
+
+#[test]
+fn eight_series_are_drawn_in_as_many_pieces_as_four_their_lines_thinned_to_a_share() {
+    assert_eq!(share(LINE_VERTICES, 1), LINE_VERTICES);
+    assert_eq!(share(LINE_VERTICES, UNMARKED), LINE_VERTICES);
+    assert_eq!(share(LINE_VERTICES, CHART_SERIES), LINE_VERTICES / 2);
+    // Eight series zigzagging at every one of 256 points: each thinned to its share, keeping every swing's extremes.
+    let mut chart = Chart::new(CHART_POINTS).with_axis(ValueAxis::new(Some(0.0), Some(1.0), ""));
+    for (index, colour) in Colour::SERIES.into_iter().enumerate() {
+        chart = chart.with_series(Series::new(
+            "a",
+            colour,
+            SeriesStyle::Line,
+            (0..CHART_POINTS)
+                .map(|point| Some(((point as usize + index) % 2) as f32))
+                .collect(),
+        ));
+    }
+    let drawing = draw(&chart, AREA);
+    let (top, bottom, ..) = plot(&drawing);
+    let area = drawing.plot.clone().unwrap();
+    assert_eq!(area.thinned.len(), CHART_SERIES);
+    for (index, runs) in &area.thinned {
+        assert!(runs.iter().map(Vec::len).sum::<usize>() <= share(LINE_VERTICES, CHART_SERIES) + 2);
+        let ys: Vec<f32> = runs.iter().flatten().map(|point| point[1]).collect();
+        assert!(ys.iter().any(|y| (y - top).abs() < 1.0), "{index}");
+        assert!(ys.iter().any(|y| (y - bottom).abs() < 1.0), "{index}");
+    }
+    let four = {
+        let mut four = chart.clone();
+        four.series.truncate(UNMARKED);
+        pieces(&draw(&four, AREA))
+    };
+    let marks = (CHART_SERIES - UNMARKED) * MARKS * 3;
+    assert!(
+        pieces(&drawing) <= four + marks + 16,
+        "{} of {four}",
+        pieces(&drawing)
+    );
+}
+
+#[test]
+fn several_series_of_bars_stand_side_by_side_each_at_least_two_font_pixels_wide() {
+    // One alone keeps a bar for each stretch of 128.
+    let one = fixtures::bars(1);
+    let drawing = draw(&one, AREA);
+    assert_eq!(
+        fills(&drawing, ink(one.series[0].colour, 1.0)).len(),
+        LINE_VERTICES
+    );
+    assert_eq!(drawing.plot.unwrap().stretches, LINE_VERTICES);
+    for count in [2, 4, 8] {
+        for area in [AREA, WIDE] {
+            let chart = fixtures::bars(count);
+            let drawing = draw(&chart, area);
+            let (_, _, left, right) = plot(&drawing);
+            let plotted = drawing.plot.clone().unwrap();
+            let stretches = plotted.stretches;
+            assert_eq!(stretches, bar_stretches(256, right - left, count));
+            // Thinned only where a stretch for each point would make them narrower: eight in a slot are a few dozen.
+            assert!(
+                (4..=LINE_VERTICES).contains(&stretches),
+                "{count}: {stretches}"
+            );
+            if count == 8 && area == AREA {
+                assert!(stretches < 32, "{stretches}");
+            }
+            // Each series a bar in each stretch, each at least two font pixels wide, within the plot, in its place.
+            let mut all = Vec::new();
+            for (place, series) in chart.series.iter().enumerate() {
+                let drawn = fills(&drawing, ink(series.colour, 1.0));
+                assert_eq!(drawn.len(), stretches, "{count}: {place}");
+                for (x, _, width, _) in &drawn {
+                    assert!(*width >= BAR_WIDTH - 0.05, "{count}: {width}");
+                    assert!(*x >= left - 1e-3 && x + width <= right + 1e-3);
+                }
+                all.extend(drawn.into_iter().map(|(x, _, width, _)| (x, width, place)));
+            }
+            // None overlapping another, and in each stretch the series in their order, left to right.
+            all.sort_by(|a, b| a.0.total_cmp(&b.0));
+            for pair in all.windows(2) {
+                assert!(
+                    pair[0].0 + pair[0].1 <= pair[1].0 + 1e-3,
+                    "{count}: {pair:?}"
+                );
+            }
+            for group in all.chunks(count) {
+                assert!(
+                    group.iter().map(|bar| bar.2).eq(0..count),
+                    "{count}: {group:?}"
+                );
+            }
+            // The readout reads each the bar drawn: its stretch's farthest from the base, a dot at its top.
+            let readout = super::readout::Readout::new(&chart, &plotted, 100.0, (2000.0, 400.0));
+            for (index, series) in chart.series.iter().enumerate() {
+                let stretch = 100 * stretches / 256;
+                let want = series.values
+                    [stretch * 256 / stretches..(stretch + 1) * 256 / stretches]
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .fold(f32::MIN, f32::max);
+                let read = bar_at(&chart, index, 100.0, stretches).unwrap();
+                assert!((read - want).abs() <= want * 1e-3, "{read} {want}");
+                assert_eq!(readout.dots[index].0[1], plotted.y(read));
+            }
+        }
+    }
+    // Too narrow a plot for two-pixel bars even in one stretch draws them in one, as narrow as they must be.
+    assert_eq!(bar_stretches(256, 4.0, 8), 1);
+    assert_eq!(bar_stretches(256, 300.0, 0), LINE_VERTICES);
+    assert_eq!(bar_stretches(6, 300.0, 3), 6);
+    // A readout of nothing reads nothing; nonsense reads the oldest.
+    let chart = fixtures::bars(2);
+    assert_eq!(bar_at(&chart, 5, 1.0, 10), None);
+    assert_eq!(bar_at(&chart, 0, f32::NAN, 10), bar_at(&chart, 0, 0.0, 10));
+    let mut gap = fixtures::bars(2);
+    gap.series[1].values = vec![None; 256];
+    assert_eq!(bar_at(&gap, 1, 3.0, 10), None);
+}
+
+#[test]
+fn a_legend_of_eight_series_wraps_onto_a_second_row_and_says_how_many_more_do_not_fit() {
+    let plain = |rows: &[Vec<Cell>]| {
+        rows.iter()
+            .map(|row| crate::ui_text::plain(row))
+            .collect::<Vec<_>>()
+    };
+    let chart = fixtures::regions();
+    // In a standard slot, as many as fit in two rows, then how many more.
+    let slot = legend(&chart, 34);
+    assert_eq!(
+        plain(&slot),
+        [
+            "── eu-west-1 112  ── us-east-1 161",
+            "── ap-south-1 324  +5",
+        ]
+    );
+    // In a wide slot, every series whole, the fifth to the eighth with their markers in their keys, and its limit
+    // where it fits.
+    let wide = legend(&chart, 140);
+    assert_eq!(wide.len(), 2);
+    let said = plain(&wide).join("  ");
+    for name in chart.series.iter().map(|series| series.name.as_str()) {
+        assert!(said.contains(name), "{said}");
+    }
+    assert!(
+        said.contains("─●─ us-west-2") && said.contains("─○─ eu-central-1"),
+        "{said}"
+    );
+    assert!(
+        said.contains("─◉─ ap-northeast-1") && said.contains("─☐─ af-south-1"),
+        "{said}"
+    );
+    assert!(wide.iter().all(|row| row.len() <= 140));
+    // Floating, or wide enough for all in a row, one row with its limit.
+    let row = legend(&chart, 400);
+    assert_eq!(row.len(), 1);
+    assert!(crate::ui_text::plain(&row[0]).ends_with("limit 1.0k"));
+    // However narrow, never more than two rows, none wider than the legend.
+    for columns in 1..60 {
+        let rows = legend(&chart, columns);
+        assert!(rows.len() <= LEGEND_ROWS, "{columns}");
+        assert!(
+            rows.iter().all(|row| row.len() <= columns),
+            "{columns}: {:?}",
+            plain(&rows)
+        );
+    }
+    assert_eq!(plain(&legend(&chart, 1)), ["…", "…"]);
 }

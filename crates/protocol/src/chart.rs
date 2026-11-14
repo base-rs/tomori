@@ -15,8 +15,8 @@ use crate::text::one_line;
 
 /// The most points along a chart's axis: 15 minutes at 5 seconds is 181.
 pub const CHART_POINTS: u32 = 256;
-/// The most series of a chart.
-pub const CHART_SERIES: usize = 4;
+/// The most series of a chart: as many as the colours of its series' palette, [`Colour::SERIES`].
+pub const CHART_SERIES: usize = 8;
 /// The most reference lines of a chart, such as a target.
 pub const CHART_REFERENCES: usize = 4;
 /// The most shaded regions of a chart.
@@ -39,7 +39,7 @@ pub const SIGNIFICANT: i32 = 4;
 pub const CHART_MAGNITUDE: f32 = 1.0e15;
 
 /// A colour of a chart's palette, or any other as RGB. On the wire, a name, such as `teal`, or `#rrggbb`; a name a
-/// client does not know is [`Colour::Grey`].
+/// client does not know is [`Colour::Grey`], as an older client reads [`Colour::Yellow`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "String", into = "String")]
 #[non_exhaustive]
@@ -53,12 +53,13 @@ pub enum Colour {
     #[default]
     Grey,
     White,
+    Yellow,
     Rgb([u8; 3]),
 }
 
 impl Colour {
     /// Every named colour, with its name.
-    pub const NAMED: [(&'static str, Colour); 8] = [
+    pub const NAMED: [(&'static str, Colour); 9] = [
         ("teal", Colour::Teal),
         ("amber", Colour::Amber),
         ("blue", Colour::Blue),
@@ -67,21 +68,52 @@ impl Colour {
         ("red", Colour::Red),
         ("grey", Colour::Grey),
         ("white", Colour::White),
+        ("yellow", Colour::Yellow),
     ];
 
-    /// Its red, green and blue, from 0 to 1, as every client draws it on a panel's dark face.
-    pub fn rgb(self) -> [f32; 3] {
+    /// The palette for a chart's series, in the order an environment gives them: a colour for each of
+    /// [`CHART_SERIES`], each told apart from the others, and from [`Colour::White`], kept for reference lines such as
+    /// a target, with normal sight and with simulated deuteranopia, protanopia and tritanopia.
+    pub const SERIES: [Colour; CHART_SERIES] = [
+        Colour::Teal,
+        Colour::Amber,
+        Colour::Blue,
+        Colour::Violet,
+        Colour::Green,
+        Colour::Red,
+        Colour::Yellow,
+        Colour::Grey,
+    ];
+
+    /// Its red, green and blue as sRGB bytes, as `#rrggbb` writes them: the named colours chosen for a panel's dark
+    /// face, lightened from Okabe and Ito's palette for colour blindness, each at least 5 times as bright as the face,
+    /// so that its text is legible.
+    pub fn srgb(self) -> [u8; 3] {
         match self {
-            Self::Teal => [0.16, 0.74, 0.66],
-            Self::Amber => [0.86, 0.62, 0.22],
-            Self::Blue => [0.42, 0.6, 0.98],
-            Self::Violet => [0.68, 0.52, 0.94],
-            Self::Green => [0.3, 0.8, 0.44],
-            Self::Red => [0.92, 0.36, 0.3],
-            Self::Grey => [0.56, 0.6, 0.66],
-            Self::White => [0.92, 0.93, 0.95],
-            Self::Rgb(rgb) => rgb.map(|value| f32::from(value) / 255.0),
+            Self::Teal => [0x36, 0xd9, 0xbd],
+            Self::Amber => [0xd9, 0x93, 0x27],
+            Self::Blue => [0x52, 0x90, 0xf1],
+            Self::Violet => [0xdf, 0x90, 0xd9],
+            Self::Green => [0x77, 0xd3, 0x67],
+            Self::Red => [0xde, 0x73, 0x6e],
+            Self::Grey => [0x84, 0x8d, 0x9e],
+            Self::White => [0xf6, 0xf7, 0xf9],
+            Self::Yellow => [0xfd, 0xf2, 0x70],
+            Self::Rgb(rgb) => rgb,
         }
+    }
+
+    /// Its red, green and blue, linear, from 0 to 1, as every client draws it: [`Colour::srgb`] decoded, so that
+    /// `#36d9bd` is drawn as [`Colour::Teal`] is.
+    pub fn rgb(self) -> [f32; 3] {
+        self.srgb().map(|byte| {
+            let value = f32::from(byte) / 255.0;
+            if value <= 0.040_45 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        })
     }
 }
 
@@ -1146,7 +1178,8 @@ impl Chart {
 
     /// What the chart reads at `at`, a point's index or a share of the way between two, in plain text: its time, and
     /// each series' name and value there, `-6 min: admitted 203,800 a minute, rejected no data`, on one line of at
-    /// most [`READING_CHARS`].
+    /// most [`READING_CHARS`]: each value whole, and those that do not fit said as how many more, `, +3 more`, rather
+    /// than one cut short.
     pub fn read_at(&self, at: f32) -> String {
         let values: Vec<String> = self
             .series
@@ -1154,17 +1187,36 @@ impl Chart {
             .take(CHART_SERIES)
             .enumerate()
             .map(|(index, series)| {
-                format!(
-                    "{} {}",
-                    one_line(&series.name, CHART_NAME_CHARS),
-                    self.amount(self.value_at(index, at))
+                one_line(
+                    &format!(
+                        "{} {}",
+                        one_line(&series.name, CHART_NAME_CHARS),
+                        self.amount(self.value_at(index, at))
+                    ),
+                    READING_CHARS,
                 )
             })
             .collect();
-        one_line(
-            &format!("{}: {}", self.time_at(at), values.join(", ")),
-            READING_CHARS,
-        )
+        let mut reading = one_line(&format!("{}: ", self.time_at(at)), READING_CHARS);
+        for (index, value) in values.iter().enumerate() {
+            let separator = if index == 0 { "" } else { ", " };
+            // Room for this value, and for saying how many more after it where there are.
+            let more = values.len() - index - 1;
+            let after = if more > 0 {
+                format!(", +{more} more").len()
+            } else {
+                0
+            };
+            if reading.chars().count() + separator.len() + value.chars().count() + after
+                > READING_CHARS
+            {
+                reading.push_str(&format!("{separator}+{} more", values.len() - index));
+                break;
+            }
+            reading.push_str(separator);
+            reading.push_str(value);
+        }
+        one_line(&reading, READING_CHARS)
     }
 }
 

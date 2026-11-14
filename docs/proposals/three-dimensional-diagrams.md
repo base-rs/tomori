@@ -97,7 +97,7 @@ The maintainer asked whether the panel is the right container. It is, extended b
 | Part | Fields | Bounds |
 | --- | --- | --- |
 | Diagram | title, id, place, metadata (as a panel's), `layout`, its direction or hub, nodes, edges, groups | at most 64 nodes in stage 1, 128 once measured; 128 edges, 192 later; 12 groups |
-| Node | `id`; `label`; `shape`: `box`, `sphere`, `cylinder`, `prism` (hexagonal), `diamond` or `card`; `colour`, of the chart palette (teal, amber, blue, violet, green, red, grey, white); `size`, 1 to 5, by importance; `detail`; `ref`; `group` | id 1 to 32 ASCII letters, digits, `-`, `_` and `.`; label 32 characters; detail 240; ref 256 bytes |
+| Node | `id`; `label`; `shape`: `box`, `sphere`, `cylinder`, `prism` (hexagonal), `diamond` or `card`; `colour`, of the chart palette (teal, amber, blue, violet, green, red, yellow, grey, white); `size`, 1 to 5, by importance; `detail`; `ref`; `group` | id 1 to 32 ASCII letters, digits, `-`, `_` and `.`; label 32 characters; detail 240; ref 256 bytes |
 | Edge | `from`, `to`; `label`; `direction`: forward, back, both or none; `style`: `solid`, `dashed`, `dotted`, `thick` or `flow` (pulses moving from its source to its target); `colour`; `weight`, 1 to 3 | label 24 characters; at most 4 edges between one pair of nodes |
 | Group | `id`; `label`; `kind`: `cluster` (a tray its members stand on), `layer` (a floor, its groups stacked one above another) or `container` (a box drawn around its members); `collapsed`; `layout` within it; its members | nested at most 3 deep; a node in at most one group |
 | Layout | `layered` with `down`, `up`, `right`, `left` or `away`; `radial`, about a hub node; `force`; `grid` | |

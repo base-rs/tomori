@@ -14,11 +14,11 @@ use crate::stage::published::{RESTING, RESTING_RUNS};
 /// The most bytes of JSON a published panel's content and chart can take, everything in it bounded as it is: a chart of
 /// every series at every point, its labels, summary and title, each at its longest, with room to spare. These tests
 /// check that the largest there can be is within it.
-const PUBLISHED_BYTES: usize = 24 * 1024;
+const PUBLISHED_BYTES: usize = 48 * 1024;
 
-/// The most bytes of JSON a published panel of a chart of every series at every point takes without its lines' breaks,
-/// as a live chart is: the bytes a side may publish at once, [`crate::channel::PUBLISH_BYTES_BURST`], hold as many of
-/// it as it may show.
+/// The most bytes of JSON a published panel of a chart of four series at every point takes without its lines' breaks,
+/// as a live chart is: the bytes a side may publish at once, [`crate::channel::PUBLISH_BYTES_BURST`], hold a page of
+/// it. One of all eight series takes twice as much at most, and a page of it is put up within two seconds.
 const PLOTTED_BYTES: usize = 16 * 1024;
 use crate::stage::{Destination, Placed, Target, WallChange};
 
@@ -209,7 +209,7 @@ fn a_published_panel_is_cleaned_bounded_and_a_chart_s_body_is_its_summary() {
     assert!(Publishing::new(Panel::text("a b", "", "")).is_err());
     assert!(Publishing::new(Panel::chart("c", "", Chart::new(1))).is_err());
     let mut wide = Chart::new(256);
-    for _ in 0..4 {
+    for _ in 0..tomori_protocol::chart::CHART_SERIES {
         wide = wide.with_series(Series::new(
             "s",
             Colour::Teal,
@@ -224,9 +224,13 @@ fn a_published_panel_is_cleaned_bounded_and_a_chart_s_body_is_its_summary() {
             .map(|at| AxisLabel::new(at, "\u{1F600}".repeat(32)))
             .collect(),
     );
-    // A chart of every series at every point, with the longest title, is within what a side may publish at once for
-    // each panel of a page; the largest a chart can be, in every part, is within the bound.
-    let bytes = Publishing::new(Panel::chart("w", "\u{1F600}".repeat(80), wide))
+    // A chart of four series at every point, with the longest title, is within what a side may publish at once for
+    // each panel of a page; one of every series, eight, within twice that, a page of it put up within two seconds, the
+    // bytes a side may publish at once bounding what one patch carries; the largest a chart can be, in every part, is
+    // within the bound.
+    let mut four = wide.clone();
+    four.series.truncate(4);
+    let bytes = Publishing::new(Panel::chart("w", "\u{1F600}".repeat(80), four))
         .unwrap()
         .bytes();
     assert!(bytes <= PLOTTED_BYTES, "{bytes}");
@@ -234,6 +238,19 @@ fn a_published_panel_is_cleaned_bounded_and_a_chart_s_body_is_its_summary() {
         (PLOTTED_BYTES * crate::channel::PUBLISH_PAGE) as f32
             <= crate::channel::PUBLISH_BYTES_BURST,
         "a page is put up at once"
+    );
+    let bytes = Publishing::new(Panel::chart("w", "\u{1F600}".repeat(80), wide))
+        .unwrap()
+        .bytes();
+    assert!(
+        bytes > PLOTTED_BYTES && bytes <= 2 * PLOTTED_BYTES,
+        "{bytes}"
+    );
+    let waiting =
+        (bytes * crate::channel::PUBLISH_PAGE) as f32 - crate::channel::PUBLISH_BYTES_BURST;
+    assert!(
+        waiting / crate::channel::PUBLISH_BYTES_PER_SECOND <= 2.0,
+        "a page is put up within two seconds"
     );
     let bytes = Publishing::new(Panel::chart("w", "\u{1F600}".repeat(80), largest_chart()))
         .unwrap()
@@ -1335,10 +1352,11 @@ fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
     for series in &mut plotted.series {
         series.breaks.clear();
     }
-    // Every chart is shown to a client that takes the most, 7.6 to 8.0 MB among the largest text panels and 32.4 MB
+    // Every chart is shown to a client that takes the most, 9.3 to 10.2 MB among the largest text panels and 32.4 MB
     // among code panels sent short, within its frame; an older client, which takes today's limits, is sent the Tomori
     // wall and the first nine of the environment's walls, 78 slots, and so 72 of the 128, as many of them as charts
-    // as its frame holds, 36 to 49, and the rest as their summaries, the frame then within 25 KB of full.
+    // as its frame holds, 17 to 24 of eight series, and the rest as their summaries, the frame then within one of the
+    // largest panels of full.
     let largest = largest_chart();
     for (chart, others) in [
         (&plotted, &text),
@@ -1348,9 +1366,10 @@ fn a_projection_with_every_published_chart_at_its_largest_fits_in_one_frame() {
     ] {
         let [(most, shown, published), (today, sent, older)] = at_every_limit(chart, others);
         assert_eq!((shown, published, older), (PUBLISHED, PUBLISHED, 72));
-        assert!((30..72).contains(&sent), "{sent} charts");
+        assert!((16..72).contains(&sent), "{sent} charts");
         assert!(most <= tomori_protocol::MOST_FRAME_BYTES, "{most} bytes");
-        let frames = tomori_protocol::MAX_FRAME_BYTES - 25_000..=tomori_protocol::MAX_FRAME_BYTES;
+        let frames =
+            tomori_protocol::MAX_FRAME_BYTES - PUBLISHED_BYTES..=tomori_protocol::MAX_FRAME_BYTES;
         assert!(frames.contains(&today), "{today} bytes");
     }
 }

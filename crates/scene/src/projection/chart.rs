@@ -24,18 +24,18 @@ use crate::ui_text::{CELL_HEIGHT, CELL_WIDTH, Cell, Row, Span, Style};
 /// each panel's faces are kept (see [`super::faces`]).
 pub const DRAWN: usize = tomori_environment::PANEL_LIMIT;
 
-/// A chart's legend and drawing, at a face of so many columns and rows below its heading.
-type Drawn = (Chart, (usize, usize), Rc<(Vec<Cell>, Drawing)>);
+/// A chart's legend's rows and drawing, at a face of so many columns and rows below its heading.
+type Drawn = (Chart, (usize, usize), Rc<(Vec<Vec<Cell>>, Drawing)>);
 
 thread_local! {
     /// The charts drawn most recently, the newest last.
     static CACHE: RefCell<Vec<Drawn>> = const { RefCell::new(Vec::new()) };
 }
 
-/// `chart`'s legend and drawing on a face `columns` wide with `body` rows below its heading, as [`face`] lays them out,
-/// from [`CACHE`] where it has been drawn at that size, and drawn and kept otherwise, forgetting the least recent beyond
-/// [`DRAWN`].
-fn drawn(chart: &Chart, columns: usize, body: usize) -> Rc<(Vec<Cell>, Drawing)> {
+/// `chart`'s legend's rows and drawing on a face `columns` wide with `body` rows below its heading, as [`face`] lays
+/// them out, from [`CACHE`] where it has been drawn at that size, and drawn and kept otherwise, forgetting the least
+/// recent beyond [`DRAWN`].
+fn drawn(chart: &Chart, columns: usize, body: usize) -> Rc<(Vec<Vec<Cell>>, Drawing)> {
     CACHE.with_borrow_mut(|cache| {
         if let Some(index) = cache
             .iter()
@@ -46,12 +46,15 @@ fn drawn(chart: &Chart, columns: usize, body: usize) -> Rc<(Vec<Cell>, Drawing)>
             cache.push(entry);
             return found;
         }
+        // A legend of nothing still takes its row, as one of a row does.
         let legend_cells = if chart.legend {
-            legend(chart, columns)
+            let mut rows = legend(chart, columns);
+            rows.resize_with(rows.len().max(1), Vec::new);
+            rows
         } else {
             Vec::new()
         };
-        let top = 3 + usize::from(chart.legend);
+        let top = 3 + legend_cells.len();
         let drawing = draw(
             chart,
             Area {
@@ -103,8 +106,8 @@ pub(super) fn metadata(chart: &Chart) -> Vec<Span> {
 }
 
 /// `panel`'s face, a chart panel of `chart`, framed by `border` and sized as `fit` says: its title, bold, a row of its
-/// status, in its tone, and its unit, a rule, its legend, where it shows one, and its chart in the rows below; and where
-/// its plot is drawn, which its readout reads.
+/// status, in its tone, and its unit, a rule, its legend's rows, where it shows one, and its chart in the rows below;
+/// and where its plot is drawn, which its readout reads.
 pub(super) fn face(
     panel: &Panel,
     chart: &Chart,
@@ -131,9 +134,7 @@ pub(super) fn face(
         rule,
     ];
     let drawn = drawn(chart, columns, body);
-    if chart.legend {
-        rows.push(Row::new(drawn.0.clone()));
-    }
+    rows.extend(drawn.0.iter().cloned().map(Row::new));
     rows.resize_with(3 + body, Row::default);
     canvas.rows = rows;
     canvas.shapes = chips.shapes;
