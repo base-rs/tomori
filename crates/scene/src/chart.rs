@@ -267,6 +267,7 @@ pub fn bounded(chart: &Chart) -> Chart {
         name(&chart.axis.unit),
     );
     bounded.legend = chart.legend;
+    bounded.time = chart.time;
     bounded.badge = chart
         .badge
         .as_ref()
@@ -1552,7 +1553,8 @@ fn columns(points: &[[f32; 2]], most: usize) -> Vec<[f32; 2]> {
 }
 
 /// The legend of `chart`, in rows `columns` wide: each series' key, a short line in its colour, two dashes for a dashed
-/// series and its marker in it for a marked one, its name and its latest value, `--` where its last point has none, or
+/// series and its marker in it for a marked one, its name and its latest value, on a fixed window its newest, as
+/// [`Chart::current`] reads it, `--` where it has none now, or
 /// `no data` where it has none at all, dim; then each reference line's label and value. Each is whole, the series
 /// first, wrapping onto the next row where one does not fit, in at most [`LEGEND_ROWS`], and those that do not fit in
 /// them said at the end as how many more, `+3`; a reference line's only where it fits in the rows the series take,
@@ -1563,8 +1565,8 @@ pub fn legend(chart: &Chart, columns: usize) -> Vec<Vec<Cell>> {
     let mut items: Vec<Vec<Span>> = Vec::new();
     for (index, series) in chart.series.iter().enumerate() {
         let color = ink(series.colour, 1.0);
-        let (text, color) = match series.latest() {
-            Some(value) => (format!(" {} {}", series.name, brief(value)), color),
+        let (text, color) = match chart.current(series) {
+            Some((_, value)) => (format!(" {} {}", series.name, brief(value)), color),
             None if series.values.iter().any(Option::is_some) => {
                 (format!(" {} --", series.name), color)
             }

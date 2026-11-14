@@ -307,6 +307,57 @@ fn a_summary_says_each_latest_value_and_never_that_all_is_well_without_data() {
     );
 }
 
+#[test]
+fn a_fixed_window_s_summary_says_each_series_newest_value_and_when() {
+    // 02:00 to 10:00 UTC on 14 November 2026, a point each 6 minutes, 81 points.
+    let from_ms = 1_794_621_600_000;
+    let window = |values: Vec<Option<f32>>| {
+        Chart::new(81)
+            .with_series(Series::new(
+                "dw2 trial",
+                Colour::Teal,
+                SeriesStyle::Line,
+                values,
+            ))
+            .with_time(TimeAxis::Fixed {
+                from_ms,
+                to_ms: from_ms + 8 * 3_600_000,
+            })
+    };
+    // Filling until its end: read to 05:54, the rest a gap to come, never a value gone.
+    let filling = window((0..81).map(|at| (at <= 39).then_some(0.194)).collect())
+        .with_status(Note::new("filling until 10:00 UTC", Tone::Neutral));
+    assert_eq!(
+        filling.summary(),
+        "filling until 10:00 UTC\ndw2 trial: 0.194 at 05:54"
+    );
+    assert_eq!(filling.current(&filling.series[0]), Some((39, 0.194)));
+    // Ended and read whole, at its end; a series that stopped within it, when it stopped.
+    let ended = window(vec![Some(0.2); 81]);
+    assert_eq!(ended.summary(), "dw2 trial: 0.2 at its end, 10:00");
+    let stopped = window((0..81).map(|at| (at < 40).then_some(0.5)).collect());
+    assert_eq!(stopped.summary(), "dw2 trial: 0.5 at 05:54");
+    // Off the minute, to the second; not begun, no data.
+    let mut fine = window(vec![None; 81]);
+    fine.time = Some(TimeAxis::Fixed {
+        from_ms: from_ms + 15_000,
+        to_ms: from_ms + 15_000 + 8 * 3_600_000,
+    });
+    fine.series[0].values[1] = Some(1.0);
+    assert_eq!(fine.summary(), "dw2 trial: 1 at 02:06:15");
+    assert_eq!(
+        window(vec![None; 81]).summary(),
+        "No data.\ndw2 trial: no data"
+    );
+    // A live chart whose last point has no value still says it has none now.
+    let mut live = window((0..81).map(|at| (at <= 39).then_some(0.194)).collect());
+    live.time = Some(TimeAxis::Live { step_ms: 360_000 });
+    assert_eq!(live.summary(), "dw2 trial: no value now");
+    assert_eq!(live.current(&live.series[0]), None);
+    live.series[0].values[80] = Some(0.3);
+    assert_eq!(live.summary(), "dw2 trial: 0.3 now");
+}
+
 /// Root admissions a minute, as a line, at 5 seconds over 15 minutes, with a gap and a break; and rejections as bars.
 fn admissions() -> Chart {
     let admitted = (0..181)

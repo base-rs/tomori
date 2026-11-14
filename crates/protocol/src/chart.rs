@@ -301,6 +301,15 @@ impl Series {
     pub fn latest(&self) -> Option<f32> {
         self.values.last().copied().flatten()
     }
+
+    /// Its newest value and the point it is at, if it has any value at all, whatever gaps follow it.
+    pub fn newest(&self) -> Option<(usize, f32)> {
+        self.values
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(at, value)| value.map(|value| (at, value)))
+    }
 }
 
 /// A level across the chart, such as a target of 1.0, with its label, in its colour.
@@ -716,9 +725,23 @@ impl Chart {
                 .all(|(a, b)| a.values == b.values && a.breaks == b.breaks)
     }
 
+    /// The value `series` reads as now, and the point it is at: on a fixed window, its newest value, since a window
+    /// still filling until a time to come, or one a series stopped within, has gaps after it that are not a value gone;
+    /// on a live chart, or one that says no time, its latest, only where its last point has one, so that a series gone
+    /// now reads as having no value.
+    pub fn current(&self, series: &Series) -> Option<(usize, f32)> {
+        match self.time {
+            Some(TimeAxis::Fixed { .. }) => series.newest(),
+            _ => series
+                .latest()
+                .map(|value| (series.values.len().saturating_sub(1), value)),
+        }
+    }
+
     /// What the chart shows now, in plain text, for a reader that cannot draw it, as an older client, and for the
     /// agent: each series' latest value, or that it has none, each reference line, its badge and its status, a line
-    /// each; or that it has no data.
+    /// each; or that it has no data. On a fixed window, each series' newest value, at the time of day it is at in UTC,
+    /// `0.194 at 05:56`, or at its end, `0.194 at its end, 10:00`, whether or not the window is still filling.
     pub fn summary(&self) -> String {
         let unit = if self.axis.unit.is_empty() {
             String::new()
@@ -732,9 +755,19 @@ impl Chart {
         if !self.has_values() {
             lines.push("No data.".to_owned());
         }
+        let last = (self.points.max(2) - 1) as usize;
         for series in &self.series {
-            lines.push(match series.latest() {
-                Some(value) => format!("{}: {value}{unit} now", series.name),
+            lines.push(match self.current(series) {
+                Some((at, value)) => {
+                    let when = match self.time_of(at as f32) {
+                        Some(ChartTime::Instant { utc_ms }) if at >= last => {
+                            format!("at its end, {}", clock(utc_ms))
+                        }
+                        Some(ChartTime::Instant { utc_ms }) => format!("at {}", clock(utc_ms)),
+                        _ => "now".to_owned(),
+                    };
+                    format!("{}: {value}{unit} {when}", series.name)
+                }
                 None if series.values.iter().any(Option::is_some) => {
                     format!("{}: no value now", series.name)
                 }
@@ -753,6 +786,18 @@ impl Chart {
             lines.push(badge.text.clone());
         }
         lines.join("\n")
+    }
+}
+
+/// The time of day of `utc_ms`, milliseconds since the Unix epoch, in UTC, to the nearest second: `05:56`, or
+/// `05:56:15` off the minute.
+fn clock(utc_ms: f64) -> String {
+    let seconds = (utc_ms / 1000.0).round().rem_euclid(86_400.0) as u64 % 86_400;
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if seconds == 0 {
+        format!("{hours:02}:{minutes:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
     }
 }
 

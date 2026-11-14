@@ -656,6 +656,24 @@ fn a_legend_shows_whole_items_as_they_fit_and_says_what_is_missing() {
         "── mean --  ── greatest no data  target 1"
     );
     assert_eq!(plain(legend(&fixtures::pressure(), 6)), "── me…\n── gr…");
+    // A fixed window still filling, or a series that stopped within it, shows its newest value, not `--`; a live
+    // chart's series without a value at its last point still shows `--`.
+    let mut filling = fixtures::stale().with_time(tomori_protocol::chart::TimeAxis::Fixed {
+        from_ms: 0,
+        to_ms: 3_600_000,
+    });
+    filling.series[1].values = vec![Some(1.25), None];
+    filling.points = 2;
+    filling.series[0].values = vec![Some(0.5), None];
+    assert_eq!(
+        plain(legend(&filling, 60)),
+        "── mean 0.50  ── greatest 1.2  target 1"
+    );
+    let live = filling.with_time(tomori_protocol::chart::TimeAxis::Live { step_ms: 5_000 });
+    assert_eq!(
+        plain(legend(&live, 60)),
+        "── mean --  ── greatest --  target 1"
+    );
     assert!(legend(&Chart::new(2), 10).is_empty());
 }
 
