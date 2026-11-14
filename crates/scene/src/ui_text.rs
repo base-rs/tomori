@@ -3,7 +3,7 @@
 
 //! Styled text laid out on a grid of monospaced cells, for the local-space panels' [`Canvas`](crate::canvas::Canvas), free of rendering code.
 //!
-//! Text is given as [`Span`]s, each with a [`Style`]: a colour, whether it is bold, and an optional background. [`wrap`] lays spans out on rows of a given width, at words, breaking a word longer than a row, with a hanging indent for the rows after the first and, for code, a continuation mark where a line is broken rather than cut; [`fit`] keeps at most a number of rows, ending the last with "…" where text is left out, and [`cut`] keeps one row, ending with "…" where it is cut. [`lines`] and [`clip`] do the same for plain text. These are the one rule for every panel, label and menu row.
+//! Text is given as [`Span`]s, each with a [`Style`]: a colour, whether it is bold, and an optional background. [`wrap`] lays spans out on rows of a given width, at words, breaking a word longer than a row, with a hanging indent for the rows after the first, or, for code, as a code panel's lines wrap, at spaces and punctuation, under each line's own indentation, with a continuation mark where a line is broken rather than cut; [`fit`] keeps at most a number of rows, ending the last with "…" where text is left out, and [`cut`] keeps one row, ending with "…" where it is cut. [`lines`] and [`clip`] do the same for plain text. These are the one rule for every panel, label and menu row.
 //!
 //! Each grapheme drawn takes a cell, or two for a wide one, such as a CJK ideograph or a full-width form, whose second cell holds [`WIDE`], so that a row's cells are its columns. A grapheme is drawn as the one character its letter and marks compose to, leaving out marks that do not compose; [`shown`] is the character drawn for it, which is itself where a bundled font has it, its base letter where only that is, or `?`, so that the console shows what the headset draws. Every kind of line break, such as CRLF, a lone carriage return or a form feed, is one, as a line feed is. Other control characters, variation selectors and zero-width spaces and joiners take no cell. Lines break at spaces and, between CJK characters, wherever Unicode's line breaking rules (UAX #14) allow, so never before closing punctuation such as "。".
 //!
@@ -137,7 +137,9 @@ pub struct Wrap {
     pub indent: usize,
     /// Cells of space before every later row's text, such as to hang a list item's text under itself.
     pub hanging: usize,
-    /// Keep spaces and break anywhere, marking each break with this character at the end of the row, as for code, rather than breaking at words.
+    /// Lay the text out as code, marking each break with this character at the end of the row, rather than breaking at
+    /// words: each line as [`wrap_code`] wraps a code panel's, keeping its spaces and hanging its later rows under its
+    /// own indentation, after `indent`; `hanging` is not used.
     pub continuation: Option<char>,
 }
 
@@ -148,10 +150,33 @@ pub fn wrap(spans: &[Span], width: usize, options: Wrap) -> Vec<Vec<Cell>> {
     let width = width.max(options.indent.max(options.hanging) + 2);
     let graphemes = graphemes(spans.iter().map(|span| (span.text.as_str(), span.style)));
     let mut rows = Vec::new();
-    for line in graphemes.split(|(ch, _)| *ch == '\n') {
-        match options.continuation {
-            Some(mark) => wrap_code(line, width, options, mark, &mut rows),
-            None => wrap_words(line, width, options, &mut rows),
+    let lines = graphemes.split(|(ch, _)| *ch == '\n');
+    match options.continuation {
+        Some(mark) => {
+            // Each line as drawn, a tab as a space.
+            let lines: Vec<Vec<Cell>> = lines
+                .map(|line| {
+                    let mut cells = Vec::new();
+                    for &(ch, style) in line {
+                        extend(&mut cells, &[(if ch == '\t' { ' ' } else { ch }, style)]);
+                    }
+                    cells
+                })
+                .collect();
+            let text: Vec<String> = lines.iter().map(|line| plain(line)).collect();
+            let step = indent_step(text.iter().map(String::as_str));
+            for line in &lines {
+                rows.extend(
+                    wrap_code(line, width - options.indent, step, Some(mark))
+                        .into_iter()
+                        .map(|row| blank(options.indent, WHITE).chain(row).collect()),
+                );
+            }
+        }
+        None => {
+            for line in lines {
+                wrap_words(line, width, options, &mut rows);
+            }
         }
     }
     rows
@@ -171,45 +196,94 @@ fn blank(count: usize, style: Style) -> impl Iterator<Item = Cell> {
     )
 }
 
-fn wrap_code(line: &[Cell], width: usize, options: Wrap, mark: char, rows: &mut Vec<Vec<Cell>>) {
-    let line: Vec<Cell> = line
-        .iter()
-        .map(|&(ch, style)| (if ch == '\t' { ' ' } else { ch }, style))
-        .collect();
-    let mut rest = line.as_slice();
-    let mut first = true;
+/// The fewest cells a wrapped line of code keeps for its code beside its hanging indent, however deeply it is indented.
+pub(crate) const CODE_ROOM: usize = 16;
+
+/// The indent step of code's `lines`: the least indentation any line has, of two to four spaces, or four where none is
+/// indented.
+pub(crate) fn indent_step<'a>(lines: impl IntoIterator<Item = &'a str>) -> usize {
+    lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.chars().take_while(|c| *c == ' ').count())
+        .filter(|indent| *indent > 0)
+        .min()
+        .map_or(4, |step| step.clamp(2, 4))
+}
+
+/// Whether a line of code may break between `before` and `after`: after a space, or after punctuation that ends or
+/// opens a part of it, such as a comma, an operator or an opening bracket, unless a closing one follows.
+fn code_breaks(before: char, after: char) -> bool {
+    before == ' '
+        || (",;([{.:=&|+-*/<>!?".contains(before) && !")]}>,;.:".contains(after) && after != ' ')
+}
+
+/// One line of code's `cells`, as drawn, a wide character followed by [`WIDE`], on rows of `width` cells: as it is
+/// where it fits, and otherwise broken where [`code_breaks`] allows, in the latter half of the row and after the line's
+/// own indentation, or else at the row's end, never through a wide character. Its later rows hang one indent `step`
+/// under its own indentation, keeping at least [`CODE_ROOM`] cells for its code, and the spaces at each break are
+/// dropped. With a `mark`, every row but the last ends with it, in the row's last cell. Each cell keeps its style, so
+/// that highlighting carries across a break.
+pub(crate) fn wrap_code(
+    cells: &[Cell],
+    width: usize,
+    step: usize,
+    mark: Option<char>,
+) -> Vec<Vec<Cell>> {
+    let indent = cells.iter().take_while(|(c, _)| *c == ' ').count();
+    let hanging = (indent + step).min(width.saturating_sub(CODE_ROOM));
+    let mut rows = Vec::new();
+    let mut rest = cells;
     loop {
-        let indent = if first {
-            options.indent
-        } else {
-            options.hanging
-        };
-        let room = width - indent;
+        let prefix = if rows.is_empty() { 0 } else { hanging };
+        // The hanging indent keeps the code's background, so that a tinted block stays one block.
         let style = rest.first().map_or(WHITE, |(_, style)| *style);
-        let mut row: Vec<Cell> = blank(indent, style).collect();
-        if span(rest) <= room {
-            extend(&mut row, rest);
+        let mut row: Vec<Cell> = std::iter::repeat_n(
+            (
+                ' ',
+                Style {
+                    mark: None,
+                    ..style
+                },
+            ),
+            prefix,
+        )
+        .collect();
+        if rest.len() <= width - prefix {
+            row.extend_from_slice(rest);
             rows.push(row);
-            return;
+            return rows;
         }
-        // As many as fit beside the mark. The rest is wider than the room, so some never fit.
-        let mut taken = 0;
-        let mut used = 0;
-        while used + columns(rest[taken].0) < room {
-            used += columns(rest[taken].0);
-            taken += 1;
+        // The last break the line allows in the latter half of the row, beside the mark, after its indentation, or else
+        // the row's end, before a wide character that would not fit.
+        let room = width - prefix - usize::from(mark.is_some());
+        let first = (room / 2).max(if rows.is_empty() { indent + 1 } else { 1 });
+        let mut at = (first..=room)
+            .rev()
+            .find(|&at| rest[at].0 != WIDE && code_breaks(rest[at - 1].0, rest[at].0))
+            .unwrap_or(room - usize::from(rest[room].0 == WIDE));
+        // A wide character with no room beside the mark fills the row alone.
+        let alone = at == 0;
+        if alone {
+            at = 1 + usize::from(rest.get(1).is_some_and(|(c, _)| *c == WIDE));
         }
-        if taken == 0 {
-            // A wide character with no room beside it for the mark fills the row alone.
-            extend(&mut row, &rest[..1]);
-            rest = &rest[1..];
-        } else {
-            extend(&mut row, &rest[..taken]);
-            row.push((mark, rest[taken].1));
-            rest = &rest[taken..];
+        row.extend_from_slice(&rest[..at]);
+        while row.len() > prefix && row.last().is_some_and(|(c, _)| *c == ' ') {
+            row.pop();
+        }
+        let next = rest[at].1;
+        rest = &rest[at..];
+        let spaces = rest.iter().take_while(|(c, _)| *c == ' ').count();
+        rest = &rest[spaces..];
+        if let Some(mark) = mark.filter(|_| !alone && !rest.is_empty()) {
+            let style = row.last().map_or(next, |(_, style)| *style);
+            row.extend(std::iter::repeat_n((' ', style), width - 1 - row.len()));
+            row.push((mark, next));
         }
         rows.push(row);
-        first = false;
+        if rest.is_empty() {
+            return rows;
+        }
     }
 }
 
@@ -701,10 +775,43 @@ mod tests {
         assert!(rows.iter().all(|row| row.len() <= 10));
         // A wide character is never split by the mark: it moves to the next row, and one with no room beside the mark fills a row alone.
         let rows = wrap(&[Span::new("let 名前 = 1;", code)], 6, CODE);
-        assert_eq!(text(&rows), ["let ↵", "名前 ↵", "= 1;"]);
+        assert_eq!(text(&rows), ["let  ↵", "名前 ↵", "= 1;"]);
         assert!(rows.iter().all(|row| row.len() <= 6));
         let rows = wrap(&[Span::new("日本", code)], 2, CODE);
         assert_eq!(text(&rows), ["日", "本"]);
+    }
+
+    #[test]
+    fn code_wraps_as_a_code_panel_does_with_its_mark_in_the_last_cell() {
+        let code = WHITE.on([0.2, 0.2, 0.2, 1.0]);
+        let block = "fn f() {\n    call(first, second, third);\n}";
+        let rows = wrap(&[Span::new(block, code)], 20, CODE);
+        // Broken after punctuation in the latter half of the row, its later rows hanging under its own indentation and
+        // one step more, the block's least, here 4, and the mark in the row's last cell.
+        assert_eq!(
+            text(&rows),
+            [
+                "fn f() {",
+                "    call(first,    ↵",
+                "    second, third);",
+                "}"
+            ]
+        );
+        assert!(rows.iter().all(|row| row.len() <= 20));
+        // The hanging indent and the cells before the mark keep the code's background, so that the block stays one.
+        assert!(
+            rows[1..3]
+                .iter()
+                .flatten()
+                .all(|(_, style)| style.background == code.background)
+        );
+        // Laid out after `indent`, and no mark where only spaces are left after a break.
+        let rows = wrap(
+            &[Span::new(format!("abc{}", " ".repeat(30)), code)],
+            22,
+            Wrap { indent: 2, ..CODE },
+        );
+        assert_eq!(text(&rows), ["  abc"]);
     }
 
     #[test]

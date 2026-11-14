@@ -875,7 +875,7 @@ fn code_breaks_at_spaces_or_punctuation_and_hard_breaks_a_long_token_never_throu
         )
     };
     let rows = |text: &str, room, step| -> Vec<String> {
-        wrap_code(&cells(text), room, step)
+        wrap_code(&cells(text), room, step, None)
             .iter()
             .map(|row| crate::ui_text::plain(row))
             .collect()
@@ -903,7 +903,7 @@ fn code_breaks_at_spaces_or_punctuation_and_hard_breaks_a_long_token_never_throu
     assert_eq!(wrapped.concat().replace(' ', ""), token);
     // A wide character that would be cut by the row's end starts the next.
     let wide = format!("{}日本", "x".repeat(19));
-    let wrapped = wrap_code(&cells(&wide), 20, 4);
+    let wrapped = wrap_code(&cells(&wide), 20, 4, None);
     assert_eq!(crate::ui_text::plain(&wrapped[0]), "x".repeat(19));
     assert!(wrapped.iter().all(|row| crate::ui_text::whole(row)));
     // A letter and the marks it composes with take one cell, and are never parted by a break, nor is an emoji, wide.
@@ -912,22 +912,22 @@ fn code_breaks_at_spaces_or_punctuation_and_hard_breaks_a_long_token_never_throu
     assert_eq!(wrapped[0], "\u{e9}".repeat(20));
     assert_eq!(wrapped.concat().replace(' ', ""), "\u{e9}".repeat(30));
     let emoji = format!("{}😀😀", "x".repeat(19));
-    let wrapped = wrap_code(&cells(&emoji), 20, 4);
+    let wrapped = wrap_code(&cells(&emoji), 20, 4, None);
     assert!(wrapped.iter().all(|row| crate::ui_text::whole(row)));
     assert!(wrapped.iter().all(|row| row.len() <= 20));
     // The hanging indent keeps some room for code, however deeply the line is indented.
     let deep = format!("{}{}", " ".repeat(40), "y ".repeat(20));
-    let wrapped = wrap_code(&cells(&deep), 45, 4);
+    let wrapped = wrap_code(&cells(&deep), 45, 4, None);
     assert!(
         wrapped[1..]
             .iter()
             .all(|row| { row.iter().take_while(|(c, _)| *c == ' ').count() == 45 - CODE_ROOM })
     );
     // The indent step is the least indentation the block's lines have, of two to four.
-    assert_eq!(indent_step(&["a", "  b", "    c"]), 2);
-    assert_eq!(indent_step(&["a", "\tb", "        c"]), 4);
-    assert_eq!(indent_step(&["a", " b"]), 2);
-    assert_eq!(indent_step(&["a", "", "b"]), 4);
+    assert_eq!(indent_step(["a", "  b", "    c"]), 2);
+    assert_eq!(indent_step(["a", "\tb", "        c"]), 4);
+    assert_eq!(indent_step(["a", " b"]), 2);
+    assert_eq!(indent_step(["a", "", "b"]), 4);
 }
 
 #[test]

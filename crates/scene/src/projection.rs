@@ -31,7 +31,7 @@ use crate::{
     shapes::Shape,
     sides::{Hands, Side},
     transcript::{BRIGHT, DIM, Line, TEXT},
-    ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style, cut},
+    ui_text::{CELL_HEIGHT, CELL_WIDTH, CODE_ROOM, Row, Style, cut},
 };
 
 /// A panel's face in a wall's slot, in cells: a title, a row of metadata, a rule, and its body.
@@ -149,8 +149,6 @@ pub fn scroll_rate(forward: f32) -> f32 {
     -forward.signum() * SCROLL_SPEED * past * past
 }
 
-/// The fewest cells a wrapped line of code keeps beside its hanging indent.
-const CODE_ROOM: usize = 16;
 /// The continuation marker, drawn in the gutter of a line of code's later rows.
 const CONTINUED: char = '↪';
 const CONTINUED_COLOR: [f32; 4] = [0.42, 0.47, 0.55, 0.8];
@@ -3014,10 +3012,10 @@ mod list;
 pub mod volume;
 pub(crate) use list::RowMarks;
 
+#[cfg(test)]
+use crate::ui_text::{indent_step, wrap_code};
 pub use code::CodeLayout;
 use code::code_face;
-#[cfg(test)]
-use code::{indent_step, wrap_code};
 pub(crate) use labels::KeptLabel;
 use labels::hint_sheet;
 pub use labels::{Controls, ItemAction, Release, hint, label, let_go_hint};
