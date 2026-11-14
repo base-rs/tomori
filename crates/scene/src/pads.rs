@@ -333,6 +333,7 @@ fn sheet(destination: String, at: Vec3, viewer: Vec3, controls: Controls) -> She
             1.0,
         )),
         canvas: Some(crate::frame_timing::drawn(canvas)),
+        ahead: false,
     }
 }
 

@@ -390,6 +390,7 @@ pub(super) fn hint_beside(mut canvas: Canvas, edge: Vec3, viewer: Vec3, side: f3
     Sheet {
         model: Some(facing(edge + Vec3::Y * side * tall / 2.0, viewer, 1.0)),
         canvas: Some(crate::frame_timing::drawn(canvas)),
+        ahead: false,
     }
 }
 

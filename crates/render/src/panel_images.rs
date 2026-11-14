@@ -277,7 +277,7 @@ impl PanelImages {
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: Default::default(),
-                bias: Default::default(),
+                bias: crate::occlusion::OVER,
             }),
             multisample: wgpu::MultisampleState {
                 count: samples,

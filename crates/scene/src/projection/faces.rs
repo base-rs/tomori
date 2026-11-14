@@ -424,7 +424,7 @@ fn far(title: &str, (width, height): (f32, f32), border: [f32; 4]) -> Canvas {
     let mut canvas = Canvas::new(columns, pixel);
     canvas.kind = Kind::PanelFace;
     canvas.padding = (MARGIN.0, vertical);
-    canvas.background = [0.02, 0.035, 0.06, 0.94];
+    canvas.background = [0.02, 0.035, 0.06, 1.0];
     canvas.border = Some(border);
     let lines = crate::ui_text::lines(title, columns, rows);
     let empty = rows - lines.len();

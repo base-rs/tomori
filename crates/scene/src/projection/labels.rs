@@ -154,6 +154,7 @@ fn label_sheet(canvas: Arc<Canvas>, at: Vec3, viewer: Vec3) -> Sheet {
             1.0,
         )),
         canvas: Some(canvas),
+        ahead: false,
     }
 }
 
@@ -321,5 +322,6 @@ pub(super) fn hint_sheet(
     Sheet {
         model: Some(facing(at, viewer, 1.0)),
         canvas: Some(crate::frame_timing::drawn(canvas)),
+        ahead: false,
     }
 }

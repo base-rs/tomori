@@ -85,7 +85,7 @@ pub(super) fn face(panel: &Panel, image: &Image, fit: Fit, border: Option<[f32; 
     let captioned = caption(panel, columns, most.min(body.saturating_sub(IMAGE_ROWS)));
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
-    canvas.background = [0.02, 0.035, 0.06, 0.94];
+    canvas.background = [0.02, 0.035, 0.06, 1.0];
     canvas.border = border;
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), columns),

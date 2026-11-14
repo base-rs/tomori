@@ -79,8 +79,13 @@ pub struct Canvas {
     pub rows: Vec<Row>,
     /// The size of a font pixel, in metres.
     pub pixel: f32,
-    /// Behind everything, usually translucent.
+    /// Behind everything: wholly opaque for a panel's face or a wall's board, which the renderer draws first, writing
+    /// depth, and translucent for labels and the like.
     pub background: Rgba,
+    /// Where the background is drawn, its left, top, width and height in font pixels from the canvas's top-left corner,
+    /// as a shape is placed, where it is not the whole canvas, as a wall of a group's board is, its edges where the
+    /// group's seams are; by default the whole canvas.
+    pub backing: Option<[f32; 4]>,
     /// Font pixels around the text, horizontally and vertically.
     pub padding: (usize, usize),
     /// A frame around the panel, a font pixel wide.
@@ -103,6 +108,7 @@ impl Canvas {
             rows: Vec::new(),
             pixel,
             background: [0.008, 0.018, 0.035, 0.85],
+            backing: None,
             padding: (6, 4),
             border: None,
             shapes: Vec::new(),
@@ -164,6 +170,7 @@ impl Canvas {
             rows,
             pixel,
             background,
+            backing,
             padding,
             border,
             shapes,
@@ -176,6 +183,7 @@ impl Canvas {
             && *columns == other.columns
             && *pixel == other.pixel
             && *background == other.background
+            && *backing == other.backing
             && *padding == other.padding
             && *rows == other.rows
             && *shapes == other.shapes
@@ -196,7 +204,8 @@ impl Canvas {
         let mut mesh = Mesh::new(self);
         let (width, height) = self.size_in_pixels();
         let (width, height) = (width as f32, height as f32);
-        mesh.quad(0.0, 0.0, width, height, self.background);
+        let [x, y, across, down] = self.backing.unwrap_or([0.0, 0.0, width, height]);
+        mesh.quad(x, y, across, down, self.background);
         let start = mesh.vertices.len();
         if let Some(border) = self.border {
             mesh.shape(

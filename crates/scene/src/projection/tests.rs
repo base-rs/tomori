@@ -205,13 +205,13 @@ fn a_wall_holds_its_slots_in_three_columns_of_two_the_first_at_the_top_left() {
     assert!(offsets[0].y > offsets[3].y);
     assert_eq!(offsets[0].x, offsets[3].x);
     // The wall's face is laid out to match: its slots marked where the panels go.
-    let face = wall_face(&wall(TOMORI_WALL, WallKind::Tomori, 0.0, 3.0));
+    let face = wall_face(&wall(TOMORI_WALL, WallKind::Tomori, 0.0, 3.0), &[]);
     let (size_width, size_height) = face.size();
     assert!((size_width - wall_width).abs() < 1e-6 && (size_height - wall_height).abs() < 1e-6);
     assert_eq!(face.shapes.len(), WALL_SLOTS as usize);
     assert!(face.plain().starts_with("  TOMORI"));
     assert!(
-        wall_face(&wall("w", WallKind::Environment, 0.0, 3.0))
+        wall_face(&wall("w", WallKind::Environment, 0.0, 3.0), &[])
             .plain()
             .starts_with("  WALL")
     );
@@ -225,7 +225,7 @@ fn a_flat_wall_of_any_grid_draws_its_board_and_marks_its_slots_where_its_panels_
             let wall = wall("wall-1", WallKind::Added, 0.0, 3.0)
                 .with_grid(grid)
                 .with_scale(scale);
-            let face = wall_face(&wall);
+            let face = wall_face(&wall, &[]);
             // Its face is its board, drawn at its scale.
             let (width, height) = face.size();
             let (board_width, board_height) = wall.board().unwrap();
@@ -2085,7 +2085,7 @@ fn a_curved_wall_draws_a_board_for_each_slot_its_label_and_its_panels_in_them() 
         .with_name(Some("Details".to_owned()));
     assert_eq!(arc_label(&named).plain().trim(), "DETAILS");
     assert!(
-        wall_face(&named.clone().with_shape(WallShape::Grid))
+        wall_face(&named.clone().with_shape(WallShape::Grid), &[])
             .plain()
             .contains("DETAILS")
     );
@@ -2993,6 +2993,23 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
         })
         .unwrap();
     assert_eq!(docked.size(), in_slot);
+    // Docked in its slot, carried still, it alone is drawn ahead of the wall, so that the wall never covers it.
+    let ahead = |output: &Output| {
+        output
+            .sheets
+            .iter()
+            .filter(|sheet| sheet.ahead)
+            .map(|sheet| {
+                sheet
+                    .canvas
+                    .as_deref()
+                    .unwrap()
+                    .plain()
+                    .starts_with("javascript")
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ahead(&output), [true]);
     // Carried away from the wall, it is as tall as its code, and pointed at at that size, its hint below it.
     let away = Ray::new(HOME, Vec3::new(-1.0, 0.2, 0.3));
     let output = projector.update(Input {
@@ -3011,6 +3028,7 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
                 .starts_with("javascript")
         })
         .unwrap();
+    assert!(carried.ahead);
     let canvas = carried.canvas.as_deref().unwrap();
     assert!(canvas.size().1 > panel_size().1);
     assert_eq!(canvas.size(), fitted_size(&on_wall, Fit::Text));
@@ -3027,7 +3045,9 @@ fn a_code_panel_grows_to_show_its_code_floating_and_takes_its_slot_s_size_and_sc
         pose: Pose::upright_facing((centre + Vec3::X * 2.0).to_array(), HOME.to_array()),
     };
     let floating = projection(vec![on_wall.clone()]);
-    projector.update(input(&floating, None, 0.0, now + PENDING));
+    let left = projector.update(input(&floating, None, 0.0, now + PENDING));
+    // Floating where it was left, and no longer carried, it is drawn as any other.
+    assert_eq!(ahead(&left), [false; 0]);
     assert!(!projector.scrollable("c"));
     assert_eq!(projector.scroll("c"), 0);
     // Put back on the wall, it is a slot's size again, scrolled as it was.

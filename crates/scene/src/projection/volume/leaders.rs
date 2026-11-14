@@ -224,6 +224,7 @@ impl Leader {
                 Vec3::new(viewer.x, at.y, viewer.z),
                 pixel / super::PIXEL,
             )),
+            ahead: false,
         }
     }
 

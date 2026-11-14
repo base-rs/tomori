@@ -1785,6 +1785,7 @@ impl Editor {
             sheets.push(Sheet {
                 model: Some(*model * Mat4::from_scale(Vec3::splat(*size))),
                 canvas: Some(canvas),
+                ahead: false,
             });
             if on {
                 // Beyond the padlock, clear of it, as the padlock is beyond its wall: above it, or below one below,
@@ -1830,6 +1831,7 @@ impl Editor {
                 sheets.push(Sheet {
                     model: Some(bar.model * Mat4::from_scale(Vec3::splat(scale))),
                     canvas: Some(canvas),
+                    ahead: false,
                 });
                 if on && self.editing() != Some(wall.id.as_str()) {
                     // Below the bar, clear of it, as the bar is below its wall.
@@ -1885,6 +1887,7 @@ impl Editor {
             sheets.extend(slots.map(|slot| Sheet {
                 canvas: Some(crate::frame_timing::drawn(ghost(cells))),
                 model: Some(slot * Mat4::from_translation(Vec3::Z * LIFT)),
+                ahead: false,
             }));
         }
         let keep = self.drag.as_ref().map(|drag| drag.handle);
@@ -1908,6 +1911,7 @@ impl Editor {
                 sheets.push(Sheet {
                     model: Some(*model * Mat4::from_scale(Vec3::splat(size))),
                     canvas: Some(canvas),
+                    ahead: false,
                 });
             }
         }

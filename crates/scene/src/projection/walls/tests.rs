@@ -58,24 +58,55 @@ fn drawn(draw: impl FnOnce()) -> usize {
     crate::frame_timing::take().faces
 }
 
+/// A wall marks on its board only the slots no panel stands in, a panel's opaque face covering the rest, and draws its
+/// board again as a panel comes or goes, not otherwise; a wall of a group, the same.
+#[test]
+fn a_wall_marks_only_its_empty_slots() {
+    let mut faces = WallFaces::default();
+    let wall = flat("wall-1", 0.0);
+    let slots = wall.grid().slots() as usize;
+    let marks = |canvas: &Canvas| canvas.shapes.len();
+    let empty = faces.board(&wall, &[]);
+    let one = faces.board(&wall, &[0]);
+    assert_eq!(marks(&empty) - marks(&one), 1);
+    assert_eq!(*one, wall_face(&wall, &[0]));
+    assert_eq!(
+        drawn(|| assert!(Arc::ptr_eq(&faces.board(&wall, &[0]), &one))),
+        0
+    );
+    let all: Vec<u32> = (0..slots as u32).collect();
+    assert_eq!(marks(&empty) - marks(&faces.board(&wall, &all)), slots);
+    let (left, right) = (flat("wall-1", 0.0), flat("wall-2", 2.4));
+    let walls = [&left, &right];
+    let shapes = |filled: &[u32]| {
+        boards::sheets(&left, Mat4::IDENTITY, &walls, filled)[0]
+            .canvas
+            .as_deref()
+            .unwrap()
+            .shapes
+            .len()
+    };
+    assert_eq!(shapes(&[]) - shapes(&[1]), 1);
+}
+
 #[test]
 fn a_walls_faces_are_kept_while_what_they_are_drawn_from_is_the_same() {
     let mut faces = WallFaces::default();
     let wall = flat("wall-1", 0.0);
-    let board = faces.board(&wall);
-    assert_eq!(*board, wall_face(&wall), "as drawn afresh");
+    let board = faces.board(&wall, &[]);
+    assert_eq!(*board, wall_face(&wall, &[]), "as drawn afresh");
     // Moved, or at another version, the same face.
     let mut moved = wall.clone();
     moved.pose.position[0] += 2.0;
     moved.version = 7;
     assert_eq!(
-        drawn(|| assert!(Arc::ptr_eq(&faces.board(&moved), &board))),
+        drawn(|| assert!(Arc::ptr_eq(&faces.board(&moved, &[]), &board))),
         0
     );
     // Its grid changed, drawn again.
     let bigger = wall.clone().with_grid(Grid::new(4, 2).unwrap());
     let mut again = None;
-    assert_eq!(drawn(|| again = Some(faces.board(&bigger))), 1);
+    assert_eq!(drawn(|| again = Some(faces.board(&bigger, &[]))), 1);
     assert!(!Arc::ptr_eq(&again.unwrap(), &board));
     // A curved wall's slot board, the same for every slot, and its label, each drawn once.
     let arc = curved("wall-3");
@@ -103,14 +134,14 @@ fn a_groups_boards_are_kept_until_a_wall_of_the_group_changes() {
     let mut faces = WallFaces::default();
     let (left, right) = pair();
     let walls = [&left, &right];
-    let sheets = faces.group(&left, &walls);
-    let fresh = boards::sheets(&left, Mat4::IDENTITY, &walls);
+    let sheets = faces.group(&left, &walls, &[]);
+    let fresh = boards::sheets(&left, Mat4::IDENTITY, &walls, &[]);
     assert_eq!(sheets.len(), fresh.len());
     for ((face, model), sheet) in sheets.iter().zip(&fresh) {
         assert_eq!(Some(face), sheet.canvas.as_ref());
         assert_eq!(Some(*model), sheet.model);
     }
-    let again = faces.group(&left, &walls);
+    let again = faces.group(&left, &walls, &[]);
     assert!(Arc::ptr_eq(&again[0].0, &sheets[0].0));
     // Carried together, turned and moved, the group keeps its faces, and draws none.
     let carry = |wall: &Wall| {
@@ -126,23 +157,23 @@ fn a_groups_boards_are_kept_until_a_wall_of_the_group_changes() {
     let (moved_left, moved_right) = (carry(&left), carry(&right));
     let mut carried = Vec::new();
     assert_eq!(
-        drawn(|| carried = faces.group(&moved_left, &[&moved_left, &moved_right])),
+        drawn(|| carried = faces.group(&moved_left, &[&moved_left, &moved_right], &[])),
         0
     );
     assert!(Arc::ptr_eq(&carried[0].0, &sheets[0].0));
     // Another wall joining its group draws it again.
     let mut third = flat("wall-5", 3.0);
     third.group = left.group.clone();
-    let joined = faces.group(&left, &[&left, &right, &third]);
+    let joined = faces.group(&left, &[&left, &right, &third], &[]);
     assert!(!Arc::ptr_eq(&joined[0].0, &sheets[0].0));
     // And a member changed in its layout.
     let wider = right.clone().with_grid(Grid::new(4, 2).unwrap());
-    let changed = faces.group(&left, &[&left, &wider]);
+    let changed = faces.group(&left, &[&left, &wider], &[]);
     assert!(!Arc::ptr_eq(&changed[0].0, &joined[0].0));
     // Its neighbour moved away, its edge is drawn: drawn again.
     let mut away = right.clone();
     away.pose.position[0] += 1.0;
-    let moved = faces.group(&left, &[&left, &away]);
+    let moved = faces.group(&left, &[&left, &away], &[]);
     assert!(!Arc::ptr_eq(&moved[0].0, &sheets[0].0));
 }
 
@@ -150,12 +181,12 @@ fn a_groups_boards_are_kept_until_a_wall_of_the_group_changes() {
 fn the_faces_of_walls_no_longer_shown_are_forgotten() {
     let mut faces = WallFaces::default();
     let (one, two) = (flat("wall-1", -1.0), flat("wall-2", 1.0));
-    let first = faces.board(&one);
-    faces.board(&two);
+    let first = faces.board(&one, &[]);
+    faces.board(&two, &[]);
     faces.retain(&[&two]);
     assert_eq!(faces.walls.len(), 1);
     // Shown again, its face is drawn again.
-    assert!(!Arc::ptr_eq(&faces.board(&one), &first));
+    assert!(!Arc::ptr_eq(&faces.board(&one, &[]), &first));
 }
 
 fn input(projection: &Projection, viewer: Vec3, ray: Option<Ray>, grip: f32) -> Input<'_> {
