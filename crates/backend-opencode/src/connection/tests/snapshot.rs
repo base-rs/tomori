@@ -362,7 +362,7 @@ fn a_session_not_yet_read_is_not_reconciled() {
     // Longer than the reconciliation cadence.
     assert!(
         watched
-            .recv_timeout(RECONCILE_INTERVAL + Duration::from_millis(500))
+            .recv_timeout(BRISK.reconcile + Duration::from_millis(500))
             .is_err(),
         "an event reached the session before its initial state"
     );

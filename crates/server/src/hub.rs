@@ -462,6 +462,8 @@ pub struct Hub {
     pairing: RwLock<Option<PairingSetup>>,
     pairing_prompt: RwLock<Option<PairingPrompt>>,
     pairing_timeout: RwLock<Duration>,
+    /// How long a device has to reveal its value; see [`REVEAL_TIMEOUT`].
+    reveal_timeout: RwLock<Duration>,
     /// How long pairing stays open once opened; see [`PAIRING_OPEN_FOR`].
     pairing_open_for: RwLock<Duration>,
     knock_timeout: RwLock<Duration>,
@@ -2410,6 +2412,7 @@ impl Hub {
             pairing: RwLock::new(None),
             pairing_prompt: RwLock::new(None),
             pairing_timeout: RwLock::new(PAIRING_TIMEOUT),
+            reveal_timeout: RwLock::new(REVEAL_TIMEOUT),
             pairing_open_for: RwLock::new(PAIRING_OPEN_FOR),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             inspect_timeout: RwLock::new(agent_inspect::INSPECT_TIMEOUT),
@@ -2488,6 +2491,10 @@ impl Hub {
 
     pub(crate) fn set_pairing_timeout(&self, timeout: Duration) {
         *self.pairing_timeout.write().expect("never left poisoned") = timeout;
+    }
+
+    pub(crate) fn set_reveal_timeout(&self, timeout: Duration) {
+        *self.reveal_timeout.write().expect("never left poisoned") = timeout;
     }
 
     pub(crate) fn set_knock_timeout(&self, timeout: Duration) {
@@ -3015,11 +3022,12 @@ impl Hub {
         }
         {
             let timeout = *self.pairing_timeout.read().expect("never left poisoned");
+            let reveal_timeout = *self.reveal_timeout.read().expect("never left poisoned");
             let knock_timeout = *self.knock_timeout.read().expect("never left poisoned");
             let mut state = self.lock();
             let expired = state.pairing.as_ref().and_then(|pairing| {
                 let waited = now.saturating_duration_since(pairing.started);
-                if pairing.code.is_none() && waited >= REVEAL_TIMEOUT {
+                if pairing.code.is_none() && waited >= reveal_timeout {
                     Some("The pairing was not completed in time.")
                 } else if waited >= timeout {
                     Some("The pairing was not confirmed in time.")

@@ -152,7 +152,9 @@ fn a_pairing_is_withdrawn_after_its_timeout() {
 
 #[test]
 fn a_device_that_does_not_reveal_in_time_is_withdrawn() {
-    let (server, pairing) = pairing_server(true, |server| server);
+    // A second rather than the default ten seconds, which the same check enforces; still well short of the pairing's own timeout, which would withdraw it with another error.
+    let reveal = Duration::from_secs(1);
+    let (server, pairing) = pairing_server(true, move |server| server.with_reveal_timeout(reveal));
     let mut quest = server.connect("quest", "Quest 3");
     quest.send(&ClientMessage::PairBegin {
         commitment: Nonce::generate().commitment(),
@@ -164,7 +166,7 @@ fn a_device_that_does_not_reveal_in_time_is_withdrawn() {
         (pending.device.as_str(), pending.code),
         (Some("Quest"), None)
     );
-    let deadline = std::time::Instant::now() + tomori_server::REVEAL_TIMEOUT + TIMEOUT;
+    let deadline = std::time::Instant::now() + reveal + TIMEOUT;
     let error = loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match quest.next_message(remaining) {

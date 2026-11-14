@@ -186,7 +186,17 @@ fn a_refused_call_reports_the_status_and_the_services_message() {
             busy
         );
         assert_eq!(
-            failed(session_running(client, resolved, "s1", cancellation, scheduler).await),
+            failed(
+                session_running(
+                    client,
+                    resolved,
+                    "s1",
+                    cancellation,
+                    scheduler,
+                    ACTIVE_LOOKUP_TIMEOUT
+                )
+                .await
+            ),
             busy
         );
         assert_eq!(
@@ -330,7 +340,13 @@ fn family(route: fn(&str, &str) -> (&'static str, String)) -> Result<Vec<String>
         async |client, resolved, cancellation, timers| {
             let mut walk = FamilyWalk::new("s");
             result = walk
-                .run(client, resolved, cancellation, timers)
+                .run(
+                    client,
+                    resolved,
+                    cancellation,
+                    timers,
+                    FamilyWalk::LISTING_TIMEOUT,
+                )
                 .await
                 .map(|()| {
                     walk.take_found()
@@ -370,19 +386,34 @@ fn a_stopped_family_walk_goes_on_where_it_stopped() {
         async |client, resolved, cancellation, timers| {
             use base_scheduler::Clock as _;
             let mut walk = FamilyWalk::new("s");
-            futures_lite::future::or(walk.run(client, resolved, cancellation, timers), async {
-                timers
-                    .sleep(Duration::from_millis(100), cancellation)
-                    .await
-                    .unwrap();
-                Ok(())
-            })
+            futures_lite::future::or(
+                walk.run(
+                    client,
+                    resolved,
+                    cancellation,
+                    timers,
+                    FamilyWalk::LISTING_TIMEOUT,
+                ),
+                async {
+                    timers
+                        .sleep(Duration::from_millis(100), cancellation)
+                        .await
+                        .unwrap();
+                    Ok(())
+                },
+            )
             .await
             .unwrap();
             assert_eq!(walk.take_found(), [child("c1", "s")]);
-            walk.run(client, resolved, cancellation, timers)
-                .await
-                .unwrap();
+            walk.run(
+                client,
+                resolved,
+                cancellation,
+                timers,
+                FamilyWalk::LISTING_TIMEOUT,
+            )
+            .await
+            .unwrap();
             assert_eq!(walk.take_found(), [child("g1", "c1")]);
         },
     );
@@ -400,23 +431,49 @@ fn a_family_walk_is_held_to_the_worker_limit_across_its_runs() {
             let mut walk = FamilyWalk::new("s");
             walk.count = MAX_TRACKED_WORKERS;
             assert_eq!(
-                failed(walk.run(client, resolved, cancellation, timers).await).1,
+                failed(
+                    walk.run(
+                        client,
+                        resolved,
+                        cancellation,
+                        timers,
+                        FamilyWalk::LISTING_TIMEOUT
+                    )
+                    .await
+                )
+                .1,
                 "the worker family exceeds the worker limit"
             );
             // None of the page that would exceed it was taken, and its
             // parent is listed again when the walk goes on.
             assert!(walk.take_found().is_empty());
             walk.count = 0;
-            walk.run(client, resolved, cancellation, timers)
-                .await
-                .unwrap();
+            walk.run(
+                client,
+                resolved,
+                cancellation,
+                timers,
+                FamilyWalk::LISTING_TIMEOUT,
+            )
+            .await
+            .unwrap();
             assert_eq!(walk.take_found(), [child("c1", "s")]);
 
             // Likewise for the size of the records found.
             let mut walk = FamilyWalk::new("s");
             walk.bytes = MAX_WORKER_SNAPSHOT_BYTES;
             assert_eq!(
-                failed(walk.run(client, resolved, cancellation, timers).await).1,
+                failed(
+                    walk.run(
+                        client,
+                        resolved,
+                        cancellation,
+                        timers,
+                        FamilyWalk::LISTING_TIMEOUT
+                    )
+                    .await
+                )
+                .1,
                 "the worker family exceeds the supported snapshot size"
             );
             assert!(walk.take_found().is_empty());
@@ -451,13 +508,29 @@ fn a_failed_family_walk_goes_on_with_the_listing_that_failed() {
         async |client, resolved, cancellation, timers| {
             let mut walk = FamilyWalk::new("s");
             assert_eq!(
-                failed(walk.run(client, resolved, cancellation, timers).await).1,
+                failed(
+                    walk.run(
+                        client,
+                        resolved,
+                        cancellation,
+                        timers,
+                        FamilyWalk::LISTING_TIMEOUT
+                    )
+                    .await
+                )
+                .1,
                 "busy"
             );
             assert_eq!(walk.take_found(), [child("c1", "s"), child("c2", "s")]);
-            walk.run(client, resolved, cancellation, timers)
-                .await
-                .unwrap();
+            walk.run(
+                client,
+                resolved,
+                cancellation,
+                timers,
+                FamilyWalk::LISTING_TIMEOUT,
+            )
+            .await
+            .unwrap();
             assert_eq!(walk.take_found(), [child("g1", "c1")]);
             assert_eq!(C1_LISTINGS.load(std::sync::atomic::Ordering::Acquire), 2);
         },
@@ -756,7 +829,18 @@ fn an_unreachable_service_fails_each_call_without_a_status() {
                 None
             );
             assert_eq!(
-                failed(session_running(client, resolved, "s1", cancellation, scheduler).await).0,
+                failed(
+                    session_running(
+                        client,
+                        resolved,
+                        "s1",
+                        cancellation,
+                        scheduler,
+                        ACTIVE_LOOKUP_TIMEOUT
+                    )
+                    .await
+                )
+                .0,
                 None
             );
         },
@@ -1060,7 +1144,15 @@ fn a_prompt_keeps_a_key_already_shaped_as_a_message_id_and_an_invalid_record_has
         send_prompt(client, resolved, "s1", "msg_k", "Hi", cancellation)
             .await
             .unwrap();
-        let running = session_running(client, resolved, "s1", cancellation, scheduler).await;
+        let running = session_running(
+            client,
+            resolved,
+            "s1",
+            cancellation,
+            scheduler,
+            ACTIVE_LOOKUP_TIMEOUT,
+        )
+        .await;
         assert_eq!(running.unwrap(), None);
     });
 }

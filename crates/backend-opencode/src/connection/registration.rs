@@ -673,18 +673,20 @@ impl Registration {
     /// than their records. Creations kept for a parent it found are added
     /// too. `failure` is the rest of the walk and why it stopped before the
     /// family was walked whole: the walk goes on from there after the next of
-    /// [`DISCOVERY_RETRIES`] from `now`, or, once they are used up, stops, and
+    /// `retries`, [`DISCOVERY_RETRIES`] in production, from `now`, or, once
+    /// they are used up, stops, and
     /// either way the workers stay incomplete.
     pub(super) fn adopt_discovered(
         &mut self,
         mut workers: Vec<Worker>,
         failure: Option<(api::FamilyWalk, String)>,
         now: Instant,
+        retries: &[Duration],
     ) {
         self.discovery_in_flight = None;
         self.discovery_retry_at = None;
         self.workers_partial = failure.map(|(walk, reason)| {
-            match DISCOVERY_RETRIES.get(self.discovery_failures) {
+            match retries.get(self.discovery_failures) {
                 Some(delay) => {
                     self.discovery_failures += 1;
                     self.discovery_retry_at = Some(now + *delay);

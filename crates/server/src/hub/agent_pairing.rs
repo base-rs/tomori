@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use super::provenance::{Needs, Requester};
-use super::{Confirmation, Hub, HubState, PAIRING_DECISIONS, PairingEvent, REVEAL_TIMEOUT};
+use super::{Confirmation, Hub, HubState, PAIRING_DECISIONS, PairingEvent};
 use serde_json::{Value, json};
 
 /// What the tools say on a server that does not pair, as in `--auth open` mode.
@@ -84,6 +84,7 @@ impl Hub {
     /// The pairing waiting, as the `pairing` tool lists it to the agent of the space bound to `session`: only what the server knows itself, how long ago it began, how long until it is withdrawn and whether the device shows its code yet, and whether pairing is open and whether it is paused. Never the code, nor the values it is derived from, nor the device's name, which the device chose and could carry an attacker's code or instructions. The server knows nothing else of the device, such as its kind or platform. See `design/security.md`.
     pub(crate) fn tool_pairing(&self, session: &str) -> Result<Value, String> {
         let timeout = *self.pairing_timeout.read().expect("never left poisoned");
+        let reveal_timeout = *self.reveal_timeout.read().expect("never left poisoned");
         let state = self.lock();
         self.calling_space(&state, session)?;
         if self.pairing.read().expect("never left poisoned").is_none() {
@@ -96,7 +97,7 @@ impl Hub {
             let waited = now.saturating_duration_since(pairing.started);
             // A device that has not revealed its value is withdrawn sooner.
             let limit = if pairing.code.is_none() {
-                REVEAL_TIMEOUT.min(timeout)
+                reveal_timeout.min(timeout)
             } else {
                 timeout
             };

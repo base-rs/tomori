@@ -395,6 +395,12 @@ impl Server {
         self
     }
 
+    /// Change how long a device has to reveal its value once the server has sent its own; see [`crate::REVEAL_TIMEOUT`].
+    pub fn with_reveal_timeout(self, timeout: Duration) -> Self {
+        self.hub.set_reveal_timeout(timeout);
+        self
+    }
+
     /// Change how long pairing stays open once an owner or the operator opens it; see [`crate::PAIRING_OPEN_FOR`].
     pub fn with_pairing_open_for(self, length: Duration) -> Self {
         self.hub.set_pairing_open_for(length);

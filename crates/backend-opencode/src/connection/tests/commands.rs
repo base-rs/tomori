@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// [`BRISK`], with an active-session lookup long enough for the simulated
+/// service to answer one it delays well within it.
+const PATIENT: Timing = Timing {
+    snapshot: Duration::from_secs(2),
+    active_lookup: Duration::from_secs(1),
+    ..BRISK
+};
+
+/// How long the simulated service delays an active-session lookup that
+/// still answers in time.
+const ACTIVE_DELAY: Duration = Duration::from_millis(500);
+
 #[test]
 fn stalled_snapshot_does_not_block_another_space_or_its_events() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,7 +133,7 @@ fn stalled_snapshot_does_not_block_another_space_or_its_events() {
                             } else if path == "/api/session/active" {
                                 if delay_active.load(Ordering::Acquire) {
                                     let _ = delayed.send(());
-                                    std::thread::sleep(Duration::from_millis(1500));
+                                    std::thread::sleep(ACTIVE_DELAY);
                                 }
                                 r#"{"data":{"child":{"type":"running"}}}"#.to_owned()
                             } else if path.starts_with("/api/session?parentID=wide&") {
@@ -208,8 +220,9 @@ fn stalled_snapshot_does_not_block_another_space_or_its_events() {
     });
     let (commands, receiver) = Commands::new();
     let resolved = crate::endpoint::resolve(Some(&format!("http://{address}")));
-    let connection =
-        std::thread::spawn(move || run_thread(Box::new(move || Ok(resolved.clone())), receiver));
+    let connection = std::thread::spawn(move || {
+        run_thread(Box::new(move || Ok(resolved.clone())), receiver, PATIENT)
+    });
     let attach = |id: &str| {
         let id = id.to_owned();
         block_on(commands.reply_with(|reply| Command::Attach {
@@ -337,7 +350,7 @@ fn stalled_snapshot_does_not_block_another_space_or_its_events() {
     assert_eq!(long.messages.last().unwrap().id, "message-000");
     close("long", &long_events);
     // A wide family with modest per-request latency must fit within the
-    // deadline; serial leaf traversal would take more than five seconds.
+    // deadline; serial leaf traversal would take six seconds.
     let wide_events = attach("wide");
     let (wide_reply, wide_wait) = async_channel::bounded(1);
     commands
@@ -417,7 +430,7 @@ fn stalled_snapshot_does_not_block_another_space_or_its_events() {
         .expect("the slow active lookup did not start");
     let false_busy_wait = first_of(&stale_events, "busy");
     let Err(mpsc::RecvTimeoutError::Timeout) =
-        false_busy_wait.recv_timeout(Duration::from_millis(2200))
+        false_busy_wait.recv_timeout(ACTIVE_DELAY + Duration::from_millis(700))
     else {
         unreachable!("expected Err(mpsc::RecvTimeoutError::Timeout)");
     };
@@ -650,7 +663,7 @@ fn stalled_snapshot_does_not_block_another_space_or_its_events() {
     });
     assert!(
         timeout_rx
-            .recv_timeout(SNAPSHOT_TIMEOUT + Duration::from_secs(2))
+            .recv_timeout(PATIENT.snapshot + Duration::from_secs(2))
             .expect("snapshot timeout did not fire")
             .unwrap()
             .is_err()
@@ -1157,10 +1170,10 @@ fn a_request_unanswered_after_the_stream_is_lost_is_abandoned() {
         kind(event) == "reconnecting"
     });
     let (result, answered_at) = stalled
-        .recv_timeout(IN_FLIGHT_GRACE + Duration::from_secs(2))
+        .recv_timeout(BRISK.in_flight_grace + Duration::from_secs(2))
         .expect("the stalled prompt was never abandoned");
     assert!(result.is_err());
-    assert!(answered_at.duration_since(lost) >= IN_FLIGHT_GRACE - Duration::from_millis(500));
+    assert!(answered_at.duration_since(lost) >= BRISK.in_flight_grace - Duration::from_millis(500));
     until(&watched, "the resynchronization", |event| {
         kind(event) == "resynchronized"
     });

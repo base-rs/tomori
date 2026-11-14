@@ -117,6 +117,7 @@ pub(super) fn prepare_command<'a, S: Timers>(
         resolved,
         cancellation,
         timers,
+        timing,
     } = service;
     // A caller that gave up while OpenCode was unreachable no longer wants
     // its command performed, such as a session created for nobody.
@@ -183,7 +184,7 @@ pub(super) fn prepare_command<'a, S: Timers>(
                         resolved,
                         cancellation,
                         timers,
-                        api::ACTIVE_LOOKUP_TIMEOUT,
+                        timing.active_lookup,
                     )
                     .await;
                     Ok(session_summaries(&sessions, active.as_ref()))

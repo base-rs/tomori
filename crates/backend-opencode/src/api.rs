@@ -304,6 +304,15 @@ pub fn session_directory(info: &Value) -> Option<&str> {
         .filter(|directory| !directory.is_empty())
 }
 
+/// `duration` as a message says it: in seconds when it is a whole number of them, and otherwise in milliseconds.
+pub(crate) fn said(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 {
+        format!("{} seconds", duration.as_secs())
+    } else {
+        format!("{} milliseconds", duration.as_millis())
+    }
+}
+
 /// How long the optional active-session lookup may take alongside the
 /// session record during reconciliation.
 pub(crate) const ACTIVE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -506,7 +515,8 @@ impl FamilyWalk {
 
     /// List children, at most [`Self::MAX_IN_FLIGHT`] parents at once, until
     /// the family has been read. A parent whose children are not listed
-    /// within [`Self::LISTING_TIMEOUT`] fails the walk. The future may be
+    /// within `timeout`, which is [`Self::LISTING_TIMEOUT`] in production, fails
+    /// the walk. The future may be
     /// dropped at any point, or fail: a later call lists again the parents
     /// whose listing it abandoned or that failed.
     pub(crate) async fn run<'scope, S: Timers>(
@@ -515,6 +525,7 @@ impl FamilyWalk {
         resolved: &Resolved,
         cancellation: &Cancellation,
         timers: &S,
+        timeout: Duration,
     ) -> Result<(), Failure> {
         for parent in self.listing.drain(..).rev() {
             self.pending.push_front(parent);
@@ -530,12 +541,12 @@ impl FamilyWalk {
                     let children = futures_lite::future::or(
                         child_sessions(client, resolved, &parent, cancellation),
                         async {
-                            let _ = timers.sleep(Self::LISTING_TIMEOUT, cancellation).await;
+                            let _ = timers.sleep(timeout, cancellation).await;
                             Err(Failure {
                                 status: None,
                                 message: format!(
-                                    "OpenCode did not list a worker's children within {} seconds",
-                                    Self::LISTING_TIMEOUT.as_secs()
+                                    "OpenCode did not list a worker's children within {}",
+                                    said(timeout)
                                 ),
                             })
                         },
@@ -1409,24 +1420,20 @@ impl SnapshotParts {
 /// Whether the session is running: the process's active-session list when it
 /// answers, otherwise the record's `time.busy` / `time.idle` timestamps.
 ///
-/// The optional list is fetched alongside the record under a short bound, so
-/// a stalled list adds at most that bound to the record request.
+/// The optional list is fetched alongside the record under a short bound,
+/// `lookup`, [`ACTIVE_LOOKUP_TIMEOUT`] in production, so a stalled list adds
+/// at most that bound to the record request.
 pub async fn session_running<'scope, S: Timers>(
     client: &Client<'scope>,
     resolved: &Resolved,
     session_id: &str,
     cancellation: &Cancellation,
     timers: &S,
+    lookup: Duration,
 ) -> Result<Option<bool>, Failure> {
     let (info, active) = futures_lite::future::zip(
         session_info(client, resolved, session_id, cancellation),
-        active_sessions_with_timeout(
-            client,
-            resolved,
-            cancellation,
-            timers,
-            ACTIVE_LOOKUP_TIMEOUT,
-        ),
+        active_sessions_with_timeout(client, resolved, cancellation, timers, lookup),
     )
     .await;
     let info = info?;

@@ -351,7 +351,8 @@ fn chain(state: &mut FakeState, root: &str, ids: &[&str]) {
 }
 
 /// A family too deep to walk within the snapshot's bound, a chain of 64
-/// workers whose children each take 80 milliseconds to list, opens in time
+/// workers whose children each take 25 milliseconds to list, 1.6 seconds
+/// in all, opens in time
 /// with the workers found so far, marked incomplete. The rest is found in
 /// the background, and every worker is then reported, oldest first, as a
 /// complete list.
@@ -364,7 +365,7 @@ fn a_deep_worker_family_opens_in_part_and_is_completed_in_the_background() {
     let ids: Vec<String> = (0..64).map(|level| format!("w{level}")).collect();
     let names: Vec<&str> = ids.iter().map(String::as_str).collect();
     shared.update(|state| {
-        state.child_latency = Duration::from_millis(80);
+        state.child_latency = Duration::from_millis(25);
         chain(state, "s1", &names);
     });
     let (id, events) = create_session(&commands);
@@ -373,7 +374,7 @@ fn a_deep_worker_family_opens_in_part_and_is_completed_in_the_background() {
     let snapshot = read_snapshot(&commands, &id, &events).unwrap();
     let elapsed = started.elapsed();
     assert!(
-        elapsed < SNAPSHOT_TIMEOUT + Duration::from_secs(1),
+        elapsed < BRISK.snapshot + Duration::from_secs(1),
         "the snapshot took {elapsed:?}"
     );
     assert_eq!(snapshot.workers_incomplete.as_deref(), Some(DISCOVERING));
@@ -499,7 +500,7 @@ fn a_stalled_background_discovery_is_visible_and_tried_again() {
     let watched = watch(&events);
     let seen = until_within(
         &watched,
-        SNAPSHOT_TIMEOUT + Duration::from_secs(3),
+        BRISK.snapshot + Duration::from_secs(3),
         "the discovery stopping",
         |event| reported(event).is_some_and(|(_, notice)| notice != Some(DISCOVERING)),
     );
@@ -508,7 +509,10 @@ fn a_stalled_background_discovery_is_visible_and_tried_again() {
     assert_eq!(worker_ids(workers), ["w0"]);
     assert!(
         message.starts_with("Could not find every worker")
-            && message.contains("did not list a worker's children within 5 seconds")
+            && message.contains(&format!(
+                "did not list a worker's children within {}",
+                api::said(BRISK.listing)
+            ))
             && message.ends_with("Trying again."),
         "{message}"
     );
@@ -519,7 +523,7 @@ fn a_stalled_background_discovery_is_visible_and_tried_again() {
     });
     until_within(
         &watched,
-        DISCOVERY_RETRIES[0] + Duration::from_secs(3),
+        BRISK.discovery_retries[0] + Duration::from_secs(3),
         "the whole family",
         |event| reported_ids(event) == Some((vec!["w0", "w1"], None)),
     );
@@ -627,7 +631,7 @@ fn a_family_read_again_in_part_is_completed_in_the_background() {
     service.end_streams();
     let seen = until_within(
         &watched,
-        SNAPSHOT_TIMEOUT * 2,
+        BRISK.snapshot * 2,
         "the family read again in part",
         |event| reported_ids(event) == Some((names.to_vec(), Some(DISCOVERING))),
     );
@@ -713,7 +717,12 @@ fn closing_during_a_discovery_cancels_it_and_ignores_its_result() {
     // A later registration of the same session is not touched by the
     // abandoned discovery's result.
     let replacement = insert_registration(&mut registrations, "s".into(), "/tmp", Modes::default());
-    finish_discovery(&mut registrations, found(1), Instant::now());
+    finish_discovery(
+        &mut registrations,
+        found(1),
+        Instant::now(),
+        &Timing::DEFAULT,
+    );
     assert!(registrations["s"].children.is_empty());
     assert!(replacement.try_recv().is_err());
 
@@ -738,6 +747,7 @@ fn closing_during_a_discovery_cancels_it_and_ignores_its_result() {
             ..found(1)
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     assert!(registrations["s"].children.is_empty());
     assert!(replacement.try_recv().is_err());
@@ -793,6 +803,7 @@ fn discover(
             active: None,
         },
         at,
+        &Timing::DEFAULT,
     );
 }
 
@@ -932,6 +943,7 @@ fn a_discovery_retry_is_dropped_when_the_session_is_read_again_or_closes() {
             active: None,
         },
         start,
+        &Timing::DEFAULT,
     );
     let registration = &registrations["s"];
     assert!(registration.discovery.is_none() && registration.discovery_retry_at.is_none());
@@ -973,6 +985,7 @@ fn a_discovery_retry_is_dropped_when_the_session_is_read_again_or_closes() {
             active: None,
         },
         start,
+        &Timing::DEFAULT,
     );
     let registration = &registrations["s"];
     assert!(registration.discovery.is_none() && registration.discovery_retry_at.is_none());
@@ -1010,6 +1023,7 @@ fn a_read_again_goes_on_discovering_the_family_it_ran_out_of_time_for() {
             modes: None,
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     assert!(registrations["s"].discovery.is_some());
     let mut workers = None;
@@ -1042,6 +1056,7 @@ fn workers_found_in_the_background_stay_within_the_limits() {
         vec![worker("x".repeat(MAX_WORKER_ID_BYTES + 1), "s")],
         None,
         Instant::now(),
+        &DISCOVERY_RETRIES,
     );
     assert!(registration.children.is_empty());
     assert!(
@@ -1060,6 +1075,7 @@ fn workers_found_in_the_background_stay_within_the_limits() {
             .collect(),
         None,
         Instant::now(),
+        &DISCOVERY_RETRIES,
     );
     assert!(registration.workers_incomplete);
     assert_eq!(registration.children.len(), api::MAX_TRACKED_WORKERS);
@@ -1071,12 +1087,13 @@ fn workers_found_in_the_background_stay_within_the_limits() {
             .collect(),
         None,
         Instant::now(),
+        &DISCOVERY_RETRIES,
     );
     assert!(!registration.workers_incomplete);
     registration
         .initial_creations
         .insert("late".into(), worker("late".into(), "w0"));
-    registration.adopt_discovered(Vec::new(), None, Instant::now());
+    registration.adopt_discovered(Vec::new(), None, Instant::now(), &DISCOVERY_RETRIES);
     assert!(registration.workers_incomplete);
 
     // A snapshot whose workers leave no room for a creation kept while
@@ -1182,7 +1199,7 @@ fn a_worker_deleted_while_disconnected_is_removed_once_verified() {
         *address.lock().unwrap() = next.address;
         let mut seen = until_within(
             &watched,
-            SNAPSHOT_TIMEOUT * 3,
+            BRISK.snapshot * 3,
             "the resynchronization",
             |event| kind(event) == "resynchronized",
         );

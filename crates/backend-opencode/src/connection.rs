@@ -89,6 +89,50 @@ const DISCOVERY_RETRIES: [Duration; 3] = [
 ];
 const MAX_RECONCILIATIONS: usize = 16;
 
+/// How long the connection waits for each thing it waits on. Production uses
+/// [`Timing::DEFAULT`]; tests shorten them, so as not to wait them out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Timing {
+    /// See [`RECONCILE_INTERVAL`].
+    pub(crate) reconcile: Duration,
+    /// See [`SNAPSHOT_TIMEOUT`].
+    pub(crate) snapshot: Duration,
+    /// See [`api::FamilyWalk::LISTING_TIMEOUT`].
+    pub(crate) listing: Duration,
+    /// See [`DISCOVERY_RETRIES`].
+    pub(crate) discovery_retries: [Duration; 3],
+    /// See [`RECONNECT_INITIAL`].
+    pub(crate) reconnect_initial: Duration,
+    /// See [`RECONNECT_MAX`].
+    pub(crate) reconnect_max: Duration,
+    /// See [`CONNECT_TIMEOUT`].
+    pub(crate) connect: Duration,
+    /// See [`IN_FLIGHT_GRACE`].
+    pub(crate) in_flight_grace: Duration,
+    /// See [`api::ACTIVE_LOOKUP_TIMEOUT`].
+    pub(crate) active_lookup: Duration,
+}
+
+impl Timing {
+    pub(crate) const DEFAULT: Self = Self {
+        reconcile: RECONCILE_INTERVAL,
+        snapshot: SNAPSHOT_TIMEOUT,
+        listing: api::FamilyWalk::LISTING_TIMEOUT,
+        discovery_retries: DISCOVERY_RETRIES,
+        reconnect_initial: RECONNECT_INITIAL,
+        reconnect_max: RECONNECT_MAX,
+        connect: CONNECT_TIMEOUT,
+        in_flight_grace: IN_FLIGHT_GRACE,
+        active_lookup: api::ACTIVE_LOOKUP_TIMEOUT,
+    };
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// How many reconciliations list a session's agents again while OpenCode offers none.
 const LISTINGS: u8 = 30;
 
@@ -151,11 +195,11 @@ pub type Resolve = Box<dyn FnMut() -> std::result::Result<Resolved, String> + Se
 /// Run the connection until its command channel closes, reconnecting whenever
 /// the service cannot be reached or its event stream ends. Blocking: called on
 /// a dedicated thread.
-pub fn run_thread(resolve: Resolve, commands: CommandReceiver) {
-    block_on(drive(resolve, commands));
+pub(crate) fn run_thread(resolve: Resolve, commands: CommandReceiver, timing: Timing) {
+    block_on(drive(resolve, commands, timing));
 }
 
-async fn drive(resolve: Resolve, commands: CommandReceiver) {
+async fn drive(resolve: Resolve, commands: CommandReceiver, timing: Timing) {
     // With these options, starting fails only if the system refuses its
     // threads or event queue, as spawning any thread can.
     let scheduler = NativeScheduler::with_options(NativeOptions {
@@ -165,7 +209,7 @@ async fn drive(resolve: Resolve, commands: CommandReceiver) {
         ..Default::default()
     })
     .expect("start the connection scheduler");
-    run(&scheduler, resolve, commands).await;
+    run(&scheduler, resolve, commands, timing).await;
     block_on(scheduler.shutdown());
 }
 
@@ -178,6 +222,8 @@ struct Sessions {
     /// Commands received while no connection is open, performed in order once
     /// one opens, or refused if the attempt fails.
     held: VecDeque<Command>,
+    /// How long each connection waits for what it waits on.
+    timing: Timing,
 }
 
 /// Why a connection to the service ended.
@@ -196,11 +242,15 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
     scheduler: &S,
     mut resolve: Resolve,
     commands: CommandReceiver,
+    timing: Timing,
 ) where
     <S as Scheduler<'scope>>::Socket: 'static,
 {
-    let mut sessions = Sessions::default();
-    let mut delay = RECONNECT_INITIAL;
+    let mut sessions = Sessions {
+        timing,
+        ..Sessions::default()
+    };
+    let mut delay = timing.reconnect_initial;
     let mut attempt_at = scheduler.now();
     let mut earliest = attempt_at;
     let mut reported: Option<String> = None;
@@ -212,7 +262,7 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
         let started = scheduler.now();
         // A command waiting for a connection brings the next attempt forward,
         // but never to less than the initial delay after this one.
-        earliest = started + RECONNECT_INITIAL;
+        earliest = started + timing.reconnect_initial;
         let outcome = match resolve() {
             Ok(resolved) => {
                 let outcome =
@@ -245,7 +295,7 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
                     );
                 }
                 attempt_at = started + delay;
-                delay = (delay * 2).min(RECONNECT_MAX);
+                delay = (delay * 2).min(timing.reconnect_max);
                 announce = true;
             }
             Outcome::Lost(reason) => {
@@ -253,9 +303,9 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
                 eprintln!("the opencode event stream {reason}; reconnecting");
                 reported = None;
                 let now = scheduler.now();
-                let wait = after_loss(delay, now.saturating_duration_since(started));
+                let wait = after_loss(delay, now.saturating_duration_since(started), &timing);
                 attempt_at = now + wait;
-                delay = (wait * 2).min(RECONNECT_MAX);
+                delay = (wait * 2).min(timing.reconnect_max);
                 announce = true;
             }
         }
@@ -284,9 +334,9 @@ async fn run<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
 /// lost soon after it opens counts as a failed attempt, so a service that keeps
 /// dropping the stream is not reconnected to, and every session read again, in
 /// a tight loop; one that lasted resets the backoff.
-fn after_loss(delay: Duration, lasted: Duration) -> Duration {
-    if lasted >= RECONNECT_MAX {
-        RECONNECT_INITIAL
+fn after_loss(delay: Duration, lasted: Duration, timing: &Timing) -> Duration {
+    if lasted >= timing.reconnect_max {
+        timing.reconnect_initial
     } else {
         delay
     }
@@ -465,9 +515,10 @@ async fn connect<'scope, S: Scheduler<'scope> + Send + Sync + 'static>(
 where
     <S as Scheduler<'scope>>::Socket: 'static,
 {
+    let timing = sessions.timing;
     let cancellation = Cancellation::new();
     let lookup = lookup(scheduler, resolved, &cancellation);
-    let address = match holding(lookup, scheduler, commands, sessions, CONNECT_TIMEOUT).await {
+    let address = match holding(lookup, scheduler, commands, sessions, timing.connect).await {
         Ok(address) => address,
         Err(outcome) => return outcome,
     };
@@ -685,13 +736,14 @@ type DiscoveryFutures<'a> = FuturesUnordered<Pin<Box<dyn Future<Output = Discove
 
 /// The service a connection's requests and reads go to: its HTTP client,
 /// where it is and with what credentials, the connection's cancellation, which
-/// ends them all with it, and its timers.
+/// ends them all with it, its timers, and how long it waits.
 #[derive(Clone, Copy)]
 struct Service<'a, 'c, T> {
     client: &'a Client<'c>,
     resolved: &'a Resolved,
     cancellation: &'a Cancellation,
     timers: T,
+    timing: Timing,
 }
 
 /// Open the server's global event stream, then serve it and the commands,
@@ -709,6 +761,7 @@ async fn connected<S: Timers>(
     timers: &S,
     announce: bool,
 ) -> Outcome {
+    let timing = sessions.timing;
     let open = async {
         let mut request = base_http::Request::get(base_http::Path::from("/api/event".to_owned()));
         if let Some(authorization) = resolved.authorization_header()
@@ -726,7 +779,7 @@ async fn connected<S: Timers>(
         }
         Ok(response.body)
     };
-    let mut stream = match holding(open, timers, commands, sessions, CONNECT_TIMEOUT).await {
+    let mut stream = match holding(open, timers, commands, sessions, timing.connect).await {
         Ok(stream) => stream,
         Err(outcome) => return outcome,
     };
@@ -737,17 +790,19 @@ async fn connected<S: Timers>(
         registrations,
         held,
         sequence,
+        ..
     } = sessions;
     let service = Service {
         client,
         resolved,
         cancellation,
         timers,
+        timing,
     };
 
     let mut groups = EventGroups::default();
     let mut timer = timers.timer();
-    let mut next_reconcile = timers.now() + RECONCILE_INTERVAL;
+    let mut next_reconcile = timers.now() + timing.reconcile;
     let mut reconcile_offset = 0usize;
     let mut snapshots: SnapshotFutures<'_> = FuturesUnordered::new();
     let mut resyncs: ResyncFutures<'_> = FuturesUnordered::new();
@@ -873,7 +928,7 @@ async fn connected<S: Timers>(
                 }
             }) => {
                 let completed = completed.expect("a discovery was in flight");
-                finish_discovery(registrations, completed, timers.now());
+                finish_discovery(registrations, completed, timers.now(), &timing);
                 start_discoveries(registrations, &mut discoveries, service);
                 continue;
             }
@@ -884,7 +939,7 @@ async fn connected<S: Timers>(
                     resyncs.next().await
                 }
             }) => {
-                finish_resync(registrations, completed.expect("a read was in flight"), timers.now());
+                finish_resync(registrations, completed.expect("a read was in flight"), timers.now(), &timing);
                 // A slot is free: start the next waiting session at once.
                 start_resyncs(registrations, &mut resyncs, sequence, service);
                 start_discoveries(registrations, &mut discoveries, service);
@@ -984,7 +1039,7 @@ async fn connected<S: Timers>(
                     restores.clear();
                     discoveries.clear();
                     reconciliations.clear();
-                    grace = Some(timers.now() + IN_FLIGHT_GRACE);
+                    grace = Some(timers.now() + timing.in_flight_grace);
                 }
                 continue;
             }
@@ -1035,11 +1090,11 @@ async fn connected<S: Timers>(
                                     let info = current.map_or(Value::Null, |agent| serde_json::json!({"agent":agent}));
                                     Some(modes(client, resolved, &directory, &info, &local_cancel).await)
                                 } else { None };
-                                let running = api::session_running(client, resolved, &id, &local_cancel, timers).await.ok().flatten();
+                                let running = api::session_running(client, resolved, &id, &local_cancel, timers, timing.active_lookup).await.ok().flatten();
                                 (modes, running)
                             },
                             async {
-                                let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
+                                let _ = timers.sleep(timing.snapshot, cancellation).await;
                                 (None, None)
                             },
                         ).await;
@@ -1059,7 +1114,7 @@ async fn connected<S: Timers>(
                 // Go on with a discovery whose retry is due.
                 start_discoveries(registrations, &mut discoveries, service);
                 retry_worker_delivery(registrations);
-                next_reconcile = timers.now() + RECONCILE_INTERVAL;
+                next_reconcile = timers.now() + timing.reconcile;
                 continue;
             }
         }
