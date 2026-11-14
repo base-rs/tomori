@@ -169,6 +169,48 @@ pub enum Activity {
     Unknown,
 }
 
+/// What the agent in a space is doing, as the server's state machine finds it. `Unknown` stands for any state a newer
+/// server sends that this build does not know, which a client shows as it would without the state. See
+/// `design/agent-state.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    /// No turn in progress, and none of its speech playing or to come.
+    Idle,
+    /// A participant is speaking to the agent, or their words are being transcribed.
+    Listening,
+    /// The agent is in a turn, generating text.
+    Thinking,
+    /// The agent's speech is still to come.
+    Speaking,
+    /// A tool or sub-agent call is running.
+    Working,
+    /// The agent needs an answer or an approval.
+    Waiting,
+    /// The agent's backend failed or is disconnected, or its session has ended.
+    Error,
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// The longest [`AgentStatus::detail`] a server sends, in characters.
+pub const AGENT_DETAIL_CHARS: usize = 48;
+
+/// The agent's state in a space, with what it is doing and a sequence number. See `design/agent-state.md`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStatus {
+    pub state: AgentState,
+    /// What it is working on, such as "running shell" or "waiting on 2 workers", or what failed, short: at most
+    /// [`AGENT_DETAIL_CHARS`] characters on one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Changed with every change of the state or its detail in the space, for this run of the server, so that a client
+    /// tells a change from the same state sent again. Only its equality means anything.
+    #[serde(default)]
+    pub sequence: u64,
+}
+
 /// What a connection may do where it is now: an owner anywhere, a collaborator in the space they were admitted to, and a visitor otherwise. `Unknown` stands for a role a newer server sends that this build does not know, and permits nothing beyond a visitor's actions. See `design/security.md`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -249,6 +291,12 @@ pub struct SpaceState {
     /// session is doing. False from older servers. See `design/speech.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub speech_to_come: bool,
+    /// What the agent is doing, as the server's state machine finds it from the turn's events, shared by everyone in
+    /// the space. A client that has it shows it, in the status pill, the swarm and its cues, rather than working the
+    /// agent's state out from [`Self::activity`] and [`Self::speech_to_come`]; absent from older servers, whose clients
+    /// do so as before. See `design/agent-state.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentStatus>,
     /// The instructions Tomori gives the agent in this space, in layers, so that everyone in it can see them. Absent
     /// when the space's backend takes no instructions, and from older servers. See `design/spaces.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -964,6 +1012,46 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((timer.next, timer.state), (None, TimerState::Unknown));
+    }
+
+    #[test]
+    fn the_agent_s_state_is_sent_only_when_given_and_absent_from_an_older_server() {
+        assert!(
+            serde_json::to_value(SpaceState::default())
+                .unwrap()
+                .get("agent")
+                .is_none()
+        );
+        let older: SpaceState =
+            serde_json::from_value(serde_json::to_value(SpaceState::default()).unwrap()).unwrap();
+        assert_eq!(older.agent, None);
+        let state = SpaceState {
+            agent: Some(AgentStatus {
+                state: AgentState::Working,
+                detail: Some("running shell".into()),
+                sequence: 7,
+            }),
+            ..SpaceState::default()
+        };
+        let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(
+            value["agent"],
+            serde_json::json!({"state": "working", "detail": "running shell", "sequence": 7})
+        );
+        let read: SpaceState = serde_json::from_value(value).unwrap();
+        assert_eq!(read.agent, state.agent);
+        // A state a newer server sends, unknown here, with no detail.
+        let newer: AgentStatus =
+            serde_json::from_value(serde_json::json!({"state": "dreaming", "sequence": 2}))
+                .unwrap();
+        assert_eq!(
+            newer,
+            AgentStatus {
+                state: AgentState::Unknown,
+                detail: None,
+                sequence: 2,
+            }
+        );
     }
 
     fn modes(current: Option<&str>) -> SpaceState {

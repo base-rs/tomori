@@ -9011,6 +9011,8 @@ fn an_inspection_whose_threads_cannot_start_tells_the_agent_so() {
 
 #[path = "hub_tests/actions.rs"]
 mod actions;
+#[path = "hub_tests/agent_state.rs"]
+mod agent_state;
 #[path = "hub_tests/anchors.rs"]
 mod anchors;
 #[path = "hub_tests/asking.rs"]

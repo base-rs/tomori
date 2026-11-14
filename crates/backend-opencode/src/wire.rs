@@ -300,9 +300,33 @@ fn busy_like(data: &Value, session_id: &str, event: Event) -> Option<Event> {
     for_session(data, session_id).then_some(event)
 }
 
+/// Whether a run that failed with `data` was cancelled deliberately, as OpenCode records a cancel or barge-in that its
+/// run noticed as a failure rather than an interruption: an error of type `aborted`, or `MessageAbortedError` from
+/// before. Such a run ended rather than failed.
+pub(crate) fn aborted(data: &Value) -> bool {
+    matches!(
+        data.pointer("/error/type").and_then(Value::as_str),
+        Some("aborted" | "MessageAbortedError")
+    )
+}
+
+/// The kind of event `kind`, with `data`, stands for: a run's failure that was a deliberate cancel stands for its
+/// interruption, and every other event for itself.
+pub(crate) fn as_cancelled<'a>(kind: &'a str, data: &Value) -> &'a str {
+    if kind == "session.execution.failed" && aborted(data) {
+        "session.execution.interrupted"
+    } else {
+        kind
+    }
+}
+
 fn execution_failed(data: &Value, session_id: &str) -> Option<Event> {
     if !for_session(data, session_id) {
         return None;
+    }
+    // A deliberate cancel ends the turn, and is no failure to show.
+    if aborted(data) {
+        return Some(Event::Idle);
     }
     Some(Event::Error {
         message: data

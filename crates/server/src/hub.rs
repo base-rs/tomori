@@ -39,6 +39,7 @@ mod agent_names;
 mod agent_pairing;
 pub(crate) mod agent_panels;
 mod agent_places;
+mod agent_state;
 mod agent_timers;
 pub(crate) mod agent_workers;
 mod anchors;
@@ -822,6 +823,10 @@ struct SpaceRecord {
     /// Where people joining it arrived, among its environment's spawn points, for this run and this environment only.
     /// See `design/environments.md`.
     arrivals: crate::spawns::Arrivals,
+    /// What its agent is doing, as its state machine finds it from the turn's events, for this run only. A cell, because
+    /// it is brought up to date as everyone in it is told of a change, which only needs shared access to the state. See
+    /// `design/agent-state.md`.
+    agent: std::cell::RefCell<crate::agent_state::Machine>,
     /// When the space was last active, in seconds since the Unix epoch, to the [`ACTIVE_RESOLUTION`]: when it was
     /// created, its agent last worked in it, or input was last queued in it. Kept across a restart. See
     /// `design/arrival.md`.
@@ -1548,6 +1553,8 @@ impl HubState {
     fn touch_space(&self, id: &str) {
         if let Some(space) = self.space(id) {
             let now = Instant::now();
+            // What the agent is doing, as it is now. See `design/agent-state.md`.
+            self.sync_agent(id, now);
             space.touched.set(Some(now));
             space.deferred.set(None);
             space.stamp_attention(now);
@@ -1704,9 +1711,13 @@ impl HubState {
                 space
                     .model
                     .sent(&key, Err("the agent session has stopped".to_owned()));
-            } else if let Some(source) = source {
-                // A following agent goes to whoever it begins answering.
-                self.agent_given(id, source, Instant::now());
+            } else {
+                // Its turn begins now, before its backend says it is busy.
+                self.agent_prompted(id, now);
+                if let Some(source) = source {
+                    // A following agent goes to whoever it begins answering.
+                    self.agent_given(id, source, Instant::now());
+                }
             }
         }
     }
@@ -2331,6 +2342,7 @@ impl HubState {
             // A following agent's move for them stops where it is.
             ended.iter().for_each(|(participant, space)| {
                 self.agent_cancelled(space, participant, Instant::now());
+                self.agent_changed(space, Instant::now());
             });
             self.recorded(ended);
             deferred.push(Deferred::Cancel(open.id));
@@ -3762,6 +3774,8 @@ impl Hub {
                     .expect("checked above")
                     .speech
                     .recording(participant);
+                // Everyone in it sees that someone is speaking to the agent.
+                state.agent_changed(&space, Instant::now());
                 if question && let Some(captured) = self.capture(state, &space, participant) {
                     state.agent_pressed(&space, participant, captured, Instant::now());
                 }
@@ -5298,6 +5312,9 @@ impl Hub {
                     let open = record.utterance.take().expect("matched above");
                     record.failed = Some(open.client.clone());
                     let ended = state.utterances.remove(&open.id);
+                    ended
+                        .iter()
+                        .for_each(|record| state.agent_changed(&record.space, Instant::now()));
                     state.recorded(ended.map(UtteranceRecord::recorder));
                     deferred.push(Deferred::Cancel(open.id));
                     state.send(
@@ -5378,6 +5395,28 @@ impl Hub {
     }
 
     pub(crate) fn transcript_finished(&self, utterance: UtteranceId, text: &str) {
+        let space = self.transcribing(utterance);
+        self.transcribed(utterance, text);
+        self.listened(space);
+    }
+
+    /// The space whose words `utterance` is, while it is transcribed.
+    fn transcribing(&self, utterance: UtteranceId) -> Option<String> {
+        self.lock()
+            .utterances
+            .get(&utterance)
+            .map(|record| record.space.clone())
+    }
+
+    /// Words spoken in `space` are no longer transcribed, and have been queued or failed: what its agent is doing
+    /// follows, once whatever they began has begun. See `design/agent-state.md`.
+    fn listened(&self, space: Option<String>) {
+        if let Some(space) = space {
+            self.lock().agent_changed(&space, Instant::now());
+        }
+    }
+
+    fn transcribed(&self, utterance: UtteranceId, text: &str) {
         let mut state = self.lock();
         let Some(record) = state.utterances.remove(&utterance) else {
             return;
@@ -5622,6 +5661,12 @@ impl Hub {
     }
 
     pub(crate) fn transcript_failed(&self, utterance: UtteranceId, error: &str) {
+        let space = self.transcribing(utterance);
+        self.transcription_failed(utterance, error);
+        self.listened(space);
+    }
+
+    fn transcription_failed(&self, utterance: UtteranceId, error: &str) {
         let mut deferred = Vec::new();
         {
             let mut state = self.lock();
@@ -5720,6 +5765,7 @@ impl Hub {
             rates: Default::default(),
             proximity: Default::default(),
             arrivals: Default::default(),
+            agent: Default::default(),
             active: None,
         });
         // Created now, it is active from now.
@@ -5896,6 +5942,7 @@ impl Hub {
                     rates: Default::default(),
                     proximity: Default::default(),
                     arrivals: Default::default(),
+                    agent: Default::default(),
                     active: kept.active,
                 });
             }
@@ -6096,6 +6143,7 @@ impl Hub {
         // The agent working in the space keeps when it was last active, written again at most once a minute.
         let active =
             crate::space::is_activity(&event) && record.stamp_active(crate::cards::unix_now());
+        record.agent_event(&event, Instant::now());
         record.model.apply(event);
         // Following its session, the space took its new title: everyone sees it, and it is kept across a restart.
         let retitled = record.model.title != title;
@@ -6119,6 +6167,7 @@ impl Hub {
             );
         }
         if resynchronized {
+            record.agent_resynchronized(Instant::now());
             // The agent was read again after its connection was lost, perhaps after it restarted: give it the instructions again, before any input released by reading it.
             record.instruct(true);
             // It forgets Tomori's tools when it restarts, too.
@@ -6330,6 +6379,7 @@ impl Hub {
             .flat_map(|space| [space.deferred.get(), space.projection_deferred.get()])
             .flatten()
             .chain(state.movement_deadline())
+            .chain(state.agent_deadline())
             .min()
     }
 
@@ -6390,6 +6440,8 @@ impl Hub {
         let mut state = self.lock();
         // And the agents' moves that are due. See `design/environments.md`.
         state.movements_due(now);
+        // And the agents' states that change of themselves, as a failure passes or a turn stalls.
+        state.agents_due(now);
         self.keep_up(&mut state, now);
         let due: Vec<String> = state
             .spaces
@@ -6419,9 +6471,13 @@ impl Hub {
         let Some(record) = state.space_mut(space) else {
             return;
         };
+        let failed = result.is_err();
         record
             .model
             .sent(key, result.map_err(|error| error.message));
+        if failed {
+            state.agent_unprompted(space, Instant::now());
+        }
         state.pump(space);
         state.touch_space(space);
         self.recount(&mut state);
@@ -6636,6 +6692,8 @@ impl Hub {
                 state.stream = space.following.stream;
                 // Whether its speech is still to come, so that clients show it speaking through the gaps in it.
                 state.speech_to_come = space.following.to_come();
+                // What it is doing, as its state machine found it when everyone was last told of a change.
+                state.agent = Some(space.agent.borrow().status().clone());
                 // The avatar its environment names, or else its backend's, for everyone in it. See `design/avatars.md`.
                 state.avatar = environments
                     .avatar(&space.model.environment)

@@ -185,6 +185,8 @@ impl Default for Tracker {
 impl Tracker {
     /// Apply an event of `kind`, with its `data`, observed at `at`.
     pub(crate) fn apply(&mut self, kind: &str, data: &Value, at: u64) {
+        // A run cancelled deliberately has no failure to show.
+        let kind = crate::wire::as_cancelled(kind, data);
         if !self.synced {
             self.hold(kind, data, at);
         }

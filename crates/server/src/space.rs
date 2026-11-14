@@ -1119,6 +1119,11 @@ impl SpaceModel {
             || !self.submitting.is_empty()
     }
 
+    /// Whether `message` is one of a user's, rather than the agent's, as its start said.
+    pub fn is_user_message(&self, message: &str) -> bool {
+        self.user_messages.contains(message)
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed
     }
@@ -2572,6 +2577,8 @@ impl SpaceModel {
             speech: self.speech,
             // Set by the hub, which knows the agent's speech.
             speech_to_come: false,
+            // Set by the hub, which drives the agent's state machine.
+            agent: None,
             voice_answers: true,
             environment_changes: true,
             // Set by the hub.

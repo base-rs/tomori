@@ -2787,6 +2787,7 @@ mod tests {
                 });
                 let pill = tomori_scene::pill::rows(&tomori_scene::pill::Status {
                     activity: tomori_protocol::Activity::Running,
+                    agent: None,
                     speaking: None,
                     waiting: false,
                     pulse: 0,

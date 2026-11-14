@@ -8,6 +8,7 @@
 //! [`Server::builder`] builds and runs a server from the `tomori-server` command line, with backends and environments of another project's own registered beside Tomori's; the `tomori-server` executable is its default build. See [`Builder`] and `design/builders.md`.
 mod access;
 mod admission;
+mod agent_state;
 mod ambient;
 mod application;
 pub mod auth_command;

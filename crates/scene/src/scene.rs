@@ -1456,6 +1456,12 @@ impl Step {
         let focused = senses.focused;
         let visual = self.signals.update(
             interaction::Inputs {
+                // What the server says the agent is doing, as the status pill shows it. See `design/agent-state.md`.
+                agent: if focused {
+                    conversation.agent_state()
+                } else {
+                    None
+                },
                 session: if focused {
                     conversation.activity()
                 } else {

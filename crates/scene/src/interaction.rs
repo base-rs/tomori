@@ -3,6 +3,7 @@
 
 //! Observable conversational activity, independent of the XR/audio backends.
 use serde::{Deserialize, Serialize};
+use tomori_protocol::AgentState;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionActivity {
@@ -75,6 +76,9 @@ impl Visual {
 
 #[derive(Default)]
 pub struct Inputs {
+    /// The agent's state as the server says it, smoothed, which the swarm shows in place of the session's activity and
+    /// the speech still to come, where the server says one. See `design/agent-state.md`.
+    pub agent: Option<AgentState>,
     pub session: SessionActivity,
     pub speech: SpeechActivity,
     pub recording: bool,
@@ -108,12 +112,18 @@ impl Signals {
         } else {
             (self.speaking_for - step).max(0.0)
         };
-        // And while more of it is still to come, however long the next of it takes to synthesize, unless a reply is held for the participant, which the swarm prepares for.
-        let speaking = input.speech.playing
-            || self.speaking_for > 0.0
-            || (input.speech.to_come && !input.speech.pending);
+        // And while more of it is still to come, however long the next of it takes to synthesize, as the server's state or else its speech still to come says, unless a reply is held for the participant, which the swarm prepares for.
+        let agent = input.agent.filter(|agent| *agent != AgentState::Unknown);
+        let to_come = match agent {
+            Some(agent) => agent == AgentState::Speaking,
+            None => input.speech.to_come,
+        };
+        let speaking =
+            input.speech.playing || self.speaking_for > 0.0 || (to_come && !input.speech.pending);
         let mode = if input.recording {
             Mode::Listening
+        } else if let Some(agent) = agent {
+            Self::agent_mode(agent, speaking, &input)
         } else if speaking {
             Mode::Speaking
         } else if input.voice_busy {
@@ -156,8 +166,31 @@ impl Signals {
             } else {
                 0.0
             },
-            working: input.session == SessionActivity::Working,
+            working: match agent {
+                Some(agent) => matches!(agent, AgentState::Working | AgentState::Thinking),
+                None => input.session == SessionActivity::Working,
+            },
             time: 0.0,
+        }
+    }
+
+    /// What the swarm shows of the server's agent state `agent`, by its precedence, with this device's own facts
+    /// layered on it: speech playing here, `speaking`, below listening and waiting, and its own transcription, failures
+    /// and held reply below that. See `design/agent-state.md`.
+    fn agent_mode(agent: AgentState, speaking: bool, input: &Inputs) -> Mode {
+        match agent {
+            AgentState::Error => Mode::Unavailable,
+            AgentState::Listening => Mode::Listening,
+            AgentState::Waiting => Mode::Waiting,
+            _ if speaking => Mode::Speaking,
+            _ if input.voice_busy => Mode::Transcribing,
+            _ if input.voice_error || input.speech.failed => Mode::Unavailable,
+            // Speech still to come for a reply held for the participant prepares, as the reply does.
+            _ if input.pending_text || input.speech.pending || agent == AgentState::Speaking => {
+                Mode::Preparing
+            }
+            AgentState::Working | AgentState::Thinking => Mode::Working,
+            _ => Mode::Ready,
         }
     }
 }
@@ -283,6 +316,73 @@ mod tests {
                 .update(speech(SessionActivity::Ready, false, 0.0), dt)
                 .level,
             0.0
+        );
+    }
+
+    #[test]
+    fn the_server_s_agent_state_shows_by_its_precedence_with_this_device_s_speech_layered_on_it() {
+        use AgentState as A;
+        let shown = |agent: AgentState, change: &dyn Fn(&mut Inputs)| {
+            let mut signals = Signals::default();
+            let input = || {
+                let mut input = Inputs {
+                    agent: Some(agent),
+                    // What an older server's session says, which the server's state replaces.
+                    session: SessionActivity::Ready,
+                    ..Default::default()
+                };
+                change(&mut input);
+                input
+            };
+            // Long enough for ready to settle.
+            let visual = (0..10)
+                .map(|_| signals.update(input(), 0.1))
+                .last()
+                .unwrap();
+            (visual.mode, visual.working)
+        };
+        let nothing = |_: &mut Inputs| {};
+        let playing = |input: &mut Inputs| input.speech.playing = true;
+        let held = |input: &mut Inputs| input.speech.pending = true;
+        assert_eq!(shown(A::Thinking, &nothing), (Mode::Working, true));
+        assert_eq!(shown(A::Working, &nothing), (Mode::Working, true));
+        assert_eq!(shown(A::Speaking, &nothing), (Mode::Speaking, false));
+        assert_eq!(shown(A::Waiting, &nothing), (Mode::Waiting, false));
+        assert_eq!(shown(A::Listening, &nothing), (Mode::Listening, false));
+        assert_eq!(shown(A::Error, &nothing), (Mode::Unavailable, false));
+        // Idle settles to ready as the session's ready does.
+        assert_eq!(shown(A::Idle, &nothing), (Mode::Ready, false));
+        // Speech playing here shows over thinking, working and idle, and not over waiting, listening or an error.
+        assert_eq!(shown(A::Working, &playing).0, Mode::Speaking);
+        assert_eq!(shown(A::Idle, &playing).0, Mode::Speaking);
+        assert_eq!(shown(A::Waiting, &playing).0, Mode::Waiting);
+        assert_eq!(shown(A::Listening, &playing).0, Mode::Listening);
+        assert_eq!(shown(A::Error, &playing).0, Mode::Unavailable);
+        // Speech to come for a reply held here prepares; this device's own recording, transcription and failures show.
+        assert_eq!(shown(A::Speaking, &held).0, Mode::Preparing);
+        assert_eq!(shown(A::Idle, &held).0, Mode::Preparing);
+        assert_eq!(
+            shown(A::Waiting, &|input| input.recording = true).0,
+            Mode::Listening
+        );
+        assert_eq!(
+            shown(A::Thinking, &|input| input.voice_busy = true).0,
+            Mode::Transcribing
+        );
+        assert_eq!(
+            shown(A::Thinking, &|input| input.speech.failed = true).0,
+            Mode::Unavailable
+        );
+        // Speech still to come that an older server says is not used where the server says its state.
+        assert_eq!(
+            shown(A::Idle, &|input| input.speech.to_come = true).0,
+            Mode::Ready
+        );
+        // A state this build does not know shows the session's activity, as an older server's.
+        assert_eq!(
+            shown(A::Unknown, &|input| input.session =
+                SessionActivity::Working),
+            (Mode::Working, true)
         );
     }
 

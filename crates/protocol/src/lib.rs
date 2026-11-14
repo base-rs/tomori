@@ -55,11 +55,12 @@ pub use projection::{
     WallKind, WallShape, hash_bytes, hash_text, row_value, valid_spans,
 };
 pub use space::{
-    AVATAR_BYTES, Activity, AgentInstructions, AgentMovement, Anchors, Approval, ApprovalOption,
-    Attention, BackendInfo, ConnectionRole, Engagement, EnvironmentInfo, EnvironmentVersion,
-    KnockRequest, KnockState, Message, Mode, Movement, Participant, Presentation, PresentationKind,
-    Question, QueueEntry, QueueState, Renamer, Role, SessionSummary, SpaceState, SpaceSummary,
-    SpeechSetting, Timer, TimerState, Worker, WorkerState, WorkspaceRoot, valid_avatar,
+    AGENT_DETAIL_CHARS, AVATAR_BYTES, Activity, AgentInstructions, AgentMovement, AgentState,
+    AgentStatus, Anchors, Approval, ApprovalOption, Attention, BackendInfo, ConnectionRole,
+    Engagement, EnvironmentInfo, EnvironmentVersion, KnockRequest, KnockState, Message, Mode,
+    Movement, Participant, Presentation, PresentationKind, Question, QueueEntry, QueueState,
+    Renamer, Role, SessionSummary, SpaceState, SpaceSummary, SpeechSetting, Timer, TimerState,
+    Worker, WorkerState, WorkspaceRoot, valid_avatar,
 };
 pub use space::{RETURN_AFTER, RETURN_CHOICES, RETURN_LONGEST, RETURN_SHORTEST};
 

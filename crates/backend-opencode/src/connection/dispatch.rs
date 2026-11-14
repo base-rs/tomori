@@ -196,6 +196,8 @@ pub(super) fn apply_worker_event(value: &Value, registrations: &mut HashMap<Stri
     let Some(data) = value.get("data") else {
         return;
     };
+    // A worker cancelled deliberately stopped, rather than failed.
+    let kind = crate::wire::as_cancelled(kind, data);
     let Some(child) = data
         .get("sessionID")
         .and_then(Value::as_str)

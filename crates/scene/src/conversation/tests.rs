@@ -5477,6 +5477,127 @@ fn the_pill_and_swarm_say_speaking_through_a_turn_while_its_speech_is_to_come_an
 }
 
 #[test]
+fn the_pill_and_turn_follow_the_server_s_agent_state_smoothed_with_speech_here_layered_on_it() {
+    use tomori_protocol::{AgentState, AgentStatus};
+    let mut conversation = on_wrist(|space| space.activity = Activity::Idle);
+    let mut feedback = feedback::Feedback::new(feedback::Settings::default());
+    let start = Instant::now();
+    let ms = Duration::from_millis;
+    let mut sequence = 0;
+    // The server says `state`, with `detail`, its session's activity saying otherwise, as an older client would see.
+    let mut say = |conversation: &mut Conversation, state: AgentState, detail: Option<&str>| {
+        sequence += 1;
+        conversation.apply(space(|space| {
+            space.activity = Activity::Running;
+            space.agent = Some(AgentStatus {
+                state,
+                detail: detail.map(Into::into),
+                sequence,
+            });
+        }));
+    };
+    let label = |conversation: &mut Conversation, at: Instant| {
+        let status = conversation.pill_status(at).unwrap();
+        crate::pill::rows(&status)[0]
+            .plain()
+            .split("  ")
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    say(&mut conversation, AgentState::Thinking, None);
+    // Shown as said, before any frame smoothed it.
+    assert_eq!(label(&mut conversation, start), "● thinking");
+    speech_frame(&mut conversation, start, false);
+    say(
+        &mut conversation,
+        AgentState::Working,
+        Some("running shell"),
+    );
+    speech_frame(&mut conversation, start + ms(20), false);
+    assert_eq!(label(&mut conversation, start + ms(20)), "● running shell");
+    // Speech playing here shows over its tool.
+    announce(&mut conversation, "m1");
+    speech_frame(&mut conversation, start + ms(40), true);
+    assert_eq!(label(&mut conversation, start + ms(40)), "◉ speaking");
+    // Thinking for a moment, briefer than the smoothing, never shows; once it lasts, it does.
+    let quiet = start + ms(40) + crate::turn::HOLD;
+    speech_frame(&mut conversation, quiet, false);
+    say(&mut conversation, AgentState::Thinking, None);
+    speech_frame(&mut conversation, quiet + ms(20), false);
+    assert_eq!(label(&mut conversation, quiet + ms(20)), "● running shell");
+    let lasted = quiet + ms(20) + crate::agent_view::BRIEF;
+    speech_frame(&mut conversation, lasted, false);
+    assert_eq!(label(&mut conversation, lasted), "● thinking");
+    // A request waiting shows over speech playing here.
+    say(&mut conversation, AgentState::Waiting, None);
+    speech_frame(&mut conversation, lasted + ms(20), true);
+    assert_eq!(label(&mut conversation, lasted + ms(20)), "● waiting");
+    // No turn while the server says it is busy, though its session says idle.
+    conversation.apply(space(|space| {
+        space.activity = Activity::Idle;
+        space.agent = Some(AgentStatus {
+            state: AgentState::Thinking,
+            detail: Some("stalled".into()),
+            sequence: 100,
+        });
+    }));
+    let ended = lasted + ms(20) + crate::turn::HOLD;
+    speech_frame(&mut conversation, ended, false);
+    assert_eq!(turn_cues(&conversation, &mut feedback, ended), 0);
+    let lasted = ended + crate::agent_view::BRIEF;
+    speech_frame(&mut conversation, lasted, false);
+    assert_eq!(label(&mut conversation, lasted), "● thinking, stalled");
+    // Idle, as the server says, though its session says running: the participant's turn.
+    say(&mut conversation, AgentState::Idle, None);
+    speech_frame(&mut conversation, lasted + ms(20), false);
+    assert_eq!(turn_cues(&conversation, &mut feedback, lasted + ms(20)), 1);
+    let idle = lasted + ms(20) + crate::agent_view::BRIEF;
+    speech_frame(&mut conversation, idle, false);
+    assert_eq!(label(&mut conversation, idle), "● idle");
+    say(
+        &mut conversation,
+        AgentState::Error,
+        Some("Lost the agent."),
+    );
+    speech_frame(&mut conversation, idle + ms(20), false);
+    assert_eq!(
+        label(&mut conversation, idle + ms(20)),
+        "● error: Lost the agent."
+    );
+    // A state this build does not know, or none, is worked out from the session as before.
+    say(&mut conversation, AgentState::Unknown, None);
+    speech_frame(&mut conversation, idle + ms(40), false);
+    assert!(conversation.agent().is_none());
+    assert_eq!(label(&mut conversation, idle + ms(40)), "● running");
+}
+
+#[test]
+fn moved_straight_into_another_space_its_agent_state_shows_at_once_whatever_its_sequence() {
+    use tomori_protocol::{AgentState, AgentStatus};
+    let mut conversation = on_wrist(|_| {});
+    let start = Instant::now();
+    let said = |state| AgentStatus {
+        state,
+        detail: None,
+        sequence: 3,
+    };
+    conversation.apply(space(|space| {
+        space.agent = Some(said(AgentState::Speaking))
+    }));
+    speech_frame(&mut conversation, start, false);
+    assert_eq!(conversation.agent_state(), Some(AgentState::Speaking));
+    // The server puts the participant straight into another space, unasked, whose agent is idle at the same sequence.
+    conversation.apply(space(|space| {
+        space.id = "space-2".into();
+        space.agent = Some(said(AgentState::Idle));
+    }));
+    assert_eq!(conversation.agent_state(), Some(AgentState::Idle));
+    speech_frame(&mut conversation, start + Duration::from_millis(20), false);
+    assert_eq!(conversation.agent_state(), Some(AgentState::Idle));
+}
+
+#[test]
 fn the_pill_says_speaking_while_speech_plays_then_settles_to_idle_with_your_turn_once() {
     use crate::pill::Speaking;
     let mut conversation = on_wrist(|space| space.activity = Activity::Idle);

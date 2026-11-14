@@ -262,6 +262,51 @@ fn a_watcher_draws_what_a_participant_does_but_what_is_theirs_alone() {
 }
 
 #[test]
+fn a_watcher_s_swarm_shows_the_server_s_agent_state_as_a_participant_s_does() {
+    use crate::interaction::Mode;
+    use tomori_protocol::{AgentState, AgentStatus};
+    let mut watched = furnished(ConnectionRole::Owner);
+    let mut participant_view = furnished(ConnectionRole::Owner);
+    let (mut watcher, mut step) = (clocked(), clocked());
+    let start = Instant::now();
+    for (sequence, (state, mode)) in (1..).zip([
+        (AgentState::Waiting, Mode::Waiting),
+        (AgentState::Error, Mode::Unavailable),
+        (AgentState::Listening, Mode::Listening),
+    ]) {
+        // The session says it runs, as an older client would show, while the server says what the agent is doing.
+        for conversation in [&mut watched, &mut participant_view] {
+            conversation.apply(space(|space| {
+                space.activity = tomori_protocol::Activity::Running;
+                space.agent = Some(AgentStatus {
+                    state,
+                    detail: None,
+                    sequence,
+                });
+            }));
+        }
+        let now = start + std::time::Duration::from_secs(sequence);
+        let watched_mode = watcher
+            .watch(camera(), &mut watched, &mut felt(), now, FRAME)
+            .swarm
+            .visual
+            .mode;
+        let their_mode = step
+            .update(
+                &participant(),
+                &mut participant_view,
+                &mut felt(),
+                now,
+                FRAME,
+            )
+            .swarm
+            .visual
+            .mode;
+        assert_eq!((watched_mode, their_mode), (mode, mode), "{state:?}");
+    }
+}
+
+#[test]
 fn every_element_of_a_frame_is_shared_or_named_personal() {
     // What a watcher leaves out is exactly this: adding to it hides a scene feature from the spectator, which needs
     // its own review and a change to `design/spectator.md`.

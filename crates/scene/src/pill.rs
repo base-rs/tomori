@@ -4,7 +4,7 @@
 //! The status pill: what is left of the floating panel in a space, two short rows low in the view, so that something needing the participant is seen without a gesture. The first row says what the agent is doing; the second shows only when something needs them, and says where to look. See `design/interaction.md`.
 //!
 //! This is free of rendering code: [`rows`] lays out a [`Status`] that the conversation gives.
-use tomori_protocol::Activity;
+use tomori_protocol::{Activity, AgentState, AgentStatus};
 
 use crate::shapes::Mark;
 pub use crate::turn::Speaking;
@@ -47,6 +47,9 @@ pub enum Need {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Status {
     pub activity: Activity,
+    /// The agent's state as the server says it, smoothed, which shows in place of the activity where the server says
+    /// one; agent speech playing here still shows over thinking, working and idle. See `design/agent-state.md`.
+    pub agent: Option<AgentStatus>,
     /// Agent speech playing on this device, which shows over the activity, as the swarm speaks over what the agent is doing, and how it is heard here.
     pub speaking: Option<Speaking>,
     /// A reply the server holds for the participant while they record, or in the pause after they let go of X, which
@@ -62,20 +65,47 @@ pub struct Status {
 
 /// The pill's rows: what the agent is doing, or that it is speaking, its mode and the space's title, cut to fit; then, only when something needs the participant, what it is and where to look.
 pub fn rows(status: &Status) -> Vec<Row> {
-    let (label, color) = match (status.speaking, status.activity) {
-        _ if status.waiting => ("reply waiting", VIOLET),
-        (Some(Speaking::Heard), _) => ("speaking", VIOLET),
-        (Some(Speaking::Muted), _) => ("speaking, muted", VIOLET),
-        (Some(Speaking::Skipped), _) => ("speaking, skipped", VIOLET),
-        (None, Activity::Idle) => ("idle", GREEN),
-        (None, Activity::Running) => ("running", CYAN),
-        (None, Activity::Waiting) => ("waiting", AMBER),
-        (None, Activity::Closed) => ("closed", DIM),
-        (None, Activity::Unknown) => ("unknown", DIM),
+    let agent = status.agent.as_ref();
+    // The server's state, more pressing than speech playing here, shows over it; speech shows over the rest.
+    let over_speech = agent.is_some_and(|agent| {
+        matches!(
+            agent.state,
+            AgentState::Error | AgentState::Listening | AgentState::Waiting
+        )
+    });
+    let speaking = status.speaking.filter(|_| !over_speech);
+    let detail = agent.and_then(|agent| agent.detail.as_deref());
+    let (label, color): (std::borrow::Cow<str>, _) = match (speaking, agent) {
+        _ if status.waiting => ("reply waiting".into(), VIOLET),
+        (Some(Speaking::Heard), _) => ("speaking".into(), VIOLET),
+        (Some(Speaking::Muted), _) => ("speaking, muted".into(), VIOLET),
+        (Some(Speaking::Skipped), _) => ("speaking, skipped".into(), VIOLET),
+        (None, Some(agent)) => match agent.state {
+            AgentState::Error => (
+                detail.map_or("error".into(), |detail| format!("error: {detail}").into()),
+                RED,
+            ),
+            AgentState::Listening => ("listening".into(), TEXT),
+            AgentState::Waiting => ("waiting".into(), AMBER),
+            AgentState::Speaking => ("speaking".into(), VIOLET),
+            AgentState::Working => (detail.unwrap_or("working").to_owned().into(), CYAN),
+            AgentState::Thinking => (
+                detail.map_or("thinking".into(), |detail| {
+                    format!("thinking, {detail}").into()
+                }),
+                CYAN,
+            ),
+            AgentState::Idle => (
+                detail.map_or("idle".into(), |detail| format!("idle · {detail}").into()),
+                GREEN,
+            ),
+            AgentState::Unknown => activity(status.activity),
+        },
+        (None, None) => activity(status.activity),
     };
     let dot = if status.waiting {
         WAITING_DOT
-    } else if status.speaking.is_some() {
+    } else if speaking.is_some() || agent.is_some_and(|agent| agent.state == AgentState::Speaking) {
         SPEAKING_DOT
     } else {
         Mark::Dot
@@ -86,7 +116,7 @@ pub fn rows(status: &Status) -> Vec<Row> {
     let mut first = vec![
         dot.span(1, Style::plain(lit)),
         Span::new(" ", Style::plain(lit)),
-        Span::new(label, Style::plain(color)),
+        Span::new(label.into_owned(), Style::plain(color)),
     ];
     if let Some(mode) = &status.mode {
         first.push(Span::new(format!("  {mode}"), Style::plain(DIM)));
@@ -114,6 +144,17 @@ pub fn rows(status: &Status) -> Vec<Row> {
     rows
 }
 
+/// What the session's `activity` says, where the server says no agent state this build knows.
+fn activity(activity: Activity) -> (std::borrow::Cow<'static, str>, [f32; 4]) {
+    match activity {
+        Activity::Idle => ("idle".into(), GREEN),
+        Activity::Running => ("running".into(), CYAN),
+        Activity::Waiting => ("waiting".into(), AMBER),
+        Activity::Closed => ("closed".into(), DIM),
+        Activity::Unknown => ("unknown".into(), DIM),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +174,7 @@ mod tests {
     fn status(need: Option<Need>) -> Status {
         Status {
             activity: Activity::Running,
+            agent: None,
             speaking: None,
             waiting: false,
             pulse: 0,
@@ -140,6 +182,78 @@ mod tests {
             title: "Fix the parser".into(),
             replaying: false,
             need,
+        }
+    }
+
+    #[test]
+    fn the_server_s_agent_state_says_what_the_agent_is_doing_with_speech_here_over_the_least_pressing()
+     {
+        let said = |state, detail: Option<&str>, speaking| {
+            rows(&Status {
+                agent: Some(AgentStatus {
+                    state,
+                    detail: detail.map(Into::into),
+                    sequence: 1,
+                }),
+                speaking,
+                ..status(None)
+            })[0]
+                .plain()
+        };
+        let cases = [
+            (AgentState::Idle, None, None, "● idle"),
+            (
+                AgentState::Idle,
+                Some("2 workers running"),
+                None,
+                "● idle · 2 workers running",
+            ),
+            (AgentState::Listening, None, None, "● listening"),
+            (AgentState::Thinking, None, None, "● thinking"),
+            (
+                AgentState::Thinking,
+                Some("stalled"),
+                None,
+                "● thinking, stalled",
+            ),
+            (AgentState::Speaking, None, None, "◉ speaking"),
+            (AgentState::Working, None, None, "● working"),
+            (
+                AgentState::Working,
+                Some("waiting on 2 workers"),
+                None,
+                "● waiting on 2 workers",
+            ),
+            (AgentState::Waiting, None, None, "● waiting"),
+            (AgentState::Error, None, None, "● error"),
+            (AgentState::Error, Some("Lost."), None, "● error: Lost."),
+            (AgentState::Unknown, None, None, "● running"),
+            (
+                AgentState::Working,
+                Some("running shell"),
+                Some(Speaking::Muted),
+                "◉ speaking, muted",
+            ),
+            (
+                AgentState::Waiting,
+                None,
+                Some(Speaking::Heard),
+                "● waiting",
+            ),
+            (
+                AgentState::Listening,
+                None,
+                Some(Speaking::Heard),
+                "● listening",
+            ),
+            (AgentState::Error, None, Some(Speaking::Heard), "● error"),
+        ];
+        for (state, detail, speaking, expected) in cases {
+            let row = said(state, detail, speaking);
+            assert!(
+                row.starts_with(&format!("{expected}  build")),
+                "{state:?} {detail:?} {speaking:?}: {row}"
+            );
         }
     }
 

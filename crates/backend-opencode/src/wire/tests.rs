@@ -252,6 +252,21 @@ fn each_event_becomes_the_backend_event_for_its_session_only() {
                 message: "the agent execution failed".into(),
             }),
         ),
+        // A deliberate cancel or barge-in that the run noticed as a failure ends the turn, and is no error.
+        (
+            for_s(
+                "session.execution.failed",
+                json!({"error":{"type":"aborted","message":"Tool execution interrupted"}}),
+            ),
+            Some(Event::Idle),
+        ),
+        (
+            for_s(
+                "session.execution.failed",
+                json!({"error":{"type":"MessageAbortedError","message":"Stopped"}}),
+            ),
+            Some(Event::Idle),
+        ),
         (for_s("session.created", json!({"id":"child"})), None),
         (for_s("session.forked", json!({"id":"child"})), None),
         (for_s("session.compacted", json!({})), None),
