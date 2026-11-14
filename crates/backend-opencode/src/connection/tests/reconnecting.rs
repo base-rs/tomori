@@ -24,6 +24,7 @@ fn a_restarted_service_is_found_again_and_its_sessions_are_read_again() {
         run_thread(
             Box::new(move || resolver.next_from(None, Some(&resolve_path))),
             receiver,
+            BRISK,
         )
     });
     let create = || {
@@ -232,6 +233,7 @@ fn a_worker_s_activity_is_read_again_after_the_stream_is_lost() {
         run_thread(
             Box::new(move || resolver.next_from(None, Some(&resolve_path))),
             receiver,
+            BRISK,
         )
     });
     let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
@@ -768,8 +770,9 @@ fn reconnecting_backs_off_and_shutdown_stays_prompt() {
     };
     let (commands, receiver) = Commands::new();
     let resolved = crate::endpoint::resolve_from(Some(&format!("http://{address}")), None, None).0;
-    let connection =
-        std::thread::spawn(move || run_thread(Box::new(move || Ok(resolved.clone())), receiver));
+    let connection = std::thread::spawn(move || {
+        run_thread(Box::new(move || Ok(resolved.clone())), receiver, BRISK)
+    });
     // A command while the service is unreachable fails rather than waits.
     let refused = block_on(commands.reply_with(|reply| Command::Sessions {
         directory: "/tmp".into(),
@@ -946,6 +949,7 @@ fn a_resync_without_room_for_its_held_events_closes_with_the_reason() {
             modes: None,
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     assert!(!registrations.contains_key("full"));
     let mut last = None;
@@ -976,6 +980,7 @@ fn failed_reads_after_reconnecting_are_retried_at_the_cadence_then_close() {
                 })
             }),
             receiver,
+            BRISK,
         )
     });
     let mut open = Vec::new();
@@ -1030,7 +1035,7 @@ fn failed_reads_after_reconnecting_are_retried_at_the_cadence_then_close() {
         assert_eq!(times.len(), 4, "{id}: {times:?}");
         for pair in times[1..].windows(2) {
             assert!(
-                pair[1] - pair[0] >= RECONCILE_INTERVAL - Duration::from_millis(50),
+                pair[1] - pair[0] >= BRISK.reconcile - Duration::from_millis(50),
                 "{id} was read again too soon: {times:?}"
             );
         }
@@ -1110,6 +1115,7 @@ fn modes_seen_during_a_read_follow_its_resynchronization() {
             }),
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     let Some(Event::Resynchronized { snapshot }) = events.try_recv().unwrap().into_current() else {
         unreachable!("the resynchronization was not first");
@@ -1230,6 +1236,7 @@ fn held_events_the_read_reflects_are_dropped_and_no_text_is_lost() {
             modes: None,
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     let mut delivered = Vec::new();
     while let Ok(event) = events.try_recv() {
@@ -1370,6 +1377,7 @@ fn closing_during_a_read_cancels_it_and_ignores_its_result() {
             modes: None,
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     assert!(replacement.try_recv().is_err());
     assert!(registrations["s"].resync.is_none());
@@ -1451,6 +1459,7 @@ fn events_are_held_through_retry_gaps_and_beyond_the_limit_close_only_that_sessi
             modes: None,
         },
         Instant::now(),
+        &Timing::DEFAULT,
     );
     let mut text = String::new();
     while let Ok(event) = resyncing.try_recv() {

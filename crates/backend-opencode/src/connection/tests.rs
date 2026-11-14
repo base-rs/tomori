@@ -17,6 +17,47 @@ mod service;
 mod snapshot;
 mod workers;
 
+/// The connection's timing in tests, shorter than in production so that tests
+/// do not wait out its timeouts, in the same order: a snapshot outlasts the
+/// active-session lookup that reconciliation races against it.
+const BRISK: Timing = Timing {
+    reconcile: Duration::from_millis(250),
+    snapshot: Duration::from_secs(1),
+    listing: Duration::from_secs(1),
+    discovery_retries: [
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+    ],
+    reconnect_initial: Duration::from_millis(250),
+    reconnect_max: Duration::from_secs(2),
+    connect: Duration::from_secs(1),
+    in_flight_grace: Duration::from_secs(1),
+    active_lookup: Duration::from_millis(500),
+};
+
+#[test]
+fn production_waits_as_long_as_it_always_has() {
+    let second = Duration::from_secs(1);
+    assert_eq!(
+        Timing::default(),
+        Timing {
+            reconcile: second,
+            snapshot: second * 5,
+            listing: second * 5,
+            discovery_retries: [second * 5, second * 30, second * 120],
+            reconnect_initial: Duration::from_millis(250),
+            reconnect_max: second * 10,
+            connect: second * 5,
+            in_flight_grace: second * 5,
+            active_lookup: second * 2,
+        }
+    );
+    // A listing that runs out of time says how long it had, in seconds as in production, or in milliseconds.
+    assert_eq!(api::said(second * 5), "5 seconds");
+    assert_eq!(api::said(Duration::from_millis(250)), "250 milliseconds");
+}
+
 /// The state of a simulated OpenCode service that persists across its
 /// restarts, as OpenCode keeps sessions on disk.
 #[derive(Default)]
@@ -601,6 +642,7 @@ fn connect_to(
                 })
             }),
             receiver,
+            BRISK,
         )
     });
     (commands, connection)

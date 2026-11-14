@@ -165,8 +165,14 @@ fn a_lost_stream_says_why_the_http_driver_ended() {
 #[test]
 fn the_backoff_resets_only_after_a_connection_that_lasted() {
     let delay = Duration::from_secs(4);
-    assert_eq!(after_loss(delay, Duration::from_secs(1)), delay);
-    assert_eq!(after_loss(delay, RECONNECT_MAX), RECONNECT_INITIAL);
+    assert_eq!(
+        after_loss(delay, Duration::from_secs(1), &Timing::DEFAULT),
+        delay
+    );
+    assert_eq!(
+        after_loss(delay, RECONNECT_MAX, &Timing::DEFAULT),
+        RECONNECT_INITIAL
+    );
 }
 
 #[test]
@@ -324,7 +330,7 @@ fn a_service_that_cannot_be_found_refuses_what_waits_for_it() {
     ];
     for (resolve, expected) in resolvers {
         let (commands, receiver) = Commands::new();
-        let connection = std::thread::spawn(move || run_thread(resolve, receiver));
+        let connection = std::thread::spawn(move || run_thread(resolve, receiver, BRISK));
         let refused = block_on(commands.reply_with(|reply| Command::Sessions {
             directory: "/tmp".into(),
             reply,
@@ -643,6 +649,7 @@ fn a_read_again_fails_when_too_many_workers_changed_or_one_is_oversized() {
         &mut registrations,
         read_again(&identity, Ok(Snapshot::default()), None),
         Instant::now(),
+        &Timing::DEFAULT,
     );
     assert_eq!(registrations["s"].resync.as_ref().unwrap().failures, 1);
     let registration = registrations.get_mut("s").unwrap();
@@ -657,6 +664,7 @@ fn a_read_again_fails_when_too_many_workers_changed_or_one_is_oversized() {
         &mut registrations,
         read_again(&identity, Ok(snapshot), None),
         Instant::now(),
+        &Timing::DEFAULT,
     );
     assert_eq!(registrations["s"].resync.as_ref().unwrap().failures, 2);
 }
@@ -682,6 +690,7 @@ fn a_read_again_takes_the_listed_agent_and_the_running_state_held_since() {
         &mut registrations,
         read_again(&identity, Ok(snapshot), Some(modes)),
         Instant::now(),
+        &Timing::DEFAULT,
     );
     let registration = &registrations["s"];
     assert_eq!(registration.modes.current.as_deref(), Some("plan"));
@@ -881,6 +890,7 @@ fn perform(port: u16, registrations: &mut HashMap<String, Registration>, command
                 resolved,
                 cancellation,
                 timers: scheduler,
+                timing: Timing::DEFAULT,
             },
         );
         assert!(snapshots.is_empty());
@@ -1146,6 +1156,7 @@ fn reads_again_and_restores_start_only_as_many_as_are_allowed() {
                 resolved,
                 cancellation,
                 timers: scheduler,
+                timing: Timing::DEFAULT,
             },
         );
         assert_eq!(resyncs.len(), MAX_RESYNCS);
@@ -1158,6 +1169,7 @@ fn reads_again_and_restores_start_only_as_many_as_are_allowed() {
                 resolved,
                 cancellation,
                 timers: scheduler,
+                timing: Timing::DEFAULT,
             },
         );
         assert_eq!(restores.len(), MAX_RESYNCS);
@@ -1170,7 +1182,16 @@ fn modes_read_again_are_listed_or_none_when_the_record_cannot_be_read_in_time() 
     let modes = crate::api::tests::with_client(
         listed,
         async |client, resolved, cancellation, scheduler| {
-            bounded_modes(client, resolved, "s", "/tmp", cancellation, scheduler).await
+            bounded_modes(
+                client,
+                resolved,
+                "s",
+                "/tmp",
+                cancellation,
+                scheduler,
+                SNAPSHOT_TIMEOUT,
+            )
+            .await
         },
     );
     let offered: Vec<_> = modes
@@ -1185,7 +1206,16 @@ fn modes_read_again_are_listed_or_none_when_the_record_cannot_be_read_in_time() 
     let modes = crate::api::tests::with_client(
         refused,
         async |client, resolved, cancellation, scheduler| {
-            bounded_modes(client, resolved, "s", "/tmp", cancellation, scheduler).await
+            bounded_modes(
+                client,
+                resolved,
+                "s",
+                "/tmp",
+                cancellation,
+                scheduler,
+                SNAPSHOT_TIMEOUT,
+            )
+            .await
         },
     );
     assert!(modes.is_none());
@@ -1195,7 +1225,16 @@ fn modes_read_again_are_listed_or_none_when_the_record_cannot_be_read_in_time() 
     let modes =
         crate::api::tests::with_client(port, async |client, resolved, cancellation, scheduler| {
             let timers = Hurried::new(scheduler, 0, false);
-            bounded_modes(client, resolved, "s", "/tmp", cancellation, &timers).await
+            bounded_modes(
+                client,
+                resolved,
+                "s",
+                "/tmp",
+                cancellation,
+                &timers,
+                SNAPSHOT_TIMEOUT,
+            )
+            .await
         });
     assert!(modes.is_none());
 }
@@ -1234,6 +1273,7 @@ fn restore(
                 resolved,
                 cancellation,
                 timers: &timers,
+                timing: Timing::DEFAULT,
             },
         );
         restores.next().await.unwrap()

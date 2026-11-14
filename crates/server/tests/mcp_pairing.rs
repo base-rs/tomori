@@ -255,12 +255,11 @@ fn the_agent_lists_the_pairing_waiting_but_never_its_code() {
         "{unrevealed}"
     );
     assert_eq!(unrevealed["pending"]["code_shown"], false);
-    assert!(
-        unrevealed["pending"]["expires_in_seconds"]
-            .as_u64()
-            .unwrap()
-            <= 10
-    );
+    // A device that has not revealed its value has REVEAL_TIMEOUT, ten seconds, not the pairing's own timeout.
+    let expires = unrevealed["pending"]["expires_in_seconds"]
+        .as_u64()
+        .unwrap();
+    assert!((9..=10).contains(&expires), "{expires}");
     // Nothing can be confirmed before the device shows its code, and trying does not end the pairing.
     assert!(
         failure(&studio.call("confirm_pairing", json!({"code": "123 456"})))

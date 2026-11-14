@@ -73,8 +73,9 @@ async fn bounded_snapshot<S: Timers>(
         resolved,
         cancellation,
         timers,
+        timing,
     } = service;
-    let deadline = timers.now() + SNAPSHOT_TIMEOUT;
+    let deadline = timers.now() + timing.snapshot;
     // The connection's cancellation ends the wait early, and so the read.
     let expired = || async {
         let remaining = deadline.saturating_duration_since(timers.now());
@@ -96,7 +97,7 @@ async fn bounded_snapshot<S: Timers>(
         let mut walk = api::FamilyWalk::new(id);
         let walked = futures_lite::future::or(
             async {
-                walk.run(client, resolved, local, timers)
+                walk.run(client, resolved, local, timers, timing.listing)
                     .await
                     .map(|()| true)
                     .map_err(map_failure)
@@ -257,6 +258,7 @@ pub(super) fn start_resyncs<'a, S: Timers>(
         resolved,
         cancellation,
         timers,
+        timing,
     } = service;
     let now = timers.now();
     let mut ids: Vec<_> = registrations
@@ -317,13 +319,29 @@ pub(super) fn start_resyncs<'a, S: Timers>(
                                 .into_iter()
                                 .filter(|known| !listed.contains(known.as_str()))
                                 .collect();
-                            missing_workers(client, resolved, omitted, &local, timers).await
+                            missing_workers(
+                                client,
+                                resolved,
+                                omitted,
+                                &local,
+                                timers,
+                                timing.snapshot,
+                            )
+                            .await
                         }
                         Err(_) => Vec::new(),
                     };
                     (result, rest, missing)
                 },
-                bounded_modes(client, resolved, &id, &directory, &listing, timers),
+                bounded_modes(
+                    client,
+                    resolved,
+                    &id,
+                    &directory,
+                    &listing,
+                    timers,
+                    timing.snapshot,
+                ),
             )
             .await;
             local.cancel();
@@ -340,7 +358,7 @@ pub(super) fn start_resyncs<'a, S: Timers>(
     }
 }
 
-/// The modes of session `id` in `directory`, read again within [`SNAPSHOT_TIMEOUT`]: the agent its record names, among those listed again. Optional, like the listing at attach: `None` if its record cannot be read in time, or the read is cancelled, which keeps the modes already known.
+/// The modes of session `id` in `directory`, read again within `timeout`, [`SNAPSHOT_TIMEOUT`] in production: the agent its record names, among those listed again. Optional, like the listing at attach: `None` if its record cannot be read in time, or the read is cancelled, which keeps the modes already known.
 pub(super) async fn bounded_modes<S: Timers>(
     client: &Client<'_>,
     resolved: &Resolved,
@@ -348,6 +366,7 @@ pub(super) async fn bounded_modes<S: Timers>(
     directory: &str,
     cancellation: &Cancellation,
     timers: &S,
+    timeout: Duration,
 ) -> Option<Modes> {
     futures_lite::future::race(
         async {
@@ -357,7 +376,7 @@ pub(super) async fn bounded_modes<S: Timers>(
             Some(modes(client, resolved, directory, &info, cancellation).await)
         },
         async {
-            let _ = timers.sleep(SNAPSHOT_TIMEOUT, cancellation).await;
+            let _ = timers.sleep(timeout, cancellation).await;
             None
         },
     )
@@ -365,7 +384,7 @@ pub(super) async fn bounded_modes<S: Timers>(
 }
 
 /// The workers among `omitted` that OpenCode answers do not exist, looked up
-/// by identifier, at most eight at once, within [`SNAPSHOT_TIMEOUT`]. A lookup
+/// by identifier, at most eight at once, within `timeout`, [`SNAPSHOT_TIMEOUT`] in production. A lookup
 /// that fails, finds the worker, or does not finish in time leaves it out, as
 /// only a session OpenCode reports not found is evidence of deletion; those
 /// found missing in time are kept.
@@ -375,6 +394,7 @@ async fn missing_workers<S: Timers>(
     omitted: Vec<String>,
     cancellation: &Cancellation,
     timers: &S,
+    timeout: Duration,
 ) -> Vec<String> {
     const MAX_LOOKUPS: usize = 8;
     if omitted.is_empty() {
@@ -409,7 +429,7 @@ async fn missing_workers<S: Timers>(
             }
         },
         async {
-            let _ = timers.sleep(SNAPSHOT_TIMEOUT, looking).await;
+            let _ = timers.sleep(timeout, looking).await;
         },
     )
     .await;
@@ -428,6 +448,7 @@ pub(super) fn finish_resync(
     registrations: &mut HashMap<String, Registration>,
     completed: ResyncResult,
     now: Instant,
+    timing: &Timing,
 ) {
     let Some(registration) = registrations.get_mut(&completed.id).filter(|registration| {
         Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
@@ -524,7 +545,7 @@ pub(super) fn finish_resync(
             if resync.failures < RESYNC_ATTEMPTS {
                 // Wait for the next cadence: a service still starting, or
                 // about to be lost again, must not use up every attempt at once.
-                resync.retry_at = Some(now + RECONCILE_INTERVAL);
+                resync.retry_at = Some(now + timing.reconcile);
                 registration.resync = Some(resync);
                 return;
             }
@@ -575,6 +596,7 @@ pub(super) fn start_discoveries<'a, S: Timers>(
         resolved,
         cancellation,
         timers,
+        timing,
     } = service;
     let free = MAX_DISCOVERIES.saturating_sub(discoveries.len());
     for id in due_discoveries(registrations, timers.now(), free) {
@@ -584,7 +606,9 @@ pub(super) fn start_discoveries<'a, S: Timers>(
         let identity = registration.events.worker_epoch.clone();
         discoveries.push(Box::pin(async move {
             // A listing OpenCode does not answer in time ends the walk.
-            let result = walk.run(client, resolved, &local, timers).await;
+            let result = walk
+                .run(client, resolved, &local, timers, timing.listing)
+                .await;
             // Like a read, a worker is reported running only on evidence.
             let active = match result {
                 Ok(()) => {
@@ -623,6 +647,7 @@ pub(super) fn finish_discovery(
     registrations: &mut HashMap<String, Registration>,
     completed: DiscoveryResult,
     now: Instant,
+    timing: &Timing,
 ) {
     let Some(registration) = registrations.get_mut(&completed.id).filter(|registration| {
         Arc::ptr_eq(&registration.events.worker_epoch, &completed.registration)
@@ -641,6 +666,7 @@ pub(super) fn finish_discovery(
             .err()
             .map(|failure| (walk, failure.message)),
         now,
+        &timing.discovery_retries,
     );
     registration.publish_workers();
 }
@@ -660,6 +686,7 @@ pub(super) fn start_restores<'a, S: Timers>(
         resolved,
         cancellation,
         timers,
+        timing,
     } = service;
     for (id, registration) in registrations.iter_mut() {
         if restores.len() >= MAX_RESYNCS {
@@ -683,7 +710,7 @@ pub(super) fn start_restores<'a, S: Timers>(
                         .map(|value| snapshot_messages(&value))
                 },
                 async {
-                    let _ = timers.sleep(SNAPSHOT_TIMEOUT, &local).await;
+                    let _ = timers.sleep(timing.snapshot, &local).await;
                     None
                 },
             )
@@ -741,6 +768,7 @@ pub(super) fn start_activity_syncs<'a, S: Timers>(
         resolved,
         cancellation,
         timers,
+        timing,
     } = service;
     let room = MAX_RESYNCS.saturating_sub(activities.len());
     let due = registrations.iter_mut().filter(|(_, registration)| {
@@ -779,7 +807,7 @@ pub(super) fn start_activity_syncs<'a, S: Timers>(
                         Some((messages, inbox, requests))
                     },
                     async {
-                        let _ = timers.sleep(SNAPSHOT_TIMEOUT, &local).await;
+                        let _ = timers.sleep(timing.snapshot, &local).await;
                         None
                     },
                 )

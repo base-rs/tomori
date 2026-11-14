@@ -80,7 +80,7 @@ impl OpenCode {
                 // The thread is detached: it ends once every sender of its
                 // commands is dropped, or on shutdown.
                 system::spawn("opencode-connection", move || {
-                    connection::run_thread(resolve, receiver);
+                    connection::run_thread(resolve, receiver, connection::Timing::DEFAULT);
                 })
                 .map_err(|error| {
                     Error::new(
