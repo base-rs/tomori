@@ -1259,6 +1259,7 @@ fn campsite_logs(burning: &[(usize, f32)], size: f32) -> Vec<crate::campsite::Sh
         toast: vec![0.0; campsite::STICKS],
         size,
         burnt,
+        burning: Vec::new(),
     });
     sticks.logs_shown(&[], &[], std::time::Instant::now(), 0)
 }

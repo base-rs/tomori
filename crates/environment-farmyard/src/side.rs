@@ -3,8 +3,8 @@
 
 //! The farmyard's server side: it owns the flock of each space bound to the farmyard, moves it on by the farmyard's
 //! clock, the time since it started, takes participants' notices, simulates the campsite's marshmallow sticks and the
-//! beach's stones, taking participants' taking and letting go of them and toasting the marshmallows held in the fire's
-//! heat, and shares every change with the clients in the space, with the clock, through the environment state channel. Behind the crate's `side` feature, which builds the physics engine that only a server needs. See
+//! beach's stones, taking participants' taking and letting go of them, toasting the marshmallows held in the fire's
+//! heat and burning those black, and shares every change with the clients in the space, with the clock, through the environment state channel. Behind the crate's `side` feature, which builds the physics engine that only a server needs. See
 //! `design/farmyard.md`.
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};

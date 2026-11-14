@@ -6,9 +6,10 @@
 //! from this participant's own hand every frame and from the others' hands their presence brings, and let go, thrown as
 //! fast as the hand moved, foreseen until the server's snapshots take over; each marshmallow as toasted as the server
 //! side says, which toasts it from where the holder's hand holds it, and, for one this participant holds, as they
-//! foresee it toasting by the same rule from where they draw it, easing to what the server side says; and each stick on
-//! its way back fading out where it was, its marshmallow as it was, and in on its log, fresh. See
-//! `tomori-environment-farmyard`'s `campsite`.
+//! foresee it toasting by the same rule from where they draw it, easing to what the server side says; each burning as
+//! the server side says it does, and, for one this participant holds, as they foresee it catching and going out from
+//! where they draw it, until the side says the same or [`GRACE`] passes; and each stick on its way back fading out where
+//! it was, its marshmallow as it was, and in on its log, fresh. See `tomori-environment-farmyard`'s `campsite`.
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -37,6 +38,11 @@ const BEHIND: f32 = 0.01;
 const EASE: f32 = 0.25;
 /// The longest frame the foresight toasts over, in seconds.
 const FRAME_MOST: f32 = 0.1;
+/// How long the holder's foresight of their marshmallow catching or going out may differ from what the server side
+/// says before it gives way to it: as long as their hand takes to reach the side through presence, a tick of the side
+/// and its word to come back, so that the side agreeing ends the difference first, and one the side never lit, as when
+/// the holder's foresight ran ahead of it, goes out.
+pub const GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A stick as it is drawn this frame: which, where, the shade of its marshmallow and whether it burns.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -227,8 +233,9 @@ const CRACKLE_CHANCE: f32 = 0.3;
 
 /// The sticks as this client shows them: their bodies, how toasted the server side says each is, this participant's
 /// foresight of those they hold, how toasted each on its way back was as it began, which it is drawn as fading out,
-/// the server side having said its marshmallow fresh, how long each marshmallow burns on, as this client draws it, and
-/// when they were last drawn.
+/// the server side having said its marshmallow fresh, since when the server side says each burns, how long each this
+/// participant holds burns on, as they foresee it, and since when that has differed from what the side says, and when
+/// they were last drawn.
 ///
 /// And the woodpile's logs, as the server side says how far each has burnt, how far each on its way back had as it
 /// began, and the fire, as big as the server side says, and as big as it is drawn, eased there, and when it last
@@ -239,7 +246,9 @@ pub struct Sticks {
     toast: Vec<f32>,
     foreseen: BTreeMap<u32, f32>,
     leaving: BTreeMap<u32, f32>,
+    lit: Vec<Option<u64>>,
     flames: BTreeMap<u32, f32>,
+    differs: BTreeMap<u32, Instant>,
     last: Option<Instant>,
     logs: Loose<Pile>,
     burnt: Vec<f32>,
@@ -260,6 +269,8 @@ impl Sticks {
         self.logs.share(&only(&shared.sticks, is_log));
         self.toast = shared.toast.iter().copied().take(STICKS).collect();
         self.toast.resize(STICKS, 0.0);
+        self.lit = shared.burning.iter().copied().take(STICKS).collect();
+        self.lit.resize(STICKS, None);
         self.burnt = shared
             .burnt
             .iter()
@@ -308,6 +319,15 @@ impl Sticks {
                 *burnt = campsite::unit(burning.burnt);
             }
         }
+        for lit in &event.lit {
+            if let Some(index) = campsite::index(lit.body)
+                && let Some(since) = self.lit.get_mut(index)
+            {
+                // What the holder foresaw differs anew from what the side says now, as it says it only as it changes.
+                self.differs.remove(&lit.body);
+                *since = lit.since;
+            }
+        }
         if let Some(size) = event.size {
             self.size = campsite::unit(size);
         }
@@ -325,6 +345,12 @@ impl Sticks {
     /// How toasted stick `index` is, as the server side last said.
     pub fn toast(&self, index: usize) -> f32 {
         self.toast.get(index).copied().unwrap_or_default()
+    }
+
+    /// Since when, on the farmyard's clock, stick `index`'s marshmallow has burnt, as the server side last said, if it
+    /// does.
+    pub fn lit(&self, index: usize) -> Option<u64> {
+        self.lit.get(index).copied().flatten()
     }
 
     /// The loose bodies the sticks are.
@@ -421,9 +447,10 @@ impl Sticks {
     }
 
     /// Every stick as it is drawn at `now`, the farmyard's clock at `clock`: those this participant holds, in their
-    /// hand, their marshmallows as they foresee them toasting; one another holds, in theirs, from `right` and `left`,
-    /// their hands by their numbers; and the rest where the server side says they are; each as toasted as the server
-    /// side says, but one fading out on its way back, as toasted as it was, and burning only drawn whole.
+    /// hand, their marshmallows as they foresee them toasting, catching and going out; one another holds, in theirs, from
+    /// `right` and `left`, their hands by their numbers; and the rest where the server side says they are; each as
+    /// toasted as the server side says, but one fading out on its way back, as toasted as it was, and burning as the
+    /// server side says, only drawn whole.
     pub fn shown(
         &mut self,
         right: &[(u32, Hand)],
@@ -443,11 +470,14 @@ impl Sticks {
         *drawn += (size - *drawn) * (seconds / SIZE_EASE).min(1.0);
         let shown_size = *drawn;
         let placed = self.loose.placed(right, left, now, clock);
-        self.foreseen.retain(|body, _| {
+        let mine = |body: &u32| {
             placed
                 .iter()
                 .any(|(held, _, _, mine)| held == body && *mine)
-        });
+        };
+        self.foreseen.retain(|body, _| mine(body));
+        self.flames.retain(|body, _| mine(body));
+        self.differs.retain(|body, _| mine(body));
         self.leaving.retain(|body, _| {
             placed
                 .iter()
@@ -482,19 +512,43 @@ impl Sticks {
                     }
                 };
                 let index = Rack::number(body) as usize;
-                let flame = self.flames.entry(body).or_default();
-                *flame = match fade {
-                    Fade::Whole => {
-                        campsite::burns_at(*flame, toast, marshmallow, seconds, shown_size)
+                let alight = self.lit(index).is_some();
+                let burning = match fade {
+                    Fade::Whole if mine => {
+                        let flame = self.flames.entry(body).or_insert(if alight {
+                            campsite::BURNS
+                        } else {
+                            0.0
+                        });
+                        // Black as soon as either the foresight or the side says so.
+                        let black = toast.max(said);
+                        *flame =
+                            campsite::burns_at(*flame, black, marshmallow, seconds, shown_size);
+                        let foreseen = *flame > 0.0;
+                        if foreseen == alight {
+                            self.differs.remove(&body);
+                            foreseen
+                        } else if now
+                            .saturating_duration_since(*self.differs.entry(body).or_insert(now))
+                            < GRACE
+                        {
+                            foreseen
+                        } else {
+                            // The side never said so: as it says, burning on until it says it went out, until the
+                            // two agree again.
+                            *flame = if alight { campsite::BURNS } else { 0.0 };
+                            alight
+                        }
                     }
-                    _ => 0.0,
+                    Fade::Whole => alight,
+                    _ => false,
                 };
                 Shown {
                     index,
                     transform,
                     marshmallow,
                     shade: campsite::shade(toast),
-                    burning: *flame > 0.0,
+                    burning,
                 }
             })
             .collect()

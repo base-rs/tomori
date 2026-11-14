@@ -124,6 +124,8 @@ fn the_sticks_settle_on_their_log_and_then_cost_nothing() {
         campsite::STICKS + campsite::LOGS
     );
     assert_eq!(shared.toast, [0.0; campsite::STICKS]);
+    // None alight: the side keeps nothing, so a server started again begins with every marshmallow fresh and unlit.
+    assert_eq!(shared.burning, [None; campsite::STICKS]);
     let (events, _) = run(&mut sticks, &[], now, 2.0);
     assert!(events.is_empty(), "{events:?}");
 }
@@ -280,6 +282,137 @@ fn a_stick_let_go_falls_and_comes_to_rest_where_it_lies_as_toasted_as_it_was() {
         sticks.world().held(campsite::body(0)).map(|held| held.by),
         Some(4)
     );
+}
+
+/// Move `sticks` on from `now`, the farmyard's clock at `clock`, by `seconds`, in steps of the side's tick, with
+/// `presence`: every event it said, and when, and at what clock, it ends.
+fn burn(
+    sticks: &mut Sticks,
+    presence: &[Presence],
+    now: Instant,
+    clock: u64,
+    seconds: f32,
+) -> (Vec<Event>, Instant, u64) {
+    let mut events = Vec::new();
+    let (mut at, mut clock) = (now, clock);
+    for _ in 0..(seconds / 0.05).round() as usize {
+        at += Duration::from_millis(50);
+        clock += 50;
+        events.extend(sticks.update(presence, at, clock));
+    }
+    (events, at, clock)
+}
+
+/// What `events` said of stick `index` catching or going out, in order.
+fn lit(events: &[Event], index: usize) -> Vec<Option<u64>> {
+    events
+        .iter()
+        .flat_map(|event| &event.lit)
+        .filter(|lit| lit.body == campsite::body(index))
+        .map(|lit| lit.since)
+        .collect()
+}
+
+#[test]
+fn a_black_marshmallow_catches_in_the_heat_and_burns_on_out_of_it_for_everyone_until_it_goes_out() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    taken(&mut sticks, 1, now);
+    // Just short of black, over the heart of the fire, it turns black within a tick and catches as it does, said at
+    // once, as black as it is, since then.
+    sticks.toast[1] = campsite::BLACK - 0.002;
+    let over = holding(3, toasting(campsite::heart()), now);
+    let (events, later, clock) = burn(&mut sticks, std::slice::from_ref(&over), now, 1_000, 0.05);
+    assert!(sticks.toast(1) >= campsite::BLACK);
+    assert_eq!(sticks.lit(1), Some(clock));
+    assert_eq!(lit(&events, 1), [Some(clock)]);
+    let said = events.iter().flat_map(|event| &event.toast).last().unwrap();
+    assert_eq!(
+        (said.body, said.toast),
+        (campsite::body(1), sticks.toast(1))
+    );
+    assert_eq!(sticks.shared().burning[1], Some(clock));
+    assert!(sticks.report().sticks[1].burning);
+    assert_eq!(
+        sticks.report().inspect("campsite/stick-1").unwrap()["burning"],
+        true
+    );
+    let caught = clock;
+    // Pulled out at once, it burns on, said nothing more, for as long as it may out of the heat, and then goes out,
+    // said once.
+    let away = holding(3, toasting(campsite::heart() + Vec3::X * 2.0), later);
+    let (events, later, clock) = burn(
+        &mut sticks,
+        std::slice::from_ref(&away),
+        later,
+        clock,
+        campsite::BURNS - 0.2,
+    );
+    assert!(lit(&events, 1).is_empty());
+    assert_eq!(sticks.lit(1), Some(caught));
+    let (events, later, clock) = burn(&mut sticks, std::slice::from_ref(&away), later, clock, 0.4);
+    assert_eq!(lit(&events, 1), [None]);
+    assert_eq!(sticks.lit(1), None);
+    let out = events
+        .iter()
+        .find(|event| !event.lit.is_empty())
+        .unwrap()
+        .clock;
+    let burned = (out - caught) as f32 / 1000.0;
+    assert!((burned - campsite::BURNS).abs() <= 0.1, "{burned}");
+    assert!(sticks.toast(1) >= campsite::BLACK);
+    let (events, later, clock) = burn(&mut sticks, &[away], later, clock, 1.0);
+    assert!(lit(&events, 1).is_empty());
+    // Back in the heat, it catches again; and held under the pool's water, it goes out at once.
+    let over = holding(3, toasting(campsite::heart()), later);
+    let (events, later, clock) = burn(&mut sticks, &[over], later, clock, 0.05);
+    assert_eq!(lit(&events, 1), [Some(clock)]);
+    let under = crate::layout::POOL - Vec3::Y * 0.1;
+    assert!(campsite::doused(under));
+    let pool = holding(3, toasting(under), later);
+    let (events, _, _) = burn(&mut sticks, &[pool], later, clock, 0.05);
+    assert_eq!(lit(&events, 1), [None]);
+}
+
+#[test]
+fn a_burning_marshmallow_let_go_burns_on_and_goes_out_in_the_pool_or_fresh_on_its_log() {
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    let epoch = taken(&mut sticks, 1, now);
+    sticks.toast[1] = campsite::BLACK;
+    let over = holding(3, toasting(campsite::heart()), now);
+    let (_, later, clock) = burn(&mut sticks, &[over], now, 0, 0.05);
+    assert!(sticks.lit(1).is_some());
+    // Let go above the pool, it burns on as it falls, and goes out as it floats in, its marshmallow under the water.
+    let pool = crate::layout::POOL;
+    let above = Placement::at(Vec3::new(pool.x, pool.y + 0.6, pool.z + 0.5));
+    let ada = holding(3, above, later);
+    assert!(sticks.ask(3, &let_go(1, epoch, above, [0.0; 3]), &[ada]));
+    let (events, later, clock) = burn(&mut sticks, &[], later, clock, 0.1);
+    assert!(lit(&events, 1).is_empty());
+    let (events, later, clock) = burn(&mut sticks, &[], later, clock, 10.0);
+    assert_eq!(lit(&events, 1), [None]);
+    // Another, alight, put back gently by its log, fades onto it fresh and unlit, said as it begins its way.
+    let epoch = taken(&mut sticks, 2, later);
+    sticks.toast[2] = campsite::BLACK;
+    let over = holding(3, toasting(campsite::heart()), later);
+    let (_, later, clock) = burn(&mut sticks, &[over], later, clock, 0.05);
+    assert!(sticks.lit(2).is_some());
+    let (middle, ..) = campsite::seat();
+    let at = Placement::at(middle + Vec3::new(0.0, 0.9, 0.0));
+    assert!(sticks.ask(3, &let_go(2, epoch, at, [0.0; 3]), &[holding(3, at, later)]));
+    let (events, _, _) = burn(&mut sticks, &[], later, clock, 0.2);
+    let began = events
+        .iter()
+        .find(|event| !event.sticks.returning.is_empty())
+        .unwrap();
+    assert!(
+        began
+            .lit
+            .iter()
+            .any(|lit| lit.body == campsite::body(2) && lit.since.is_none())
+    );
+    assert_eq!((sticks.lit(2), sticks.toast(2)), (None, 0.0));
 }
 
 #[test]
@@ -609,6 +742,7 @@ fn the_agent_is_told_of_the_bonfire_the_fireside_log_and_each_stick_and_may_insp
     assert_eq!(bonfire["kind"], "bonfire");
     let stick = report.inspect("campsite/stick-2").unwrap();
     assert_eq!(stick["looks"], "fresh and white");
+    assert_eq!(stick["burning"], false);
     assert_eq!(stick["held_by"], 3);
     assert_eq!(stick["on_its_log"], false);
     assert_eq!(

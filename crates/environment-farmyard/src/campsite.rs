@@ -323,7 +323,8 @@ pub fn burns(left: f32, toast: f32, at: Vec3, seconds: f32) -> f32 {
 }
 
 /// How long a marshmallow toasted `toast`, at `at`, burns on, `seconds` after it would have burned on for `left`, with
-/// the fire at `size`, as each client draws it: for [`BURNS`] while it is [`burning_at`] in the fire's heat, and less
+/// the fire at `size`, as the server side burns it and its holder's client foresees it: for [`BURNS`] while it is
+/// [`burning_at`] in the fire's heat, and less
 /// as it is out of it, until it goes out on its own, or at once under the pool's water; and never unless it is black.
 pub fn burns_at(left: f32, toast: f32, at: Vec3, seconds: f32, size: f32) -> f32 {
     if burning_at(toast, at, size) {
@@ -865,6 +866,14 @@ pub struct Toasted {
     pub toast: f32,
 }
 
+/// Whether a stick's marshmallow burns, as the side says it: since when, on the farmyard's clock, it last caught, or
+/// none, as it went out or was never alight.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Lit {
+    pub body: u32,
+    pub since: Option<u64>,
+}
+
 /// How far a log has burnt, as the side says it.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Burnt {
@@ -874,7 +883,8 @@ pub struct Burnt {
 
 /// What the farmyard shares of the campsite, in its state beside the flock's, as `campsite`: the bodies of its world,
 /// every stick's and then every log's, as `sticks`; how toasted each stick is, in order; how big the fire is, from 0,
-/// its default, to 1; and how far each log has burnt, in order, from 0, not alight, to 1, burnt away.
+/// its default, to 1; how far each log has burnt, in order, from 0, not alight, to 1, burnt away; and since when each
+/// stick's marshmallow has burnt, on the farmyard's clock, in order, or none for one not alight.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Shared {
     #[serde(default)]
@@ -885,6 +895,8 @@ pub struct Shared {
     pub size: f32,
     #[serde(default)]
     pub burnt: Vec<f32>,
+    #[serde(default)]
+    pub burning: Vec<Option<u64>>,
 }
 
 /// The campsite as the farmyard shares it, in its state, or none in a state from before its sticks were bodies.
@@ -894,8 +906,8 @@ pub fn shared(state: &serde_json::Value) -> Shared {
 
 /// What changed of the campsite, as the side sends it to everyone in the space: the farmyard's clock, what changed of
 /// the sticks' and logs' bodies, how toasted those sticks whose toasting changed are now, how big the fire is, if that
-/// changed, and how far the logs whose burning changed have burnt. A client from before reads it as neither a
-/// chicken's nor a stone's, and ignores it.
+/// changed, how far the logs whose burning changed have burnt, and which marshmallows caught or went out. A client from
+/// before reads it as neither a chicken's nor a stone's, and ignores it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub clock: u64,
@@ -906,6 +918,8 @@ pub struct Event {
     pub size: Option<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub burnt: Vec<Burnt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lit: Vec<Lit>,
 }
 
 /// The solids of the campsite, which the agent, walls and panels keep clear of, as `(least, greatest)` corners: the

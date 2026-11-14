@@ -4,11 +4,13 @@
 //! The campsite's marshmallow sticks and the logs of its woodpile as the farmyard's server side keeps them, with its
 //! fire: loose bodies ([`Loose`]) of a `tomori-physics` world of the campsite's own, taken and let go as any loose body
 //! is, as the beach's stones are; each held stick's marshmallow toasted from where its holder's hand holds it, as the
-//! server last saw it, in the fire's heat, which reaches as far as the fire is big; a stick put back by its log, or come
-//! to rest where it does not stay, back on its log, fading there, with a fresh marshmallow as it goes; a log come to
-//! rest in the fire burning, feeding the fire as it catches, and, burnt away, back on the woodpile, fresh, while the
-//! fire dies back to its default without more wood; a log carried off back on the woodpile; and, once nobody has been
-//! in the space for an hour, every stick back on its log and every log on the woodpile. See `crate::campsite`.
+//! server last saw it, in the fire's heat, which reaches as far as the fire is big, and, burnt black, catching there
+//! and burning on wherever it is, in a hand or not, until it goes out on its own or in the pool; a stick put back by its
+//! log, or come to rest where it does not stay, back on its log, fading there, with a fresh marshmallow as it goes; a
+//! log come to rest in the fire burning, feeding the fire as it catches, and, burnt away, back on the woodpile, fresh,
+//! while the fire dies back to its default without more wood; a log carried off back on the woodpile; and, once nobody
+//! has been in the space for an hour, every stick back on its log and every log on the woodpile. See
+//! `crate::campsite`.
 use std::time::{Duration, Instant};
 
 use glam::{Quat, Vec3};
@@ -75,11 +77,12 @@ pub fn hand(presence: &[Presence], held: &Held) -> Option<Placement> {
     (hand.valid() && near).then_some(hand)
 }
 
-/// What the agent is told of one stick: how toasted it is, who holds it, whether it is back on its log, and where its
-/// marshmallow is, unless someone holds it.
+/// What the agent is told of one stick: how toasted it is, whether it burns, who holds it, whether it is back on its
+/// log, and where its marshmallow is, unless someone holds it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Said {
     pub toast: f32,
+    pub burning: bool,
     pub held_by: Option<u32>,
     pub racked: bool,
     pub floating: bool,
@@ -195,6 +198,7 @@ impl Report {
             "kind": "marshmallow stick",
             "toast": stick.toast,
             "looks": campsite::looks(stick.toast),
+            "burning": stick.burning,
             "held_by": stick.held_by,
             "on_its_log": stick.racked,
             "floating": stick.floating,
@@ -208,6 +212,11 @@ pub struct Sticks {
     /// How toasted each stick is, what it last said, when it last toasted them and last said.
     toast: Vec<f32>,
     said: Vec<f32>,
+    /// How long each stick's marshmallow burns on, in seconds, none for one not alight; since when on the farmyard's
+    /// clock each has burnt; and what it last said of that.
+    flame: Vec<f32>,
+    lit: Vec<Option<u64>>,
+    lit_said: Vec<Option<u64>>,
     toasted: Instant,
     told: Option<Instant>,
     /// How big the fire is, and what it last said; how far each log has burnt, and what it last said.
@@ -235,6 +244,9 @@ impl Sticks {
             loose: Loose::new(world, NOUN, now),
             toast: vec![0.0; campsite::STICKS],
             said: vec![0.0; campsite::STICKS],
+            flame: vec![0.0; campsite::STICKS],
+            lit: vec![None; campsite::STICKS],
+            lit_said: vec![None; campsite::STICKS],
             toasted: now,
             told: None,
             size: 0.0,
@@ -258,6 +270,11 @@ impl Sticks {
         self.toast[index]
     }
 
+    /// Since when, on the farmyard's clock, stick `index`'s marshmallow has burnt, if it does.
+    pub fn lit(&self, index: usize) -> Option<u64> {
+        self.lit[index]
+    }
+
     /// How big the fire is, from 0, its default, to 1, its biggest.
     pub fn size(&self) -> f32 {
         self.size
@@ -275,6 +292,7 @@ impl Sticks {
             toast: self.toast.clone(),
             size: self.size,
             burnt: self.burnt.clone(),
+            burning: self.lit.clone(),
         }
     }
 
@@ -348,23 +366,40 @@ impl Sticks {
     }
 
     /// Toast each stick held in the fire's heat from where its holder's hand holds it, as the server last saw it in
-    /// `presence`, by how big the fire is; burn each log alight, sending one burnt away back to the woodpile; and grow
-    /// the fire by the logs catching in it, or let it die back; up to `now`.
-    fn tick(&mut self, presence: &[Presence], now: Instant) {
+    /// `presence`, by how big the fire is; light each black marshmallow in the heat, and burn on or put out each alight,
+    /// from where its hand holds it or its body is, as [`campsite::burns_at`] says, noting when it caught on the
+    /// farmyard's `clock`; burn each log alight, sending one burnt away back to the woodpile; and grow the fire by the
+    /// logs catching in it, or let it die back; up to `now`.
+    fn tick(&mut self, presence: &[Presence], now: Instant, clock: u64) {
         let seconds = now
             .saturating_duration_since(self.toasted)
             .as_secs_f32()
             .min(TOAST_STEP_MOST);
         self.toasted = now;
         for index in 0..campsite::STICKS {
-            let Some(held) = self.world().held(campsite::body(index)) else {
-                continue;
+            let body = campsite::body(index);
+            // Where its marshmallow is: in its holder's hand, toasting there; where its body is; or, held where the
+            // server has not seen the hand, nowhere it may catch or go out but on its own.
+            let at = match self.world().held(body) {
+                Some(held) => hand(presence, &held).map(|hand| {
+                    let at = campsite::Pose::of(&held.placement(&hand)).marshmallow();
+                    self.toast[index] =
+                        campsite::toasted_at(self.toast[index], at, seconds, self.size);
+                    at
+                }),
+                None => self
+                    .world()
+                    .placement(body)
+                    .map(|at| campsite::Pose::of(&at).marshmallow()),
             };
-            let Some(hand) = hand(presence, &held) else {
-                continue;
-            };
-            let at = campsite::Pose::of(&held.placement(&hand)).marshmallow();
-            self.toast[index] = campsite::toasted_at(self.toast[index], at, seconds, self.size);
+            let at = at.unwrap_or(Vec3::NAN);
+            self.flame[index] =
+                campsite::burns_at(self.flame[index], self.toast[index], at, seconds, self.size);
+            match (self.flame[index] > 0.0, self.lit[index]) {
+                (true, None) => self.lit[index] = Some(clock),
+                (false, Some(_)) => self.lit[index] = None,
+                _ => {}
+            }
         }
         let catching = self
             .burnt
@@ -389,10 +424,11 @@ impl Sticks {
     /// second; and how toasted those sticks whose toasting changed are, how big the fire is and how far the logs whose
     /// burning changed have burnt, at most every [`TOAST_EVERY`], but a fresh marshmallow or log at once: on one that
     /// begins its way back, which clients draw as it was until it fades in, or a stick that comes to rest on its log;
-    /// and a log alight as it comes to rest in the fire; said at `clock`, or sooner, when what moves was where it says
+    /// and a log alight as it comes to rest in the fire; and, at once, since when each marshmallow that caught or went
+    /// out burns, with how toasted it is; said at `clock`, or sooner, when what moves was where it says
     /// (see [`Loose::behind`]).
     pub fn update(&mut self, presence: &[Presence], now: Instant, clock: u64) -> Option<Event> {
-        self.tick(presence, now);
+        self.tick(presence, now, clock);
         let sticks = self.loose.update(now).unwrap_or_default();
         // Said as of when what moves was where it says.
         let clock = if sticks.moving.is_empty() {
@@ -408,7 +444,7 @@ impl Sticks {
             ) {
                 (Some(index), _) => {
                     fresh |= self.toast[index] != 0.0;
-                    self.toast[index] = 0.0;
+                    self.fresh(index);
                 }
                 (_, Some(index)) => {
                     fresh |= self.burnt[index] != 0.0;
@@ -442,12 +478,25 @@ impl Sticks {
             if world.at_home(body, campsite::RACKED) {
                 // Back on its log, with a fresh marshmallow.
                 fresh |= self.toast[index] != 0.0;
-                self.toast[index] = 0.0;
+                self.fresh(index);
             } else if campsite::goes_back(&at) {
                 let _ = world.send_home(body);
             }
         }
+        // A marshmallow catching or going out is said at once, with how toasted it is, so that it burns for everyone.
+        let lit: Vec<campsite::Lit> = (0..campsite::STICKS)
+            .filter(|index| self.lit[*index] != self.lit_said[*index])
+            .map(|index| campsite::Lit {
+                body: campsite::body(index),
+                since: self.lit[index],
+            })
+            .collect();
+        for change in &lit {
+            let index = campsite::index(change.body).expect("a stick");
+            self.lit_said[index] = change.since;
+        }
         let due = fresh
+            || !lit.is_empty()
             || self
                 .told
                 .is_none_or(|told| now.saturating_duration_since(told) >= TOAST_EVERY);
@@ -455,7 +504,10 @@ impl Sticks {
             (0..campsite::STICKS)
                 .filter(|index| {
                     let (toast, said) = (self.toast[*index], self.said[*index]);
-                    (toast - said).abs() >= TOAST_STEP || (toast == 0.0 && said != 0.0)
+                    (toast - said).abs() >= TOAST_STEP
+                        || (toast == 0.0 && said != 0.0)
+                        || (toast != said
+                            && lit.iter().any(|lit| lit.body == campsite::body(*index)))
                 })
                 .map(|index| Toasted {
                     body: campsite::body(index),
@@ -497,7 +549,12 @@ impl Sticks {
         if let Some(size) = size {
             self.size_said = size;
         }
-        if sticks.is_empty() && toast.is_empty() && burnt.is_empty() && size.is_none() {
+        if sticks.is_empty()
+            && toast.is_empty()
+            && burnt.is_empty()
+            && size.is_none()
+            && lit.is_empty()
+        {
             return None;
         }
         Some(Event {
@@ -506,7 +563,15 @@ impl Sticks {
             toast,
             size,
             burnt,
+            lit,
         })
+    }
+
+    /// Stick `index` with a fresh marshmallow, white and not alight, as it goes back on its log.
+    fn fresh(&mut self, index: usize) {
+        self.toast[index] = 0.0;
+        self.flame[index] = 0.0;
+        self.lit[index] = None;
     }
 
     /// The campsite as the agent is told of it now.
@@ -530,6 +595,7 @@ impl Sticks {
                     let placement = world.placement(body);
                     Said {
                         toast: self.toast[index],
+                        burning: self.lit[index].is_some(),
                         held_by: world.held(body).map(|held| held.by),
                         racked: placement.zip(world.home(body)).is_some_and(|(at, home)| {
                             at.position.distance(home.position) <= campsite::RACKED
