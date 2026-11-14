@@ -196,6 +196,11 @@ impl Gpu {
             )?
         };
         log::info!("Vulkan adapter: {}", adapter.get_info().name);
+        // wgpu loses the device without an error of its own when the driver fails a call unexpectedly, and every
+        // object made after is invalid: the log says why, before whatever then fails.
+        device.set_device_lost_callback(|reason, message| {
+            log::error!("The GPU device was lost ({reason:?}): {message}");
+        });
         Ok(Self {
             device,
             queue,

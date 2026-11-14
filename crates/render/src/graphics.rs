@@ -1852,6 +1852,8 @@ mod tests {
         }
         // The swarm and workers are drawn with each instance's basis spliced into `swarm.wgsl`.
         test_gpu::validate_wgsl("swarm.wgsl, oriented", &oriented_shader());
+        // And the blink, written here.
+        test_gpu::validate_wgsl("blink", BLINK_SHADER);
     }
 
     #[test]
