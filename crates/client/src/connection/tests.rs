@@ -600,7 +600,15 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
     let mut connection = connection(&mut session, Scripted::default(), Nowhere);
     connection.feedback().set_haptics(true);
     // Presence goes nowhere, and no voice is placed.
-    connection.send_presence(pose(0.0), None, None, [None, None], &[], [false, true]);
+    connection.send_presence(
+        pose(0.0),
+        None,
+        None,
+        [None, None],
+        &[],
+        [false, true],
+        [None, None],
+    );
     let mut placed = false;
     connection.listen([2], |_, _| placed = true);
     assert!(!placed);
@@ -1239,6 +1247,7 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
         left: None,
         right: None,
         hands: None,
+        pointing: None,
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(*watched.lock().unwrap(), [2]);
@@ -1305,6 +1314,7 @@ fn a_microphone_failure_is_reported_whenever_it_happens() {
         left: None,
         right: None,
         hands: None,
+        pointing: None,
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(
@@ -2092,16 +2102,36 @@ mod served {
             [None, None],
             &["panel-1".to_owned()],
             [true, true],
+            [
+                None,
+                Some(tomori_protocol::Ray {
+                    aim: pose(0.25),
+                    length: 2.0,
+                    meets: true,
+                }),
+            ],
         );
-        let (left, right) = bea.wait_for(
+        let (left, right, pointing) = bea.wait_for(
             || connection.poll(true, &mut session),
             |message| match message {
-                ServerMessage::Presence { left, right, .. } => Some((*left, *right)),
+                ServerMessage::Presence {
+                    left,
+                    right,
+                    pointing,
+                    ..
+                } => Some((*left, *right, pointing.as_deref().copied())),
                 _ => None,
             },
         );
         assert_eq!(left.map(|pose| pose.position[0]), Some(-0.2));
         assert_eq!(right.map(|pose| pose.position[0]), Some(0.2));
+        // The right ray, drawn in full, is relayed from its aim.
+        let [left_ray, right_ray] = pointing.expect("a ray drawn in full");
+        assert_eq!(left_ray, None);
+        assert_eq!(
+            right_ray.map(|ray| (ray.aim.position[0], ray.length)),
+            Some((0.25, 2.0))
+        );
     }
 
     #[test]

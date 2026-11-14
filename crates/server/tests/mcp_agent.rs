@@ -57,6 +57,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     // Once the server has heard where she is, it comes; before, it cannot.
     let called = loop {
@@ -130,6 +131,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     let to_ada = eventually(|| {
         let result = call(

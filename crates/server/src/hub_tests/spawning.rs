@@ -53,6 +53,7 @@ impl Client {
             carrying: None,
             carried: Vec::new(),
             rays: None,
+            pointing: None,
         });
     }
 }

@@ -43,7 +43,7 @@ const LIFT: f32 = layout::LIFT;
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
     pub head: Pose,
-    /// The left and right controllers' aim poses, while tracked.
+    /// The left and right controllers' poses, while tracked: the grips the headset draws them at, not their rays' aims.
     pub controllers: [Option<Pose>; 2],
     /// The left and right tracked hands' palms, while tracked.
     pub hands: [Option<[f32; 3]>; 2],
@@ -54,6 +54,9 @@ pub(crate) struct Seen {
     /// Which of their rays are shown, left then right, as their client said: an older client says nothing, which is
     /// taken as the right ray alone.
     pub rays: [bool; 2],
+    /// The aim poses of their rays drawn in full, left then right, as a current client says them whenever a ray is
+    /// shown; none from an older client, whose shown rays are resolved from its controllers' grip poses, as before.
+    pub aims: Option<[Option<Pose>; 2]>,
 }
 
 impl Seen {
@@ -81,6 +84,7 @@ impl Seen {
             at,
             carrying: Vec::new(),
             rays: [false, true],
+            aims: None,
         })
     }
 
@@ -110,6 +114,27 @@ impl Seen {
     pub(crate) fn showing(mut self, rays: Option<[bool; 2]>) -> Self {
         self.rays = rays.unwrap_or([false, true]);
         self
+    }
+
+    /// It, with the rays its client says are drawn in full, `pointing`, aimed as each says where it is sound; from an
+    /// older client, which says none, its shown rays are taken from its controllers.
+    pub(crate) fn aiming(mut self, pointing: Option<&tomori_protocol::Pointing>) -> Self {
+        self.aims = pointing.map(|pointing| {
+            pointing.map(|ray| {
+                ray.filter(tomori_protocol::Ray::valid)
+                    .and_then(|ray| sound(ray.aim))
+            })
+        });
+        self
+    }
+
+    /// Where each of its rays points from, left then right, along the pose's −Z: each drawn in full from its aim pose,
+    /// as a current client says; or, from an older client, each shown from its controller's pose, which is its grip, not
+    /// its aim, and so points a little off. A ray hidden, or shown only as a stub, points from nowhere.
+    pub(crate) fn pointing(&self) -> [Option<Pose>; 2] {
+        self.aims.unwrap_or_else(|| {
+            [0, 1].map(|index| self.controllers[index].filter(|_| self.rays[index]))
+        })
     }
 
     /// The panels it says are being carried at `now`: a report gone [`STALE`] says none, since its client has stopped,
@@ -190,6 +215,21 @@ pub(crate) fn whom<'a>(named: &str, people: &'a [Someone]) -> Result<&'a Someone
             handles.join(" or ")
         )),
     }
+}
+
+/// `pointing`, as the others are told it: each ray that is sound, aimed with a unit orientation, or nothing where none
+/// is, so that nothing a client sends makes another's drawing fail.
+pub(crate) fn sounded(
+    pointing: Option<&tomori_protocol::Pointing>,
+) -> Option<Box<tomori_protocol::Pointing>> {
+    let pointing = pointing?.map(|ray| {
+        ray.filter(tomori_protocol::Ray::valid)
+            .and_then(|ray| sound(ray.aim).map(|aim| tomori_protocol::Ray { aim, ..ray }))
+    });
+    pointing
+        .iter()
+        .any(Option::is_some)
+        .then(|| Box::new(pointing))
 }
 
 /// `pose` with a unit orientation, if it is finite, within reach and has an orientation.
@@ -791,10 +831,11 @@ pub(crate) fn report(
                 (None, None) => Value::Null,
             };
         }
-        // What each shown ray points at, and, for agents' instructions written for one ray, the right's as before.
+        // What each ray drawn in full points at, from its aim, and, for agents' instructions written for one ray, the
+        // right's as before.
+        let aims = seen.pointing();
         let pointing = |index: usize| {
-            seen.controllers[index]
-                .filter(|_| seen.rays[index])
+            aims[index]
                 .and_then(|ray| meet(ray.position, forward(&ray), projection, &others))
                 .map_or(Value::Null, |(met, along)| {
                     described(&met, along, projection)

@@ -24,6 +24,7 @@ impl Hub {
                 carrying,
                 carried,
                 rays,
+                pointing,
             } => {
                 let Some(id) = space.filter(|space| state.space(space).is_some()) else {
                     return;
@@ -38,7 +39,13 @@ impl Hub {
                     hands.as_deref(),
                     Instant::now(),
                 )
-                .map(|seen| seen.carrying_all(carrying, carried).showing(rays));
+                .map(|seen| {
+                    seen.carrying_all(carrying, carried)
+                        .showing(rays)
+                        .aiming(pointing.as_deref())
+                });
+                // The rays drawn in full are relayed as sounded, so that the others draw only what is a ray.
+                let pointing = crate::presence::sounded(pointing.as_deref());
                 for other in space.model.members() {
                     if other != participant {
                         state.send(
@@ -49,6 +56,7 @@ impl Hub {
                                 left,
                                 right,
                                 hands: hands.clone(),
+                                pointing: pointing.clone(),
                             },
                         );
                     }

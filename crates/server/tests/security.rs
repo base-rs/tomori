@@ -211,6 +211,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     let source = vic.wait_for(|message| match message {
         ServerMessage::Presence { source, .. } => Some(*source),
@@ -229,6 +230,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         carrying: None,
         carried: Vec::new(),
         rays: None,
+        pointing: None,
     });
     assert_eq!(vic.error(), "Visitors can watch, but not act in a space.");
     vic.send_audio(Gate::Live, speech("not heard"));

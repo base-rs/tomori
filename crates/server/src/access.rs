@@ -240,6 +240,7 @@ mod tests {
                 carrying: None,
                 carried: Vec::new(),
                 rays: None,
+                pointing: None,
             },
             ClientMessage::SetAttribution { enabled: true },
             ClientMessage::SetMode {

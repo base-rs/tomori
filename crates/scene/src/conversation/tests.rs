@@ -169,6 +169,7 @@ fn a_ping_or_pong_changes_nothing_and_presence_keeps_only_the_others_right_hands
         left: None,
         right: Some(tomori_protocol::Pose::HOME),
         hands: None,
+        pointing: None,
     }));
     assert!(lobby.right_hands.is_empty());
 }

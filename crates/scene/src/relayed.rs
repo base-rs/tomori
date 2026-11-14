@@ -318,6 +318,7 @@ mod tests {
                 left: None,
                 right: Some(Pose::at([x, 1.0, 0.0])),
                 hands: None,
+                pointing: None,
             })
         };
         let mut conversation = joined();

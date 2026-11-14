@@ -44,7 +44,7 @@ pub use message::{
     ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, NO_SPEECH,
     PAIRING_CLOSED, Pose, Resource, ServerMessage, SpaceDeletion, TranscriptPart, TranscriptStage,
 };
-pub use presence::{BONES, Hand, JOINT_COUNT, Joint};
+pub use presence::{BONES, Hand, JOINT_COUNT, Joint, Pointing, RAY_REACH, Ray};
 pub use projection::group;
 pub use projection::layout as wall;
 pub use projection::{

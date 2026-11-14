@@ -154,6 +154,7 @@ fn furnished(role: ConnectionRole) -> Conversation {
         left: None,
         right: Some(tomori_protocol::Pose::HOME),
         hands: None,
+        pointing: None,
     }));
     conversation.take_actions();
     conversation
@@ -395,6 +396,7 @@ fn a_watcher_runs_the_client_side_of_the_environment_it_draws_and_tells_it_nothi
         left: None,
         right: Some(tomori_protocol::Pose::HOME),
         hands: None,
+        pointing: None,
     }));
     step.watch(camera, &mut conversation, &mut felt(), now, FRAME);
     {

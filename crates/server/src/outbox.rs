@@ -622,6 +622,7 @@ mod tests {
             left: None,
             right: None,
             hands: None,
+            pointing: None,
         }
     }
 
