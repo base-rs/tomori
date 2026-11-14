@@ -3754,8 +3754,11 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         )
         .with_reference("chart/pressure")
     };
+    // The side's rates are kept by a clock the test sets, for the updates whose waiting depends on it.
+    let start = Instant::now();
+    let publish_at = |panel, at| hub.channel_publish_at(&outlet(binding), panel, at);
     // Published, it is on the environment's wall for everyone, a chart with its summary for older clients.
-    assert_eq!(outlet(binding).publish(chart(0.7)), Ok(()));
+    assert_eq!(publish_at(chart(0.7), start), Ok(()));
     let shown = ada
         .paced_projections()
         .pop()
@@ -3782,8 +3785,8 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     assert!(wall(&shown));
     // Updated within a second, the update waits, the newest replacing the one before in its place; another panel, due
     // itself, goes at once while the space has changes left, rather than waiting behind it.
-    assert_eq!(outlet(binding).publish(chart(0.8)), Ok(()));
-    assert_eq!(outlet(binding).publish(chart(0.85)), Ok(()));
+    assert_eq!(publish_at(chart(0.8), start), Ok(()));
+    assert_eq!(publish_at(chart(0.85), start), Ok(()));
     assert!(ada.paced_projections().is_empty());
     let rota = tomori_environment::Panel::text("rota", "Rota", "Feed the hens");
     assert_eq!(outlet(binding).publish(rota.clone()), Ok(()));
@@ -3791,7 +3794,7 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     assert_eq!(shown.panels.len(), 2);
     assert_eq!(shown.panel(&panel.id).unwrap().body, "mean: 0.7 now");
     // As soon as it may be, at the hub's next sweep, the latest arrives.
-    let soon = Instant::now() + Duration::from_secs(1);
+    let soon = start + Duration::from_secs(1);
     hub.flush_publishes(soon);
     let shown = ada.paced_projections().pop().unwrap();
     assert_eq!(shown.panel(&panel.id).unwrap().body, "mean: 0.85 now");
@@ -3965,24 +3968,24 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     assert_eq!(outlet(binding).retract("pressure"), Ok(()));
     assert!(ada.paced_projections().pop().unwrap().panels.is_empty());
     // With no changes left, updates wait, at most so many, one a panel.
+    let spent = soon + Duration::from_secs(5);
     hub.lock()
         .space_mut(&id)
         .unwrap()
         .channel
         .as_mut()
         .unwrap()
-        .publishes = Some(crate::channel::Publishes::spent(Instant::now()));
+        .publishes = Some(crate::channel::Publishes::spent(spent));
     for index in 0..crate::stage::PUBLISHED {
         let panel = tomori_environment::Panel::text(format!("w{index}"), "", "x");
-        assert_eq!(outlet(binding).publish(panel), Ok(()));
+        assert_eq!(publish_at(panel, spent), Ok(()));
     }
-    assert!(
-        outlet(binding)
-            .publish(tomori_environment::Panel::text("over", "", "x"))
-            .is_err()
-    );
+    assert!(publish_at(tomori_environment::Panel::text("over", "", "x"), spent).is_err());
     // A retraction takes away what waits for its panel.
-    assert_eq!(outlet(binding).retract("w3"), Ok(()));
+    assert_eq!(
+        hub.channel_retract_at(&outlet(binding), "w3", spent),
+        Ok(())
+    );
     let waiting = |hub: &Arc<Hub>| {
         hub.lock()
             .space(&id)
@@ -3996,7 +3999,8 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     assert_eq!(waiting(&hub), crate::stage::PUBLISHED - 1);
     // Made as soon as they may be: those the stage takes go up, at the next sweep.
     let before = ada.projection().panels.len();
-    hub.flush_publishes(soon + Duration::from_secs(10));
+    let refilled = soon + Duration::from_secs(10);
+    hub.flush_publishes(refilled);
     assert!(ada.paced_projections().pop().unwrap().panels.len() > before);
     // The same again, when it may be made, changes nothing.
     hub.lock()
@@ -4005,21 +4009,18 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
         .channel
         .as_mut()
         .unwrap()
-        .publishes = Some(crate::channel::Publishes::new(Instant::now()));
+        .publishes = Some(crate::channel::Publishes::new(refilled));
     let w0 = tomori_environment::Panel::text("w0", "", "x");
-    assert_eq!(outlet(binding).publish(w0), Ok(()));
+    assert_eq!(publish_at(w0, refilled), Ok(()));
     assert!(ada.paced_projections().is_empty());
-    // Messages, whatever they change, are held to a rate too.
+    // Messages, whatever they change, are held to a rate too: past the burst, the one publish and these retractions
+    // the rest of it, the last two are refused.
     let refused = (0..crate::channel::MESSAGE_BURST as usize + 1)
-        .map(|_| outlet(binding).retract("gone"))
+        .map(|_| hub.channel_retract_at(&outlet(binding), "gone", refilled))
         .filter(Result::is_err)
         .count();
-    assert!(refused > 0);
-    assert!(
-        outlet(binding)
-            .publish(tomori_environment::Panel::text("late", "", "x"))
-            .is_err()
-    );
+    assert_eq!(refused, 2);
+    assert!(publish_at(tomori_environment::Panel::text("late", "", "x"), refilled).is_err());
     // A binding's first change may be a retraction.
     hub.lock().space_mut(&id).unwrap().channel = None;
     assert_eq!(outlet(binding).retract("gone"), Ok(()));
@@ -4027,15 +4028,16 @@ fn a_side_publishes_panels_onto_its_own_walls_for_everyone_in_the_space() {
     // dropped, and from then on, whatever thread it left calls, it changes no panels.
     let shown = ada.projection().panels.len();
     assert!(shown > 0);
+    let failing = soon + Duration::from_secs(15);
     hub.lock()
         .space_mut(&id)
         .unwrap()
         .channel
         .as_mut()
         .unwrap()
-        .publishes = Some(crate::channel::Publishes::spent(Instant::now()));
+        .publishes = Some(crate::channel::Publishes::spent(failing));
     let update = tomori_environment::Panel::text("w0", "", "y");
-    assert_eq!(outlet(binding).publish(update.clone()), Ok(()));
+    assert_eq!(publish_at(update.clone(), failing), Ok(()));
     for _ in 0..2 {
         hub.side_failed(crate::server_sides::Failure {
             space: id.clone(),
