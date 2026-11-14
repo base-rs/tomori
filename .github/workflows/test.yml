@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          # Only main saves caches, which pull requests and the merge queue restore; saving from each of them too evicted main's, past the repository's 10 GB. Likewise in every job below.
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
           components: clippy, rustfmt
           # Its own cache, of checked rather than built dependencies.
           cache-shared-key: lint-check
@@ -55,9 +57,19 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
           components: llvm-tools-preview
           # Invalidate caches containing the retired socketry-cargo-bake launcher.
           cache-shared-key: coverage-bake-launcher-v2
+      # Compiled workspace libraries, kept by compiler arguments, so that what a change leaves alone is not compiled again; the instrumented build's arguments differ, so it never shares the plain build's. Rust's cache above keeps the dependencies. Test binaries are linked, which sccache cannot cache. Only main writes, as with Rust's cache.
+      - uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Compile with sccache
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          # If the sccache server dies, compile without it rather than failing the build.
+          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF" != refs/heads/main ]; then echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"; fi
       # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU.
       - name: Install the ALSA development files for the desktop client, and lavapipe
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers
@@ -168,6 +180,7 @@ jobs:
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
           toolchain: ${{ steps.version.outputs.rust }}
           # Its own cache, of checked rather than built dependencies.
           cache-shared-key: minimum-check
@@ -193,6 +206,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
           target: aarch64-linux-android
       - name: Install the Android NDK, platform and build tools
         run: |
@@ -253,6 +267,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build the APK, unsigned
         run: |
           export RELEASE_ARTIFACTS="$RUNNER_TEMP/release-artifacts"
@@ -315,6 +331,7 @@ jobs:
           fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-shared-key: releases-bake-launcher-v1
       - name: Install Bake launcher
         run: cargo install bake --locked
