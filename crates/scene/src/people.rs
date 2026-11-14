@@ -498,6 +498,31 @@ fn gazes(head: &Hand, eyes: Option<Vec3>, gazing: bool) -> bool {
     facing.dot(towards) >= within.to_radians().cos()
 }
 
+/// How someone looks, `present`, as cubes pushed onto `cubes`: today the visor block, about `middle`, shrunk about it to
+/// `fade` of its size, its visor `glow` of the way lit and a little lighter on the side towards `eyes`. It is the one
+/// place a person's look is made, so that another look replaces it alone. See `design/people.md`.
+fn look(
+    cubes: &mut Vec<Cube>,
+    present: &Present,
+    middle: Vec3,
+    fade: f32,
+    glow: f32,
+    eyes: Option<Vec3>,
+) {
+    let turn = present.head.orientation;
+    let towards = eyes
+        .and_then(|eyes| (eyes - present.head.position).try_normalize())
+        .map_or(0.0, |towards| {
+            ((turn * Vec3::X).dot(towards) / GAZE_LEFT.to_radians().sin()).clamp(-1.0, 1.0)
+        });
+    cubes.extend(PARTS.iter().map(|(offset, size, part)| Cube {
+        position: (middle + turn * (*offset * fade)).to_array(),
+        scale: (*size * fade).to_array(),
+        color: part.color(glow, towards),
+        orientation: turn.to_array(),
+    }));
+}
+
 /// Draw `present`, of `source`, into `figures` at `index`, `fade` of the way in, its visor `glow` of the way lit, seen
 /// from `eyes`, with its head if `head`: saying how many figures it drew, none where nothing of it shows.
 #[allow(clippy::too_many_arguments)]
@@ -528,21 +553,7 @@ fn figure(
     figure.source = source;
     figure.cubes.clear();
     if head {
-        // Shrunk about its middle as it fades, its visor a little lighter on the side towards the eyes.
-        let turn = present.head.orientation;
-        let towards = eyes
-            .and_then(|eyes| (eyes - present.head.position).try_normalize())
-            .map_or(0.0, |towards| {
-                ((turn * Vec3::X).dot(towards) / GAZE_LEFT.to_radians().sin()).clamp(-1.0, 1.0)
-            });
-        figure
-            .cubes
-            .extend(PARTS.iter().map(|(offset, size, part)| Cube {
-                position: (middle + turn * (*offset * fade)).to_array(),
-                scale: (*size * fade).to_array(),
-                color: part.color(glow, towards),
-                orientation: turn.to_array(),
-            }));
+        look(&mut figure.cubes, present, middle, fade, glow, eyes);
     }
     for ray in present.pointing.iter().flatten() {
         let color = if ray.meets { RAY_MEETS } else { RAY };
