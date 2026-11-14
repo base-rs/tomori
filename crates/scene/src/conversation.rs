@@ -310,13 +310,11 @@ pub const CALLED_NEAR: f32 = 3.0;
 pub struct Conversation {
     /// This participant's number on the connected server, from its Welcome, which the server records on their queued input. Kept while the connection is down, since a reconnect keeps it; see `design/security.md`.
     source: Option<u32>,
-    /// The others' right hands in the space, by their numbers, as their presence last said, for what an environment's
-    /// client side draws in their hands. See `design/environments.md`.
-    right_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
-    /// The others' left hands, likewise.
-    left_hands: std::collections::BTreeMap<u32, tomori_protocol::Pose>,
-    /// How many times the others' hands have been forgotten, on connecting and on leaving or joining a space, after
-    /// which their numbers may be someone else's.
+    /// The others in the space, by their numbers, as their presence last said, whom the people are drawn from and an
+    /// environment's client side is given the hands of. See `design/people.md`.
+    people: std::collections::BTreeMap<u32, crate::people::Heard>,
+    /// How many times the others have been forgotten, on connecting and on leaving or joining a space, after which
+    /// their numbers may be someone else's.
     hands_forgotten: u64,
     /// What this connection may do where it is now, from its Welcome and the role messages that follow. See `design/security.md`.
     role: ConnectionRole,
@@ -558,8 +556,7 @@ impl Conversation {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             source: None,
-            right_hands: std::collections::BTreeMap::new(),
-            left_hands: std::collections::BTreeMap::new(),
+            people: std::collections::BTreeMap::new(),
             hands_forgotten: 0,
             role: ConnectionRole::Unknown,
             certificate: None,
@@ -1325,24 +1322,33 @@ impl Conversation {
             }
             // A reply held for this participant while they record, and in the pause after they let go of X.
             ServerMessage::SpeechHeld { held } => self.turn.held(held),
-            // The others' hands, for what an environment's client side draws in them; the rest of presence is the
-            // scene's and the player's.
+            // The others as they are drawn, and their hands, for what an environment's client side draws in them, in a
+            // space; where each voice is placed is the player's.
             ServerMessage::Presence {
                 source,
+                head,
                 left,
                 right,
-                ..
+                hands,
+                pointing,
             } => {
-                for (hands, pose) in [(&mut self.right_hands, right), (&mut self.left_hands, left)]
-                {
-                    match pose {
-                        Some(pose) if self.space.is_some() => {
-                            hands.insert(source, pose);
-                        }
-                        _ => {
-                            hands.remove(&source);
-                        }
-                    }
+                if self.space.is_some() {
+                    let reports = self
+                        .people
+                        .get(&source)
+                        .map_or(0, |heard| heard.reports.wrapping_add(1));
+                    self.people.insert(
+                        source,
+                        crate::people::Heard {
+                            head,
+                            controllers: [left, right],
+                            hands: hands.map_or([None, None], |hands| *hands),
+                            pointing: pointing.map_or([None, None], |pointing| *pointing),
+                            reports,
+                        },
+                    );
+                } else {
+                    self.people.remove(&source);
                 }
             }
             ServerMessage::Welcome { .. }
@@ -4689,15 +4695,41 @@ impl Conversation {
         self.source
     }
 
+    /// The others in the joined space, by their numbers, as their presence last said, in the space's coordinates: only
+    /// those the space's state still lists, and never this participant's own.
+    pub fn people(&self) -> Vec<(u32, &crate::people::Heard)> {
+        let Some((space, _)) = self.joined_space() else {
+            return Vec::new();
+        };
+        self.people
+            .iter()
+            .filter(|(source, _)| {
+                Some(**source) != self.source
+                    && space
+                        .participants
+                        .iter()
+                        .any(|participant| participant.source == **source)
+            })
+            .map(|(source, heard)| (*source, heard))
+            .collect()
+    }
+
     /// The right hands of the others in the joined space, by their numbers, as their presence last said, in the space's
-    /// coordinates: only those the space's state still lists, and never this participant's own.
+    /// coordinates, of those [`Self::people`] lists.
     pub fn right_hands(&self) -> Vec<(u32, tomori_protocol::Pose)> {
-        self.others(&self.right_hands)
+        self.hands(1)
     }
 
     /// The others' left hands, likewise.
     pub fn left_hands(&self) -> Vec<(u32, tomori_protocol::Pose)> {
-        self.others(&self.left_hands)
+        self.hands(0)
+    }
+
+    fn hands(&self, index: usize) -> Vec<(u32, tomori_protocol::Pose)> {
+        self.people()
+            .into_iter()
+            .filter_map(|(source, heard)| Some((source, heard.controllers[index]?)))
+            .collect()
     }
 
     /// How many times the others' hands have been forgotten, on connecting and on leaving or joining a space: once it
@@ -4707,29 +4739,8 @@ impl Conversation {
     }
 
     fn forget_hands(&mut self) {
-        self.right_hands.clear();
-        self.left_hands.clear();
+        self.people.clear();
         self.hands_forgotten += 1;
-    }
-
-    fn others(
-        &self,
-        hands: &std::collections::BTreeMap<u32, tomori_protocol::Pose>,
-    ) -> Vec<(u32, tomori_protocol::Pose)> {
-        let Some((space, _)) = self.joined_space() else {
-            return Vec::new();
-        };
-        hands
-            .iter()
-            .filter(|(source, _)| {
-                Some(**source) != self.source
-                    && space
-                        .participants
-                        .iter()
-                        .any(|participant| participant.source == **source)
-            })
-            .map(|(source, pose)| (*source, *pose))
-            .collect()
     }
 
     pub fn joined_space(&self) -> Option<(&SpaceState, bool)> {

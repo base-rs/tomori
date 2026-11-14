@@ -445,8 +445,10 @@ fn a_client_side_is_given_the_others_right_hands_in_the_space_but_never_its_own(
     assert_eq!(source, 2);
     assert!(bea.position.distance(Vec3::new(0.5, 1.0, -1.0)) < 1e-5);
     assert_eq!(rig.conversation.source(), Some(1));
-    // Her presence without a right hand, as the desktop's, gives none.
+    // Her presence without a right hand, as the desktop's, gives none, an update behind, as she is drawn.
     rig.conversation.apply(hand(2, 0.5, false));
+    rig.frame();
+    assert_eq!(hands(&rig).len(), 1);
     rig.frame();
     assert!(hands(&rig).is_empty());
     // Leaving the space forgets them all.

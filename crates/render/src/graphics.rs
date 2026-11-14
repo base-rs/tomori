@@ -41,6 +41,11 @@ impl Default for Instance {
     }
 }
 
+/// How many of the others in a space are drawn at most, and how many cubes they are drawn with at most, after the rest
+/// of Tomori's cubes, in the same draw. See `design/people.md`.
+pub const MOST_PEOPLE: usize = 16;
+const PEOPLE_INSTANCES: usize = MOST_PEOPLE * tomori_scene::people::CUBES;
+
 // Workspace cubes are shown inside a space and arrival cubes outside one, but either may follow the swarm. The grid takes up to twice its lines while an environment grows through it.
 const MAX_INSTANCES: usize = AGENT_COUNT
     + 210
@@ -270,6 +275,10 @@ pub struct Renderer {
     /// The GPU's time for each frame, and what each drew; see `design/rendering.md`.
     profiler: crate::profiler::Profiler,
     solids: crate::solids::Solids,
+    /// The others in the space, as cubes after [`Self::scene`]'s, each person an item of the world of their own, culled
+    /// whole and then cube by cube, with the cubes of [`Self::people`] that are theirs this frame.
+    people: Vec<Instance>,
+    figures: Vec<(tomori_world::ItemId, std::ops::Range<usize>)>,
 }
 
 /// What the renderer itself submits to its world: the scene's coordinates within the space's, the cubes', and the
@@ -438,7 +447,7 @@ impl Renderer {
         });
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("swarm instances"),
-            size: (MAX_INSTANCES * size_of::<Instance>()) as u64,
+            size: ((MAX_INSTANCES + PEOPLE_INSTANCES) * size_of::<Instance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -517,11 +526,70 @@ impl Renderer {
             scenery_roots,
             tally: Default::default(),
             panels_seen: (0, 0),
-            shown: Vec::with_capacity(MAX_INSTANCES),
+            shown: Vec::with_capacity(MAX_INSTANCES + PEOPLE_INSTANCES),
             cubes_culled: false,
             // Marks within a pass mean little on the headset's tiled GPU, which draws a pass's tiles one by one.
             profiler: crate::profiler::Profiler::new(device, queue, !cfg!(target_os = "android")),
             solids,
+            people: Vec::with_capacity(PEOPLE_INSTANCES),
+            figures: Vec::with_capacity(MOST_PEOPLE),
+        }
+    }
+
+    /// Which of the others' cubes each person's item of the world holds, by where they come in the frame.
+    #[cfg(test)]
+    pub(crate) fn figures(&self) -> Vec<std::ops::Range<usize>> {
+        self.figures
+            .iter()
+            .map(|(_, range)| range.clone())
+            .collect()
+    }
+
+    /// The others in the space, as the frame step drew them, in the scene: each of the first [`MOST_PEOPLE`] an item of
+    /// the world of their own, among Tomori's cubes, in their one draw, hazed and lit as the rest. See `design/people.md`.
+    pub fn set_people(&mut self, figures: &[tomori_scene::people::Figure]) {
+        use tomori_world::{Item, Layer, Mobility};
+        self.people.clear();
+        let finite = |values: &[f32]| values.iter().all(|value| value.is_finite());
+        for (index, figure) in figures.iter().take(MOST_PEOPLE).enumerate() {
+            let start = self.people.len();
+            self.people.extend(
+                figure
+                    .cubes
+                    .iter()
+                    .take(tomori_scene::people::CUBES)
+                    .filter(|cube| {
+                        finite(&cube.position)
+                            && finite(&cube.scale)
+                            && finite(&cube.orientation)
+                            && cube.scale.iter().all(|side| *side > 0.0)
+                    })
+                    .map(|cube| Instance {
+                        position: cube.position,
+                        scale: cube.scale,
+                        color: cube.color,
+                        basis: glam::Mat3::from_quat(
+                            glam::Quat::from_array(cube.orientation).normalize(),
+                        )
+                        .to_cols_array_2d(),
+                    }),
+            );
+            let range = start..self.people.len();
+            match self.figures.get_mut(index) {
+                Some((_, kept)) => *kept = range,
+                None => {
+                    let item = self.world.add(Item::new(
+                        self.submitted.scene,
+                        Layer::Opaque,
+                        Mobility::Dynamic,
+                    ));
+                    self.figures.push((item, range));
+                }
+            }
+        }
+        let drawn = figures.len().min(MOST_PEOPLE);
+        for (_, range) in self.figures.iter_mut().skip(drawn) {
+            *range = 0..0;
         }
     }
 
@@ -1278,6 +1346,8 @@ impl Renderer {
             avatar,
             scene,
             shown,
+            people,
+            figures,
             ..
         } = self;
         world.set_culling(self.culling);
@@ -1294,6 +1364,14 @@ impl Renderer {
             submitted.cubes,
             scene.iter().map(|cube| Some(cube_bounds(cube))),
         );
+        for (item, range) in figures.iter() {
+            world.place(
+                *item,
+                people[range.clone()]
+                    .iter()
+                    .map(|cube| Some(cube_bounds(cube))),
+            );
+        }
         world.place(
             submitted.panels,
             panels
@@ -1326,13 +1404,30 @@ impl Renderer {
                 .map(|(cube, _)| *cube),
         );
         let culled = shown.len() != scene.len();
+        // The others, after the rest, each person seen whole and then cube by cube.
+        let before = shown.len();
+        for (item, range) in figures.iter() {
+            shown.extend(
+                people[range.clone()]
+                    .iter()
+                    .zip(world.seen(*item))
+                    .filter(|(_, seen)| **seen)
+                    .map(|(cube, _)| *cube),
+            );
+        }
         if culled || self.cubes_culled {
             queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(shown));
+        } else if shown.len() > before {
+            queue.write_buffer(
+                &self.instances,
+                (before * size_of::<Instance>()) as u64,
+                bytemuck::cast_slice(&shown[before..]),
+            );
         }
         self.cubes_culled = culled;
         tally += tomori_assets::bounds::Tally {
             drawn: shown.len(),
-            culled: scene.len() - shown.len(),
+            culled: scene.len() + people.len() - shown.len(),
             draws: 1,
             triangles: shown.len() * self.vertex_count as usize / 3,
         };

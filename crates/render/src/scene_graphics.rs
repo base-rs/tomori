@@ -329,6 +329,8 @@ pub fn draw(
             },
         );
     }
+    // The others in the space, among Tomori's cubes; see `design/people.md`.
+    renderer.set_people(frame.people);
     renderer.update_images(device, queue, &frame.images);
     let shared = panels.set(queue, &frame.panels);
     // The walls stand farther away than the inbox, beside the swarm, so they go first.
@@ -362,6 +364,7 @@ mod tests {
     mod linked_cursor;
     mod padlock_corner;
     mod padlock_floor;
+    mod people;
     mod timers;
     mod turning;
     mod volumes;

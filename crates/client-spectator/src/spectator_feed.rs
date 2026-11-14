@@ -331,6 +331,8 @@ impl Feed {
             log::info!("Spectator: {}", caption.replace('\n', " "));
             self.last_caption = Some(caption.clone());
         }
+        // Others are drawn as they are, but for the head it sees from.
+        self.step.follow(self.following);
         let frame = self.step.watch(
             camera,
             &mut self.conversation,
