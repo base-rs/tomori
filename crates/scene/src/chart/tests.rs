@@ -258,13 +258,9 @@ fn the_largest_charts_are_drawn_in_a_bounded_number_of_pieces() {
     for chart in [fixtures::largest(false), fixtures::largest(true)] {
         let drawing = draw(&chart, AREA);
         // Each series' line and dashes, as many in all for eight series as for four, the fills together, the reference
-        // lines' dashes, the dots where lines leave the plot, the marks of the last four and the rest.
-        let marks = (CHART_SERIES - UNMARKED) * MARKS * 3;
-        let most = UNMARKED * (2 * LINE_VERTICES + MARKERS)
-            + marks
-            + FILL_QUADS
-            + 4 * REFERENCE_DASHES
-            + 64;
+        // lines' dashes, the dots where lines leave the plot and the rest.
+        let most =
+            UNSHARED * (2 * LINE_VERTICES + MARKERS) + FILL_QUADS + 4 * REFERENCE_DASHES + 64;
         assert!(pieces(&drawing) <= most, "{} of {most}", pieces(&drawing));
         assert!(finite(&drawing));
     }
@@ -1430,163 +1426,47 @@ fn the_palette_s_colours_are_legible_on_the_plot() {
 }
 
 #[test]
-fn the_series_after_the_fourth_are_each_marked_along_their_line_by_a_marker_of_their_own() {
-    assert_eq!(
-        (0..CHART_SERIES).map(Marker::of).collect::<Vec<_>>(),
-        [
-            None,
-            None,
-            None,
-            None,
-            Some(Marker::Dot),
-            Some(Marker::Ring),
-            Some(Marker::Ringed),
-            Some(Marker::Square)
-        ]
-    );
-    assert_eq!(Marker::of(CHART_SERIES), None);
-    let chart = fixtures::regions();
-    let drawing = draw(&chart, AREA);
-    let (top, bottom, left, right) = plot(&drawing);
-    let area = drawing.plot.clone().unwrap();
-    let rings: Vec<_> = drawing
-        .shapes
-        .iter()
-        .filter_map(|shape| match *shape {
-            Shape::Ring { centre, color, .. } => Some((centre, color)),
-            _ => None,
-        })
-        .collect();
-    let squares = drawing
-        .shapes
-        .iter()
-        .filter(|shape| {
-            matches!(
+fn every_series_of_eight_is_told_apart_by_its_colour_alone() {
+    // Each series in its own colour of the palette, with no marks: no rings, squares or dots but where a line leaves
+    // the plot or rounds a joint, as lines and as bars.
+    let unmarked = |drawing: &Drawing| {
+        drawing.shapes.iter().all(|shape| {
+            !matches!(
                 shape,
-                Shape::Rect {
-                    outline: Some(_),
-                    ..
-                }
-            )
-        })
-        .count();
-    let colour = |index: usize| ink(chart.series[index].colour, 1.0);
-    // A ring for each mark of the sixth and seventh, a square for the eighth's and a dot for the fifth's, one in each
-    // column across the plot, where its line is drawn there, within the plot.
-    let sixth: Vec<_> = rings
-        .iter()
-        .filter(|(_, color)| *color == colour(5))
-        .collect();
-    assert_eq!(sixth.len(), MARKS);
-    assert_eq!(
-        rings
-            .iter()
-            .filter(|(_, color)| *color == colour(6))
-            .count(),
-        MARKS
-    );
-    assert_eq!(squares, MARKS);
-    let fifth: Vec<_> = dots(&drawing)
-        .into_iter()
-        .filter(|(_, radius, color)| *color == colour(4) && *radius == 3.0)
-        .collect();
-    assert_eq!(fifth.len(), MARKS);
-    let column = (right - left) / MARKS as f32;
-    for (mark, (centre, _)) in sixth.iter().enumerate() {
-        assert!((centre[0] - (left + column * (mark as f32 + 1.5 / 4.0))).abs() < 1e-3);
-        assert!(centre[1] >= top && centre[1] <= bottom);
-        let at = area.at([centre[0], top]).unwrap();
-        // A step's held from its point, as its line is drawn.
-        let value = chart.series[5].values[at.floor() as usize].unwrap();
-        assert!((centre[1] - area.y(value)).abs() < 1e-3, "{mark}");
-    }
-    // None for the first four, nor in any colour of theirs but their lines'.
-    for index in 0..UNMARKED {
-        assert!(rings.iter().all(|(_, color)| *color != colour(index)));
-    }
-    // None across a gap, beyond a fixed end of the axis, nor for bars, which are told apart by their colour.
-    let mut gapped = fixtures::regions();
-    gapped.series[4].values = vec![None; fixtures::POINTS as usize];
-    gapped.series[5].values = vec![Some(1.0e6); fixtures::POINTS as usize];
-    gapped.axis.max = Some(2000.0);
-    gapped.series[6].style = SeriesStyle::Bars;
-    let drawing = draw(&gapped, AREA);
-    assert!(
-        drawing
-            .shapes
-            .iter()
-            .all(|shape| !matches!(shape, Shape::Ring { .. }))
-    );
-    assert!(
-        dots(&drawing)
-            .iter()
-            .all(|(_, radius, color)| *color != colour(4) || *radius != 3.0)
-    );
-    // Nor across a break: a few points, each its own run, too few to be thinned.
-    let mut broken = Chart::new(9);
-    for (index, colour) in Colour::SERIES.into_iter().enumerate() {
-        broken = broken.with_series(
-            Series::new("a", colour, SeriesStyle::Line, vec![Some(1.0); 9]).with_breaks(
-                if index == 7 {
-                    (0..9).collect()
-                } else {
-                    Vec::new()
-                },
-            ),
-        );
-    }
-    let squares = |drawing: &Drawing| {
-        drawing
-            .shapes
-            .iter()
-            .filter(|shape| {
-                matches!(
-                    shape,
-                    Shape::Rect {
+                Shape::Ring { .. }
+                    | Shape::Rect {
                         outline: Some(_),
                         ..
                     }
-                )
-            })
-            .count()
+            )
+        }) && dots(drawing).iter().all(|(_, radius, _)| *radius < 3.0)
     };
-    assert_eq!(squares(&draw(&broken, AREA)), 0);
-    broken.series[7].breaks.clear();
-    assert_eq!(squares(&draw(&broken, AREA)), MARKS);
-    // A line thinned to be drawn is marked where it is drawn.
-    let mut thinned = fixtures::regions();
-    for series in &mut thinned.series {
-        series.values = (0..fixtures::POINTS as usize)
-            .map(|point| Some(if point % 2 == 0 { 100.0 } else { 900.0 }))
-            .collect();
-    }
-    let drawing = draw(&thinned, AREA);
-    let area = drawing.plot.clone().unwrap();
-    let (_, runs) = area.thinned.iter().find(|(index, _)| *index == 7).unwrap();
-    let frames: Vec<_> = drawing
-        .shapes
-        .iter()
-        .filter_map(|shape| match *shape {
-            Shape::Rect {
-                x,
-                y,
-                width,
-                outline: Some(_),
-                ..
-            } => Some([x + width / 2.0, y + width / 2.0]),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(frames.len(), MARKS);
-    for [x, y] in frames {
-        assert!((area.y(area.drawn(runs, x).unwrap()) - y).abs() < 1e-2);
+    let lines = fixtures::regions();
+    let colours: Vec<_> = lines.series.iter().map(|series| series.colour).collect();
+    assert_eq!(colours, Colour::SERIES);
+    assert!(unmarked(&draw(&lines, AREA)));
+    // Bars: each series' bars in its own colour, and nothing else drawn in it.
+    let bars = fixtures::bars(CHART_SERIES);
+    let colours: Vec<_> = bars.series.iter().map(|series| series.colour).collect();
+    assert_eq!(colours, Colour::SERIES);
+    for area in [AREA, WIDE] {
+        let drawing = draw(&bars, area);
+        assert!(unmarked(&drawing));
+        assert!(dots(&drawing).is_empty());
+        for series in &bars.series {
+            assert!(
+                !fills(&drawing, ink(series.colour, 1.0)).is_empty(),
+                "{}",
+                series.name
+            );
+        }
     }
 }
 
 #[test]
 fn eight_series_are_drawn_in_as_many_pieces_as_four_their_lines_thinned_to_a_share() {
     assert_eq!(share(LINE_VERTICES, 1), LINE_VERTICES);
-    assert_eq!(share(LINE_VERTICES, UNMARKED), LINE_VERTICES);
+    assert_eq!(share(LINE_VERTICES, UNSHARED), LINE_VERTICES);
     assert_eq!(share(LINE_VERTICES, CHART_SERIES), LINE_VERTICES / 2);
     // Eight series zigzagging at every one of 256 points: each thinned to its share, keeping every swing's extremes.
     let mut chart = Chart::new(CHART_POINTS).with_axis(ValueAxis::new(Some(0.0), Some(1.0), ""));
@@ -1612,12 +1492,11 @@ fn eight_series_are_drawn_in_as_many_pieces_as_four_their_lines_thinned_to_a_sha
     }
     let four = {
         let mut four = chart.clone();
-        four.series.truncate(UNMARKED);
+        four.series.truncate(UNSHARED);
         pieces(&draw(&four, AREA))
     };
-    let marks = (CHART_SERIES - UNMARKED) * MARKS * 3;
     assert!(
-        pieces(&drawing) <= four + marks + 16,
+        pieces(&drawing) <= four + 16,
         "{} of {four}",
         pieces(&drawing)
     );
@@ -1720,7 +1599,7 @@ fn a_legend_of_eight_series_wraps_onto_a_second_row_and_says_how_many_more_do_no
             "── ap-south-1 324  +5",
         ]
     );
-    // In a wide slot, every series whole, the fifth to the eighth with their markers in their keys, and its limit
+    // In a wide slot, every series whole, each key a line in its colour, two dashes for a dashed one, and its limit
     // where it fits.
     let wide = legend(&chart, 140);
     assert_eq!(wide.len(), 2);
@@ -1729,11 +1608,11 @@ fn a_legend_of_eight_series_wraps_onto_a_second_row_and_says_how_many_more_do_no
         assert!(said.contains(name), "{said}");
     }
     assert!(
-        said.contains("─●─ us-west-2") && said.contains("─○─ eu-central-1"),
+        said.contains("── us-west-2") && said.contains("── eu-central-1"),
         "{said}"
     );
     assert!(
-        said.contains("─◉─ ap-northeast-1") && said.contains("─☐─ af-south-1"),
+        said.contains("─ ─ ap-northeast-1") && said.contains("── af-south-1"),
         "{said}"
     );
     assert!(wide.iter().all(|row| row.len() <= 140));

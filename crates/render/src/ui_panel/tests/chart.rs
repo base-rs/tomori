@@ -425,9 +425,8 @@ fn a_chart_in_a_wide_slot_and_on_a_wall_five_times_the_size_lays_out_its_width()
 }
 
 /// Set `TOMORI_EIGHT_CHART_PREVIEW` to a PNG path to save what this renders: requests in eight regions, a line each in
-/// the palette's eight colours, the fifth to the eighth marked, read by pointing at its plot, in a standard slot, the
-/// same in a 4:1 slot and floating, and eight regions' bars, each face on in a panel whose buffer holds what a wall's
-/// panel's does.
+/// the palette's eight colours, told apart by colour alone, read by pointing at its plot, in a standard slot, the same
+/// in a 4:1 slot and floating, each face on in a panel whose buffer holds what a wall's panel's does.
 #[test]
 fn a_chart_of_eight_series_tells_each_apart_and_reads_them_all_where_pointed_at() {
     use tomori_scene::chart::{Area, draw, legend, readout::Readout};
