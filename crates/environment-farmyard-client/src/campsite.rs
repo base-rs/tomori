@@ -326,11 +326,14 @@ impl Sticks {
                 // What the holder foresaw differs anew from what the side says now, as it says it only as it changes.
                 self.differs.remove(&lit.body);
                 *since = lit.since;
-                // Caught just now, as the side says, it burns on from here for the holder too, at once.
-                if lit.since.is_some()
-                    && let Some(flame) = self.flames.get_mut(&lit.body)
-                {
-                    *flame = flame.max(campsite::BURNS);
+                // Caught just now, as the side says, it burns on from here for the holder too, and gone out, it is out,
+                // at once; but still alight in the heat.
+                if let Some(flame) = self.flames.get_mut(&lit.body) {
+                    *flame = if lit.since.is_some() {
+                        flame.max(campsite::BURNS)
+                    } else {
+                        0.0
+                    };
                 }
             }
         }

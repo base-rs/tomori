@@ -772,6 +772,21 @@ fn the_holder_foresees_their_marshmallow_catching_and_going_out_and_gives_way_to
             .iter()
             .all(|burning| *burning)
     );
+    // Under the pool's water while the side still says it burns, as when it never saw it there, it is out until the
+    // grace has passed, and then alight as the side says; and out at once as the side says it went out.
+    let frames = held_for(&mut sticks, pool, &mut now, 1.0);
+    let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(
+        ((first + 1) as f32 * 0.016 - GRACE.as_secs_f32()).abs() < 0.04,
+        "{first}"
+    );
+    assert!(frames[first..].iter().all(|burning| *burning));
+    sticks.changed(&lit(3, None), 6_000);
+    assert!(
+        held_for(&mut sticks, away_from_the_fire(), &mut now, 0.2)
+            .iter()
+            .all(|burning| !*burning)
+    );
     // A brown one, never alight.
     sticks.changed(
         &Event {
