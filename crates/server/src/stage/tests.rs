@@ -1661,10 +1661,11 @@ fn a_projection_of_code_panels_at_every_limit_fits_in_one_frame() {
     for origin in near {
         for _ in 0..WALL_SLOTS {
             let id = stage.project(&walls, largest.clone(), origin, 0);
-            // Pinned, as a participant may pin every one.
-            let wall = match &stage.view("s", &walls, 0).panel(&id).unwrap().place {
-                Place::Wall { wall, .. } => wall.clone(),
-                _ => unreachable!("projected onto a wall"),
+            // Pinned, as a participant may pin every one. Found where the stage keeps it rather than in a projection
+            // built whole for each of them, which only the projection at the end needs.
+            let wall = match &stage.kept(walls.environment, &id).unwrap().place {
+                Placed::Wall { wall, .. } => wall.clone(),
+                Placed::Free { .. } => unreachable!("projected onto a wall"),
             };
             stage.place(&walls, &id, Target::Wall(wall)).unwrap();
             latest = id;

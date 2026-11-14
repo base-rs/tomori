@@ -502,7 +502,10 @@ fn the_agent_coming_to_anyone_on_the_trail_finds_a_spot_2_m_from_them_clear_of_t
     // them, its box its swarm's reach and 0.1 m more on every side, seen from their eyes.
     let (conversation, rise, margin) = (2.0, 0.1, 0.1);
     let half = Vec3::from_array(SWARM.map(|reach| reach / 2.0 + margin));
-    let meets = |middle: Vec3, eyes: Vec3, solid: &Solid| {
+    // The agent's box with its middle at `middle`, facing `eyes`, as the lines between its corners and from the eyes to
+    // its middle, with the bounds they all lie within, and a millimetre more, so that a solid beyond those bounds is met
+    // by none of them and need not be tried, however a line's test rounds at its ends.
+    let spot = |middle: Vec3, eyes: Vec3| {
         let ahead = ((eyes - middle) * Vec3::new(1.0, 0.0, 1.0)).normalize();
         let across = Vec3::new(ahead.z, 0.0, -ahead.x);
         let corners: Vec<Vec3> = (0..8)
@@ -521,6 +524,22 @@ fn the_agent_coming_to_anyone_on_the_trail_finds_a_spot_2_m_from_them_clear_of_t
             .collect();
         lines.extend((0..4).map(|from| (corners[from], corners[7 - from])));
         lines.push((eyes, middle));
+        let (low, high) = corners.iter().fold((eyes, eyes), |(low, high), corner| {
+            (low.min(*corner), high.max(*corner))
+        });
+        (
+            middle,
+            lines,
+            low - Vec3::splat(1e-3),
+            high + Vec3::splat(1e-3),
+        )
+    };
+    let meets = |(middle, lines, low, high): &(Vec3, Vec<(Vec3, Vec3)>, Vec3, Vec3),
+                 solid: &Solid| {
+        let (solid_low, solid_high) = (Vec3::from_array(solid.low), Vec3::from_array(solid.high));
+        if solid_high.cmplt(*low).any() || solid_low.cmpgt(*high).any() {
+            return false;
+        }
         solid.contains(middle.to_array())
             || lines
                 .iter()
@@ -565,16 +584,17 @@ fn the_agent_coming_to_anyone_on_the_trail_finds_a_spot_2_m_from_them_clear_of_t
         let mut clear = 0;
         for bearing in 0..36 {
             let yaw = bearing as f32 / 36.0 * TAU;
-            let spot = at + Vec2::new(yaw.sin(), -yaw.cos()) * conversation;
-            let middle = Vec3::new(spot.x, eyes.y + rise, spot.y);
+            let there = at + Vec2::new(yaw.sin(), -yaw.cos()) * conversation;
+            let middle = Vec3::new(there.x, eyes.y + rise, there.y);
+            let agent = spot(middle, eyes);
             // Whatever plant or pine its spot there meets, the server knows of, so that it swings past it.
             for solid in &plants_and_pines {
-                if meets(middle, eyes, solid) {
+                if meets(&agent, solid) {
                     met += 1;
                     assert!(beside.contains(solid), "{at} {bearing} {solid:?}");
                 }
             }
-            if !kept.iter().any(|solid| meets(middle, eyes, solid)) {
+            if !kept.iter().any(|solid| meets(&agent, solid)) {
                 clear += 1;
             }
         }
