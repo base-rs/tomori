@@ -232,7 +232,7 @@ impl HubState {
             names: vec!["agent".to_owned()],
             label: "Tomori".to_owned(),
             described: "you, the agent".to_owned(),
-            at: Some(record.summoned.unwrap_or(home).position),
+            at: Some(record.away.unwrap_or(home).position),
             radius: SWARM,
             frame: None,
             absent: None,

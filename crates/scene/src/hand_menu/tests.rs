@@ -724,7 +724,7 @@ fn the_space_section_switches_modes_speech_and_this_headsets_settings() {
         assert_eq!(rows[pill + 2].key, MenuKey::Leave);
     }
     assert_eq!(menu.choose(&MenuKey::Travel), Some(Choice::Travel));
-    // While the agent is summoned away from its home, a participant can send it home, before this headset's own
+    // While the agent is away from its home, a participant can send it home, before this headset's own
     // settings; and not otherwise.
     assert!(!rows.iter().any(|row| row.key == MenuKey::AgentHome));
     model.agent_away = true;

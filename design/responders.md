@@ -194,7 +194,7 @@ A **responder** is anything that can take an action: it says which actions it ha
 
 1. **Modal responders**, which take focus while they are up: the hand menu while it shows (and while pinned), the right wrist's transcript while it shows, a panel, wall or card carried, a teleport being aimed, and the conversation's own state for `Back` and `Confirm`: the list of modes, a selected queue entry, waiting for a name, the card saying no speech was heard, the participant's and the space's problems, a request in its grace.
 2. **The pointed responder** and its **containers**: the nearest thing under the ray, as today's `Aim` resolution finds it, then what contains it. A panel's container is its wall; a menu row's, the hand menu; an environment object's, the environment's client side; and nothing pointed at is the client side, where there is one. The chain from a panel never reaches the environment, whose object is not its container.
-3. **Global handlers**, after the chain: the swarm for `Choose` (attracting, and summoning only for a pull begun on nothing of Tomori's or the environment's), result cards for `Scroll` outside a space, the lobby for `Move` outside a space, and the notice that holding B leaves. One global handler comes **before** focus, as a key equivalent: travel, for `Move`.
+3. **Global handlers**, after the chain: the swarm for `Choose` (attracting), result cards for `Scroll` outside a space, the lobby for `Move` outside a space, and the notice that holding B leaves. One global handler comes **before** focus, as a key equivalent: travel, for `Move`.
 
 | Responder | Handles | Accepts when |
 | --- | --- | --- |
@@ -211,7 +211,7 @@ A **responder** is anything that can take an action: it says which actions it ha
 | Environment object | as it declares: `Choose` and `Back` (`selectable`), `Scroll` (first increment), more later | it says so in `Picked` |
 | Environment client side | `Scroll`, `Move` (ambient) | the ray on nothing of Tomori's |
 | Travel | `Move`, before focus | the environment travels on this headset |
-| Swarm | `Choose` | always; summons only from nothing |
+| Swarm | `Choose` | always |
 
 ### Each action keeps its declared order
 

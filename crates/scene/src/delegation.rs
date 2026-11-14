@@ -357,8 +357,7 @@ pub struct Station {
     pub state: State,
     pub title: String,
     pub opacity: f32,
-    /// Where the eyes are of whoever its sign faces, the agent's audience: those at home, or those of whoever summoned
-    /// it.
+    /// Where the eyes are of whoever its sign faces, the agent's audience: those at home.
     pub facing: [f32; 3],
     /// How large its sign is drawn, as a share of its full size: smaller in a compact cluster.
     pub scale: f32,
@@ -392,7 +391,7 @@ pub fn sign_scale(station: [f32; 3], facing: [f32; 3]) -> f32 {
     ((station[0] - facing[0]).hypot(station[2] - facing[2]) / SIGN_REACH).max(1.0)
 }
 
-/// Where the eyes are at home, which a station's sign faces unless the agent is summoned.
+/// Where the eyes are at home, which a station's sign faces.
 pub const HOME_EYES: [f32; 3] = [0.0, 1.6, 0.0];
 
 impl Station {
@@ -529,8 +528,7 @@ pub struct Scene {
     highlighted: Hands<Option<String>>,
     /// Where the headset's ray ends on the worker pointed at.
     hit_point: Hands<Option<Vec3>>,
-    /// The origin of the workers' arrangement, home unless the joined space's environment says otherwise, or the agent
-    /// while it is summoned.
+    /// The origin of the workers' arrangement, home unless the joined space's environment says otherwise.
     origin: Anchor,
     /// Where the eyes are of whoever the agent faces, whom the workers gather about.
     audience: Vec3,
@@ -1475,7 +1473,7 @@ impl Scene {
             // hidden partition follows exactly, so splitting never snaps back
             // into an axis-aligned frame. No metadata refresh resets this clock.
             let was_solid = solid_completed(worker);
-            // A live worker placed elsewhere, as when the agent is summoned or sent home, glides there.
+            // A live worker placed elsewhere glides there.
             if dt > 0.0 && worker.retired.is_none() {
                 worker.anchor = glide(worker.anchor, worker.place, dt);
             }

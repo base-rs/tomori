@@ -371,27 +371,15 @@ pub struct SpaceState {
     pub anchors: Anchors,
     /// Where the agent stands away from its home, in the space's coordinates, facing along its +Z, as it follows the
     /// speaker or was called or asked to go there: absent while it is at home, as it is when the space opens and after
-    /// the agent or a participant sends it home. See `design/environments.md`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summoned: Option<crate::Pose>,
-    /// Sent only by older servers, while the agent was summoned: where the eyes were of whoever it was summoned to, in
-    /// the space's coordinates, whom its entourage gathered about, its workers on their arc about them. A server no
-    /// longer sends it, since nothing travels with the agent, and a client reads its absence, with
-    /// [`Self::movement`] sent, as the workers at home; whom the agent stands for is [`Self::partner`]. See
+    /// the agent or a participant sends it home. The Tomori wall and the workers stay home. See
     /// `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summoner: Option<[f32; 3]>,
-    /// Whether the server keeps where a participant's trigger summons the agent to, taking
-    /// [`crate::ClientMessage::PlaceAgent`] with a place from a participant. Set only by older servers: since the agent
-    /// follows whoever speaks to it, a server no longer keeps summons, and a client sends none. See
-    /// `design/environments.md`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub summons: bool,
+    pub away: Option<crate::Pose>,
     /// How the space's agent moves, an owner's setting, kept with the space: following whoever speaks to it, only
     /// when asked, or staying home, and how long after a conversation goes quiet it goes home. A server that sends it
     /// accepts [`crate::ClientMessage::CallAgent`], [`crate::ClientMessage::SetAgentMovement`] from an owner, and
-    /// [`crate::ClientMessage::PlaceAgent`] without a place to send the agent home; a client sends those only to such a
-    /// server. None from older servers. See `design/environments.md`.
+    /// [`crate::ClientMessage::SendAgentHome`]; a client sends those only to such a server. None from older servers.
+    /// See `design/environments.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub movement: Option<AgentMovement>,
     /// Whether the agent is pinned where it stands, by a participant's **Call Tomori here** or **Tomori: stay here**, or
@@ -1392,17 +1380,13 @@ mod tests {
                 .with_agent(pose)
                 .with_workers(pose)
                 .with_arrival(pose),
-            summoned: Some(pose),
-            summoner: Some([0.5, 1.5, 0.0]),
-            summons: true,
+            away: Some(pose),
             ..SpaceState::default()
         };
         let json = serde_json::to_value(&state).unwrap();
-        assert_eq!(json["summoner"][1], 1.5);
         assert_eq!(json["anchors"]["agent"]["position"][0], 1.0);
         assert_eq!(json["anchors"]["arrival"]["position"][1], 1.5);
-        assert_eq!(json["summoned"]["position"][2], -3.0);
-        assert_eq!(json["summons"], true);
+        assert_eq!(json["away"]["position"][2], -3.0);
         assert!(!Anchors::new().with_arrival(pose).is_empty());
         let spawned = Anchors::new().with_spawn(crate::spawn::Spawn::new(pose));
         assert!(!spawned.is_empty());
@@ -1424,8 +1408,7 @@ mod tests {
         // None at all sends no field, and an older server's state, without it, reads as none.
         let plain = serde_json::to_value(SpaceState::default()).unwrap();
         assert!(plain.get("anchors").is_none());
-        assert!(plain.get("summoned").is_none() && plain.get("summons").is_none());
-        assert!(plain.get("summoner").is_none());
+        assert!(plain.get("away").is_none());
         let read = serde_json::from_value::<SpaceState>(plain).unwrap();
         assert!(read.anchors.is_empty());
         assert!(!state.anchors.is_empty());

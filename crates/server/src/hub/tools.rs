@@ -1174,9 +1174,9 @@ impl Hub {
                         })
                     })
                     .cloned();
-                let was = record.summoned;
+                let was = record.away;
                 state.agent_unpin(&space, None, speaker.as_deref(), now);
-                state.space(&space).expect("found above").summoned != was
+                state.space(&space).expect("found above").away != was
             }
             Going::Anchor(name) => {
                 // To its cluster, at its point if free, else its next free slot, facing whoever it gathers about.
@@ -1193,7 +1193,7 @@ impl Hub {
                     limited(&mut state)?;
                     self.agent_goes(&mut state, &space, at, eyes, now);
                     let record = state.space_mut(&space).expect("found above");
-                    record.agent_at = record.summoned.map(|pose| (name.clone(), pose));
+                    record.agent_at = record.away.map(|pose| (name.clone(), pose));
                     log::info!(
                         "The agent of space {space} moved itself to the anchor {name}{}.",
                         because(&asked)
@@ -1231,7 +1231,7 @@ impl Hub {
                         limited(&mut state)?;
                         self.agent_goes(&mut state, &space, at, eyes, now);
                         let record = state.space_mut(&space).expect("found above");
-                        record.agent_at = record.summoned.map(|pose| (name.clone(), pose));
+                        record.agent_at = record.away.map(|pose| (name.clone(), pose));
                         log::info!(
                             "The agent of space {space} moved itself by an object, to the anchor {name}{}.",
                             because(&asked)
@@ -1246,7 +1246,7 @@ impl Hub {
                         let at = self.beside_object(&state, &space, position, asker).ok_or(
                             "Nowhere beside that is clear for you to stand, so stay where you are, or ask whoever asked to show you where.",
                         )?;
-                        let moved = record.summoned != Some(at);
+                        let moved = record.away != Some(at);
                         if moved {
                             limited(&mut state)?;
                             self.agent_goes(&mut state, &space, at, asker.position, now);
@@ -1304,7 +1304,7 @@ impl Hub {
                             .to_owned()
                     })?;
                 }
-                let was = state.space(&space).expect("found above").summoned;
+                let was = state.space(&space).expect("found above").away;
                 self.walk_with(
                     &mut state,
                     &space,
@@ -1313,7 +1313,7 @@ impl Hub {
                     now,
                 )
                 .expect("a participant who has said where they are, where the space lets it move");
-                state.space(&space).expect("found above").summoned != was
+                state.space(&space).expect("found above").away != was
             }
             Going::Person(name, beside) => {
                 let people = state.heads(&space);
@@ -1329,7 +1329,7 @@ impl Hub {
                 } else {
                     (crate::presence::before(&head), head.position)
                 };
-                let moved = state.space(&space).expect("found above").summoned != Some(at);
+                let moved = state.space(&space).expect("found above").away != Some(at);
                 if moved {
                     limited(&mut state)?;
                     self.agent_goes(&mut state, &space, at, eyes, now);

@@ -98,8 +98,8 @@ fn called_to_someone_on_the_upper_terrace_the_agent_stands_on_it_and_goes_there_
         rays: None,
     });
     ada.send(&ClientMessage::CallAgent);
-    let state = ada.space(|state| state.summoned.is_some());
-    let spot = state.summoned.unwrap().position;
+    let state = ada.space(|state| state.away.is_some());
+    let spot = state.away.unwrap().position;
     // On the terrace's floor, as high above it as her eyes stand above it, and a little more.
     let ground = carried_ground();
     let under = ground
@@ -133,8 +133,8 @@ fn called_to_someone_on_the_upper_terrace_the_agent_stands_on_it_and_goes_there_
         rays: None,
     });
     ada.send(&ClientMessage::CallAgent);
-    let state = ada.space(|state| state.summoned.is_some_and(|at| at.position != spot));
-    let down = state.summoned.unwrap().position;
+    let state = ada.space(|state| state.away.is_some_and(|at| at.position != spot));
+    let down = state.away.unwrap().position;
     assert!(down[1] < terrace, "{down:?}");
     assert!(down[1] >= eyes[1] - 1e-3, "{down:?}");
     above(&ground, spot, state.via, down);

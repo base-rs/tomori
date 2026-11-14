@@ -6516,20 +6516,22 @@ fn the_attractor_is_drawn_as_each_platform_draws_it() {
     }
 }
 
-/// The [`ClientMessage::PlaceAgent`]s `conversation` sent since it was last asked.
-fn placed(conversation: &mut Conversation) -> Vec<Option<tomori_protocol::Pose>> {
+/// How many times `conversation` sent the agent home since it was last asked.
+fn sent_home(conversation: &mut Conversation) -> usize {
     conversation
         .take_actions()
         .into_iter()
-        .filter_map(|action| match action {
-            Action::Send(tomori_protocol::ClientMessage::PlaceAgent { at }) => Some(at),
-            _ => None,
+        .filter(|action| {
+            matches!(
+                action,
+                Action::Send(tomori_protocol::ClientMessage::SendAgentHome)
+            )
         })
-        .collect()
+        .count()
 }
 
 #[test]
-fn in_a_space_the_trigger_draws_the_swarm_nowhere_and_summons_nothing_from_any_server() {
+fn in_a_space_the_trigger_draws_the_swarm_nowhere_and_moves_the_agent_nowhere() {
     let now = Instant::now();
     let at = Vec3::new(0.8, 1.2, -0.6);
     let pulling = Senses {
@@ -6537,34 +6539,29 @@ fn in_a_space_the_trigger_draws_the_swarm_nowhere_and_summons_nothing_from_any_s
         trigger: Some(1.0),
         ..senses()
     };
-    // On a server that keeps summons, as an older one does, and on one that says how the agent moves alike.
-    for older in [true, false] {
-        let mut conversation = lobby(ConnectionRole::Owner);
-        conversation.apply(space(|state| {
-            state.summons = older;
-            state.movement = (!older).then(tomori_protocol::AgentMovement::default);
-        }));
-        conversation.take_actions();
-        let mut step = Step::default();
-        for _ in 0..(1.0 / FRAME) as usize {
-            let frame = step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
-            assert!(!frame.attracting, "{older}");
-        }
-        step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
-        assert!(placed(&mut conversation).is_empty());
-        assert_eq!(
-            conversation.arrangement().agent,
-            crate::anchors::Anchor::AGENT
-        );
-        // Away, it is sent home from the hand menu instead, from either.
-        conversation.apply(space(|state| {
-            state.summons = older;
-            state.movement = (!older).then(tomori_protocol::AgentMovement::default);
-            state.summoned = Some(tomori_protocol::Pose::at([1.0, 1.4, -1.0]));
-        }));
-        conversation.send_agent_home();
-        assert_eq!(placed(&mut conversation), [None]);
+    let mut conversation = lobby(ConnectionRole::Owner);
+    conversation.apply(space(|state| {
+        state.movement = Some(tomori_protocol::AgentMovement::default());
+    }));
+    conversation.take_actions();
+    let mut step = Step::default();
+    for _ in 0..(1.0 / FRAME) as usize {
+        let frame = step.update(&pulling, &mut conversation, &mut felt(), now, FRAME);
+        assert!(!frame.attracting);
     }
+    step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+    assert!(!moved_the_agent(&mut conversation));
+    assert_eq!(
+        conversation.arrangement().agent,
+        crate::anchors::Anchor::AGENT
+    );
+    // Away, it is sent home from the hand menu instead.
+    conversation.apply(space(|state| {
+        state.movement = Some(tomori_protocol::AgentMovement::default());
+        state.away = Some(tomori_protocol::Pose::at([1.0, 1.4, -1.0]));
+    }));
+    conversation.send_agent_home();
+    assert_eq!(sent_home(&mut conversation), 1);
 }
 
 #[test]
@@ -6601,14 +6598,14 @@ fn on_an_environment_s_selectable_object_the_trigger_selects_it_and_on_a_panel_d
     assert_eq!(step.hands.right.aim, precedence::Aim::Environment);
     assert!(!pull(&mut step, &mut conversation, &on_lamp));
     assert!(!selects(&done).is_empty());
-    // On a panel in front of it, Tomori's, the pull draws nothing and summons nothing.
+    // On a panel in front of it, Tomori's, the pull draws nothing and moves the agent nowhere.
     code_ahead(&mut conversation, 1);
     conversation.apply(space(|state| state.projection = true));
     conversation.take_actions();
     grow(&mut step, &mut conversation, &on_lamp, now);
     assert_eq!(step.hands.right.aim, precedence::Aim::Tomori);
     assert!(!pull(&mut step, &mut conversation, &on_lamp));
-    assert!(placed(&mut conversation).is_empty());
+    assert!(!moved_the_agent(&mut conversation));
 }
 
 #[test]
@@ -6626,7 +6623,7 @@ fn the_agent_glides_where_it_goes_by_its_waypoint_turning_to_face_whoever_it_tur
     let to = tomori_protocol::Pose::at([2.0, 1.4, -2.3]).facing_towards([0.0, 1.6, 0.0]);
     conversation.apply(space(|state| {
         state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(to);
+        state.away = Some(to);
         state.via = Some([1.0, 2.6, -2.3]);
     }));
     let mut last = crate::swarm::CENTER;
@@ -6645,7 +6642,7 @@ fn the_agent_glides_where_it_goes_by_its_waypoint_turning_to_face_whoever_it_tur
     // Turned to face someone, it turns about the vertical to face them, where it stands.
     conversation.apply(space(|state| {
         state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(to);
+        state.away = Some(to);
         state.facing = Some([4.0, 1.6, 0.0]);
     }));
     let facing = conversation.arrangement().agent;
@@ -6675,7 +6672,7 @@ fn the_agent_glides_where_it_goes_by_its_waypoint_turning_to_face_whoever_it_tur
     // Somewhere it cannot face, or a waypoint beyond the space, is ignored; and far away it streams.
     conversation.apply(space(|state| {
         state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(to);
+        state.away = Some(to);
         state.facing = Some([f32::NAN, 0.0, 0.0]);
         state.via = Some([0.0, 0.0, 900.0]);
         state.stream = true;
@@ -6708,7 +6705,7 @@ fn the_swarm_s_agents_keep_up_with_the_agent_as_it_glides() {
     let to = tomori_protocol::Pose::at([0.0, 1.4, 1.7]).facing_towards([0.0, 1.6, 3.7]);
     conversation.apply(space(|state| {
         state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(to);
+        state.away = Some(to);
     }));
     let mut astray = 0.0f32;
     for _ in 0..(8.0 / FRAME) as usize {
@@ -6752,7 +6749,7 @@ fn moved_the_agent(conversation: &mut Conversation) -> bool {
         matches!(
             action,
             Action::Send(
-                ClientMessage::PlaceAgent { .. }
+                ClientMessage::SendAgentHome
                     | ClientMessage::CallAgent
                     | ClientMessage::PinAgent { .. }
                     | ClientMessage::WalkAgent { .. }
@@ -6844,7 +6841,7 @@ fn while_its_speech_plays_the_agent_still_glides_where_it_follows_and_turns_to_w
     conversation.apply(space(|state| {
         state.movement = follow;
         state.activity = tomori_protocol::Activity::Idle;
-        state.summoned = Some(to);
+        state.away = Some(to);
         state.partner = Some([4.5, 1.1, -5.1]);
     }));
     speaking(&mut step, &mut conversation, 12.0);
@@ -6859,7 +6856,7 @@ fn while_its_speech_plays_the_agent_still_glides_where_it_follows_and_turns_to_w
     conversation.apply(space(|state| {
         state.movement = follow;
         state.activity = tomori_protocol::Activity::Idle;
-        state.summoned = Some(to);
+        state.away = Some(to);
         state.partner = Some([4.5, 1.1, -5.1]);
         state.facing = Some([5.5, 1.1, -4.6]);
     }));
@@ -6886,7 +6883,7 @@ fn joining_the_agent_is_at_its_place_at_once_and_this_clients_swarm_flies_there_
     let near = tomori_protocol::Pose::at([-1.5, 1.6, -3.5]).facing_towards([0.0, 1.6, 0.0]);
     let across = tomori_protocol::Pose::at([-3.0, 1.5, -1.0]).facing_towards([0.0, 1.6, 0.0]);
     let following = tomori_protocol::Pose::at([2.5, 1.5, 1.0]).facing_towards([0.0, 1.6, 0.0]);
-    for (home, summoned) in [(near, None), (across, None), (near, Some(following))] {
+    for (home, away) in [(near, None), (across, None), (near, Some(following))] {
         let mut conversation = lobby(ConnectionRole::Owner);
         let mut step = Step::default();
         for _ in 0..200 {
@@ -6897,9 +6894,9 @@ fn joining_the_agent_is_at_its_place_at_once_and_this_clients_swarm_flies_there_
         assert!(lobby.distance(crate::swarm::CENTER) < 0.5, "{lobby}");
         conversation.apply(space(|state| {
             state.anchors = tomori_protocol::Anchors::new().with_agent(home);
-            state.summoned = summoned;
+            state.away = away;
         }));
-        assert!(placed(&mut conversation).is_empty());
+        assert!(!moved_the_agent(&mut conversation));
         let place = conversation.arrangement().agent;
         let distance = lobby.distance(place.position);
         assert!(distance > 1.5, "{distance}");
@@ -6941,12 +6938,12 @@ fn joining_the_agent_is_at_its_place_at_once_and_this_clients_swarm_flies_there_
         let flown = flown.expect("arrived") as f32 * FRAME;
         assert!((1.0..4.0).contains(&flown), "{flown}");
         assert!(middle_of(&seen).distance(place.position) < 0.1);
-        // And it stays, through a long idle, with no summons.
+        // And it stays, through a long idle, sent nowhere.
         for _ in 0..3000 {
             let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
             assert_eq!(frame.swarm.anchor().position, place.position);
         }
-        assert!(placed(&mut conversation).is_empty());
+        assert!(!moved_the_agent(&mut conversation));
     }
 }
 
@@ -6968,7 +6965,7 @@ fn the_swarm_flies_to_the_agent_as_it_moves_turns_back_on_leaving_and_flies_in_a
         |x: f32| Some(tomori_protocol::Pose::at([x, 1.5, 1.0]).facing_towards([0.0, 1.6, 0.0]));
     conversation.apply(space(|state| {
         state.anchors = tomori_protocol::Anchors::new().with_agent(home);
-        state.summoned = following(2.5);
+        state.away = following(2.5);
     }));
     conversation.take_actions();
     assert!(frame(&mut step, &mut conversation).1, "flying");
@@ -6976,7 +6973,7 @@ fn the_swarm_flies_to_the_agent_as_it_moves_turns_back_on_leaving_and_flies_in_a
         if index < 72 * 2 && index % 12 == 0 {
             conversation.apply(space(|state| {
                 state.anchors = tomori_protocol::Anchors::new().with_agent(home);
-                state.summoned = following(2.5 - index as f32 / 72.0);
+                state.away = following(2.5 - index as f32 / 72.0);
             }));
         }
         frame(&mut step, &mut conversation);

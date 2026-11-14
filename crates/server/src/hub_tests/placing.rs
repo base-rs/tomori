@@ -412,8 +412,8 @@ fn the_agent_goes_to_an_anchor_facing_whoever_watches_it_within_its_limits() {
         (&json!(true), &json!("rack/a12"))
     );
     // At the anchor's point, the first to arrive there, and listed there.
-    let summoned = hub.lock().space(&space).unwrap().summoned.unwrap();
-    assert_eq!(summoned.position, [4.0, 1.4, -8.0]);
+    let away = hub.lock().space(&space).unwrap().away.unwrap();
+    assert_eq!(away.position, [4.0, 1.4, -8.0]);
     let presence = hub.tool_presence("session").unwrap();
     assert_eq!(presence["agent"]["anchor"], "rack/a12");
     let at = presence["anchors"]
@@ -561,7 +561,7 @@ fn the_agent_at_an_anchor_that_goes_stays_where_it_is_and_the_home_anchor_is_hom
     );
     hub.agent_move_agent("session", "anchor rack/a12", None)
         .unwrap();
-    let there = hub.lock().space(&space).unwrap().summoned;
+    let there = hub.lock().space(&space).unwrap().away;
     assert_eq!(
         hub.channel_remove_anchor_at(&outlet, "rack/a12", start + Duration::from_secs(1)),
         Ok(())
@@ -569,7 +569,7 @@ fn the_agent_at_an_anchor_that_goes_stays_where_it_is_and_the_home_anchor_is_hom
     let record = |hub: &Hub| {
         let state = hub.lock();
         let record = state.space(&space).unwrap();
-        (record.summoned, record.agent_at.clone())
+        (record.away, record.agent_at.clone())
     };
     assert_eq!(record(&hub), (there, None));
     // The home anchor's point is the agent's home.

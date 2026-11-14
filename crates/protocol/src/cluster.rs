@@ -97,7 +97,7 @@ pub const ARC_RADIUS: f32 = 3.2;
 
 /// How near whoever watches today's arc stands at least, horizontally, in metres: as near as the agent's default home
 /// stands, so that its first columns stand in front of them.
-pub const NEAREST_ARC: f32 = crate::entourage::SUMMONED;
+pub const NEAREST_ARC: f32 = crate::stance::NEAR;
 
 /// How far below the agent's middle today's arc's first row stands, and how far apart its rows stand, in metres, at
 /// [`ARC_RADIUS`] or nearer: the first row a little below the agent's middle, the second above it, so that the agent

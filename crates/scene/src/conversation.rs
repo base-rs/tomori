@@ -1938,7 +1938,7 @@ impl Conversation {
             agent_away: self.sends_agent_home()
                 && self
                     .joined_space()
-                    .is_some_and(|(space, _)| space.summoned.is_some() || space.pinned),
+                    .is_some_and(|(space, _)| space.away.is_some() || space.pinned),
             calls: self.offers_call(),
             pins: self.offers_pin(),
             walks: self.offers_walk(),

@@ -103,7 +103,7 @@ impl Hub {
             | ClientMessage::PlaceCard { .. }) => {
                 self.act_on_environment(state, connection, participant, space, message, deferred);
             }
-            message @ (ClientMessage::PlaceAgent { .. }
+            message @ (ClientMessage::SendAgentHome
             | ClientMessage::CallAgent
             | ClientMessage::PinAgent { .. }
             | ClientMessage::WalkAgent { .. }

@@ -16,11 +16,7 @@ impl Hub {
         deferred: &mut Vec<Deferred>,
     ) {
         match message {
-            ClientMessage::PlaceAgent { at: Some(_) } => {
-                // The trigger no longer summons the agent: one from a client that ignores `summons` changes nothing.
-                log::debug!(target: LOG, "A summons from {participant} was dropped, as this server keeps none.");
-            }
-            ClientMessage::PlaceAgent { at: None } => {
+            ClientMessage::SendAgentHome => {
                 let Some(space) = in_space(state, participant, space) else {
                     return;
                 };

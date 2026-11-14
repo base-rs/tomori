@@ -10,7 +10,7 @@
 //! holds no I/O and no clock: the hub decides when the agent follows and asks this where. See
 //! `design/environments.md`.
 use tomori_environment::sightlines::Solid;
-use tomori_protocol::{Pose, Wall, cluster, entourage};
+use tomori_protocol::{Pose, Wall, cluster, stance};
 
 use crate::stage::geometry::{boxes, rotate};
 
@@ -30,9 +30,9 @@ pub(crate) const SWING: f32 = 10.0;
 /// comfortable conversational distance, between a person's 1.2 m social bubble and the 1.8 m at which a group forms.
 pub(crate) const DISTANCES: [f32; 3] = [1.5, 1.8, 1.2];
 
-/// How far it stands beside an object when no spot at [`DISTANCES`] is clear, in metres: as far as the summons stood
-/// it.
-pub(crate) const FALLBACK: f32 = entourage::SUMMONED;
+/// How far it stands beside an object when no spot at [`DISTANCES`] is clear, in metres: as far as it stands before
+/// someone it goes to, [`stance::NEAR`].
+pub(crate) const FALLBACK: f32 = stance::NEAR;
 
 /// The bearings it is tried at beside an object, in degrees clockwise from the asker's line of sight to it, as seen
 /// from above: to their left first, since a panel floating beside them goes to their right first, then their right,
@@ -58,11 +58,11 @@ pub(crate) const HIGHEST_ABOVE: f32 = 3.5;
 pub(crate) const ABOVE_OBJECT: f32 = 0.5;
 
 /// How far about its middle the swarm reaches, across, up and down, and towards and away from whoever it faces, in
-/// metres: half of `entourage::SWARM` each way, as the swarm's shapes reach while it talks.
+/// metres: half of `stance::SWARM` each way, as the swarm's shapes reach while it talks.
 pub(crate) const REACH: [f32; 3] = [
-    entourage::SWARM[0] / 2.0,
-    entourage::SWARM[1] / 2.0,
-    entourage::SWARM[2] / 2.0,
+    stance::SWARM[0] / 2.0,
+    stance::SWARM[1] / 2.0,
+    stance::SWARM[2] / 2.0,
 ];
 
 /// How much larger than its reach, on every side, the box kept clear about it is, in metres.

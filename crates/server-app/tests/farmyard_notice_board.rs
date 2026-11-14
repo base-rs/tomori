@@ -95,7 +95,7 @@ fn joined() -> Conversation {
         TOMORI_WALL,
         WallKind::Tomori,
         // Beneath the agent's home, as the server stands it.
-        tomori_protocol::entourage::wall_beneath(
+        tomori_protocol::stance::wall_beneath(
             &carried(tomori_server_app::farmyard_agent()),
             tomori_protocol::cluster::FLOOR,
         ),

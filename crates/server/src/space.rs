@@ -2597,9 +2597,7 @@ impl SpaceModel {
             renames: true,
             // Set by the hub, which knows the environments.
             anchors: tomori_protocol::Anchors::default(),
-            summoned: None,
-            summoner: None,
-            summons: false,
+            away: None,
             movement: Some(self.movement),
             // Set by the hub, which knows where the agent stands.
             pinned: false,

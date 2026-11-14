@@ -2112,7 +2112,7 @@ fn a_declared_locomotion_applies_only_in_a_space_in_a_drawn_environment() {
 
 #[test]
 fn a_ring_home_stands_its_workers_and_its_drawn_ring_at_home_while_the_agent_goes_elsewhere() {
-    use crate::anchors::{Anchor, FLOOR_RING, HomeRing};
+    use crate::anchors::{Anchor, HomeRing};
     use tomori_protocol::cluster::{Formation, RING};
     use tomori_protocol::{AgentMovement, Anchors, Pose};
     let agent = Pose::at([-1.0, 1.5, -4.0]).facing_towards([0.0, 1.6, 0.0]);
@@ -2143,7 +2143,7 @@ fn a_ring_home_stands_its_workers_and_its_drawn_ring_at_home_while_the_agent_goe
     // Called elsewhere, the agent goes, and its workers and its ring stay home.
     conversation.apply(space(|state| {
         at_home(state);
-        state.summoned = Some(called);
+        state.away = Some(called);
         state.partner = Some([0.0, 1.6, 0.0]);
     }));
     let away = conversation.arrangement();
@@ -2153,8 +2153,7 @@ fn a_ring_home_stands_its_workers_and_its_drawn_ring_at_home_while_the_agent_goe
         (away.workers, away.formation),
         (home.workers, Formation::Ring)
     );
-    // A sweep out of bounds is the whole ring; and from an older server, whose entourage gathers the workers about
-    // the agent, the arc about it, its ring on the floor still at home.
+    // A sweep out of bounds is the whole ring.
     let mut wide = ring.clone();
     wide.sweep = Some(400.0);
     conversation.apply(space(|state| {
@@ -2162,30 +2161,11 @@ fn a_ring_home_stands_its_workers_and_its_drawn_ring_at_home_while_the_agent_goe
         state.anchors = Anchors::new().with_agent(agent).with_cluster(wide.clone());
     }));
     assert_eq!(conversation.arrangement().sweep, None);
-    conversation.apply(space(|state| {
-        at_home(state);
-        state.movement = None;
-        state.summoned = Some(called);
-        state.summoner = Some([0.0, 1.6, 0.0]);
-    }));
-    let entourage = conversation.arrangement();
-    assert_eq!(
-        (entourage.formation, entourage.sweep, entourage.workers),
-        (Formation::Arc, None, entourage.agent)
-    );
-    assert_eq!(
-        entourage.home_ring(),
-        HomeRing {
-            centre: entourage.home.position,
-            radius: FLOOR_RING,
-            ..HomeRing::WHOLE
-        }
-    );
     // Sky, which says nothing, stands its workers on today's arc, its ring whole about the agent's home.
     conversation.apply(space(|state| {
         state.environment = "sky".into();
         state.movement = Some(AgentMovement::default());
-        state.summoned = Some(called);
+        state.away = Some(called);
     }));
     let sky = conversation.arrangement();
     assert_eq!((sky.formation, sky.extent), (Formation::Arc, None));
@@ -2200,7 +2180,7 @@ fn a_ring_home_stands_its_workers_and_its_drawn_ring_at_home_while_the_agent_goe
     conversation.apply(space(|state| {
         state.environment = "sky".into();
         state.movement = Some(AgentMovement::default());
-        state.summoned = Some(called);
+        state.away = Some(called);
         state.anchors = Anchors::new()
             .with_agent(high)
             .with_workers(high)
@@ -2254,7 +2234,7 @@ fn the_arrangement_follows_the_joined_space_s_anchors_and_its_drawn_environment_
     assert_eq!(arrangement.agent, Anchor::from_pose(&agent).unwrap());
     assert_eq!(arrangement.home, arrangement.agent);
     assert_eq!(arrangement.workers, arrangement.home);
-    assert!(!arrangement.summoned());
+    assert!(!arrangement.moved());
     // Shown as the grid, the default arc.
     assert!(arrangement.placement.is_none());
     conversation.set_drawable(vec![Environment::MINIMAL, OBSERVE]);
@@ -2280,23 +2260,21 @@ fn the_arrangement_follows_the_joined_space_s_anchors_and_its_drawn_environment_
     assert_eq!(sky.agent, Anchor::AGENT);
     assert_eq!(sky.workers, Anchor::from_pose(&agent).unwrap());
     assert_eq!(sky.audience, crate::anchors::EYES);
-    // Summoned, the agent stands there, its home where it was, and its workers go with it, gathered about whoever
-    // summoned it.
-    let summoned = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
+    // Away, the agent stands there, its home where it was, and its workers stay home, gathered about the eyes there.
+    let went = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
     conversation.apply(space(|state| {
         state.environment = "sky".into();
         state.anchors = Anchors::new().with_workers(agent);
-        state.summoned = Some(summoned);
-        state.summoner = Some([0.2, 1.4, 0.1]);
+        state.away = Some(went);
     }));
     let away = conversation.arrangement();
-    assert!(away.summoned() && away.away());
-    assert_eq!(away.agent, Anchor::from_pose(&summoned).unwrap());
+    assert!(away.moved() && away.away());
+    assert_eq!(away.agent, Anchor::from_pose(&went).unwrap());
     assert_eq!(away.home, Anchor::AGENT);
-    assert_eq!(away.workers, away.agent);
-    assert_eq!(away.audience, glam::Vec3::new(0.2, 1.4, 0.1));
+    assert_eq!(away.workers, sky.workers);
+    assert_eq!(away.audience, crate::anchors::EYES);
     // The home cluster's room, where the environment gives it, with its anchor where it says; one of room it may
-    // not have is today's arc at the workers anchor; and an older server's entourage takes no room.
+    // not have is today's arc at the workers anchor.
     let yard = tomori_protocol::Pose::at([0.0, 1.4, -5.0]).facing_towards([0.0, 1.6, 0.0]);
     let room = tomori_protocol::cluster::Anchor::new("home", yard).with_extent(6.0, 2.5, 3.0);
     conversation.apply(space(|state| {
@@ -2350,27 +2328,14 @@ fn the_arrangement_follows_the_joined_space_s_anchors_and_its_drawn_environment_
         state.anchors = Anchors::new().with_workers(agent).with_cluster(far);
     }));
     assert_eq!(conversation.arrangement().extent, None);
+    // Away, the home cluster keeps its room.
     conversation.apply(space(|state| {
         state.environment = "sky".into();
         state.anchors = Anchors::new().with_cluster(room.clone());
-        state.summoned = Some(summoned);
-        state.summoner = Some([0.2, 1.4, 0.1]);
+        state.away = Some(went);
     }));
-    let entourage = conversation.arrangement();
-    assert_eq!(
-        (entourage.workers, entourage.extent),
-        (entourage.agent, None)
-    );
-    // From a server that does not say whom, or says nonsense, about whoever it faces, 1.2 m before it.
-    for summoner in [None, Some([f32::NAN, 0.0, 0.0]), Some([0.0, 0.0, 90.0])] {
-        conversation.apply(space(|state| {
-            state.environment = "sky".into();
-            state.summoned = Some(summoned);
-            state.summoner = summoner;
-        }));
-        let before = away.agent.place(glam::Vec3::new(0.0, 0.2, 1.2));
-        assert!(conversation.arrangement().audience.distance(before) < 1e-5);
-    }
+    let left = conversation.arrangement();
+    assert_eq!((left.workers, left.extent), (roomy.workers, roomy.extent));
     // Leaving, the default layout.
     conversation.apply(space(observe));
     hold_b(&mut conversation);
@@ -2381,31 +2346,26 @@ fn the_arrangement_follows_the_joined_space_s_anchors_and_its_drawn_environment_
 #[test]
 fn a_participant_sends_the_agent_home_and_calls_it_from_the_hand_menu() {
     use tomori_protocol::{AgentMovement, Movement};
-    let summoned = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
-    // At home, or on a server that neither keeps summons nor says how the agent moves, nothing is offered and
-    // nothing is sent.
-    let mut conversation = joined(|state| state.summons = true);
+    let went = tomori_protocol::Pose::at([1.0, 1.5, -1.0]).facing_towards([0.0, 1.5, 0.0]);
+    // At home, or away on a server that does not say how the agent moves, nothing is offered and nothing is sent.
+    let mut conversation = joined(|state| state.movement = Some(AgentMovement::default()));
     assert!(!conversation.menu_model().agent_away);
-    let mut older = joined(|state| state.summoned = Some(summoned));
+    let mut older = joined(|state| state.away = Some(went));
     let model = older.menu_model();
     assert!(!model.agent_away && !model.calls && model.movement.is_none());
     older.send_agent_home();
     older.call_agent();
     older.set_agent_movement(AgentMovement::default());
     assert!(sent(&mut older).is_empty());
-    // Away, from an older server, the Space section offers to send it home, which tells everyone and stands it
-    // there at once.
+    // Away, the Space section offers to send it home, which tells everyone and stands it there at once.
     conversation.apply(space(|state| {
-        state.summons = true;
-        state.summoned = Some(summoned);
+        state.movement = Some(AgentMovement::default());
+        state.away = Some(went);
     }));
     assert!(conversation.menu_model().agent_away);
     conversation.choose_menu(crate::hand_menu::Choice::AgentHome);
-    assert_eq!(
-        sent(&mut conversation),
-        [ClientMessage::PlaceAgent { at: None }]
-    );
-    assert!(!conversation.arrangement().summoned());
+    assert_eq!(sent(&mut conversation), [ClientMessage::SendAgentHome]);
+    assert!(!conversation.arrangement().moved());
     assert!(!conversation.menu_model().agent_away);
     // From a server that says how it moves, it is called here, and an owner steps how it moves and how long it
     // waits before going home.
@@ -2433,7 +2393,7 @@ fn a_participant_sends_the_agent_home_and_calls_it_from_the_hand_menu() {
     let pinned = |at: [f32; 3]| {
         space(move |state| {
             state.movement = Some(AgentMovement::new(Movement::Follow, Some(90)));
-            state.summoned = Some(tomori_protocol::Pose::at(at));
+            state.away = Some(tomori_protocol::Pose::at(at));
             state.pinned = true;
         })
     };
@@ -2447,7 +2407,7 @@ fn a_participant_sends_the_agent_home_and_calls_it_from_the_hand_menu() {
     newer.pin_agent(false);
     assert!(sent(&mut newer).is_empty());
     newer.choose_menu(crate::hand_menu::Choice::AgentHome);
-    assert_eq!(sent(&mut newer), [ClientMessage::PlaceAgent { at: None }]);
+    assert_eq!(sent(&mut newer), [ClientMessage::SendAgentHome]);
     // Kept home, it is never called.
     newer.apply(space(|state| {
         state.movement = Some(AgentMovement::new(Movement::Home, Some(90)));
@@ -2577,28 +2537,20 @@ fn a_participant_has_the_agent_walk_with_them_or_stop_from_the_hand_menu() {
 #[test]
 fn while_the_agent_follows_the_speaker_its_workers_stay_home_and_it_faces_whoever_it_turned_to() {
     let away = tomori_protocol::Pose::at([1.0, 1.7, -1.0]).facing_towards([0.0, 1.6, 0.0]);
-    // Gone to someone with nobody to gather about, from a server that says how it moves: its workers stay home.
+    // Gone to someone: its workers stay home, gathered about the eyes there.
     let conversation = joined(|state| {
         state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(away);
+        state.away = Some(away);
     });
     let arrangement = conversation.arrangement();
-    assert!(arrangement.summoned());
+    assert!(arrangement.moved());
     assert_eq!(arrangement.workers, arrangement.home);
     assert_eq!(arrangement.audience, crate::anchors::EYES);
-    // With someone to gather about, they go with it, as a call stands it when it moves only when asked.
-    let conversation = joined(|state| {
-        state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(away);
-        state.summoner = Some([0.0, 1.6, 0.0]);
-    });
-    let arrangement = conversation.arrangement();
-    assert_eq!(arrangement.workers, arrangement.agent);
     // Away, it knows how far it stands from whoever it stands for, or else whoever it turned to; at home, or from
     // a server that says neither, or nonsense, nothing.
-    let near = |partner: Option<[f32; 3]>, facing: Option<[f32; 3]>, summoned| {
+    let near = |partner: Option<[f32; 3]>, facing: Option<[f32; 3]>, went| {
         joined(|state| {
-            state.summoned = summoned;
+            state.away = went;
             state.partner = partner;
             state.facing = facing;
         })
@@ -2615,7 +2567,7 @@ fn while_the_agent_follows_the_speaker_its_workers_stay_home_and_it_faces_whoeve
     // Sent home, it is home for whoever sent it, standing for nobody.
     let mut conversation = joined(|state| {
         state.movement = Some(tomori_protocol::AgentMovement::default());
-        state.summoned = Some(away);
+        state.away = Some(away);
         state.partner = beside;
     });
     conversation.send_agent_home();

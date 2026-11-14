@@ -1362,10 +1362,9 @@ pub(crate) fn destination(
     })
 }
 
-/// Where the agent stands when it goes to someone whose head is at `head`: `tomori_protocol::entourage::SUMMONED` in
-/// front of them, the way they face about the vertical, a little above their eyes, as a participant's summons stands
-/// it, with room for its wall beneath it however they sit or stand (`entourage::summoned`), facing them. See
-/// `design/environments.md`.
+/// Where the agent stands when it goes to someone whose head is at `head`: `tomori_protocol::stance::NEAR` in front of
+/// them, the way they face about the vertical, a little above their eyes, however they sit or stand
+/// (`stance::near`), facing them. See `design/environments.md`.
 pub(crate) fn before(head: &Pose) -> Pose {
     let ahead = forward(head);
     let (x, z) = match ahead[0].hypot(ahead[2]) {
@@ -1373,8 +1372,8 @@ pub(crate) fn before(head: &Pose) -> Pose {
         _ => (0.0, -1.0),
     };
     let [px, py, pz] = head.position;
-    let away = tomori_protocol::entourage::SUMMONED;
-    tomori_protocol::entourage::summoned(
+    let away = tomori_protocol::stance::NEAR;
+    tomori_protocol::stance::near(
         [px + x * away, py, pz + z * away],
         head.position,
         tomori_protocol::cluster::FLOOR,
@@ -1385,8 +1384,8 @@ pub(crate) fn before(head: &Pose) -> Pose {
 /// with, who pinned it and when it goes home. See `design/mcp.md`.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentState {
-    /// Where it was summoned to, or none at home.
-    pub summoned: Option<Pose>,
+    /// Where it stands away from home, or none at home.
+    pub away: Option<Pose>,
     /// Where it has reached, while it is on its way somewhere, or home.
     pub at: Option<Pose>,
     /// Where it turned to face, where it stands, if it did: whoever it glances at, or turned to, as clients turn it.
@@ -1412,7 +1411,7 @@ pub(crate) struct AgentState {
 /// `design/environments.md`.
 pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> Value {
     let home = crate::hub::agent_home(anchors);
-    let at = state.summoned.unwrap_or(home);
+    let at = state.away.unwrap_or(home);
     // The way it faces, its +Z, clockwise from −Z: or, where it turned to someone, towards them about the vertical, as
     // clients turn it where it stands.
     let facing = state
@@ -1424,7 +1423,7 @@ pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> V
     let mode = match (
         &state.walking,
         state.pinned,
-        state.summoned,
+        state.away,
         state.movement.mode,
     ) {
         (Some(walker), _, _, _) => format!("walking with {walker}"),
@@ -1442,7 +1441,7 @@ pub(crate) fn agent(anchors: &tomori_protocol::Anchors, state: &AgentState) -> V
     let mut agent = json!({
         "position": position(at.position),
         "facing_yaw": round(angles(facing).0, 0),
-        "at_home": state.summoned.is_none(),
+        "at_home": state.away.is_none(),
         "home": position(home.position),
         "mode": mode,
         "movement": movement,

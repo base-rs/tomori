@@ -6,7 +6,7 @@
 //! on its own moves; its mode, partner and return in `presence`; and the hand
 //! menu's **Tomori: stay here** and **Tomori: follow again**. See `design/mcp.md` and `design/environments.md`.
 use super::anchors::{rack, yard};
-use super::following::{ADA, follows, level, summoned};
+use super::following::{ADA, away_at, follows, level};
 use super::*;
 use crate::follow::CONVERSATION;
 use crate::hub::following::COMMIT;
@@ -49,7 +49,7 @@ fn near_or_beside_someone_it_stands_at_their_conversation_spot_and_in_front_with
     // Near her, by name: straight towards her from its home, 2 m from her, a little above her eyes, facing her.
     let moved = hub.agent_move_agent("session", "near ada", None).unwrap();
     assert_eq!(moved["moved"], true);
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
     assert!(at[0].abs() < 1e-4 && at[2] < ADA[2], "{at:?}");
     assert!((at[1] - 1.7).abs() < 1e-4);
@@ -70,13 +70,13 @@ fn near_or_beside_someone_it_stands_at_their_conversation_spot_and_in_front_with
         .unwrap();
     assert_eq!(front["moved"], true);
     // In front of her, as before, 2.3 m along the way she faces.
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!((level(at, ADA) - 2.3).abs() < 1e-3, "{at:?}");
     assert!(at[0].abs() < 1e-3);
     // Beside whoever asked, by their words: at her spot again.
     hub.agent_move_agent("session", "beside", Some("ada"))
         .unwrap();
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
     // Someone the words were not from, or nobody here, is refused.
     assert!(
@@ -109,13 +109,13 @@ fn standing_in_someones_way_close_by_it_stays_and_near_them_again_it_stays_on_it
         .unwrap()
         .following
         .backdate(Duration::from_secs(30));
-    let before = summoned(&hub, &space).unwrap();
+    let before = away_at(&hub, &space).unwrap();
     // She turns to look at it, so that it stands in her way: speaking to it, it only turns to her.
     let beyond: [f32; 3] = std::array::from_fn(|axis| ADA[axis] + (before[axis] - ADA[axis]) * 3.0);
     ada.send(looking(ADA, [beyond[0], 1.6, beyond[2]]));
     press(&ada, "u1", Vec::new());
     hub.flush_snapshots(Instant::now() + COMMIT);
-    assert_eq!(summoned(&hub, &space), Some(before));
+    assert_eq!(away_at(&hub, &space), Some(before));
     ada.send(ClientMessage::UtteranceCancel {
         utterance: "u1".to_owned(),
     });
@@ -126,7 +126,7 @@ fn standing_in_someones_way_close_by_it_stays_and_near_them_again_it_stays_on_it
         .agent_move_agent("session", "near ada", Some("ada"))
         .unwrap();
     assert_eq!(moved["moved"], false);
-    assert_eq!(summoned(&hub, &space), Some(before));
+    assert_eq!(away_at(&hub, &space), Some(before));
     assert!(apart(ADA, before, beyond) < 1e-3, "{before:?}");
 }
 
@@ -142,7 +142,7 @@ fn near_someone_who_has_not_reported_it_stands_beside_where_they_were_as_they_sp
         .values_mut()
         .for_each(|participant| participant.seen = None);
     hub.agent_move_agent("session", "near", None).unwrap();
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
     assert!(at[0].abs() < 1e-4, "{at:?}");
 }
@@ -169,7 +169,7 @@ fn by_an_object_it_stands_off_the_line_of_sight_to_it_where_it_stands_now_or_at_
         .agent_move_agent("session", "object yard:rack/7", Some("ada"))
         .unwrap();
     assert_eq!(moved["moved"], true);
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     let share = 2.0 / level(ADA, rack);
     let viewpoint = [
         rack[0] + (ADA[0] - rack[0]) * share,
@@ -191,7 +191,7 @@ fn by_an_object_it_stands_off_the_line_of_sight_to_it_where_it_stands_now_or_at_
     );
     hub.agent_move_agent("session", "object: rack/7", Some("ada"))
         .unwrap();
-    assert!(level(summoned(&hub, &space).unwrap(), moved_to) < 2.0);
+    assert!(level(away_at(&hub, &space).unwrap(), moved_to) < 2.0);
     // Near her, it stands beside her, off her line of sight to it.
     assert_eq!(
         outlet.describe(vec![
@@ -204,7 +204,7 @@ fn by_an_object_it_stands_off_the_line_of_sight_to_it_where_it_stands_now_or_at_
     );
     hub.agent_move_agent("session", "object rack-7", Some("ada"))
         .unwrap();
-    assert!((level(summoned(&hub, &space).unwrap(), ADA) - 1.5).abs() < 1e-3);
+    assert!((level(away_at(&hub, &space).unwrap(), ADA) - 1.5).abs() < 1e-3);
     // One without a position, one out of bounds, so left without one, and one no longer described are refused.
     assert!(
         hub.agent_move_agent("session", "object yard:post/1", Some("ada"))
@@ -282,8 +282,8 @@ fn near_someone_with_nowhere_clear_beside_them_it_stands_in_front_of_them() {
     let far = [40.0, 1.6, 40.0];
     ada.send(looking(far, [40.0, 1.6, 35.0]));
     hub.agent_move_agent("session", "beside ada", None).unwrap();
-    // In front of her, as a summons stood it, 2.3 m along the way she looks, though out of reach.
-    let at = summoned(&hub, &space).unwrap();
+    // In front of her, 2.3 m along the way she looks, though out of reach.
+    let at = away_at(&hub, &space).unwrap();
     assert!(level(at, [40.0, 1.9, 37.7]) < 1e-3, "{at:?}");
 }
 
@@ -294,7 +294,7 @@ fn whoever_asked_having_left_it_stands_beside_where_they_were_as_they_spoke() {
     said(&hub, &ada, &commands, Vec::new(), None);
     ada.send(ClientMessage::Leave);
     let moved = hub.agent_move_agent("session", "near", None).unwrap();
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!((level(at, ADA) - CONVERSATION).abs() < 1e-3, "{at:?}");
     // Talking with nobody here now.
     assert!(moved["agent"].get("partner").is_none());
@@ -330,7 +330,7 @@ fn by_an_object_with_nowhere_clear_beside_it_it_stays_where_it_is() {
         refused.contains("Nowhere beside that is clear"),
         "{refused}"
     );
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
 }
 
 #[test]
@@ -343,7 +343,7 @@ fn without_anyone_s_words_by_an_object_it_stands_as_for_someone_arriving() {
     hub.agent_move_agent("session", "object lamp-1", None)
         .unwrap();
     // From the arrival's eyes, 2 m before the lamp, then 1.5 m off that line.
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!((level(at, [0.0, 1.6, -4.0]) - 1.5).abs() < 1e-3, "{at:?}");
 }
 
@@ -398,7 +398,7 @@ fn stay_pins_it_and_follow_lets_it_follow_again_only_where_it_follows_the_speake
     ada.send(looking([6.0, 1.6, 6.0], [6.0, 1.6, 0.0]));
     press(&ada, "u1", Vec::new());
     hub.flush_snapshots(Instant::now() + COMMIT);
-    let pinned_at = summoned(&hub, &space).unwrap();
+    let pinned_at = away_at(&hub, &space).unwrap();
     ada.send(ClientMessage::UtteranceEnd {
         utterance: "u1".to_owned(),
         pointed: None,
@@ -406,12 +406,12 @@ fn stay_pins_it_and_follow_lets_it_follow_again_only_where_it_follows_the_speake
     let utterance = *hub.lock().utterances.keys().next().unwrap();
     hub.transcript_finished(utterance, "follow me again");
     while commands.try_recv().is_ok() {}
-    assert_eq!(summoned(&hub, &space), Some(pinned_at));
+    assert_eq!(away_at(&hub, &space), Some(pinned_at));
     let followed = hub
         .agent_move_agent("session", "follow me", Some("ada"))
         .unwrap();
     assert_eq!(followed["moved"], true);
-    let at = summoned(&hub, &space).unwrap();
+    let at = away_at(&hub, &space).unwrap();
     assert!(
         (level(at, [6.0, 1.6, 6.0]) - CONVERSATION).abs() < 1e-3,
         "{at:?}"

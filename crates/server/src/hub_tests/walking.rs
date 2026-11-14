@@ -14,9 +14,9 @@ use crate::hub::following::{POLL, SETTLE, WALK_IDLE};
 use serde_json::json;
 use tomori_protocol::{AgentMovement, Movement};
 
-/// Where the agent of `space` is summoned to.
-fn summoned(hub: &Hub, space: &str) -> Option<tomori_protocol::Pose> {
-    hub.lock().space(space).unwrap().summoned
+/// Where the agent of `space` stands away from home.
+fn away_at(hub: &Hub, space: &str) -> Option<tomori_protocol::Pose> {
+    hub.lock().space(space).unwrap().away
 }
 
 /// What `presence` says of the agent at `now`.
@@ -51,7 +51,7 @@ fn walk() -> (
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     // Her words, a tap, move nothing.
     asked(&hub, &ada, &commands, &space);
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
     (hub, space, commands, outlet, ada)
 }
 
@@ -78,7 +78,7 @@ fn walking_with_someone_it_keeps_with_them_across_many_moves_with_no_exchange_an
     let mode = walked["agent"]["mode"].as_str().unwrap().to_owned();
     assert!(mode.starts_with("walking with ada#"), "{mode}");
     assert!(walked["agent"].get("returns_home_in_s").is_none());
-    let at = summoned(&hub, &space).expect("gone to her");
+    let at = away_at(&hub, &space).expect("gone to her");
     assert!(
         (level(at.position, ADA) - CONVERSATION).abs() < 1e-3,
         "{at:?}"
@@ -103,7 +103,7 @@ fn walking_with_someone_it_keeps_with_them_across_many_moves_with_no_exchange_an
         now += Duration::from_secs(120);
         ada.send(looking(at, [at[0], 1.6, at[2] - 5.0]));
         hub.flush_snapshots(Instant::now() + SETTLE);
-        let to_her = summoned(&hub, &space).expect("followed");
+        let to_her = away_at(&hub, &space).expect("followed");
         assert!(
             (level(to_her.position, at) - CONVERSATION).abs() < 1e-3,
             "step {step}: {to_her:?}"
@@ -115,7 +115,7 @@ fn walking_with_someone_it_keeps_with_them_across_many_moves_with_no_exchange_an
         assert!(facing < 1e-3, "step {step}: {facing}");
         // Long past its 90 s return, it is still with her.
         hub.flush_snapshots(now);
-        assert_eq!(summoned(&hub, &space), Some(to_her));
+        assert_eq!(away_at(&hub, &space), Some(to_her));
     }
     // Arrived, it turns to her as she steps aside within 3 m.
     let aside = [3.8, 1.6, -6.0];
@@ -141,7 +141,7 @@ fn walking_with_someone_it_keeps_with_them_across_many_moves_with_no_exchange_an
         json!(60)
     );
     hub.flush_snapshots(ended + POLL + Duration::from_secs(91));
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
 }
 
 #[test]
@@ -163,10 +163,10 @@ fn a_walk_ends_as_they_ask_it_to_stay_or_go_home_or_stop_from_the_hand_menu() {
     // From the hand menu, she stops it, and it stays where it is, following again; asking again is refused.
     ada.send(ClientMessage::WalkAgent { walking: true });
     ada.read();
-    let at = summoned(&hub, &space);
+    let at = away_at(&hub, &space);
     ada.send(ClientMessage::WalkAgent { walking: false });
     assert_eq!(walker(&hub, &space), None);
-    assert_eq!(summoned(&hub, &space), at);
+    assert_eq!(away_at(&hub, &space), at);
     assert!(super::anchors::state(&ada).unwrap().walking.is_none());
     ada.send(ClientMessage::WalkAgent { walking: false });
     assert_eq!(ada.errors(), ["Tomori is not walking with you."]);
@@ -181,14 +181,14 @@ fn a_walk_ends_as_they_ask_it_to_stay_or_go_home_or_stop_from_the_hand_menu() {
         movement: AgentMovement::default(),
     });
     ada.send(ClientMessage::WalkAgent { walking: true });
-    let at = summoned(&hub, &space);
+    let at = away_at(&hub, &space);
     assert!(walker(&hub, &space).is_some());
     let followed = hub.agent_move_agent("session", "follow", None).unwrap();
     assert_eq!(
         (&followed["moved"], &followed["agent"]["mode"]),
         (&json!(false), &json!("away"))
     );
-    assert_eq!(summoned(&hub, &space), at);
+    assert_eq!(away_at(&hub, &space), at);
     // Kept home, it goes home, walking with nobody.
     ada.send(ClientMessage::WalkAgent { walking: true });
     ada.send(ClientMessage::SetAgentMovement {
@@ -206,10 +206,10 @@ fn a_walk_ends_as_they_leave_or_after_half_an_hour_with_nothing_between_them() {
     // It walks with Bob, who leaves: it stays where it is, its return home counting from then.
     bob.send(ClientMessage::WalkAgent { walking: true });
     assert_eq!(walker(&hub, &space).as_deref(), Some("/bob"));
-    let at = summoned(&hub, &space);
+    let at = away_at(&hub, &space);
     bob.send(ClientMessage::Leave);
     assert_eq!(walker(&hub, &space), None);
-    assert_eq!(summoned(&hub, &space), at);
+    assert_eq!(away_at(&hub, &space), at);
     let left = Instant::now();
     hub.flush_snapshots(left + POLL);
     assert_eq!(
@@ -232,7 +232,7 @@ fn a_walk_ends_as_they_leave_or_after_half_an_hour_with_nothing_between_them() {
     assert_eq!(walker(&hub, &space).as_deref(), Some("/ada"));
     hub.flush_snapshots(start + WALK_IDLE * 2);
     assert_eq!(walker(&hub, &space), None);
-    assert!(summoned(&hub, &space).is_some());
+    assert!(away_at(&hub, &space).is_some());
 }
 
 #[test]
@@ -309,11 +309,11 @@ fn only_a_participant_s_words_or_menu_start_a_walk_and_never_where_it_stays_home
         .unwrap();
     assert_eq!(walker(&hub, &space).as_deref(), Some("/bob"));
     arrived(&hub, &space);
-    let for_bob = summoned(&hub, &space);
+    let for_bob = away_at(&hub, &space);
     ada.send(looking([6.0, 1.6, 6.0], [6.0, 1.6, 0.0]));
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
     hub.flush_snapshots(Instant::now() + Duration::from_secs(1));
-    assert_eq!(summoned(&hub, &space), for_bob);
+    assert_eq!(away_at(&hub, &space), for_bob);
     super::timers::take(&hub, &space, &prompt);
     // Kept home, nobody starts one.
     ada.send(ClientMessage::SetAgentMovement {

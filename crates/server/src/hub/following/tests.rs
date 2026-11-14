@@ -42,7 +42,7 @@ fn a_glide_through_its_waypoint_is_followed_along_its_way_at_its_speed() {
         following.glide.as_ref().map(Glide::ends),
         Some(now + Duration::from_secs_f32(12.0 / STREAMING))
     );
-    // Without a glide it stands where it was summoned, or at home.
+    // Without a glide it stands where it went, or at home.
     let still = Following::default();
     assert_eq!(still.at(None, home, now), home);
     assert_eq!(still.deadline(), None);

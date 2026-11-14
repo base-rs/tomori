@@ -15,7 +15,6 @@ pub mod checklist;
 pub mod cluster;
 pub mod context;
 pub mod diagram;
-pub mod entourage;
 mod frame;
 mod keepalive;
 mod limits;
@@ -24,6 +23,7 @@ mod presence;
 mod projection;
 mod space;
 pub mod spawn;
+pub mod stance;
 pub mod text;
 pub mod world;
 
@@ -71,7 +71,7 @@ pub const GRID: &str = "minimal";
 pub const GRID_VERSION: u32 = 1;
 
 /// The protocol version sent in [`ClientMessage::Hello`] and [`ServerMessage::Welcome`].
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The HTTP path that clients use to open their connection.
 pub const CONNECT_PATH: &str = "/connect";

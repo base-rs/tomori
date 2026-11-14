@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Where participants arrive, and where Tomori's agent and its delegated workers stand in a space: the anchors the
-//! space's environment gives, `arrival`, `agent` and `workers`, which the server sends in the space's state, where a
-//! participant summoned the agent, and the placement of workers about the workers anchor, which an environment's
+//! space's environment gives, `arrival`, `agent` and `workers`, which the server sends in the space's state, where the
+//! agent stands away from its home, and the placement of workers about the workers anchor, which an environment's
 //! client crate may register beside its scenery. Every anchor faces along its +Z, the way it looks. Without them, the
 //! layout is exactly the default: home at the origin facing −Z, the swarm at [`crate::swarm::CENTER`], facing home, and
 //! the workers on [`crate::delegation::slot_position`]'s arc about home. See `design/environments.md`.
@@ -187,8 +187,8 @@ pub struct Placing<'a> {
     pub state: State,
     pub slot: usize,
     pub workers: &'a [Placed<'a>],
-    /// Where the eyes are of whoever the agent faces, whom its entourage gathers about: at home, the eyes at home,
-    /// [`EYES`]; summoned, those of whoever summoned it. The default arc curves about them.
+    /// Where the eyes are of whoever the workers gather about: the eyes at home, [`EYES`], wherever the agent goes. The
+    /// default arc curves about them.
     pub audience: Vec3,
 }
 
@@ -333,11 +333,10 @@ pub fn place(
 
 /// Where the agent and the workers stand in the joined space: the swarm at `agent`, where it went or was called, facing
 /// whoever it turned to, or else at its `home`, going there by `via` or streaming, as `stream` says; the workers about
-/// `workers`, the agent itself while its entourage goes with it, or else the home cluster anchor, by default its home,
-/// by `placement`, or in the home cluster, fitted to its `extent`, or on [`HomeArc`] without one, gathered about `audience`, the eyes of whoever it went to with its
-/// entourage, or else those at home; the eyes of whoever it stands for, its `partner`, while it is away, near whom the
-/// swarm draws in; and the `carriage` that takes the environment's own coordinates, its scenery's, walkable surfaces' and
-/// client side's, into the space's.
+/// `workers`, or else the home cluster anchor, by default its home, by `placement`, or in the home cluster, fitted to
+/// its `extent`, or on [`HomeArc`] without one, gathered about `audience`, the eyes at home, wherever the agent goes;
+/// the eyes of whoever it stands for, its `partner`, while it is away, near whom the swarm draws in; and the `carriage`
+/// that takes the environment's own coordinates, its scenery's, walkable surfaces' and client side's, into the space's.
 #[derive(Clone)]
 pub struct Arrangement {
     pub agent: Anchor,
@@ -378,7 +377,7 @@ impl Arrangement {
     }
 
     /// Whether the agent stands away from its home, or turned from the way its home faces.
-    pub fn summoned(&self) -> bool {
+    pub fn moved(&self) -> bool {
         self.agent != self.home
     }
 
@@ -759,7 +758,7 @@ mod tests {
         );
         assert_eq!(arrangement.extent, None);
         assert!(format!("{arrangement:?}").contains("placement: false"));
-        assert!(!arrangement.summoned());
+        assert!(!arrangement.moved());
         assert_eq!(arrangement.carriage, Anchor::HOME);
     }
 

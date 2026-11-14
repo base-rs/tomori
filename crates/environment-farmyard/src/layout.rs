@@ -874,7 +874,7 @@ mod tests {
     fn the_tomori_wall_beneath_the_agent_reads_and_the_agent_is_seen_from_where_participants_arrive()
      {
         use tomori_environment::sightlines::{READING, Solid, Spot, readable, seen};
-        use tomori_protocol::{Pose, entourage};
+        use tomori_protocol::{Pose, stance};
         let arrival = Spot::facing(ARRIVAL.to_array(), ARRIVAL_FACING.to_array());
         let eyes = arrival.eyes();
         let solids: Vec<Solid> = solids()
@@ -884,7 +884,7 @@ mod tests {
         // The agent faces the eyes where participants arrive, as the server registers it, and the Tomori wall stands
         // beneath it, as the server stands it, on the ground where they arrive.
         let agent = Pose::at(AGENT_HOME.to_array()).facing_towards(eyes);
-        let wall = entourage::wall_beneath(&agent, ARRIVAL.y);
+        let wall = stance::wall_beneath(&agent, ARRIVAL.y);
         assert_eq!(
             readable(&arrival, &Spot::new(wall.position, wall.yaw()), &solids),
             Ok(())
@@ -897,8 +897,8 @@ mod tests {
         // the ground.
         let far = Vec3::from_array(eyes).distance(Vec3::from_array(wall.position));
         assert!(far > 3.5 && far < READING, "{far}");
-        assert!((AGENT_HOME.y - wall.position[1] - entourage::BENEATH).abs() < 1e-5);
-        assert!(wall.position[1] - entourage::ROW_HALF >= ARRIVAL.y + entourage::CLEARANCE);
+        assert!((AGENT_HOME.y - wall.position[1] - stance::BENEATH).abs() < 1e-5);
+        assert!(wall.position[1] - stance::ROW_HALF >= ARRIVAL.y + stance::CLEARANCE);
         // Inside the fence, and the agent at the workbench, above the middle of its curve, facing out of the corner
         // as the bench does, the bench and its rack behind it, and the wall beneath it clear of the bench.
         let inside = FENCE.grown(-0.3);

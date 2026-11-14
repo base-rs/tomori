@@ -236,7 +236,7 @@ fn the_ferns_keep_the_views_the_status_wall_the_agent_and_the_anchors_rooms_open
     assert_eq!(noticed(&arrival, &board, layout::ARRIVAL.y, &yard), Ok(()));
     let agent =
         tomori_protocol::Pose::at(layout::AGENT_HOME.to_array()).facing_towards(arrival.eyes());
-    let wall = tomori_protocol::entourage::wall_beneath(&agent, layout::ARRIVAL.y);
+    let wall = tomori_protocol::stance::wall_beneath(&agent, layout::ARRIVAL.y);
     assert_eq!(
         seen(&arrival, &Spot::new(agent.position, agent.yaw()), &yard),
         Ok(())

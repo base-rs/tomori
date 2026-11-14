@@ -4,7 +4,7 @@
 //! Who comes near the space's anchors through the hub: a participant coming within an anchor's radius is told to its
 //! agent once, as Tomori's note, between its turns, or with participants' words; visitors and anchors without a radius
 //! tell nothing; and `presence` says each radius and who is within it. See `design/environments.md`.
-use super::following::{arrived, follows, level, summoned};
+use super::following::{arrived, away_at, follows, level};
 use super::timers::{handed, take};
 use super::*;
 use serde_json::{Value, json};
@@ -303,11 +303,11 @@ fn a_reply_to_a_note_about_someone_comes_to_them_and_keeps_with_them_through_it(
     );
     // Thinking, it has said nothing yet, and moves nothing.
     hub.flush_snapshots(Instant::now() + Duration::from_secs(2));
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
     // Its reply's speech queued, it comes straight to her, 2 m from her, as though she had spoken to it, and she is
     // whom it talks with.
     hub.speech_queued(&space, 2);
-    let at = summoned(&hub, &space).expect("gone to her");
+    let at = away_at(&hub, &space).expect("gone to her");
     assert!(
         (level(at, near) - crate::follow::CONVERSATION).abs() < 1e-3,
         "{at:?}"
@@ -316,14 +316,14 @@ fn a_reply_to_a_note_about_someone_comes_to_them_and_keeps_with_them_through_it(
     assert!(partner.as_str().unwrap().starts_with("ada#"), "{partner}");
     // More of it queued changes nothing.
     hub.speech_queued(&space, 1);
-    assert_eq!(summoned(&hub, &space), Some(at));
+    assert_eq!(away_at(&hub, &space), Some(at));
     // Its turn over, its voice still to come, it follows her on as she walks on.
     hub.drive_event(&space, Event::Idle);
     arrived(&hub, &space);
     let on = [5.0, 1.6, -9.0];
     ada.send(standing(on));
     hub.flush_snapshots(Instant::now() + SETTLE);
-    let to_her = summoned(&hub, &space).expect("followed");
+    let to_her = away_at(&hub, &space).expect("followed");
     assert!(
         (level(to_her, on) - crate::follow::CONVERSATION).abs() < 1e-3,
         "{to_her:?}"
@@ -336,7 +336,7 @@ fn a_reply_to_a_note_about_someone_comes_to_them_and_keeps_with_them_through_it(
     hub.flush_snapshots(Instant::now() + POLL);
     ada.send(standing([-5.0, 1.6, -9.0]));
     hub.flush_snapshots(Instant::now() + POLL + SETTLE);
-    assert_eq!(summoned(&hub, &space), Some(to_her));
+    assert_eq!(away_at(&hub, &space), Some(to_her));
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn a_note_s_reply_moves_nothing_without_speech_nor_for_a_timer_and_follows_whoev
     assert_eq!(prompts.len(), 1);
     take(&hub, &space, &prompts[0]);
     hub.flush_snapshots(Instant::now() + Duration::from_secs(2));
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
     // The timer fires: its reply to that is nobody's exchange, and it talks with nobody yet, so its speech moves
     // nothing.
     hub.lock().space_mut(&space).unwrap().model.lapse();
@@ -372,7 +372,7 @@ fn a_note_s_reply_moves_nothing_without_speech_nor_for_a_timer_and_follows_whoev
         },
     );
     hub.speech_queued(&space, 1);
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
     hub.speech_sent(&space);
     hub.drive_event(&space, Event::Idle);
     // While the agent works, Bob reaches the station, then Ada walks off and back to it, past its cooldown, and the
@@ -408,7 +408,7 @@ fn a_note_s_reply_moves_nothing_without_speech_nor_for_a_timer_and_follows_whoev
         },
     );
     hub.speech_queued(&space, 1);
-    let at = summoned(&hub, &space).expect("gone to Ada");
+    let at = away_at(&hub, &space).expect("gone to Ada");
     assert!(
         (level(at, ada_at) - crate::follow::CONVERSATION).abs() < 1e-3,
         "{at:?}"
@@ -433,16 +433,16 @@ fn a_note_s_reply_follows_nobody_who_has_left_nor_where_it_does_not_follow() {
         },
     );
     hub.speech_queued(&space, 1);
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
     // Following, but Bob gone by the time it speaks, nor does it.
     follows(&ada);
     bob.send(ClientMessage::Leave);
     hub.speech_queued(&space, 1);
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
     // Nor pinned.
     ada.send(ClientMessage::PinAgent { pinned: true });
     hub.speech_queued(&space, 1);
-    assert_eq!(summoned(&hub, &space), None);
+    assert_eq!(away_at(&hub, &space), None);
 }
 
 #[test]
@@ -465,7 +465,7 @@ fn a_spoken_reply_to_a_timer_goes_to_whom_it_talks_with() {
         },
     );
     hub.speech_queued(&space, 1);
-    let at = summoned(&hub, &space).expect("gone to her");
+    let at = away_at(&hub, &space).expect("gone to her");
     hub.speech_sent(&space);
     hub.drive_event(&space, Event::Idle);
     arrived(&hub, &space);
@@ -474,7 +474,7 @@ fn a_spoken_reply_to_a_timer_goes_to_whom_it_talks_with() {
     let off = [8.0, 1.6, 2.0];
     ada.send(standing(off));
     hub.flush_snapshots(Instant::now() + POLL + crate::hub::following::SETTLE);
-    assert_eq!(summoned(&hub, &space), Some(at));
+    assert_eq!(away_at(&hub, &space), Some(at));
     // The timer fires, naming nobody: its spoken reply goes to her, whom it talks with.
     hub.lock().space_mut(&space).unwrap().model.lapse();
     hub.tick_timers("2026-11-11T10:00:00Z".parse().unwrap());
@@ -488,7 +488,7 @@ fn a_spoken_reply_to_a_timer_goes_to_whom_it_talks_with() {
         },
     );
     hub.speech_queued(&space, 1);
-    let to_her = summoned(&hub, &space).expect("gone to her");
+    let to_her = away_at(&hub, &space).expect("gone to her");
     assert!(
         (level(to_her, off) - crate::follow::CONVERSATION).abs() < 1e-3,
         "{to_her:?}"

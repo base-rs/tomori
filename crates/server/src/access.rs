@@ -140,8 +140,8 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::DismissPanel { .. }
         | ClientMessage::SetWall { .. }
         | ClientMessage::AttachWall { .. }
-        // Visitors watch the agent, but summon it nowhere. See `design/environments.md`.
-        | ClientMessage::PlaceAgent { .. }
+        // Visitors watch the agent, but call it nowhere and send it nowhere. See `design/environments.md`.
+        | ClientMessage::SendAgentHome
         | ClientMessage::CallAgent
         | ClientMessage::PinAgent { .. }
         | ClientMessage::WalkAgent { .. }
@@ -340,7 +340,7 @@ mod tests {
                 locked: false,
                 reset: false,
             },
-            ClientMessage::PlaceAgent { at: None },
+            ClientMessage::SendAgentHome,
             ClientMessage::CallAgent,
             ClientMessage::PinAgent { pinned: true },
             ClientMessage::WalkAgent { walking: true },

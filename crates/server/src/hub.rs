@@ -793,10 +793,10 @@ struct SpaceRecord {
     /// What it projects as last built, for each kind of connection sent it, kept while it is at the same revision in
     /// the same second, so that every connection told of one change shares one build. See [`SpaceRecord::built`].
     built: std::cell::RefCell<Option<Built>>,
-    /// Where a participant or the agent summoned the agent to, in the space's coordinates, while it is not at its home:
-    /// for this run and this environment only, so the agent is at home whenever the space opens. See
+    /// Where the agent stands away from its home, in the space's coordinates, as it follows the speaker or was called or
+    /// asked to go there: for this run and this environment only, so the agent is at home whenever the space opens. See
     /// `design/environments.md`.
-    summoned: Option<tomori_protocol::Pose>,
+    away: Option<tomori_protocol::Pose>,
     /// While the agent is away, the eyes of whoever it stands for, as it was placed from them, so that clients draw the
     /// swarm in near them. See `design/avatars.md`.
     partner: Option<[f32; 3]>,
@@ -1527,10 +1527,10 @@ impl HubState {
         changed
     }
 
-    /// Summon the agent of the space `id` to `at`, for whoever's eyes are at `partner`, or send it home without it, for
+    /// Stand the agent of the space `id` at `at`, for whoever's eyes are at `partner`, or send it home without it, for
     /// everyone in the space; whether that changed where it stands. Nothing goes with it: its status wall and its
     /// workers stay at home. See `design/environments.md`.
-    fn summon(
+    fn place_agent(
         &mut self,
         id: &str,
         at: Option<tomori_protocol::Pose>,
@@ -1538,9 +1538,9 @@ impl HubState {
     ) -> bool {
         let partner = partner.filter(|_| at.is_some());
         let changed = self.space_mut(id).is_some_and(|record| {
-            let changed = record.summoned != at;
+            let changed = record.away != at;
             let told = changed || record.partner != partner;
-            record.summoned = at;
+            record.away = at;
             record.partner = partner;
             told
         });
@@ -3276,8 +3276,14 @@ impl Hub {
             return;
         }
         if protocol != PROTOCOL_VERSION {
+            // Shown as it is by a client of any release, older ones included, so it says which of the two to update.
+            let update = if protocol < PROTOCOL_VERSION {
+                "this client"
+            } else {
+                "the server"
+            };
             outbox.message(error_message(format!(
-                "Unsupported protocol {protocol}; this server speaks {PROTOCOL_VERSION}."
+                "Unsupported protocol {protocol}; this server speaks {PROTOCOL_VERSION}. Please update {update}."
             )));
             outbox.close();
             return;
@@ -4045,7 +4051,7 @@ impl Hub {
             acts: None,
             stopped: None,
             stage: crate::stage::Stage::default(),
-            summoned: None,
+            away: None,
             partner: None,
             following: following::Following::default(),
             seating: Default::default(),
@@ -4222,7 +4228,7 @@ impl Hub {
                     acts: None,
                     stopped: None,
                     stage,
-                    summoned: None,
+                    away: None,
                     partner: None,
                     following: following::Following::default(),
                     seating: Default::default(),
@@ -4963,14 +4969,11 @@ impl Hub {
                 // Named before the state is fitted to its budget, which counts them.
                 state.environment_version = environments.version(&space.model.environment);
                 // Where the environment has participants arrive and puts the agent's home and the workers, and where the
-                // agent was summoned to, for everyone in it. See `design/environments.md`.
+                // agent stands away from home, for everyone in it. See `design/environments.md`.
                 state.anchors = space.anchors(&environments);
                 // Where each worker stands, so that every client lays every cluster out alike.
                 state.clusters = space.seated(&environments).layouts();
-                state.summoned = space.summoned;
-                // The trigger summons it nowhere: it follows, and is called with the hand menu. See
-                // `design/environments.md`.
-                state.summons = false;
+                state.away = space.away;
                 state.pinned = space.following.pinned;
                 // Participants pin it, and let it follow again, from the hand menu. See `design/hand-menu.md`.
                 state.pins = true;

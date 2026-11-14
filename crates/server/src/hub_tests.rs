@@ -249,6 +249,39 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
+    assert!(
+        errors[0].ends_with("Please update the server."),
+        "{errors:?}"
+    );
+    assert!(matches!(client.outbox.pop(), Popped::Closed));
+
+    // An older client, as one from before protocol 3, is told to update itself, in the error its release shows.
+    let client = Client::connect(&hub, Access::open());
+    client.send(ClientMessage::Hello {
+        protocol: PROTOCOL_VERSION - 1,
+        participant: "eve".to_owned(),
+        name: "Eve".to_owned(),
+        names: false,
+        environments: None,
+        environment_state: false,
+        projection: false,
+        pairing_window: false,
+        speech_held: false,
+        images: false,
+        diagrams: false,
+        world_edges: false,
+        projection_patches: false,
+        live_panels: false,
+        spawns: false,
+        limits: None,
+    });
+    assert_eq!(
+        client.errors(),
+        [format!(
+            "Unsupported protocol {}; this server speaks {PROTOCOL_VERSION}. Please update this client.",
+            PROTOCOL_VERSION - 1
+        )]
+    );
     assert!(matches!(client.outbox.pop(), Popped::Closed));
 
     let client = Client::connect(&hub, Access::open());
@@ -6837,7 +6870,7 @@ fn a_panel_floating_beside_whoever_asked_goes_to_the_side_of_them_the_agent_is_n
         eyes[2] - crate::follow::CONVERSATION * towards.cos(),
     ];
     let agent = tomori_protocol::Pose::upright_facing(at, [eyes[0], 1.7, eyes[2]]);
-    hub.lock().summon(&space, Some(agent), Some(eyes));
+    hub.lock().place_agent(&space, Some(agent), Some(eyes));
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
     hub.drive_event(&space, Event::Delivered { key: prompt.key });
     let text = [
@@ -6875,7 +6908,7 @@ fn a_panel_floating_beside_whoever_asked_goes_to_the_side_of_them_the_agent_is_n
     ada.send(looking(eyes, ahead));
     let left = [eyes[0] - (at[0] - eyes[0]), 1.7, at[2]];
     let agent = tomori_protocol::Pose::upright_facing(left, [eyes[0], 1.7, eyes[2]]);
-    hub.lock().summon(&space, Some(agent), Some(eyes));
+    hub.lock().place_agent(&space, Some(agent), Some(eyes));
     let prompt = said(&hub, &ada, &commands, Vec::new(), None);
     hub.drive_event(&space, Event::Delivered { key: prompt.key });
     reply(
@@ -7617,7 +7650,7 @@ fn an_environment_s_anchors_reach_everyone_in_its_spaces_and_the_tomori_wall_sta
         .pop()
         .expect("sent as the environment changes");
     // The environment gives the Tomori wall no home of its own, so it stands beneath the agent's.
-    let beneath = tomori_protocol::entourage::wall_beneath(&agent, tomori_protocol::cluster::FLOOR);
+    let beneath = tomori_protocol::stance::wall_beneath(&agent, tomori_protocol::cluster::FLOOR);
     assert_eq!(moved.walls[0].pose, beneath);
     // The space's own edits to it, its grid and tilt, stand over that home.
     ada.send(ClientMessage::SetWall {
@@ -7650,7 +7683,7 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
     let ada = Client::greeted(&hub, Access::open(), "ada");
     // Outside a space, nowhere to call it to.
     ada.send(ClientMessage::CallAgent);
-    ada.send(ClientMessage::PlaceAgent { at: None });
+    ada.send(ClientMessage::SendAgentHome);
     ada.send(ClientMessage::SetAgentMovement {
         movement: tomori_protocol::AgentMovement::default(),
     });
@@ -7667,32 +7700,26 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
     });
     let vic = Client::greeted(&hub, Access::visitor(), "vic");
     vic.send(ClientMessage::Join { space });
-    let summoned = |client: &Client| {
+    let told = |client: &Client| {
         client
             .read()
             .into_iter()
             .filter_map(|message| match message {
-                ServerMessage::Space { state } => {
-                    Some((state.summoned, state.pinned, state.summons))
-                }
+                ServerMessage::Space { state } => Some((state.away, state.pinned)),
                 _ => None,
             })
             .next_back()
     };
-    // The server keeps no summons, so a client's trigger sends none, and one sent anyway changes nothing.
-    assert_eq!(summoned(&ada), Some((None, false, false)));
-    summoned(&vic);
-    ada.send(ClientMessage::PlaceAgent {
-        at: Some(upright([1.0, 1.4, -1.5])),
-    });
-    assert_eq!(summoned(&vic), None);
+    // The agent opens at home.
+    assert_eq!(told(&ada), Some((None, false)));
+    told(&vic);
     // Before Ada says where she is, Tomori cannot come to her.
     ada.send(ClientMessage::CallAgent);
     assert_eq!(ada.errors(), ["Tomori does not know where you are yet."]);
     // Called, everyone sees it beside her, 1.5 m from her eyes, pinned there.
     ada.send(looking([0.0, 1.6, 0.0], [0.0, 1.6, -3.0]));
     ada.send(ClientMessage::CallAgent);
-    let (at, pinned, _) = summoned(&vic).expect("told");
+    let (at, pinned) = told(&vic).expect("told");
     assert!(pinned);
     let at = at.expect("away").position;
     assert!(
@@ -7701,7 +7728,7 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
     );
     // A visitor watches, but calls nothing and sends nothing home.
     vic.send(ClientMessage::CallAgent);
-    vic.send(ClientMessage::PlaceAgent { at: None });
+    vic.send(ClientMessage::SendAgentHome);
     assert_eq!(
         vic.errors(),
         [
@@ -7710,11 +7737,11 @@ fn a_participant_calls_the_agent_and_sends_it_home_for_everyone_and_a_visitor_ca
         ]
     );
     // Sent home, everyone sees it at home again, unpinned.
-    ada.send(ClientMessage::PlaceAgent { at: None });
-    assert_eq!(summoned(&vic), Some((None, false, false)));
+    ada.send(ClientMessage::SendAgentHome);
+    assert_eq!(told(&vic), Some((None, false)));
     // Home already, sending it home tells nobody.
-    ada.send(ClientMessage::PlaceAgent { at: None });
-    assert_eq!(summoned(&vic), None);
+    ada.send(ClientMessage::SendAgentHome);
+    assert_eq!(told(&vic), None);
 }
 
 #[test]
@@ -7740,14 +7767,14 @@ fn the_status_wall_never_travels_with_the_agent_whether_it_moves_only_when_asked
         ada.send(looking(eyes, [5.0, 1.6, 0.0]));
         vic.read();
         ada.send(ClientMessage::CallAgent);
-        let (summoned, partner) = {
+        let (away, partner) = {
             let state = hub.lock();
             let record = state.space(&space).unwrap();
-            (record.summoned.expect("away"), record.partner)
+            (record.away.expect("away"), record.partner)
         };
         assert!(
-            (following::level(summoned.position, eyes) - crate::follow::CONVERSATION).abs() < 1e-3,
-            "{summoned:?}"
+            (following::level(away.position, eyes) - crate::follow::CONVERSATION).abs() < 1e-3,
+            "{away:?}"
         );
         // It stands for her, so that clients draw the swarm in near her.
         assert_eq!(partner, Some(eyes));
@@ -7756,7 +7783,7 @@ fn the_status_wall_never_travels_with_the_agent_whether_it_moves_only_when_asked
         reply(&hub, &space, "m2", PANEL_REPLY);
         let projection = ada.projection();
         assert_eq!(projection.walls[0].pose, crate::stage::default_stage());
-        ada.send(ClientMessage::PlaceAgent { at: None });
+        ada.send(ClientMessage::SendAgentHome);
     }
     // Nor does anyone move it.
     ada.read();
