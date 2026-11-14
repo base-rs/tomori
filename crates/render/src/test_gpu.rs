@@ -146,6 +146,158 @@ pub fn validate_wgsl(label: &str, source: &str) {
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("{}", error.emit_to_string_with_path(source, label)));
+    if let Some(function) = passes_a_uniform_by_value(&module) {
+        panic!(
+            "{label}: {function} is given a uniform by value in a vertex shader, which the Quest's driver cannot \
+             compile for both eyes by multiview: give it the fields it reads"
+        );
+    }
+}
+
+/// The name of a function a vertex entry point of `module` calls, directly or not, that is given by value a struct or an
+/// array read from a uniform: the uniform itself, an element of a uniform array, or a member of a uniform struct, however
+/// deeply nested, such as an eye's camera; or none. Scalars, vectors and matrices read from a uniform, which such a
+/// function is given instead, are not. The Quest 3's Adreno driver fails to make a pipeline drawing both eyes by multiview
+/// of such a shader, answering `vkCreateGraphicsPipelines` with `VK_ERROR_UNKNOWN`, which wgpu takes, silently, as the
+/// device lost.
+fn passes_a_uniform_by_value(module: &naga::Module) -> Option<String> {
+    let mut called = Vec::new();
+    let mut found = None;
+    for entry in &module.entry_points {
+        if entry.stage == naga::ShaderStage::Vertex {
+            calls(
+                module,
+                &entry.function,
+                &entry.function.body,
+                &mut called,
+                &mut found,
+            );
+        }
+    }
+    found
+}
+
+/// Every function `block` of `caller`, in `module`, calls, directly or not, into `called`, and the first given a struct
+/// or array read from a uniform into `found`.
+fn calls(
+    module: &naga::Module,
+    caller: &naga::Function,
+    block: &naga::Block,
+    called: &mut Vec<naga::Handle<naga::Function>>,
+    found: &mut Option<String>,
+) {
+    for statement in block.iter() {
+        match statement {
+            naga::Statement::Call {
+                function,
+                arguments,
+                ..
+            } => {
+                let callee = &module.functions[*function];
+                if found.is_none()
+                    && arguments
+                        .iter()
+                        .zip(&callee.arguments)
+                        .any(|(&argument, parameter)| {
+                            composite(module, parameter.ty)
+                                && from_uniform(module, caller, argument)
+                        })
+                {
+                    *found = Some(callee.name.clone().unwrap_or_default());
+                }
+                if !called.contains(function) {
+                    called.push(*function);
+                    calls(module, callee, &callee.body, called, found);
+                }
+            }
+            naga::Statement::Block(inner) => calls(module, caller, inner, called, found),
+            naga::Statement::If { accept, reject, .. } => {
+                calls(module, caller, accept, called, found);
+                calls(module, caller, reject, called, found);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases {
+                    calls(module, caller, &case.body, called, found);
+                }
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                calls(module, caller, body, called, found);
+                calls(module, caller, continuing, called, found);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether `ty` is a struct or an array, which a function is given whole.
+fn composite(module: &naga::Module, ty: naga::Handle<naga::Type>) -> bool {
+    matches!(
+        module.types[ty].inner,
+        naga::TypeInner::Struct { .. } | naga::TypeInner::Array { .. }
+    )
+}
+
+/// Whether `expression` of `function` is read from a uniform: loaded from it, or from an element or member of it, or
+/// from a variable it initialised, however deeply.
+fn from_uniform(
+    module: &naga::Module,
+    function: &naga::Function,
+    expression: naga::Handle<naga::Expression>,
+) -> bool {
+    match function.expressions[expression] {
+        naga::Expression::GlobalVariable(global) => {
+            module.global_variables[global].space == naga::AddressSpace::Uniform
+        }
+        naga::Expression::Load { pointer: base }
+        | naga::Expression::Access { base, .. }
+        | naga::Expression::AccessIndex { base, .. } => from_uniform(module, function, base),
+        naga::Expression::LocalVariable(local) => {
+            let mut values = Vec::from_iter(function.local_variables[local].init);
+            stored(function, &function.body, local, &mut values);
+            values
+                .into_iter()
+                .any(|value| from_uniform(module, function, value))
+        }
+        _ => false,
+    }
+}
+
+/// What `block` of `function` stores in its variable `local`, however deeply, into `values`.
+fn stored(
+    function: &naga::Function,
+    block: &naga::Block,
+    local: naga::Handle<naga::LocalVariable>,
+    values: &mut Vec<naga::Handle<naga::Expression>>,
+) {
+    for statement in block.iter() {
+        match statement {
+            naga::Statement::Store { pointer, value } => {
+                if matches!(function.expressions[*pointer], naga::Expression::LocalVariable(stored) if stored == local)
+                {
+                    values.push(*value);
+                }
+            }
+            naga::Statement::Block(inner) => stored(function, inner, local, values),
+            naga::Statement::If { accept, reject, .. } => {
+                stored(function, accept, local, values);
+                stored(function, reject, local, values);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases {
+                    stored(function, &case.body, local, values);
+                }
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                stored(function, body, local, values);
+                stored(function, continuing, local, values);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +336,127 @@ mod tests {
             let again = found(&Ok(gpu), Some("1")).expect("the GPU found");
             assert_eq!(again.adapter.get_info().name, name);
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "scaled is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_a_uniform_by_value_is_refused() {
+        validate_wgsl(
+            "eye.wgsl",
+            "struct Eye { matrix: mat4x4<f32>, pixels: f32 }
+@group(0) @binding(0) var<uniform> eyes: array<Eye, 2>;
+fn grown(eye: Eye) -> f32 { return eye.pixels; }
+fn scaled(eye: Eye, by: f32) -> f32 {
+    var total = 0.0;
+    if by > 0.0 { total = grown(eye); } else { total = 1.0; }
+    loop { if total > 0.0 { break; } continuing { total = total + 1.0; } }
+    switch u32(by) { default: { total = total * by; } }
+    { total = total + 0.0; }
+    return total * by;
+}
+@vertex
+fn vs_main(@builtin(instance_index) view: u32, @location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    let eye = eyes[view % 2u];
+    return eye.matrix * vec4<f32>(at * scaled(eye, 2.0) * scaled(eye, 1.0), 1.0);
+}
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grown is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_its_uniform_by_value_is_refused() {
+        validate_wgsl(
+            "camera.wgsl",
+            "struct Camera { matrix: mat4x4<f32>, pixels: f32 }
+@group(0) @binding(0) var<uniform> camera: Camera;
+fn grown(camera: Camera) -> f32 { return camera.pixels; }
+@vertex
+fn vs_main(@location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return camera.matrix * vec4<f32>(at * grown(camera), 1.0);
+}
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grown is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_a_struct_nested_in_a_uniform_by_value_is_refused() {
+        validate_wgsl(
+            "nested.wgsl",
+            "struct Camera { matrix: mat4x4<f32>, pixels: f32 }
+struct Globals { time: f32, camera: Camera }
+@group(0) @binding(0) var<uniform> globals: Globals;
+fn grown(camera: Camera) -> f32 { return camera.pixels; }
+@vertex
+fn vs_main(@location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(at * grown(globals.camera), 1.0);
+}
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grown is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_an_element_of_nested_uniform_arrays_by_value_is_refused() {
+        validate_wgsl(
+            "arrays.wgsl",
+            "struct Camera { matrix: mat4x4<f32>, pixels: f32 }
+struct Globals { eyes: array<array<Camera, 2>, 2> }
+@group(0) @binding(0) var<uniform> globals: Globals;
+fn grown(camera: Camera) -> f32 { return camera.pixels; }
+@vertex
+fn vs_main(@builtin(instance_index) index: u32, @location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(at * grown(globals.eyes[index % 2u][1]), 1.0);
+}
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grown is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_a_copy_of_its_uniform_by_value_is_refused() {
+        validate_wgsl(
+            "copy.wgsl",
+            "struct Camera { matrix: mat4x4<f32>, pixels: f32 }
+@group(0) @binding(0) var<uniform> camera: Camera;
+fn grown(camera: Camera) -> f32 { return camera.pixels; }
+@vertex
+fn vs_main(@builtin(instance_index) index: u32, @location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    var copy: Camera;
+    var unused = 1.0;
+    if index > 0u { unused = 2.0; } else { copy = camera; }
+    switch index { default: { unused = 3.0; } }
+    loop { if unused > 0.0 { break; } continuing { unused = 1.0; } }
+    { unused = unused + 0.0; }
+    return vec4<f32>(at * grown(copy) * unused, 1.0);
+}
+",
+        );
+    }
+
+    #[test]
+    fn a_vertex_shader_passing_a_uniform_s_fields_or_its_own_values_is_valid() {
+        // A scalar uniform and a uniform's scalar, vector and matrix fields are passed as they should be; a struct made
+        // in the shader, or a copy of one, and an argument passed on, are not read from a uniform.
+        validate_wgsl(
+            "fields.wgsl",
+            "struct Camera { matrix: mat4x4<f32>, pixels: f32, eye: vec4<f32> }
+@group(0) @binding(0) var<uniform> time: f32;
+@group(0) @binding(1) var<uniform> camera: Camera;
+fn twice(value: f32) -> f32 { return value * 2.0; }
+fn placed(matrix: mat4x4<f32>, eye: vec3<f32>, at: vec3<f32>) -> vec4<f32> { return matrix * vec4<f32>(at - eye, 1.0); }
+fn grown(camera: Camera) -> f32 { return camera.pixels; }
+fn passed(camera: Camera) -> f32 { return grown(camera); }
+@vertex
+fn vs_main(@location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    let made = Camera(camera.matrix, twice(time), camera.eye);
+    var copy = made;
+    let grown = passed(made) + grown(copy);
+    return placed(camera.matrix, camera.eye.xyz, at * twice(camera.pixels) * grown);
+}
+",
+        );
     }
 
     #[test]

@@ -174,6 +174,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_shader_is_valid_wgsl() {
+        tomori_render::test_gpu::validate_wgsl("letterbox", SHADER);
+    }
+
+    #[test]
     fn the_output_fits_whole_and_centred_with_bars() {
         // The same aspect fills the window.
         assert_eq!(fit((1920, 1080), (960, 540)), [0.0, 0.0, 960.0, 540.0]);
