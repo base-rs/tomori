@@ -33,6 +33,17 @@ pub(crate) struct Instance {
     pub(crate) glow: f32,
 }
 
+impl Instance {
+    /// Whether it turns its cube inside out, as a negative scale or a basis that is not a rotation would: the swarm's
+    /// pipeline culls back faces, so every instance must keep its cube's winding. See `design/rendering.md`.
+    #[cfg(test)]
+    pub(crate) fn mirrored(&self) -> bool {
+        let scale = glam::Vec3::from_array(self.scale);
+        glam::Mat3::from_cols_array_2d(&self.basis).determinant() * scale.x * scale.y * scale.z
+            < 0.0
+    }
+}
+
 impl Default for Instance {
     fn default() -> Self {
         Self {
@@ -299,7 +310,10 @@ pub struct Renderer {
     avatar_failures: tomori_scene::avatar::Failures,
     /// The eyes' targets' size, for an avatar's scenery made later.
     size: (u32, u32),
+    /// Tomori's cubes and the closed solids, drawn without their back faces.
     pipeline: wgpu::RenderPipeline,
+    /// The open solids, drawn with both faces.
+    two_sided: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     instances: wgpu::Buffer,
     cameras: [wgpu::Buffer; 2],
@@ -456,54 +470,56 @@ impl Renderer {
             bind_group_layouts: &[Some(&camera_layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("swarm pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &VERTEX_ATTRIBUTES,
-                    }),
-                    Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<Instance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &INSTANCE_ATTRIBUTES,
-                    }),
-                ],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: samples,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        // Tomori's cubes and the closed solids are drawn without their back faces, an open solid with both.
+        let swarm = |label, closed| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: size_of::<Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &VERTEX_ATTRIBUTES,
+                        }),
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: size_of::<Instance>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &INSTANCE_ATTRIBUTES,
+                        }),
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: primitive(closed),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: samples,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = swarm("swarm pipeline", true);
+        let two_sided = swarm("swarm pipeline, both faces", false);
         let mesh = cube();
         let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("unit cube"),
@@ -568,6 +584,7 @@ impl Renderer {
             avatar_failures: sceneries.avatar_failures(),
             size: (width, height),
             pipeline,
+            two_sided,
             vertices,
             instances,
             cameras,
@@ -1313,7 +1330,7 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.instances.slice(..));
             pass.draw(0..self.vertex_count, 0..self.shown.len() as u32);
             // Volumes' solids, by the same pipeline, are opaque bodies too.
-            self.solids.draw(&mut pass);
+            self.solids.draw(&mut pass, &self.pipeline, &self.two_sided);
             self.controllers.draw(&mut pass);
             self.profiler.mark(&mut pass, profiled, eye, 1);
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
@@ -1851,6 +1868,17 @@ fn swarm_instances(swarm: &Swarm, scene: &mut Vec<Instance>) {
             color,
             ..Default::default()
         });
+    }
+}
+
+/// How the swarm's pipeline draws a mesh's triangles: a `closed` one, wound counterclockwise seen from outside, as
+/// [`cube`] and the closed solids are, without its back faces, which are behind its front faces from anywhere outside
+/// it; an open one with both. See `design/rendering.md`.
+pub(crate) fn primitive(closed: bool) -> wgpu::PrimitiveState {
+    wgpu::PrimitiveState {
+        front_face: wgpu::FrontFace::Ccw,
+        cull_mode: closed.then_some(wgpu::Face::Back),
+        ..Default::default()
     }
 }
 
@@ -3543,6 +3571,8 @@ mod tests {
                         working: true,
                     };
                     renderer.update(&queue, &swarm, None, false);
+                    // No cube is mirrored, which would turn it inside out to the swarm's pipeline, which culls back faces.
+                    assert!(renderer.scene.iter().all(|cube| !cube.mirrored()));
                     renderer.render(&device, &queue, &targets, &matrices, Mat4::IDENTITY, &[]);
                 }
                 // Exercise the same single-view + resized-depth path as desktop.
