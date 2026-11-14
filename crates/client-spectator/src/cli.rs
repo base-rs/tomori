@@ -15,11 +15,11 @@ pub fn parse_voices(value: &str) -> Result<Hearing> {
 /// Where the spectator's view goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// A borderless window.
+    /// A window, decorated unless `--borderless`.
     Window,
     /// A PipeWire video source, without a window.
     Pipewire,
-    /// A PipeWire video source, with a preview window.
+    /// A PipeWire video source, with a preview window, decorated unless `--borderless`.
     PipewirePreview,
     Help,
 }
@@ -46,6 +46,7 @@ impl Command {
             follow: None,
             token,
             voices: Hearing::All,
+            borderless: false,
         };
         let (mut audio_output, mut mode) = (None, None);
         let mut arguments = arguments.into_iter();
@@ -62,6 +63,7 @@ impl Command {
                 "--follow" => options.follow = Some(value("a participant name")?),
                 "--voices" => options.voices = parse_voices(&value("all, agent or none")?)?,
                 "--audio-output" => audio_output = Some(value("an output's name")?),
+                "--borderless" => options.borderless = true,
                 _ if mode.is_none() => {
                     mode = Some(match argument.as_str() {
                         "--pipewire" => Mode::Pipewire,
@@ -74,6 +76,11 @@ impl Command {
             }
         }
         let mode = mode.unwrap_or(Mode::Window);
+        // Without a window there is nothing to be borderless.
+        anyhow::ensure!(
+            !options.borderless || mode != Mode::Pipewire,
+            "--borderless applies only to the window and --pipewire-preview; use --help"
+        );
         #[cfg(not(target_os = "linux"))]
         {
             anyhow::ensure!(
@@ -121,16 +128,17 @@ impl Command {
 }
 
 /// What `--help` shows.
-pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--audio-output NAME]
+pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--audio-output NAME]
 
 Renders a live space as a read-only view that follows a participant, for OBS or a call.
 
 Outputs:
-  (none)              a borderless 1080p window; Escape closes it.
+  (none)              a 1080p window, with a title bar, to move, resize or make full screen; Escape closes it.
   --pipewire          a headless PipeWire video source, Tomori-Spectator (Linux; Ctrl-C to stop).
   --pipewire-preview  the PipeWire video source, with a preview window.
 
 Options:
+  --borderless         show the window, or --pipewire-preview's, without a title bar or border, at least 1080p, for a clean capture into OBS or a shared screen.
   --server ADDRESS     connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.
   --token TOKEN        a token from the server, such as from `tomori-server auth mint`; TOMORI_TOKEN does the same.
   --space ID           join this space (see `tomori discover --server ADDRESS`).
@@ -204,6 +212,7 @@ mod tests {
                 follow: Some("Ada".into()),
                 token: Some("tomori_t".into()),
                 voices: Hearing::All,
+                borderless: false,
             }
         );
         let command = parse(&["--server", "h:1", "--token", "tomori_u"]).unwrap();
@@ -224,6 +233,40 @@ mod tests {
             "--voices takes all, agent or none, not \"some\""
         );
         assert_eq!(error(&["--voices"]), "--voices needs all, agent or none");
+    }
+
+    #[test]
+    fn the_window_is_decorated_unless_borderless() {
+        let command = parse(&[]).unwrap();
+        assert_eq!(command.mode, Mode::Window);
+        assert!(!command.options.borderless);
+        let command = parse(&["--borderless"]).unwrap();
+        assert_eq!(command.mode, Mode::Window);
+        assert!(command.options.borderless);
+        // The PipeWire source alone has no window to be borderless, so it is refused rather than ignored.
+        assert_eq!(
+            error(&["--pipewire", "--borderless"]),
+            "--borderless applies only to the window and --pipewire-preview; use --help"
+        );
+        assert_eq!(
+            error(&["--borderless", "--pipewire"]),
+            "--borderless applies only to the window and --pipewire-preview; use --help"
+        );
+        // The preview window is decorated too, unless borderless.
+        #[cfg(target_os = "linux")]
+        {
+            let command = parse(&["--pipewire-preview"]).unwrap();
+            assert_eq!(command.mode, Mode::PipewirePreview);
+            assert!(!command.options.borderless);
+            let command = parse(&["--pipewire-preview", "--borderless"]).unwrap();
+            assert_eq!(command.mode, Mode::PipewirePreview);
+            assert!(command.options.borderless);
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            error(&["--pipewire-preview", "--borderless"]),
+            "PipeWire video output requires Linux"
+        );
     }
 
     #[test]
@@ -270,6 +313,7 @@ mod tests {
             "--pipewire-preview",
             "--audio-output",
             "--voices",
+            "--borderless",
         ] {
             assert!(HELP.contains(output), "{output}");
         }

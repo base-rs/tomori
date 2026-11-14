@@ -1,11 +1,11 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The spectator's borderless window, following a participant in a live space; and, with a PipeWire producer, the spectator's video source with the window as its preview: the window's contents, as `tomori-client-desktop`'s window shows them. See `design/spectator.md`.
+//! The spectator's window, decorated or borderless, following a participant in a live space; and, with a PipeWire producer, the spectator's video source with the window as its preview: the window's contents, as `tomori-client-desktop`'s window shows them. See `design/spectator.md`.
 use crate::{
     graphics::Renderer,
     pipewire_video::{self, Producer, Video},
-    spectator_feed::Feed,
+    spectator_feed::{Feed, SpectatorOptions},
     spectator_view::{RenderInputs, SpectatorView},
 };
 use anyhow::Result;
@@ -34,16 +34,17 @@ pub struct SpectatorWindow {
 }
 
 impl SpectatorWindow {
-    /// The spectator's window: borderless, which Escape closes, at 1080p.
-    pub fn settings() -> Settings {
+    /// The spectator's window, as `options` ask, which Escape closes, at 1080p: decorated, with the platform's title bar, so that it can be moved, resized to any size and aspect and made full screen; or, if [`SpectatorOptions::borderless`], without decorations and at least 1080p, for a clean capture.
+    pub fn settings(options: &SpectatorOptions) -> Settings {
+        let borderless = options.borderless;
         // Request physical render pixels, not logical points, so desktop DPI scaling doesn't silently change the intended OBS capture resolution.
         let size = PhysicalSize::new(WIDTH, HEIGHT);
         Settings {
             title: TITLE,
-            decorations: false,
+            decorations: !borderless,
             size: size.into(),
-            // Keep the content itself at least 1080p even when the desktop work area excludes a panel.
-            min_size: Some(size.into()),
+            // Keep a borderless capture's content at least 1080p even when the desktop work area excludes a panel.
+            min_size: borderless.then_some(size.into()),
         }
     }
 
@@ -76,7 +77,7 @@ impl SpectatorWindow {
             gpu.width,
             gpu.height
         );
-        log::info!("Spectator: Esc closes the borderless window.");
+        log::info!("Spectator: Esc closes the window.");
         let next_video_frame = video.as_ref().map(|_| Instant::now());
         Self {
             renderer,
@@ -224,10 +225,7 @@ impl Contents for SpectatorWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        spectator_feed::SpectatorOptions,
-        test_support::{Nowhere, Silent},
-    };
+    use crate::test_support::{Nowhere, Silent};
     use std::process::{Command, Stdio};
     use tomori_client_desktop::window::test::{TestSurface, with_gpu};
     use winit::{
@@ -386,8 +384,19 @@ mod tests {
     }
 
     #[test]
-    fn the_spectator_window_is_borderless_at_1080p_physical_pixels() {
-        let window = SpectatorWindow::settings();
+    fn the_spectator_window_is_decorated_and_resizable_at_1080p_physical_pixels() {
+        let window = SpectatorWindow::settings(&SpectatorOptions::new());
+        assert_eq!(window.title, TITLE);
+        assert!(window.decorations);
+        assert_eq!(window.size, Size::Physical(PhysicalSize::new(1920, 1080)));
+        assert_eq!(window.min_size, None);
+    }
+
+    #[test]
+    fn a_borderless_spectator_window_is_at_least_1080p_physical_pixels() {
+        let mut options = SpectatorOptions::new();
+        options.borderless = true;
+        let window = SpectatorWindow::settings(&options);
         assert_eq!(window.title, TITLE);
         assert!(!window.decorations);
         assert_eq!(window.size, Size::Physical(PhysicalSize::new(1920, 1080)));

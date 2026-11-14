@@ -63,10 +63,14 @@ pub struct SpectatorOptions {
     pub token: Option<String>,
     /// Whose voices it plays: everyone's, by default, the agent's speech alone, or none. See `design/spectator.md`.
     pub voices: Hearing,
+    /// Whether its window, or the PipeWire source's preview window, is borderless, for a clean capture into OBS or a
+    /// shared screen, rather than a decorated window with the platform's title bar that can be moved, resized and made
+    /// full screen. The PipeWire source without a window has no window to be borderless. See `design/spectator.md`.
+    pub borderless: bool,
 }
 
 impl SpectatorOptions {
-    /// No server, space, participant or token, and every voice played.
+    /// No server, space, participant or token, every voice played, and a decorated window.
     pub fn new() -> Self {
         Self::default()
     }

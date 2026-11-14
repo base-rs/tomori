@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The Tomori spectator: a read-only view of a live space that follows a participant, for OBS and calls, in a borderless window, as a PipeWire video source without a window, or both. See `design/spectator.md`.
+//! The Tomori spectator: a read-only view of a live space that follows a participant, for OBS and calls, in a window, decorated or borderless, as a PipeWire video source without a window, or both. See `design/spectator.md`.
 //!
 //! The `tomori-spectator` executable runs it, drawing Tomori's own environments, [`app::sceneries`], behind the default `app` feature; `tomori --spectator…` runs it too, drawing the build's. Its interfaces change with the environment framework ([#75](https://github.com/base-rs/tomori/issues/75), [#77](https://github.com/base-rs/tomori/issues/77)).
 #[cfg(feature = "app")]
@@ -9,6 +9,7 @@ pub mod app;
 mod child_process;
 pub mod cli;
 pub mod headless_spectator;
+mod letterbox;
 pub mod pipewire_video;
 pub mod spectator_feed;
 pub mod spectator_view;
@@ -34,10 +35,10 @@ use spectator_window::SpectatorWindow;
 use tomori_client_desktop::desktop_window;
 use tomori_render::scenery::Sceneries;
 
-/// Render a read-only, participant-following view of a live space, in a borderless window, drawing `sceneries` and the grid.
+/// Render a read-only, participant-following view of a live space, in a decorated window, or a borderless one if `options.borderless`, drawing `sceneries` and the grid.
 pub fn run_window(options: SpectatorOptions, sceneries: Sceneries) -> anyhow::Result<()> {
     desktop_window::show(
-        SpectatorWindow::settings(),
+        SpectatorWindow::settings(&options),
         SpectatorWindow::open,
         (Feed::new(options).with_sceneries(sceneries), None),
     )
@@ -50,10 +51,10 @@ pub fn run_pipewire(options: SpectatorOptions, sceneries: Sceneries) -> anyhow::
     })
 }
 
-/// PipeWire video source of a live space, with a preview window, drawing `sceneries` and the grid. It needs PipeWire, on Linux.
+/// PipeWire video source of a live space, with a preview window, decorated or borderless as `options.borderless` says, drawing `sceneries` and the grid. It needs PipeWire, on Linux.
 pub fn run_pipewire_preview(options: SpectatorOptions, sceneries: Sceneries) -> anyhow::Result<()> {
     desktop_window::show(
-        SpectatorWindow::settings(),
+        SpectatorWindow::settings(&options),
         SpectatorWindow::open,
         (
             Feed::new(options).with_sceneries(sceneries),

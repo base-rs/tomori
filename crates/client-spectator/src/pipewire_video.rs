@@ -23,7 +23,7 @@ const FRAME_BYTES: usize = (ROW_BYTES * HEIGHT) as usize;
 pub struct Video {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
-    blitter: Option<wgpu::util::TextureBlitter>,
+    letterbox: Option<crate::letterbox::Letterbox>,
     buffer: wgpu::Buffer,
     pending: Option<Receiver<Result<(), wgpu::BufferAsyncError>>>,
     producer: Producer,
@@ -31,7 +31,7 @@ pub struct Video {
 }
 
 impl Video {
-    /// Frames for `producer` to publish, drawn into [`Self::view`], with a preview blitter for a window's `surface_format` if there is one.
+    /// Frames for `producer` to publish, drawn into [`Self::view`], with a letterboxed preview for a window's `surface_format` if there is one.
     pub fn new(
         device: &wgpu::Device,
         surface_format: Option<wgpu::TextureFormat>,
@@ -60,7 +60,8 @@ impl Video {
         Self {
             texture,
             view,
-            blitter: surface_format.map(|format| wgpu::util::TextureBlitter::new(device, format)),
+            letterbox: surface_format
+                .map(|format| crate::letterbox::Letterbox::new(device, format)),
             buffer,
             pending: None,
             producer,
@@ -68,7 +69,7 @@ impl Video {
         }
     }
 
-    /// Copy the latest frame into a window's `target`, scaled to fit, as its preview.
+    /// Copy the latest frame into a window's `target`, as its preview: whole, as large as it fits and centred, with black bars beside or above and below it, rather than stretched.
     ///
     /// # Panics
     ///
@@ -77,10 +78,10 @@ impl Video {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("spectator preview"),
         });
-        self.blitter
+        self.letterbox
             .as_ref()
-            .expect("a preview blitter, for a window's surface format")
-            .copy(device, &mut encoder, &self.view, target);
+            .expect("a preview, for a window's surface format")
+            .draw(device, &mut encoder, &self.view, target);
         queue.submit([encoder.finish()]);
     }
 
