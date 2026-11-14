@@ -44,12 +44,12 @@ impl Hub {
             ClientMessage::Ping { .. } | ClientMessage::Pong { .. } => {
                 unreachable!("handled before membership")
             }
-            message @ (ClientMessage::ListSpaces { .. }
+            message @ (ClientMessage::ListSpaces
             | ClientMessage::SetName { .. }
             | ClientMessage::CreateSpace { .. }
             | ClientMessage::ListSessions { .. }
             | ClientMessage::Join { .. }
-            | ClientMessage::Leave { .. }
+            | ClientMessage::Leave
             | ClientMessage::SetMode { .. }
             | ClientMessage::SetInstructions { .. }
             | ClientMessage::DeleteSpace { .. }
@@ -66,7 +66,7 @@ impl Hub {
             | ClientMessage::Answer { .. }
             | ClientMessage::SetAttribution { .. }
             | ClientMessage::Replay { .. }
-            | ClientMessage::StopReplay { .. }) => {
+            | ClientMessage::StopReplay) => {
                 self.act_on_speech(state, connection, participant, space, message, deferred);
             }
             message @ (ClientMessage::Presence { .. } | ClientMessage::Engagement { .. }) => {
@@ -74,11 +74,11 @@ impl Hub {
             }
             message @ (ClientMessage::PairBegin { .. }
             | ClientMessage::PairReveal { .. }
-            | ClientMessage::Knock { .. }
+            | ClientMessage::Knock
             | ClientMessage::DecideKnock { .. }
-            | ClientMessage::PairCancel { .. }
-            | ClientMessage::OpenPairing { .. }
-            | ClientMessage::ClosePairing { .. }) => {
+            | ClientMessage::PairCancel
+            | ClientMessage::OpenPairing
+            | ClientMessage::ClosePairing) => {
                 self.act_on_pairing(state, connection, participant, space, message, deferred);
             }
             message @ (ClientMessage::AddWall { .. }
@@ -99,12 +99,12 @@ impl Hub {
             }
             message @ (ClientMessage::SetEnvironment { .. }
             | ClientMessage::EnvironmentIntent { .. }
-            | ClientMessage::WatchCards { .. }
+            | ClientMessage::WatchCards
             | ClientMessage::PlaceCard { .. }) => {
                 self.act_on_environment(state, connection, participant, space, message, deferred);
             }
             message @ (ClientMessage::PlaceAgent { .. }
-            | ClientMessage::CallAgent { .. }
+            | ClientMessage::CallAgent
             | ClientMessage::PinAgent { .. }
             | ClientMessage::WalkAgent { .. }
             | ClientMessage::SetAgentMovement { .. }) => {
