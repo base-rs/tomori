@@ -203,28 +203,6 @@ cmake --build /tmp/opencode/obs-pwvideo-build/build
 
 Run these commands from the project directory; the clone directory must not already exist. The plugin is **not installed automatically**. When ready to change OBS, follow [the plugin's installation instructions](https://github.com/hoshinolina/obs-pwvideo#how-to-build-from-source), using the patched build and its `data` directory. Check for an existing installation before copying anything. Do not install both patched and AUR versions at once. OBS must be restarted to load a different plugin; do not restart during a stream. Verify the live preview, performance and audio/video sync before going live. Keep the `tomori-spectator` window and window capture as the fallback.
 
-### Legacy PC bridge audio (not used by server clients)
-
-The following feeds and helper belong to the older PC bridge. The current server-connected headset and spectator do not publish audio to them; use the spectator's desktop audio output instead. These notes are retained only for the legacy bridge.
-
-For separate legacy OBS volume controls, use `/spectator/microphone.wav` and `/spectator/agent.wav` as two Media Sources instead of the mixed `audio.wav`. All three are live 16 kHz mono streams on the same loopback bridge; don't add both the mixed stream and the individual streams or the sound will be doubled.
-
-### Experimental PipeWire/PulseAudio inputs (Linux)
-
-For the legacy bridge only, as an alternative to its OBS Media Sources, keep that bridge running and start the audio helper in a separate terminal:
-
-```sh
-node bridge/pipewire-audio.mjs
-```
-
-It exposes **Tomori-Quest-Microphone** and **Tomori-Assistant-Voice** as two audio inputs. In OBS, add an **Audio Input Capture (PulseAudio)** source for each and choose the matching device. Start the helper before adding or selecting the OBS sources; leave the existing OBS scene unchanged until you are ready to test. Do not simultaneously add the WAV Media Sources for the same audio.
-
-The helper subscribes to the bridge's existing local HTTP/WAV feeds and publishes them through PipeWire's PulseAudio compatibility layer; the headset-to-PC transport is unchanged. It creates two dedicated silent output sinks and two remapped inputs in the current user session, without deliberately changing the default devices or sending audio to the speakers. The internal sinks and their monitor sources can also appear in device lists. Only one helper can run at a time. It requires `pactl`, `gst-launch-1.0`, GStreamer's `rawaudioparse`, `queue` and `pulsesink` elements, and a PulseAudio-compatible server supporting `module-null-sink` and `module-remap-source`.
-
-When the bridge disconnects, the helper emits silence and retries; it can stay running across a bridge restart. **The OBS PulseAudio input did not reconnect automatically after the helper itself was stopped and restarted** in an isolated test. In that case, mute the affected OBS sources and reselect their devices or recreate the sources when safe. Ctrl-C or SIGTERM stops the helper and removes the virtual devices; an uncatchable termination or Pulse server failure can leave modules behind. If the helper reports an existing device, inspect `pactl list short modules` and unload only the matching stale `module-null-sink` and `module-remap-source` IDs after confirming they belong to this helper.
-
-The original audio remains 16 kHz mono even if PipeWire exposes the remapped inputs at 48 kHz. Small buffers mean late audio may be dropped, and the pipeline can retain a short tail after muting; verify the headset's `MIC OFF` state and audio/video sync before broadcasting.
-
 ## Build and sideload (Linux)
 
 Enable Quest developer mode, connect a USB data cable, and accept **Allow USB debugging** inside the headset. `adb devices -l` must show `device`, not `unauthorized`. Keep your boundary enabled and stay seated or stationary. Wake the Touch controllers before launching: Quest may otherwise show a **controllers required** dialog and block the application from starting.
@@ -293,7 +271,6 @@ bash scripts/fetch-sherpa-onnx.sh        # once: the speech libraries the server
 bash scripts/fetch-asr-model.sh whisper tiny.en && bash scripts/fetch-tts-model.sh   # optional: the speech models the speech tests run
 cargo test --workspace                   # simulation, projection, rendering, server and client tests
 cargo run -p tomori-client-quest -- --xr        # use an active desktop OpenXR Vulkan runtime
-npm test --prefix bridge          # session routing, questions and permissions
 ```
 
 The rendering tests draw offscreen with Vulkan: on a GPU when there is one, and otherwise on a software driver such as Mesa's lavapipe (`mesa-vulkan-drivers` on Debian and Ubuntu, `vulkan-swrast` on Arch). With no Vulkan adapter at all they are skipped, each saying so; set `TOMORI_REQUIRE_GPU=1` to fail them instead, as CI does. The tests in each test binary share one Vulkan device, created once and never dropped, because Vulkan loaders before 1.4.346 can crash when one thread creates a device while another uses one. To render on lavapipe, as CI does, on a computer with a GPU, name its driver file in `VK_DRIVER_FILES`, such as `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`. Every `.wgsl` shader is also parsed and validated with naga, with or without an adapter.
@@ -303,17 +280,6 @@ The speech tests that run the real recognition, punctuation, voice activity and 
 `cargo bake test` runs the workspace tests too, fetching the speech libraries first. On every pull request, GitHub Actions checks formatting and Clippy, runs the tests, including the rendering tests on lavapipe and the speech tests with their models, on current stable Rust, checks that every target builds on the minimum supported version (the workspace's `rust-version`, 1.92), and builds the client core and the headset APK for `aarch64-linux-android`. On stable Rust the tests run under `cargo bake test:coverage --all-targets true`, which fails unless every measured source region runs: the 100% region coverage that Base projects require. The main branch requires all of these, through the Test workflow's `test-result` job, and the Publish workflow's `check` job. Pull requests merge through GitHub's merge queue, which runs these checks again on the pull request merged with those ahead of it in the queue, with the tests run without coverage instrumentation, which takes most of their time, since each pull request has passed the gate already; pushes to main run the gate again: `gh pr merge N --squash` adds a pull request whose checks have passed to the queue, and `gh pr merge N --squash --auto` waits for its checks and then adds it.
 
 Code that is not covered gets a test, or goes if nothing needs it. Regions inside `unreachable!` are not counted. The only other exceptions are a few thin files of device and platform calls that CI cannot make: the headset's OpenXR session and its Vulkan device, the desktop window and its audio devices, a forked child before it executes its program, the server process's `_exit`, and starting the multicast DNS daemon. Each is excluded in its crate's `Cargo.toml`, with its reason, and the coverage report lists their sizes; [design/testing.md](design/testing.md) lists them, and says which decisions are still in them rather than in covered modules. To measure coverage locally, install `cargo-llvm-cov` and the `llvm-tools` component. With a distribution's Rust whose standard library sources are under `/usr/src`, which `cargo bake test:coverage` cannot read, run `cargo llvm-cov --workspace --all-targets` and then `cargo llvm-cov report --ignore-filename-regex '^/usr/src/'` instead.
-
-For the PC streaming-recognition test (model + public sample required):
-
-```sh
-bash scripts/setup-pc-transcription.sh
-mkdir -p target/downloads
-curl -fL https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav -o target/downloads/jfk.wav
-(cd bridge && node --test asr.test.mjs)
-```
-
-It checks partial results, finalization, out-of-order rejection, and a recording longer than a minute.
 
 A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build the Android APK for standalone Quest use. Desktop execution requires its own OpenXR loader/runtime (for example Monado).
 
@@ -325,11 +291,9 @@ A USB-connected Quest does **not** provide a Linux desktop OpenXR runtime: build
 - `crates/client-quest/src/vulkan.rs`: XR-created Vulkan instance/device imported into wgpu; borrowed two-layer XR swapchain images, one layer per eye.
 - `crates/render/src/graphics.rs`, `crates/render/src/swarm.wgsl`: instanced cube rendering with per-eye depth.
 - `crates/scene/src/swarm.rs`: deterministic CPU flocking, separation/alignment/cohesion.
-- `bridge/asr.mjs`, `bridge/asr_worker.py`: GPU/CPU Whisper rolling transcription.
 - `crates/scene/src/caption.rs`, `crates/render/src/caption.wgsl`: head-relative, stereo text panel.
 - `crates/scene/src/conversation.rs`: server list, space list and space panel, driven by server events.
 - `crates/client/src/connection.rs`: the connection that carries out the conversation's actions, with the server, the microphone, the speaker and Bonjour browsing.
-- `bridge/`: official OpenCode V2 client adapter, no longer used by the headset.
 
 The Vulkan device uses the runtime-selected physical GPU and enables the full extension/feature set required by wgpu. Swapchain images remain runtime-owned; wgpu has no permission to destroy them. Each frame waits for submitted GPU work before releasing the XR image, leaving it in `COLOR_ATTACHMENT_OPTIMAL`. This simple conservative synchronization favors correctness over maximum throughput. Tracking loss and non-rendering frames submit no layer; sessions handle ready/stopping/exit events. The scene initially faces the headset; the app uses `LOCAL_FLOOR` when available so the Quest's system Meta-button recenter moves the scene, falling back to `LOCAL` with an approximate 1.6 m floor offset. Reference space changes take effect at the runtime's specified frame time. Recentering doesn't reset the agents, conversation, or interaction state. This is opaque VR, not passthrough; optional tracked-hand skeletons are described above.
 

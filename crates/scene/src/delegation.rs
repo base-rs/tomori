@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Bounded worker geometry. Positions belong to this client, never to the bridge.
+//! Bounded worker geometry. Positions belong to this client, never to the server.
 //!
 //! Live anchors do not move when metadata, ordering, or membership changes. Slots
 //! are remembered for the current root; inactive slots may be reused under churn,
@@ -542,7 +542,7 @@ impl Worker {
     }
 }
 
-/// Session-local layout and animation; no bridge mutation or progress estimates.
+/// Session-local layout and animation; no server mutation or progress estimates.
 pub struct Scene {
     root: Option<String>,
     // Small, bounded slot history, reset at every root switch.
@@ -1372,7 +1372,7 @@ impl Scene {
         }
     }
 
-    /// `workspace` must be the bridge projection for `root`. Its contract has
+    /// `workspace` must be the server's projection for `root`. Its contract has
     /// no root identifier, so detached orphans cannot independently prove
     /// which root they belong to. A root change always clears prior state.
     pub fn update(&mut self, root: Option<&str>, workspace: &Workspace, dt: f32) {

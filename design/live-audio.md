@@ -1,6 +1,6 @@
 # Live Audio
 
-This describes the Rust server, which replaced the legacy Node bridge in `bridge/`, and the headset client, which uses it. Changes to the bridge are not reviewed against this document.
+This describes the Rust server, which replaced the legacy Node bridge, since removed, and the headset client, which uses it.
 
 ## Requirement
 

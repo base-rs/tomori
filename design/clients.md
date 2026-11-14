@@ -1,6 +1,6 @@
 # Clients
 
-This describes the layout of Tomori clients. The headset and desktop application is `crates/client-quest`; it connects to the new server, and no longer uses `bridge/`.
+This describes the layout of Tomori clients. The headset and desktop application is `crates/client-quest`; it connects to the server.
 
 ## Requirement
 

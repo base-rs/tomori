@@ -38,10 +38,8 @@ The public repository is `base-rs/tomori`, moved from `ioquatix/tomori` in Novem
 - Desktop crate: `tomori-client-desktop` (in `crates/client-desktop`), which the `tomori` executable's desktop modes run.
 - Android application ID: `com.codeotaku.tomori`; label: **Tomori**;
   APK: `tomori.apk`. A headset build of another project's has its own (see `crates/client-quest/context/android.md`); the example's is `com.example.tomori.headset`.
-- Node bridge package: `tomori-opencode-bridge`.
 - Environment variables: `TOMORI_*`.
 - PipeWire video: `tomori-spectator` (**Tomori-Spectator**).
-- PipeWire audio: `tomori-quest-microphone` and `tomori-assistant-voice`.
 
 ### Migrating to `com.codeotaku.tomori`
 

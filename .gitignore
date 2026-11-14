@@ -2,7 +2,6 @@
 /android/libs/
 /.android-env
 /.tools
-/bridge/node_modules/
 /.space/
 
 # Private local workspace context; publish source, not coordinator/session history.
