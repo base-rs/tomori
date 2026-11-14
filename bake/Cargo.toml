@@ -6,9 +6,9 @@ publish = false
 
 [dependencies]
 bake = ">=0.20.2"
-base-project = ">=0.1.12"
-# 0.3.11 writes the kept `## Unreleased` breaking changes and generated ones as one list.
-bake-releases = ">=0.3.11"
+base-project = ">=0.1.13"
+# 0.3.12 counts a `Release:` trailer in `releases:check` only on a commit that writes exactly the generated notes.
+bake-releases = ">=0.3.12"
 
 [dev-dependencies]
 # Reads `cargo metadata`, for the dependency rule between the core, environments and apps.
