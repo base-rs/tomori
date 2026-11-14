@@ -414,6 +414,13 @@ impl Server {
         self
     }
 
+    /// Change how often a complete answer the agent reads a page at a time is checked against its environment's answer
+    /// now; see [`crate::RECHECK_EVERY`].
+    pub fn with_inspect_recheck(self, every: Duration) -> Self {
+        self.hub.set_inspect_recheck(every);
+        self
+    }
+
     /// Change how long the agent waits for an environment's server side to answer an action; see
     /// [`crate::ACT_TIMEOUT`].
     pub fn with_act_timeout(self, timeout: Duration) -> Self {

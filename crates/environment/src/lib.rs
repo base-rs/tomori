@@ -19,7 +19,7 @@
 //!
 //! A side may also publish panels onto its environment's own walls, text, lists of [rows](Row) or [charts](chart), by ids it chooses, which every client draws as it draws the agent's panels: see [`Space::publish`]. A participant's choice of a row it marks [choosable](Row::choosable) reaches it as an [`Intent`] whose [`Intent::chosen`] names the row.
 //!
-//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`] and [`INSPECTION_LIMIT`], what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`], and the cluster anchors it places by [`ANCHOR_LIMIT`], [`ANCHOR_NAME_BYTES`], [`ANCHOR_LABEL_LIMIT`], [`ANCHOR_INTERVAL`], [`ANCHOR_CHANGES_PER_SECOND`] and [`ANCHOR_BURST`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
+//! The server bounds what a side shares, announces, describes and answers by the limits this crate exports, which it enforces: [`STATE_LIMIT`], [`EVENT_LIMIT`], [`OBJECT_LIMIT`], [`IDENTITY_LIMIT`], [`DESCRIPTION_LIMIT`], [`REFERENCE_BYTES`], [`INSPECTION_LIMIT`] and [`FULL_INSPECTION_LIMIT`], what it publishes by [`PANEL_ID_BYTES`], [`PANEL_LIMIT`], [`ROW_LIMIT`], [`ROW_ID_BYTES`] and [`ROW_CHARS`], and the cluster anchors it places by [`ANCHOR_LIMIT`], [`ANCHOR_NAME_BYTES`], [`ANCHOR_LABEL_LIMIT`], [`ANCHOR_INTERVAL`], [`ANCHOR_CHANGES_PER_SECOND`] and [`ANCHOR_BURST`]. A state or event past its limit is refused, so a side keeps within them itself, and can test that it does.
 //!
 //! A side learns where participants are in two ways: it may declare proximity [zones](Zone), whose occupancy the server
 //! tells it as an [`Intent`] whose [`Intent::occupancy`] names the zone and how many are within it, see
@@ -571,11 +571,18 @@ pub const IDENTITY_LIMIT: usize = 128;
 /// one line: a longer one is cut to this many, followed by the `…` that marks it cut.
 pub const DESCRIPTION_LIMIT: usize = 200;
 
-/// The largest answer of an [`Inspector`], as JSON text, in bytes: 16 KiB. The server refuses a larger one, and tells
-/// the agent so. Within it, the server cuts each string to 2,000 characters, and the message of an [`Error`] the
-/// inspector answers with to 512; those are not exported, since the server cuts what is past them rather than refusing
-/// it.
-pub const INSPECTION_LIMIT: usize = 16 * 1024;
+/// The largest summary an [`Inspector`] answers with, [`Inspector::inspect`], as JSON text, in bytes: 32 KiB. The server
+/// refuses a larger one, and tells the agent so, and that it may read the side's complete answer,
+/// [`Inspector::inspect_full`], a page at a time. It tells the agent a summary only if its result is within 32 KiB as
+/// sent, twice and escaped, as much as the agent's other tools tell at once, so a summary is best kept to a few KiB. Within it, the
+/// server cuts each string to 2,000 characters, and the message of an [`Error`] the inspector answers with to 512; those
+/// are not exported, since the server cuts what is past them rather than refusing it.
+pub const INSPECTION_LIMIT: usize = 32 * 1024;
+
+/// The largest complete answer an [`Inspector`] gives, [`Inspector::inspect_full`], as JSON text, in bytes: 1 MiB,
+/// which the server keeps for a few minutes and gives the agent a page at a time, each within 32 KiB as sent.
+/// The server refuses a larger one, and tells the agent so.
+pub const FULL_INSPECTION_LIMIT: usize = 1024 * 1024;
 
 /// Whether `reference` is one the server takes: 1 to [`REFERENCE_BYTES`] bytes of ASCII letters, digits, `-`, `_`,
 /// `.` and `/`, so that it can never end the agent's context block or be read as anything but a name.
@@ -698,7 +705,14 @@ impl Object {
 /// The server calls it on a thread of its own, never the side's, so that a side busy with its own work, such as a slow
 /// query, does not hold up the agent, and it may be called while the side runs; it is to answer from what the side
 /// shares with it, such as a snapshot behind a lock, or with a query of its own. The server waits for an answer for at
-/// most a few seconds, and refuses one that is not JSON or is larger than [`INSPECTION_LIMIT`], 16 KiB.
+/// most a few seconds, and refuses one that is not JSON or is larger than [`INSPECTION_LIMIT`], 32 KiB.
+///
+/// **A summary first.** What [`inspect`](Inspector::inspect) answers is what the agent reads whenever it inspects, so
+/// it is a concise summary, well within the limit: what the object is, and, for one backed by data, the query, the window
+/// it shows, its first, last, least and most values, a few points sampled from it, the parameters it depends on and
+/// what it offers, never a whole series. A side that has more, such as every point of a chart's series, gives it with
+/// [`inspect_full`](Inspector::inspect_full), which the agent asks for only when the summary is not enough, and reads a
+/// page at a time, up to [`FULL_INSPECTION_LIMIT`], 1 MiB; a side that gives none has its summary read as the only page.
 ///
 /// What it answers is told to the space's agent, which reads it as data, never as instructions: the server removes
 /// control and format characters from every string and cuts long ones. It must hold nothing that should stay in the
@@ -722,6 +736,35 @@ pub trait Inspector: Send + Sync {
     /// has nothing by that reference, as when what it named has gone; an [`Error`], whose message the agent is told,
     /// when it could not answer.
     fn inspect(&self, reference: &str) -> Result<Option<String>>;
+
+    /// The complete details of what the side described as `reference`, as JSON text, for the agent that asks for more
+    /// than [`inspect`](Inspector::inspect)'s summary, such as every point of a chart's series: at most
+    /// [`FULL_INSPECTION_LIMIT`], which the server keeps as it was answered and gives the agent a page at a time. It
+    /// answers as `inspect` does otherwise, and holds nothing that should stay in the server either. By default, the
+    /// summary itself, so that a side with nothing more gives its summary as the only page.
+    ///
+    /// ```
+    /// use tomori_environment::{Inspector, Result};
+    ///
+    /// struct Chart;
+    ///
+    /// impl Inspector for Chart {
+    ///     fn inspect(&self, _reference: &str) -> Result<Option<String>> {
+    ///         Ok(Some(r#"{"query":"up","first":1,"last":3,"min":1,"max":3}"#.to_owned()))
+    ///     }
+    ///
+    ///     fn inspect_full(&self, _reference: &str) -> Result<Option<String>> {
+    ///         Ok(Some(r#"{"query":"up","points":[1,2,3]}"#.to_owned()))
+    ///     }
+    /// }
+    ///
+    /// assert_eq!(Chart.inspect_full("chart/up"), Ok(Some(r#"{"query":"up","points":[1,2,3]}"#.to_owned())));
+    /// let summary = |_: &str| -> Result<Option<String>> { Ok(Some("{}".to_owned())) };
+    /// assert_eq!(summary.inspect_full("chart/up"), Ok(Some("{}".to_owned())));
+    /// ```
+    fn inspect_full(&self, reference: &str) -> Result<Option<String>> {
+        self.inspect(reference)
+    }
 }
 
 impl<F> Inspector for F
@@ -1747,6 +1790,16 @@ mod tests {
         }
     }
 
+    /// An inspector that gives no complete answer of its own gives its summary as one.
+    #[test]
+    fn a_complete_answer_is_the_summary_by_default() {
+        let summary = |reference: &str| -> Result<Option<String>> {
+            Ok((reference == "hen/pip").then(|| "{}".to_owned()))
+        };
+        assert_eq!(summary.inspect_full("hen/pip"), Ok(Some("{}".to_owned())));
+        assert_eq!(summary.inspect_full("hen/gone"), Ok(None));
+    }
+
     /// The limits a side keeps within are those `design/environments.md` states, so that changing one is deliberate.
     #[test]
     fn the_limits_a_side_keeps_within_are_those_the_design_states() {
@@ -1756,7 +1809,8 @@ mod tests {
         assert_eq!(IDENTITY_LIMIT, 128);
         assert_eq!(DESCRIPTION_LIMIT, 200);
         assert_eq!(REFERENCE_BYTES, 64);
-        assert_eq!(INSPECTION_LIMIT, 16 * 1024);
+        assert_eq!(INSPECTION_LIMIT, 32 * 1024);
+        assert_eq!(FULL_INSPECTION_LIMIT, 1024 * 1024);
         assert_eq!(ANCHOR_LIMIT, 64);
         assert_eq!(ANCHOR_NAME_BYTES, tomori_protocol::cluster::NAME_BYTES);
         assert_eq!(ANCHOR_LABEL_LIMIT, 80);

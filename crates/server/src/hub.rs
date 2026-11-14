@@ -465,6 +465,10 @@ pub struct Hub {
     knock_timeout: RwLock<Duration>,
     /// How long the agent waits for an environment's server side to answer an inspection; see [`agent_inspect::INSPECT_TIMEOUT`].
     inspect_timeout: RwLock<Duration>,
+    /// The complete answers the agent reads a page at a time with `inspect`'s `full`; see `design/mcp.md`.
+    inspections: Mutex<agent_inspect::Snapshots>,
+    /// How often a complete answer kept is checked against its side's answer now; see [`agent_inspect::RECHECK_EVERY`].
+    inspect_recheck: RwLock<Duration>,
     /// How long the agent waits for an environment's server side to answer an action; see [`agent_actions::ACT_TIMEOUT`].
     act_timeout: RwLock<Duration>,
     /// Tomori's MCP server and its registrations with backends; see `design/mcp.md`.
@@ -2396,6 +2400,8 @@ impl Hub {
             pairing_open_for: RwLock::new(PAIRING_OPEN_FOR),
             knock_timeout: RwLock::new(KNOCK_TIMEOUT),
             inspect_timeout: RwLock::new(agent_inspect::INSPECT_TIMEOUT),
+            inspections: Mutex::new(agent_inspect::Snapshots::default()),
+            inspect_recheck: RwLock::new(agent_inspect::RECHECK_EVERY),
             act_timeout: RwLock::new(agent_actions::ACT_TIMEOUT),
             tools: tools::Tools::default(),
             highlighter: RwLock::new(crate::highlighting::highlighter()),
