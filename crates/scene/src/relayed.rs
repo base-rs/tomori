@@ -153,19 +153,18 @@ impl<T: Between> Relayed<T> {
         }
     }
 
-    /// Each at `now`, from `hands`, each as their presence last said it, by their numbers: each drawn between the
-    /// updates that brought it, a little behind. One no longer among them is forgotten.
-    pub fn update(&mut self, now: Instant, hands: Vec<(u32, T)>) -> Vec<(u32, T)> {
+    /// Each at `now`, from `hands`, each as their presence last said it, by their numbers, into `drawn`, cleared first,
+    /// so that a frame allocates nothing once everyone has a track: each drawn between the updates that brought it, a
+    /// little behind. One no longer among them is forgotten.
+    pub fn update(&mut self, now: Instant, hands: &[(u32, T)], drawn: &mut Vec<(u32, T)>) {
         self.tracks
             .retain(|source, _| hands.iter().any(|(number, _)| number == source));
-        hands
-            .into_iter()
-            .map(|(source, hand)| {
-                let track = self.tracks.entry(source).or_default();
-                track.arrived(now, hand);
-                (source, track.at(now))
-            })
-            .collect()
+        drawn.clear();
+        drawn.extend(hands.iter().map(|&(source, hand)| {
+            let track = self.tracks.entry(source).or_default();
+            track.arrived(now, hand);
+            (source, track.at(now))
+        }));
     }
 
     /// When the track of `source` last cut, drawn at once where an update put it rather than between, if it has.
@@ -175,29 +174,31 @@ impl<T: Between> Relayed<T> {
 }
 
 /// The others' right hands and left hands, by their numbers.
-pub(crate) type Others = (Vec<(u32, Hand)>, Vec<(u32, Hand)>);
+pub type Others = (Vec<(u32, Hand)>, Vec<(u32, Hand)>);
 
 /// The others' right and left hands, from their controllers, as `drawn` draws them this frame, in the space's
 /// coordinates, carried out of them into the environment's own by `carriage`: as the frame step and the spectator give an
-/// environment's client side them, from the same tracks the people are drawn from.
-pub(crate) fn others(
+/// environment's client side them, from the same tracks the people are drawn from; into `hands`, cleared first, so that
+/// a frame allocates nothing for them.
+pub fn others(
     drawn: &[(u32, crate::people::Present)],
     carriage: crate::anchors::Anchor,
-) -> Others {
+    hands: &mut Others,
+) {
     let unturn = carriage.orientation.inverse();
     let carried = |index: usize| {
-        drawn
-            .iter()
-            .filter_map(|(source, present)| {
-                let hand = present.controllers[index]?;
-                Some((
-                    *source,
-                    Hand::new(carriage.unplace(hand.position), unturn * hand.orientation),
-                ))
-            })
-            .collect()
+        drawn.iter().filter_map(move |(source, present)| {
+            let hand = present.controllers[index]?;
+            Some((
+                *source,
+                Hand::new(carriage.unplace(hand.position), unturn * hand.orientation),
+            ))
+        })
     };
-    (carried(1), carried(0))
+    hands.0.clear();
+    hands.0.extend(carried(1));
+    hands.1.clear();
+    hands.1.extend(carried(0));
 }
 
 #[cfg(test)]
@@ -209,6 +210,13 @@ mod tests {
     /// A hand moving along x at a metre a second, turning about the vertical at a radian a second, at `seconds`.
     fn moving(seconds: f32) -> Hand {
         Hand::new(Vec3::new(seconds, 1.0, 0.0), Quat::from_rotation_y(seconds))
+    }
+
+    /// What `relayed` draws at `now` of `hands`.
+    fn tracked(relayed: &mut Relayed, now: Instant, hands: Vec<(u32, Hand)>) -> Vec<(u32, Hand)> {
+        let mut drawn = Vec::new();
+        relayed.update(now, &hands, &mut drawn);
+        drawn
     }
 
     /// How far each frame's hand moved from the last, in millimetres.
@@ -243,7 +251,7 @@ mod tests {
             }
             let at = start + Duration::from_secs_f32(now / 1000.0);
             given.push(hand);
-            drawn.push(relayed.update(at, vec![(4, hand)])[0].1);
+            drawn.push(tracked(&mut relayed, at, vec![(4, hand)])[0].1);
         }
         (given, drawn)
     }
@@ -280,41 +288,45 @@ mod tests {
             |x: f32, angle: f32| Hand::new(Vec3::new(x, 1.0, 0.0), Quat::from_rotation_y(angle));
         // Where its first update says, at once; and a second hand, of someone else, alike.
         assert_eq!(
-            relayed.update(at(0), vec![(4, hand(0.0, 0.0))]),
+            tracked(&mut relayed, at(0), vec![(4, hand(0.0, 0.0))]),
             [(4, hand(0.0, 0.0))]
         );
-        let drawn = relayed.update(at(14), vec![(4, hand(0.014, 0.2)), (5, hand(3.0, 0.0))]);
+        let drawn = tracked(
+            &mut relayed,
+            at(14),
+            vec![(4, hand(0.014, 0.2)), (5, hand(3.0, 0.0))],
+        );
         assert_eq!(drawn[1], (5, hand(3.0, 0.0)));
         // Then an interval behind, between: here at the first, then halfway, moved and turned halfway.
         assert_eq!(drawn[0], (4, hand(0.0, 0.0)));
-        let drawn = relayed.update(at(21), vec![(4, hand(0.014, 0.2))])[0].1;
+        let drawn = tracked(&mut relayed, at(21), vec![(4, hand(0.014, 0.2))])[0].1;
         assert!((drawn.position.x - 0.007).abs() < 1e-4, "{drawn:?}");
         assert!(drawn.orientation.angle_between(Quat::from_rotation_y(0.1)) < 1e-3);
         // Someone gone is forgotten, and drawn anew should they return.
         assert_eq!(
-            relayed.update(at(28), vec![(5, hand(3.0, 0.0))]),
+            tracked(&mut relayed, at(28), vec![(5, hand(3.0, 0.0))]),
             [(5, hand(3.0, 0.0))]
         );
         assert!(!relayed.tracks.contains_key(&4));
         // Still for a second, the hand then moves from where it was over an interval, rather than across the pause.
-        relayed.update(at(1_000), vec![(5, hand(3.0, 0.0))]);
-        relayed.update(at(1_014), vec![(5, hand(3.014, 0.0))]);
-        relayed.update(at(1_028), vec![(5, hand(3.028, 0.0))]);
-        relayed.update(at(2_000), vec![(5, hand(3.028, 0.0))]);
+        tracked(&mut relayed, at(1_000), vec![(5, hand(3.0, 0.0))]);
+        tracked(&mut relayed, at(1_014), vec![(5, hand(3.014, 0.0))]);
+        tracked(&mut relayed, at(1_028), vec![(5, hand(3.028, 0.0))]);
+        tracked(&mut relayed, at(2_000), vec![(5, hand(3.028, 0.0))]);
         assert_eq!(
-            relayed.update(at(2_500), vec![(5, hand(4.0, 0.0))])[0]
+            tracked(&mut relayed, at(2_500), vec![(5, hand(4.0, 0.0))])[0]
                 .1
                 .position
                 .x,
             3.028
         );
-        let x = relayed.update(at(2_507), vec![(5, hand(4.0, 0.0))])[0]
+        let x = tracked(&mut relayed, at(2_507), vec![(5, hand(4.0, 0.0))])[0]
             .1
             .position
             .x;
         assert!((x - 3.514).abs() < 1e-2, "{x}");
         assert_eq!(
-            relayed.update(at(2_514), vec![(5, hand(4.0, 0.0))])[0]
+            tracked(&mut relayed, at(2_514), vec![(5, hand(4.0, 0.0))])[0]
                 .1
                 .position
                 .x,
@@ -323,7 +335,11 @@ mod tests {
         // However seldom updates come, it is drawn no further behind than the most.
         let mut relayed = Relayed::new();
         for step in 0..10 {
-            relayed.update(at(step * 90), vec![(6, hand(step as f32, 0.0))]);
+            tracked(
+                &mut relayed,
+                at(step * 90),
+                vec![(6, hand(step as f32, 0.0))],
+            );
         }
         assert_eq!(relayed.tracks[&6].delay(), MOST);
     }
@@ -372,7 +388,9 @@ mod tests {
                 None,
                 None,
             );
-            others(people.drawn(), carriage)
+            let mut hands = Others::default();
+            others(people.drawn(), carriage, &mut hands);
+            hands
                 .0
                 .iter()
                 .map(|(_, hand)| hand.position.x)

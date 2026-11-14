@@ -197,6 +197,7 @@ fn whole_presence_keeps_the_hands_figures_and_the_hand_drawn_is_the_one_a_client
     let mut hands = crate::relayed::Relayed::<Hand>::new();
     let mut bob = heard(0.0, 0);
     let mut drawn = Vec::new();
+    let (mut others, mut tracked) = (crate::relayed::Others::default(), Vec::new());
     for frame in 0..360 {
         let now = frame as f32 * interval + 7.0;
         while let Some((_, arrived)) = sends.next_if(|(at, _)| *at <= now) {
@@ -206,7 +207,8 @@ fn whole_presence_keeps_the_hands_figures_and_the_hand_drawn_is_the_one_a_client
         people.update(at, FRAME, 0, [(2, &bob)], Some(AWAY), None);
         let present = people.drawn()[0].1;
         // The hand an environment's client side is given is the one drawn, carried into its coordinates.
-        let (right, left) = crate::relayed::others(people.drawn(), carriage);
+        crate::relayed::others(people.drawn(), carriage, &mut others);
+        let (right, left) = &others;
         let held = present.controllers[1].unwrap();
         assert_eq!(right[0].0, 2);
         assert!(
@@ -219,7 +221,8 @@ fn whole_presence_keeps_the_hands_figures_and_the_hand_drawn_is_the_one_a_client
         assert!(left.is_empty());
         // And it is drawn as the hand alone would be, between its updates.
         let alone = Present::of(&bob).unwrap().controllers[1].unwrap();
-        let hand = hands.update(at, vec![(2, alone)])[0].1;
+        hands.update(at, &[(2, alone)], &mut tracked);
+        let hand = tracked[0].1;
         assert!(hand.position.distance(held.position) < 1e-5);
         drawn.push(present.head.position.x);
     }

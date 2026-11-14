@@ -4707,21 +4707,20 @@ impl Conversation {
 
     /// The others in the joined space, by their numbers, as their presence last said, in the space's coordinates: only
     /// those the space's state still lists, and never this participant's own.
-    pub fn people(&self) -> Vec<(u32, &crate::people::Heard)> {
-        let Some((space, _)) = self.joined_space() else {
-            return Vec::new();
-        };
+    pub fn people(&self) -> impl Iterator<Item = (u32, &crate::people::Heard)> {
+        let space = self.joined_space().map(|(space, _)| space);
         self.people
             .iter()
-            .filter(|(source, _)| {
+            .filter(move |(source, _)| {
                 Some(**source) != self.source
-                    && space
-                        .participants
-                        .iter()
-                        .any(|participant| participant.source == **source)
+                    && space.is_some_and(|space| {
+                        space
+                            .participants
+                            .iter()
+                            .any(|participant| participant.source == **source)
+                    })
             })
             .map(|(source, heard)| (*source, heard))
-            .collect()
     }
 
     /// The right hands of the others in the joined space, by their numbers, as their presence last said, in the space's
@@ -4737,7 +4736,6 @@ impl Conversation {
 
     fn hands(&self, index: usize) -> Vec<(u32, tomori_protocol::Pose)> {
         self.people()
-            .into_iter()
             .filter_map(|(source, heard)| Some((source, heard.controllers[index]?)))
             .collect()
     }

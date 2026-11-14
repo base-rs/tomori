@@ -249,6 +249,11 @@ pub struct People {
     /// drift by.
     voices: Vec<u32>,
     time: f32,
+    /// What each frame is drawn from, kept from frame to frame: how many reports have arrived from each of the others,
+    /// and their presence, by their numbers, as it says and as it is drawn.
+    reports: Vec<u64>,
+    presents: Vec<(u32, Present)>,
+    tracked: Vec<(u32, Present)>,
 }
 
 impl People {
@@ -279,17 +284,21 @@ impl People {
         }
         self.relayed.since(forgotten);
         self.time += dt;
-        let heard: Vec<(u32, u64, Present)> = heard
-            .into_iter()
-            .filter_map(|(source, heard)| Some((source, heard.reports, Present::of(heard)?)))
-            .collect();
-        let drawn = self.relayed.update(
-            now,
-            heard
-                .iter()
-                .map(|(source, _, present)| (*source, *present))
-                .collect(),
+        // Into buffers kept from frame to frame, so that a frame allocates nothing once everyone is known.
+        let (mut reports, mut presents, mut drawn) = (
+            std::mem::take(&mut self.reports),
+            std::mem::take(&mut self.presents),
+            std::mem::take(&mut self.tracked),
         );
+        reports.clear();
+        presents.clear();
+        for (source, heard) in heard {
+            if let Some(present) = Present::of(heard) {
+                reports.push(heard.reports);
+                presents.push((source, present));
+            }
+        }
+        self.relayed.update(now, &presents, &mut drawn);
         // Whoever is no longer here leaves, fading where they last were.
         let leaving = &mut self.leaving;
         self.known.retain(|source, known| {
@@ -311,7 +320,7 @@ impl People {
         self.drawn.clear();
         let mut figures = std::mem::take(&mut self.figures);
         let mut used = 0;
-        for ((source, present), (_, reports, _)) in drawn.into_iter().zip(&heard) {
+        for (&(source, present), reports) in drawn.iter().zip(&reports) {
             let cut = self.relayed.cut(source);
             let known = self.known.entry(source).or_insert_with(|| Known {
                 reports: *reports,
@@ -398,6 +407,7 @@ impl People {
         }
         figures.truncate(used);
         self.figures = figures;
+        (self.reports, self.presents, self.tracked) = (reports, presents, drawn);
     }
 
     /// Each person as drawn this frame.

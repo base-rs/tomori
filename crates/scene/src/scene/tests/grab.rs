@@ -71,11 +71,13 @@ impl crate::client_side::ClientSide for Stick {
         self.left
             .lock()
             .unwrap()
-            .push((input.left_grab.clone(), input.left_hands.clone()));
-        self.told
-            .lock()
-            .unwrap()
-            .push((self.made, input.grab, input.hands, input.participant));
+            .push((input.left_grab.clone(), input.left_hands.to_vec()));
+        self.told.lock().unwrap().push((
+            self.made,
+            input.grab,
+            input.hands.to_vec(),
+            input.participant,
+        ));
         let passed = self.passes.load(Ordering::Relaxed)
             && input
                 .left_grab

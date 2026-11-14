@@ -62,9 +62,9 @@ pub struct Input<'a> {
     /// The right hands of the others in the space, by their numbers, as their presence last said, in the environment's
     /// own coordinates: so that what one of them holds is drawn in their hand, where they hold it, with nothing more
     /// sent. A participant whose presence says no right hand, as the desktop's does not, is not among them.
-    pub hands: Vec<(u32, Hand)>,
+    pub hands: &'a [(u32, Hand)],
     /// The others' left hands, likewise.
-    pub left_hands: Vec<(u32, Hand)>,
+    pub left_hands: &'a [(u32, Hand)],
     /// This participant's own number, which the server knows them by, as the others' hands and the server side's
     /// intents do; `None` for a visitor, who holds nothing, and outside a space.
     pub participant: Option<u32>,
@@ -84,8 +84,8 @@ impl<'a> Input<'a> {
             scroll: None,
             grab: None,
             left_grab: None,
-            hands: Vec::new(),
-            left_hands: Vec::new(),
+            hands: &[],
+            left_hands: &[],
             participant: None,
         }
     }
@@ -129,7 +129,7 @@ impl<'a> Input<'a> {
     }
 
     /// This input, with the others' right hands, `hands`, by their numbers.
-    pub fn with_hands(mut self, hands: Vec<(u32, Hand)>) -> Self {
+    pub fn with_hands(mut self, hands: &'a [(u32, Hand)]) -> Self {
         self.hands = hands;
         self
     }
@@ -141,7 +141,7 @@ impl<'a> Input<'a> {
     }
 
     /// This input, with the others' left hands, `hands`, by their numbers.
-    pub fn with_left_hands(mut self, hands: Vec<(u32, Hand)>) -> Self {
+    pub fn with_left_hands(mut self, hands: &'a [(u32, Hand)]) -> Self {
         self.left_hands = hands;
         self
     }
@@ -629,7 +629,7 @@ mod tests {
         let input = Input::new(Vec::new(), now);
         assert_eq!(
             (input.grab, input.hands, input.participant),
-            (None, Vec::new(), None)
+            (None, &[][..], None)
         );
         let hand = Hand::new(Vec3::Y, Quat::from_rotation_y(0.5));
         let grab = Grab::new("stick", hand, Phase::Began);
@@ -640,9 +640,10 @@ mod tests {
         assert_eq!(grab.side, Side::Right);
         let left = Grab::new("stone", hand, Phase::Began).of(Side::Left);
         assert_eq!(left.side, Side::Left);
+        let (right_hands, left_hands) = ([(2, hand)], [(3, hand)]);
         let input = Input::new(Vec::new(), now)
             .with_grab(Some(grab.clone()))
-            .with_hands(vec![(2, hand)])
+            .with_hands(&right_hands)
             .as_participant(Some(1));
         assert_eq!(input.grab, Some(grab.clone()));
         assert_eq!(input.hands, [(2, hand)]);
@@ -653,7 +654,7 @@ mod tests {
         );
         let input = input
             .with_left_grab(Some(left.clone()))
-            .with_left_hands(vec![(3, hand)]);
+            .with_left_hands(&left_hands);
         assert_eq!(input.grabs().collect::<Vec<_>>(), [&grab, &left]);
         assert_eq!(input.left_hands, [(3, hand)]);
         // Taking the grip is apart from taking the stick.
