@@ -427,7 +427,7 @@ fn eyes_warm_while_their_head_faces_this_participant_within_a_cone_that_holds_at
     assert_eq!(cubes[left].color, cubes[right].color);
     let cool_eyes = swarm::eyes(swarm::COLOUR);
     assert!(cubes[left].color[0] > cool_eyes[0] && cubes[left].color[2] < cool_eyes[2]);
-    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.3).abs() < 1e-4);
+    assert!((cubes[left].scale[0] / cool[left].scale[0] - 1.25).abs() < 1e-4);
     // The core keeps its colour, shimmering as it does, rather than warming.
     let core = cubes[0].color;
     assert!((core[2] / core[1] - swarm::COLOUR[2] / swarm::COLOUR[1]).abs() < 1e-4);

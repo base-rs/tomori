@@ -347,7 +347,7 @@ fn fewer_cubes_are_drawn_farther_away_and_a_head_alone_beyond_and_none_below_whe
     assert_eq!(full, MOST);
     assert!((200..=400).contains(&full), "{full}");
     assert!(fewer * 2 <= full, "{fewer} of {full}");
-    assert!(head < 40, "{head}");
+    assert!(head < 50, "{head}");
     assert!(
         MOTES
             .iter()
@@ -446,12 +446,14 @@ fn fewer_cubes_are_drawn_farther_away_and_a_head_alone_beyond_and_none_below_whe
 }
 
 #[test]
-fn eyes_warm_and_brighten_as_the_head_faces_this_participant_and_the_face_about_them_catches_it() {
+fn eyes_warm_and_brighten_as_the_head_faces_this_participant_their_socket_and_halo_glowing_about_them()
+ {
     let person = standing([None, None]);
     let body = Body::new(&person, EYES);
     let cool = drawn(&person, &body, &cues(0.0, 1.0));
     let warm = drawn(&person, &body, &cues(1.0, 1.0));
-    let mut warmed = 0;
+    // Facing straight at them, both eyes glow alike, nearly fully.
+    let glow = 1.0 - GLOW_SIDE / 2.0;
     for (index, part) in parts() {
         let (cool, warm) = (&cool[index], &warm[index]);
         match part {
@@ -459,34 +461,30 @@ fn eyes_warm_and_brighten_as_the_head_faces_this_participant_and_the_face_about_
                 // Soft while cool, paler than the face and no brighter than the core.
                 assert_eq!(cool.color, eyes(COLOUR));
                 assert!(cool.color[1] > COLOUR[1] && cool.color[0] <= COLOUR[0]);
-                // Facing straight at them, both eyes glow alike, nearly fully.
-                let glow = 1.0 - GLOW_SIDE / 2.0;
-                let expected = mix(eyes(COLOUR), EYE_GLOW, glow);
+                // Warm, a bright gold, a little whitened.
+                let expected = mix(eyes(COLOUR), pale(EYE_GLOW, EYE_WHITE), glow);
                 assert!(Vec3::from_array(warm.color).distance(Vec3::from_array(expected)) < 1e-5);
-                assert!((warm.scale[0] / cool.scale[0] - 1.3).abs() < 1e-5);
-                // On the face, ahead of the head's middle, small and round: a cube turned on its corner.
+                assert!(warm.color[1] > cool.color[1] && warm.color[2] < cool.color[2]);
+                assert!((warm.scale[0] / cool.scale[0] - 1.25).abs() < 1e-5);
+                // On the face, ahead of the head's middle, small.
                 assert!(warm.position[2] < -0.03);
-                assert!(cool.scale[0] < 0.02);
-                let corner = Quat::from_array(cool.orientation) * Vec3::X;
-                assert!(corner.y.abs() > 0.6, "{corner}");
+                assert!(cool.scale[0].max(cool.scale[1]) < 0.03);
             }
             Part::Ring(_) => {
-                assert!((warm.scale[0] / cool.scale[0] - 1.25).abs() < 1e-5);
-                assert!(warm.color[1] > cool.color[1] && warm.color[2] < cool.color[2]);
+                // A socket a little darker than the face while cool, framing the eye, glowing a deeper gold than it.
+                assert_eq!(cool.color, toned(COLOUR, SOCKET));
+                assert!((warm.scale[0] / cool.scale[0] - 1.1).abs() < 1e-5);
+                assert!(
+                    warm.color[1] > cool.color[1] && warm.color[1] < pale(EYE_GLOW, EYE_WHITE)[1]
+                );
             }
             Part::Halo(_) => {
                 assert_eq!(cool.scale, [0.0; 3]);
-                assert!(warm.scale[0] > 0.004);
-            }
-            Part::Shell if warm.color != cool.color => {
-                assert!(warm.color[1] > cool.color[1]);
-                assert!(warm.position[2] < 0.05, "only the face warms");
-                warmed += 1;
+                assert!(warm.scale[0].max(warm.scale[1]) > 0.04);
             }
             _ => assert_eq!(warm.color, cool.color, "{part:?}"),
         }
     }
-    assert!((4..30).contains(&warmed), "{warmed}");
     // Seen from their left, the left eye glows more; without eyes to see them, neither is nearer.
     let from_left = Cues {
         eyes: Some(Vec3::new(-1.0, 1.6, -2.0)),
@@ -546,6 +544,24 @@ fn the_orbit_quickens_and_brightens_while_their_voice_plays_and_calms_after() {
     let radius = at(&speaking).distance(middle);
     assert!(radius > 0.15 && radius < 0.23, "{radius}");
     assert!(at(&speaking).distance(at(&quiet)) > 0.02);
+    // A tidy ring: each of its cubes as far from its middle, and spaced evenly about it.
+    let orbited = middle + Vec3::new(0.0, ORBIT_ABOVE, 0.0);
+    let cubes = drawn(&person, &body, &cues(0.0, 0.0));
+    let ring = Mat3::from_euler(glam::EulerRot::XYZ, ORBIT_TILT.0, 0.0, ORBIT_TILT.1).inverse();
+    let mut angles: Vec<f32> = parts()
+        .filter(|(_, part)| *part == Part::Orbit)
+        .map(|(index, _)| {
+            let from = ring * (at(&cubes[index]) - orbited);
+            assert!((from.length() - ORBIT_RADIUS).abs() < 0.004, "{from}");
+            assert!(from.y.abs() < 0.004, "{from}");
+            from.z.atan2(from.x)
+        })
+        .collect();
+    angles.sort_by(f32::total_cmp);
+    let even = TAU / angles.len() as f32;
+    for pair in angles.windows(2) {
+        assert!((pair[1] - pair[0] - even).abs() < even * 0.3, "{angles:?}");
+    }
     // Silent again, it calms over SPEAK_FALL, never flickering for a breath between words.
     body.follow(&person, 0.1, EYES, false);
     assert!(body.speaking > 0.75);
@@ -689,7 +705,7 @@ fn each_cube_glows_brightest_at_the_middle_of_its_part_as_seen_dimmer_and_smalle
         let ((middle, middle_size), (outline, outline_size)) = (mean(true), mean(false));
         assert!(outline < middle * 0.6, "{part:?}: {outline} {middle}");
         assert!(
-            outline_size < middle_size * 0.8,
+            outline_size < middle_size * 0.92,
             "{part:?}: {outline_size} {middle_size}"
         );
     }
@@ -742,4 +758,183 @@ fn each_cube_glows_brightest_at_the_middle_of_its_part_as_seen_dimmer_and_smalle
     }
     assert!(theirs[0].color[1] / colour[1] > CORE * 0.8);
     assert_ne!(theirs[MOTES.len() - 1].color, cubes[MOTES.len() - 1].color);
+}
+
+#[test]
+fn the_eyes_are_small_crisp_rounds_facing_out_of_the_head_that_nothing_of_its_shell_covers() {
+    // Each of an eye, its socket and its halo is three flat boxes facing out of the head where the eye looks, about one
+    // middle, together a round: as wide as it is high, its corners cut.
+    for side in 0..2 {
+        let ahead = eye_direction(side);
+        for part in [Part::Eye(side), Part::Ring(side), Part::Halo(side)] {
+            let boxes: Vec<&Mote> = MOTES.iter().filter(|mote| mote.part == part).collect();
+            assert_eq!(boxes.len(), 3);
+            for mote in &boxes {
+                assert_eq!(mote.at, boxes[0].at);
+                assert!((mote.turn * Vec3::NEG_Z).distance(ahead) < 1e-4);
+                assert!(mote.size.z < mote.size.x.max(mote.size.y) * 0.5);
+            }
+            let wide = boxes.iter().map(|mote| mote.size.x).fold(0.0, f32::max);
+            let high = boxes.iter().map(|mote| mote.size.y).fold(0.0, f32::max);
+            assert_eq!(wide, high);
+            // No box reaches a corner of the square about them.
+            assert!(
+                boxes
+                    .iter()
+                    .all(|mote| mote.size.x.min(mote.size.y) < wide * 0.9)
+            );
+        }
+        // The eye stands in front of its socket, which stands in front of its halo, all a little out of the head.
+        let depth = |part| {
+            MOTES
+                .iter()
+                .find(|mote| mote.part == part)
+                .unwrap()
+                .at
+                .dot(ahead)
+        };
+        assert!(depth(Part::Eye(side)) > depth(Part::Ring(side)));
+        assert!(depth(Part::Ring(side)) > depth(Part::Halo(side)));
+        // Nothing of the shell stands in front of the eye, even grown as it warms, and none of the core reaches its socket.
+        let eye = MOTES
+            .iter()
+            .find(|mote| mote.part == Part::Eye(side))
+            .unwrap();
+        let axis = eye.at.normalize();
+        let reach = EYE * 1.25 / 2.0;
+        for mote in MOTES.iter().filter(|mote| mote.part == Part::Shell) {
+            let half = mote.size.x * 0.6;
+            let lateral = (mote.at - axis * mote.at.dot(axis)).length();
+            if lateral - half < reach {
+                assert!(
+                    mote.at.dot(axis) + half < eye.at.dot(axis) - eye.size.z / 2.0,
+                    "{mote:?}"
+                );
+            }
+        }
+        for mote in MOTES.iter().filter(|mote| mote.part == Part::Core) {
+            assert!(mote.at.dot(axis) + mote.size.x < depth(Part::Ring(side)));
+        }
+    }
+    // The head's shell is dense, its cubes packed on its outside so that its outline is round.
+    let shell: Vec<&Mote> = MOTES
+        .iter()
+        .filter(|mote| mote.part == Part::Shell)
+        .collect();
+    assert!(shell.len() > 100, "{}", shell.len());
+    for mote in shell {
+        let on = mote.at / HEAD;
+        assert!((0.94..=1.0).contains(&on.length()), "{on}");
+    }
+}
+
+#[test]
+fn the_arms_are_slender_rods_along_each_bone_tapering_to_the_wrist_stretching_as_it_does() {
+    let reaching = |hand: Vec3| {
+        let person = standing([None, Some(hand)]);
+        let body = Body::new(&person, EYES);
+        let [shoulder, elbow, end] = body.arm(&person, Quat::IDENTITY, 1);
+        (
+            drawn(&person, &body, &cues(0.0, 0.0)),
+            [shoulder, elbow, end],
+        )
+    };
+    let (cubes, joints) = reaching(Vec3::new(0.3, 1.25, -0.45));
+    let mut widths = [0.0; 2];
+    let mut lengths = [0.0; 2];
+    for bone in 0..2 {
+        let (start, end) = (joints[bone], joints[bone + 1]);
+        let along = (end - start).normalize();
+        let length = start.distance(end);
+        let rods: Vec<&Cube> = parts()
+            .filter(|(index, part)| *part == Part::Rod(1, bone) && MOTES[*index].at.y > 0.01)
+            .map(|(index, _)| &cubes[index])
+            .collect();
+        assert_eq!(rods.len(), 3);
+        let mut covered = 0.0;
+        for rod in &rods {
+            // Along the bone, within a few degrees, and on it.
+            let axis = Quat::from_array(rod.orientation) * Vec3::Y;
+            assert!(axis.dot(along).abs() > 0.99, "{axis} {along}");
+            let from = at(rod) - start;
+            assert!((from - along * from.dot(along)).length() < 0.02);
+            assert!((0.0..=length).contains(&from.dot(along)));
+            // Slender: much longer than wide.
+            assert!(rod.scale[1] > rod.scale[0] * 2.0, "{:?}", rod.scale);
+            covered += rod.scale[1];
+            widths[bone] += rod.scale[0] / 3.0;
+        }
+        // Together most of the bone, with gaps between them.
+        assert!(
+            covered > length * 0.6 && covered < length,
+            "{covered} of {length}"
+        );
+        lengths[bone] = rods.iter().map(|rod| rod.scale[1]).sum::<f32>();
+    }
+    // Thinner towards the wrist.
+    assert!(widths[1] < widths[0], "{widths:?}");
+    // With an elbow at the forearm's start.
+    let (elbow, _) = parts()
+        .find(|(index, part)| *part == Part::Rod(1, 1) && MOTES[*index].at.y == 0.0)
+        .unwrap();
+    assert!(at(&cubes[elbow]).distance(joints[1]) < 0.01);
+    // Reaching farther than the arm, each rod stretches as its bone does.
+    let (stretched, _) = reaching(Vec3::new(0.3, 1.0, -1.5));
+    for (bone, length) in lengths.into_iter().enumerate() {
+        let long: f32 = parts()
+            .filter(|(index, part)| *part == Part::Rod(1, bone) && MOTES[*index].at.y > 0.01)
+            .map(|(index, _)| stretched[index].scale[1])
+            .sum();
+        assert!((long / length - STRETCH).abs() < 0.01, "{long}");
+    }
+}
+
+#[test]
+fn each_hand_is_a_small_bright_cluster_with_a_larger_dimmer_gleam_behind_it_as_seen() {
+    let hand = Vec3::new(0.3, 1.25, -0.45);
+    let person = standing([None, Some(hand)]);
+    let body = Body::new(&person, EYES);
+    let seen = |cues: &Cues| {
+        let cubes = drawn(&person, &body, cues);
+        let hands: Vec<Cube> = parts()
+            .filter(|(_, part)| *part == Part::Hand(1))
+            .map(|(index, _)| cubes[index])
+            .collect();
+        let gleams: Vec<Cube> = parts()
+            .filter(|(_, part)| *part == Part::Gleam(1))
+            .map(|(index, _)| cubes[index])
+            .collect();
+        (hands, gleams)
+    };
+    let (hands, gleams) = seen(&cues(0.0, 0.0));
+    let eyes = EYES.unwrap();
+    let largest = hands.iter().map(|cube| cube.scale[0]).fold(0.0, f32::max);
+    let dimmest = hands.iter().map(|cube| cube.color[1]).fold(1.0, f32::min);
+    assert!(hands.iter().all(|cube| at(cube).distance(hand) < 0.06));
+    // Paler and brighter than the person's colour.
+    assert!(hands.iter().all(|cube| cube.color[1] > COLOUR[1] * 1.2));
+    assert_eq!(gleams.len(), 3);
+    for gleam in &gleams {
+        assert!(gleam.scale[0] > largest);
+        assert!(gleam.color[1] < dimmest);
+        // Behind the hand as seen, about HALO_BEHIND farther from the eyes than where it rests.
+        assert!(at(gleam).distance(hand) < 0.06);
+    }
+    let far = |cubes: &[Cube]| {
+        cubes
+            .iter()
+            .map(|cube| at(cube).distance(eyes))
+            .sum::<f32>()
+            / cubes.len() as f32
+    };
+    assert!(far(&gleams) > far(&hands) + HALO_BEHIND * 0.5);
+    // Without eyes to see it, behind where the head faces.
+    let (hands, gleams) = seen(&Cues {
+        eyes: None,
+        ..cues(0.0, 0.0)
+    });
+    let ahead = |cubes: &[Cube]| {
+        cubes.iter().map(|cube| -cube.position[2]).sum::<f32>() / cubes.len() as f32
+    };
+    assert!(ahead(&gleams) < ahead(&hands));
 }

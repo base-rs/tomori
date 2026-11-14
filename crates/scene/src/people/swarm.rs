@@ -2,14 +2,16 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! How a person looks: a small swarm of glowing cubes in their colour, shaped as a person where the agent's is a
-//! shapeless cloud. A rounded head, its core the brightest, with two soft, round eyes on its face that warm to gold and
-//! glow while it faces this participant, and a little orbit of tiny cubes about it that quickens and brightens while
-//! their voice plays; shoulders and a torso below it, turning with the head's yaw, damped, and never with its pitch or
-//! roll, dissolving below the chest into cubes that fall, shrink and fade, with no legs; and an arm from each shoulder
-//! to each hand by two bones, its elbow bending out and down, the hand a small, bright cluster. Each cube is brighter
-//! towards the middle of what it is part of, as seen, and dimmer and smaller at its outline, and shimmers a little, so
-//! that a person glows as a volume of light rather than standing as a solid; every cube drifts a little about where it
-//! rests, and fewer are drawn farther away. See `design/people.md`.
+//! shapeless cloud. A rounded head, dense, its cubes packed on its outside and its core the brightest, with two small,
+//! crisp, round eyes on its face, each in a socket, that warm to gold and glow while it faces this participant, and a
+//! tidy little orbit of tiny cubes about it that quickens and brightens while their voice plays; shoulders and a torso
+//! below it, dense at the shoulders and the upper chest, turning with the head's yaw, damped, and never with its pitch or
+//! roll, dissolving below the chest into cubes that fall, shrink and fade, with no legs; and an arm from each shoulder to
+//! each hand by two bones, each a few slender rods along it, its elbow bending out and down, the hand a small, bright
+//! cluster. Each cube is brighter towards the middle of what it is part of, as seen, and dimmer and a little smaller at
+//! its outline, and shimmers a little, so that a person glows as a volume of light rather than standing as a solid; with
+//! no bloom, the eyes and hands glow by a larger, dimmer copy behind them as seen. Every cube drifts a little about where
+//! it rests, and fewer are drawn farther away. See `design/people.md`.
 use std::f32::consts::TAU;
 use std::sync::LazyLock;
 
@@ -22,33 +24,49 @@ use crate::delegation::Cube;
 /// evening and is far from the agent's violet. Every colour of a person's swarm is made from theirs (`Cues::colour`).
 pub const COLOUR: [f32; 3] = [1.0, 0.36, 0.24];
 /// How bright a cube at the middle of what it is part of, as seen, is, whitening a little; how bright one at its outline
-/// is; and how much smaller.
+/// is; and how much smaller, the head's a little less so that its outline stays round.
 pub const CORE: f32 = 1.2;
 pub const RIM: f32 = 0.5;
-const RIM_SIZE: f32 = 0.6;
+const RIM_SIZE: f32 = 0.85;
+const HEAD_RIM_SIZE: f32 = 0.85;
 /// How bright the lowest of the torso is, of its chest.
 pub const BELOW: f32 = 0.45;
 /// How much each cube's brightness shimmers, either way, and how fast, in radians a second, each at one of these.
 pub const SHIMMER: f32 = 0.15;
 const SHIMMERS: [f32; 3] = [2.3, 3.4, 5.1];
 /// How far towards white the eyes are, and how bright, while cool: soft, a little paler than the face about them.
-const EYE_PALE: f32 = 0.55;
-const EYE_DIM: f32 = 0.8;
-/// The eyes' warm glow while the head faces this participant.
+const EYE_PALE: f32 = 0.5;
+const EYE_DIM: f32 = 0.9;
+/// How bright the socket about each eye is while cool, of the person's colour, framing it against the face.
+const SOCKET: f32 = 0.62;
+/// The eyes' warm glow while the head faces this participant, the deeper gold of the socket about each mixed with the
+/// person's colour; and how far towards white each eye itself is then.
 pub const EYE_GLOW: [f32; 3] = [1.0, 0.8, 0.22];
-/// How far from where each eye looks out of the head, in degrees, the head's shell leaves a gap for it.
-const EYE_GAP: f32 = 15.0;
-/// How far about the middle of each eye the cubes around it are, and its halo, in metres.
-const EYE_RING: f32 = 0.0125;
-const EYE_HALO: f32 = 0.024;
+const EYE_WHITE: f32 = 0.2;
+/// How far from where each eye looks out of the head, in degrees, the head's shell leaves a gap for it, and how far
+/// beyond that its cubes are smaller, so that none covers it.
+const EYE_GAP: f32 = 18.0;
+const EYE_NEAR: f32 = 12.0;
+/// How wide each eye is, its socket and the halo behind it, in metres, each a round of three flat boxes.
+const EYE: f32 = 0.023;
+const EYE_SOCKET: f32 = 0.036;
+const EYE_HALO: f32 = 0.056;
+/// The three flat boxes making a round, as fractions of its width across and up: a wide one, a tall one and a square
+/// between, as a few pixels draw a circle.
+const ROUND: [(f32, f32); 3] = [(1.0, 0.44), (0.44, 1.0), (0.82, 0.82)];
 /// How much less the eye away from this participant glows than the one towards them, at most.
 const GLOW_SIDE: f32 = 0.15;
-/// How far towards white the hands are.
+/// How far towards white the hands are, and how bright.
 const HAND_PALE: f32 = 0.45;
+const HAND_BRIGHT: f32 = 1.1;
+/// How bright each hand's gleam is, of the person's colour: larger, dimmer cubes behind it, as seen, standing in for a
+/// bloom; and how far behind.
+const HALO: f32 = 0.6;
+const HALO_BEHIND: f32 = 0.03;
 /// How far towards white the orbit is, and its brightness, and the same while their voice plays.
-const ORBIT_PALE: f32 = 0.35;
-const ORBIT_DIM: f32 = 0.75;
-pub const ORBIT_SPEAKING_PALE: f32 = 0.7;
+const ORBIT_PALE: f32 = 0.25;
+const ORBIT_DIM: f32 = 0.8;
+pub const ORBIT_SPEAKING_PALE: f32 = 0.4;
 
 /// The middle of the head from the eyes, in the head's own coordinates, which face along −Z, and its radii: about 18
 /// by 20 by 19 cm, a little larger than a head, so that it reads from across a space.
@@ -64,6 +82,8 @@ pub const SHOULDER: Vec3 = Vec3::new(0.18, -0.16, 0.02);
 pub const UPPER: f32 = 0.3;
 pub const LOWER: f32 = 0.32;
 pub const STRETCH: f32 = 1.2;
+/// How thick each bone of the arm is, as a half, at its start and at its end: tapering towards the wrist.
+const BONES: [(f32, f32); 2] = [(0.042, 0.035), (0.035, 0.026)];
 /// Where the right hand rests while it is not tracked, from the neck, in the body's coordinates: hanging at the side.
 pub const REST: Vec3 = Vec3::new(0.22, -0.66, -0.06);
 /// Which way the right elbow bends, in the body's coordinates: out, down and a little back.
@@ -82,7 +102,7 @@ pub const SPEAK_FALL: f32 = 0.5;
 /// How fast the orbit turns, in radians a second, and while their voice plays; and how far from the head's middle.
 pub const ORBIT_TURN: f32 = 0.6;
 pub const ORBIT_SPEAKING_TURN: f32 = 3.2;
-const ORBIT_RADIUS: f32 = 0.19;
+const ORBIT_RADIUS: f32 = 0.155;
 /// How the orbit is tilted about the head, its front above the eyes and its back below them, and how far above the
 /// head's middle it is.
 const ORBIT_TILT: (f32, f32) = (0.3, 0.2);
@@ -100,7 +120,7 @@ const BORN: f32 = 0.12;
 const SPREAD: f32 = 0.25;
 /// Below the chest, from how far down the torso it is the body begins to dissolve: its cubes fewer, smaller, dimmer
 /// and looser lower down.
-const DISSOLVE: f32 = 0.3;
+const DISSOLVE: f32 = 0.35;
 /// How fast the cubes drift about where they rest, in radians a second, each at one of these.
 const BEATS: [f32; 3] = [1.3, 1.9, 2.7];
 /// The torso from the neck down, in the body's coordinates: at each height, how wide it is, and how deep, each a half.
@@ -119,8 +139,8 @@ const TORSO_BACK: f32 = 0.02;
 pub enum Detail {
     /// The head alone, its eyes and a little of its orbit.
     Head,
-    /// The head's core, two thirds of its shell, its eyes and their halo, two thirds of its orbit, and a quarter of the
-    /// rest, each larger.
+    /// The head's core, half its shell, its eyes with their sockets and halo, two thirds of its orbit, the arms' rods,
+    /// half the hands and a quarter of the rest, each larger.
     Fewer,
     Full,
 }
@@ -139,7 +159,8 @@ impl Detail {
     }
 }
 
-/// What a cube of the swarm is part of: each of the arms, and the eyes, left then right.
+/// What a cube of the swarm is part of: each of the arms, and the eyes, left then right, and each arm's rods, its upper
+/// arm's then its forearm's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Part {
     Core,
@@ -151,30 +172,31 @@ pub(crate) enum Part {
     Neck,
     Torso,
     Drift,
+    Rod(usize, usize),
     Upper(usize),
     Lower(usize),
     Hand(usize),
+    Gleam(usize),
 }
 
 impl Part {
     /// How much larger its cubes are drawn at `detail`, to fill in for those left out.
     fn grow(self, detail: Detail) -> f32 {
         match (detail, self) {
-            (Detail::Full, _) | (_, Part::Core | Part::Eye(_) | Part::Ring(_) | Part::Halo(_)) => {
-                1.0
-            }
-            (Detail::Fewer, Part::Shell) => 1.15,
-            (Detail::Head, Part::Shell) => 1.45,
+            (Detail::Full, _)
+            | (_, Part::Core | Part::Eye(_) | Part::Ring(_) | Part::Halo(_) | Part::Rod(..)) => 1.0,
+            (Detail::Fewer, Part::Shell) => 1.1,
+            (Detail::Head, Part::Shell) => 1.35,
             (Detail::Head, _) => 1.6,
-            (Detail::Fewer, _) => 1.5,
+            (Detail::Fewer, _) => 1.4,
         }
     }
 }
 
 /// One cube of the swarm as it rests: in its part's own coordinates, how large, how bright, which way it is turned,
-/// which way is out of what it is part of, which way and how far it drifts and when, when it shimmers, at which detail
-/// it is drawn first, and how much of the eyes' glow it catches. A cube below the chest falls `drop` once each `fall`
-/// seconds, `offset` of the way on, turning as `spin` says.
+/// which way is out of what it is part of, which way and how far it drifts and when, when it shimmers, and at which
+/// detail it is drawn first. A cube below the chest falls `drop` once each `fall` seconds, `offset` of the way on,
+/// turning as `spin` says.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Mote {
     pub part: Part,
@@ -189,7 +211,6 @@ pub(crate) struct Mote {
     glint: [f32; 2],
     shimmer: usize,
     pub from: Detail,
-    warm: f32,
     fall: f32,
     drop: f32,
     offset: f32,
@@ -295,7 +316,6 @@ fn mote(
         glint: [glint.sin(), glint.cos()],
         shimmer: (dice.next() * SHIMMERS.len() as f32) as usize % SHIMMERS.len(),
         from,
-        warm: 0.0,
         fall: 1.0,
         drop: 0.0,
         offset: 0.0,
@@ -314,19 +334,19 @@ fn dissolved(down: f32) -> f32 {
 fn layout() -> Vec<Mote> {
     let mut dice = Dice(0x7f4a_7c15);
     let mut motes = Vec::new();
-    // The head's core, a few cubes filling it, its brightest, glowing between the shell's, the first still at its middle.
-    let core = 10;
+    // The head's core, cubes filling it, its brightest, glowing between the shell's, the first still at its middle.
+    let core = 16;
     for index in 0..core {
         let (at, size, wobble) = if index == 0 {
             (Vec3::ZERO, 0.036, 0.0)
         } else {
             (
-                dice.direction() * dice.within(0.25, 0.65) * HEAD,
-                dice.within(0.022, 0.034),
+                dice.direction() * dice.within(0.25, 0.7) * HEAD,
+                dice.within(0.024, 0.036),
                 0.002,
             )
         };
-        let from = every(index, 2, Detail::Head, Detail::Fewer);
+        let from = every(index, 4, Detail::Head, Detail::Fewer);
         let mote = mote(
             &mut dice,
             Part::Core,
@@ -345,9 +365,9 @@ fn layout() -> Vec<Mote> {
             mote
         });
     }
-    // Its shell, a rounded cluster of cubes of many sizes, with a small gap where each eye is, so that nothing of it
-    // covers them.
-    let shell = 60;
+    // Its shell, a dense, rounded cluster of cubes of many sizes packed on its outside, with a gap where each eye is and
+    // smaller cubes about it, so that nothing of it covers them.
+    let shell = 108;
     let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
     let mut kept = 0;
     for index in 0..shell {
@@ -356,96 +376,85 @@ fn layout() -> Vec<Mote> {
         let angle = golden * index as f32;
         let direction = Vec3::new(across * angle.cos(), y, across * angle.sin());
         let nearest = (0..2)
-            .map(|side| direction.dot(eye_direction(side)))
-            .fold(-1.0f32, f32::max);
-        if nearest > EYE_GAP.to_radians().cos() {
+            .map(|side| {
+                direction
+                    .dot(eye_direction(side))
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees()
+            })
+            .fold(180.0f32, f32::min);
+        if nearest < EYE_GAP {
             continue;
         }
-        let at = direction * HEAD * dice.within(0.88, 1.0);
-        let size = Vec3::splat(dice.mostly(0.014, 0.034));
-        let from = match kept % 3 {
+        let at = direction * HEAD * dice.within(0.95, 1.0);
+        let largest = if nearest < EYE_GAP + EYE_NEAR {
+            0.02
+        } else {
+            0.031
+        };
+        let size = Vec3::splat(dice.within(0.019, largest));
+        let from = match kept % 4 {
             0 => Detail::Head,
             1 => Detail::Fewer,
             _ => Detail::Full,
         };
         kept += 1;
-        // Those within 15° beyond the gap about an eye catch a little of its glow, the nearer the more.
-        let warm = 0.35 * (1.0 - (nearest.clamp(-1.0, 1.0).acos().to_degrees() - EYE_GAP) / 15.0);
         motes.push(Mote {
-            warm: warm.clamp(0.0, 0.35),
-            ..mote(&mut dice, Part::Shell, at, size, from, direction, 0.003)
+            turn: dice.tilt(0.15),
+            ..mote(&mut dice, Part::Shell, at, size, from, direction, 0.002)
         });
     }
-    // The eyes, each a small round cluster on its face: a cube turned on its corner, with smaller ones about it, and a
-    // halo that shows as they glow.
-    let across = |side: usize| {
-        let ahead = eye_direction(side);
-        let right = Vec3::Y.cross(ahead).normalize();
-        (ahead, right, ahead.cross(right))
-    };
-    for side in 0..2 {
-        let (ahead, ..) = across(side);
-        motes.push(Mote {
-            tone: 1.0,
-            turn: Quat::from_rotation_arc(Vec3::NEG_Z, ahead)
-                * Quat::from_rotation_z(std::f32::consts::FRAC_PI_4),
-            ..mote(
-                &mut dice,
-                Part::Eye(side),
-                ahead * HEAD * 1.04,
-                Vec3::new(0.018, 0.018, 0.01),
-                Detail::Head,
-                ahead,
-                0.0,
-            )
-        });
-    }
-    for (part, count, radius, low, high, from) in [
+    // The eyes, each a small, crisp round on its face, in a socket that frames it, and a halo behind that shows as they
+    // glow, each of three flat boxes facing out of the head.
+    for (part, width, depth, thick, from) in [
         (
-            Part::Ring as fn(usize) -> Part,
-            6,
-            EYE_RING,
-            0.007,
-            0.01,
+            Part::Halo as fn(usize) -> Part,
+            EYE_HALO,
+            0.95,
+            0.008,
             Detail::Fewer,
         ),
-        (Part::Halo, 5, EYE_HALO, 0.005, 0.007, Detail::Fewer),
+        (Part::Ring, EYE_SOCKET, 0.985, 0.01, Detail::Fewer),
+        (Part::Eye, EYE, 1.03, 0.008, Detail::Head),
     ] {
         for side in 0..2 {
-            let (ahead, right, up) = across(side);
-            for index in 0..count {
-                let angle = (index as f32 + dice.within(-0.2, 0.2)) / count as f32 * TAU;
-                let at = ahead * HEAD
-                    + (right * angle.cos() + up * angle.sin()) * radius * dice.within(0.85, 1.1);
-                let size = Vec3::splat(dice.within(low, high));
-                motes.push(mote(&mut dice, part(side), at, size, from, ahead, 0.0015));
+            let ahead = eye_direction(side);
+            for (across, up) in ROUND {
+                motes.push(Mote {
+                    tone: 1.0,
+                    turn: Quat::from_rotation_arc(Vec3::NEG_Z, ahead),
+                    ..mote(
+                        &mut dice,
+                        part(side),
+                        ahead * HEAD * depth,
+                        Vec3::new(across * width, up * width, thick),
+                        from,
+                        ahead,
+                        0.0,
+                    )
+                });
             }
         }
     }
-    // The orbit, a tilted ring of tiny cubes.
-    let orbit = 18;
+    // The orbit, a tidy, tilted ring of tiny cubes.
+    let orbit = 16;
     for index in 0..orbit {
-        let angle = index as f32 / orbit as f32 * TAU + dice.within(-0.12, 0.12);
-        let at =
-            Vec3::new(angle.cos(), dice.within(-0.06, 0.06), angle.sin()) * dice.within(0.95, 1.05);
-        let size = Vec3::splat(dice.within(0.006, 0.011));
+        let angle = (index as f32 + dice.within(-0.1, 0.1)) / orbit as f32 * TAU;
+        let at = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let size = Vec3::splat(dice.within(0.006, 0.008));
         let from = match index % 3 {
             0 => Detail::Head,
             1 => Detail::Fewer,
             _ => Detail::Full,
         };
-        motes.push(mote(
-            &mut dice,
-            Part::Orbit,
-            at,
-            size,
-            from,
-            Vec3::ZERO,
-            0.004,
-        ));
+        motes.push(Mote {
+            tone: dice.within(0.95, 1.05),
+            ..mote(&mut dice, Part::Orbit, at, size, from, Vec3::ZERO, 0.0015)
+        });
     }
     // The neck, each cube along it, around it and how far out.
-    let neck = 5;
+    let neck = 8;
     for index in 0..neck {
         let around = dice.within(0.0, TAU);
         let out = dice.within(0.4, 1.0);
@@ -454,8 +463,8 @@ fn layout() -> Vec<Mote> {
             (index as f32 + 0.5) / neck as f32,
             around.sin() * out,
         );
-        let from = every(index, 2, Detail::Fewer, Detail::Full);
-        let size = Vec3::splat(dice.mostly(0.012, 0.024));
+        let from = every(index, 3, Detail::Fewer, Detail::Full);
+        let size = Vec3::splat(dice.mostly(0.016, 0.026));
         let direction = Vec3::new(around.cos(), 0.0, around.sin());
         motes.push(mote(
             &mut dice,
@@ -464,26 +473,26 @@ fn layout() -> Vec<Mote> {
             size,
             from,
             direction,
-            0.003,
+            0.002,
         ));
     }
-    // The torso, through its depth rather than on its surface, densest at the shoulders, dissolving below the chest into
-    // fewer, smaller, dimmer and looser cubes.
-    let torso_cubes = 106;
+    // The torso, a dense core at the shoulders and the upper chest, most of it near its outside so that its outline
+    // reads, dissolving below the chest into fewer, smaller, dimmer and looser cubes.
+    let torso_cubes = 148;
     let (top, bottom) = (TORSO[0].0, TORSO[TORSO.len() - 1].0);
     for index in 0..torso_cubes {
-        let down = dice.next().powf(2.5);
+        let down = dice.next().powf(2.2);
         let y = top + (bottom - top) * down;
         let (width, depth) = torso(y);
         let around = dice.within(0.0, TAU);
         let loose = dissolved(down);
-        let out = dice.within(0.7, 1.0 + 0.15 * loose);
+        let out = dice.within(0.62 + 0.2 * (1.0 - loose), 1.0 + 0.15 * loose);
         let at = Vec3::new(
             width * around.cos() * out,
             y,
             depth * around.sin() * out + TORSO_BACK,
         );
-        let size = Vec3::splat(dice.mostly(0.016, 0.036) * (1.0 - 0.5 * loose));
+        let size = Vec3::splat(dice.mostly(0.026, 0.046) * (1.0 - 0.6 * loose));
         let from = every(index, 4, Detail::Fewer, Detail::Full);
         let direction = Vec3::new(around.cos(), 0.0, around.sin());
         let mote = mote(
@@ -493,16 +502,35 @@ fn layout() -> Vec<Mote> {
             size,
             from,
             direction,
-            0.004 + 0.016 * loose,
+            0.003 + 0.016 * loose,
         );
         motes.push(Mote {
             tone: mote.tone * (1.0 - (1.0 - BELOW) * loose),
+            turn: dice.tilt(0.2 + 0.4 * loose),
             ..mote
         });
     }
+    // The shoulders, a rounded cap of cubes at each, so that the arms grow from the torso.
+    for side in 0..2 {
+        for index in 0..8 {
+            let direction = (dice.direction() + Vec3::new(sign(side) * 0.8, 0.5, 0.0)).normalize();
+            let at = sided(SHOULDER, side) + direction * dice.within(0.015, 0.04);
+            let size = Vec3::splat(dice.mostly(0.022, 0.036));
+            let from = every(index, 3, Detail::Fewer, Detail::Full);
+            motes.push(mote(
+                &mut dice,
+                Part::Torso,
+                at,
+                size,
+                from,
+                direction,
+                0.003,
+            ));
+        }
+    }
     // Below the chest, cubes falling from it, more of them lower, each shrinking and fading as it falls, turning, and
     // beginning again.
-    let drift = 28;
+    let drift = 21;
     for index in 0..drift {
         let down = DISSOLVE + (1.0 - DISSOLVE) * dice.next().sqrt();
         let y = top + (bottom - top) * down;
@@ -526,33 +554,85 @@ fn layout() -> Vec<Mote> {
             ..mote
         });
     }
-    // The arms, each cube along its bone, around it and how far out; and the hands' clusters.
+    // The arms: along each bone a few slender rods, overlapping a little, turned a little from it and thinner towards
+    // the wrist, with an elbow joining them, and a few small cubes about them; and the hands, each a small, bright
+    // cluster with its glow behind.
     for side in 0..2 {
-        for (part, count, low, high) in [
-            (Part::Upper(side), 12, 0.015, 0.03),
-            (Part::Lower(side), 11, 0.013, 0.027),
-        ] {
-            for index in 0..count {
+        for bone in 0..2 {
+            let rods = 3;
+            for index in 0..rods {
+                let along = (index as f32 + 0.5 + dice.within(-0.08, 0.08)) / rods as f32;
+                let (start, end) = BONES[bone];
+                let thick = 2.0 * (start + (end - start) * along) * dice.within(0.4, 0.48);
                 let around = dice.within(0.0, TAU);
-                let out = dice.within(0.55, 1.0);
-                let at = Vec3::new(
-                    around.cos() * out,
-                    (index as f32 + dice.next()) / count as f32,
-                    around.sin() * out,
-                );
-                let size = Vec3::splat(dice.mostly(low, high));
-                let from = every(index, 4, Detail::Fewer, Detail::Full);
+                let off = dice.within(0.15, 0.35);
+                let at = Vec3::new(around.cos() * off, along, around.sin() * off);
+                let size = Vec3::new(thick, dice.within(0.25, 0.3), thick * dice.within(0.8, 1.0));
+                motes.push(Mote {
+                    turn: dice.tilt(0.1) * Quat::from_rotation_y(dice.within(0.0, TAU)),
+                    ..mote(
+                        &mut dice,
+                        Part::Rod(side, bone),
+                        at,
+                        size,
+                        Detail::Fewer,
+                        Vec3::ZERO,
+                        0.003,
+                    )
+                });
+            }
+            let part = [Part::Upper(side), Part::Lower(side)][bone];
+            for _ in 0..3 {
+                let around = dice.within(0.0, TAU);
+                let out = dice.within(0.85, 1.15);
+                let at = Vec3::new(around.cos() * out, dice.next(), around.sin() * out);
+                let size = Vec3::splat(dice.mostly(0.012, 0.022));
                 let direction = Vec3::new(around.cos(), 0.0, around.sin());
-                motes.push(mote(&mut dice, part, at, size, from, direction, 0.004));
+                motes.push(mote(
+                    &mut dice,
+                    part,
+                    at,
+                    size,
+                    Detail::Full,
+                    direction,
+                    0.004,
+                ));
             }
         }
-        for index in 0..8 {
-            let at = dice.direction() * dice.within(0.2, 1.0) * Vec3::new(0.04, 0.045, 0.035);
-            let size = Vec3::splat(dice.mostly(0.01, 0.02));
-            let from = every(index, 4, Detail::Fewer, Detail::Full);
+        // The elbow, at the forearm's start.
+        motes.push(Mote {
+            size: Vec3::new(0.034, 0.1, 0.034),
+            ..mote(
+                &mut dice,
+                Part::Rod(side, 1),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                Detail::Fewer,
+                Vec3::ZERO,
+                0.002,
+            )
+        });
+        for index in 0..10 {
+            let at = dice.direction() * dice.within(0.15, 1.0) * Vec3::new(0.034, 0.04, 0.03);
+            let size = Vec3::splat(dice.mostly(0.012, 0.022));
+            let from = every(index, 2, Detail::Fewer, Detail::Full);
             motes.push(mote(
                 &mut dice,
                 Part::Hand(side),
+                at,
+                size,
+                from,
+                Vec3::ZERO,
+                0.002,
+            ));
+        }
+        for index in 0..3 {
+            let at = dice.direction() * dice.within(0.0, 0.5) * Vec3::new(0.034, 0.04, 0.03);
+            let size = Vec3::splat(dice.within(0.036, 0.046));
+            let from = every(index, 2, Detail::Fewer, Detail::Full);
+            motes.push(mote(
+                &mut dice,
+                Part::Gleam(side),
                 at,
                 size,
                 from,
@@ -568,7 +648,7 @@ fn layout() -> Vec<Mote> {
 pub(crate) static MOTES: LazyLock<Vec<Mote>> = LazyLock::new(layout);
 
 /// How many cubes a person's swarm has at most, drawn in full.
-pub const MOST: usize = 310;
+pub const MOST: usize = 396;
 
 /// How many of the swarm's cubes are drawn at `detail`.
 pub fn cubes(detail: Detail) -> usize {
@@ -747,13 +827,18 @@ pub fn eyes(colour: [f32; 3]) -> [f32; 3] {
 }
 
 /// How bright, and how large, a cube is whose part's outside faces `facing` towards the eyes, as a cosine: [`CORE`] at
-/// the middle of what it is part of, as seen, and [`RIM`] at its outline and behind it, [`RIM_SIZE`] as large.
-fn seen(facing: f32) -> (f32, f32) {
+/// the middle of what it is part of, as seen, and [`RIM`] at its outline and behind it, `rim` as large.
+fn seen(facing: f32, rim: f32) -> (f32, f32) {
     let towards = facing.max(0.0);
-    (
-        RIM + (CORE - RIM) * towards,
-        RIM_SIZE + (1.0 - RIM_SIZE) * towards,
-    )
+    (RIM + (CORE - RIM) * towards, rim + (1.0 - rim) * towards)
+}
+
+/// Where the glow of a cube `at` is: a little farther from `eyes`, or behind `ahead` without them.
+fn behind(at: Vec3, eyes: Option<Vec3>, ahead: Vec3) -> Vec3 {
+    let away = eyes
+        .and_then(|eyes| (at - eyes).try_normalize())
+        .unwrap_or(-ahead);
+    at + away * HALO_BEHIND
 }
 
 /// A limb from `start` to `end`, as a frame whose −Y runs along it, turned as little as it can be from `rest`, and how
@@ -798,7 +883,7 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
             facing * Quat::from_rotation_arc(Vec3::NEG_Y, sided(REST - SHOULDER, side).normalize());
         let upper = limb(shoulder, elbow, rest);
         let lower = limb(elbow, hand, upper.2);
-        (upper, lower, hand)
+        ([upper, lower], hand)
     });
     let throat = limb(
         middle + turned * Vec3::new(0.0, -0.075, 0.0),
@@ -815,7 +900,10 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
     let orbited = middle + turned * Vec3::new(0.0, ORBIT_ABOVE, 0.0);
     let colour = cues.colour;
     let cool = eyes(colour);
-    let hands = pale(colour, HAND_PALE);
+    let warm = pale(EYE_GLOW, EYE_WHITE);
+    let socket = toned(colour, SOCKET);
+    let hands = toned(pale(colour, HAND_PALE), HAND_BRIGHT);
+    let haloed = toned(colour, HALO);
     let orbit = mix(
         toned(pale(colour, ORBIT_PALE), ORBIT_DIM),
         pale(colour, ORBIT_SPEAKING_PALE),
@@ -832,8 +920,8 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
         let grow = mote.part.grow(detail) * cues.fade;
         let mut size = mote.size * grow;
         // How bright and large a cube of the body is, as it is seen, its outside along `out` in the scene.
-        let mut lit = |out: Vec3, towards: Vec3| {
-            let (light, large) = seen(out.dot(towards));
+        let mut lit = |out: Vec3, towards: Vec3, rim: f32| {
+            let (light, large) = seen(out.dot(towards), rim);
             size *= large;
             toned(colour, bright * light)
         };
@@ -844,35 +932,28 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
                 toned(colour, CORE * bright),
             ),
             Part::Shell => {
-                let lit = lit(turned * mote.out, to_head);
-                (
-                    middle + turned * (mote.at + wobble),
-                    turn * mote.turn,
-                    mix(lit, EYE_GLOW, cues.glow * mote.warm),
-                )
+                let lit = lit(turned * mote.out, to_head, HEAD_RIM_SIZE);
+                (middle + turned * (mote.at + wobble), turn * mote.turn, lit)
             }
-            Part::Eye(side) | Part::Ring(side) => {
+            Part::Eye(side) | Part::Ring(side) | Part::Halo(side) => {
                 let glow = cues.glow * (1.0 - GLOW_SIDE * (1.0 - sign(side) * towards) / 2.0);
-                let (grown, dimmer) = match mote.part {
-                    Part::Eye(_) => (0.3, 1.0),
-                    _ => (0.25, 0.85),
+                // Steady, so that the cue they give never flickers; the halo nothing while they are cool, which the
+                // renderer leaves out.
+                let color = match mote.part {
+                    Part::Eye(_) => {
+                        size *= 1.0 + 0.25 * cues.glow;
+                        mix(cool, warm, glow)
+                    }
+                    Part::Ring(_) => {
+                        size *= 1.0 + 0.1 * cues.glow;
+                        mix(socket, mix(colour, EYE_GLOW, 0.7), glow)
+                    }
+                    _ => {
+                        size *= cues.glow;
+                        toned(mix(colour, EYE_GLOW, 0.5), 0.9)
+                    }
                 };
-                size *= 1.0 + grown * cues.glow;
-                // Steady, so that the cue they give never flickers.
-                (
-                    middle + turned * (mote.at * (1.0 + 0.15 * cues.glow) + wobble),
-                    turn * mote.turn,
-                    toned(mix(cool, EYE_GLOW, glow), dimmer),
-                )
-            }
-            // Nothing while the eyes are cool, which the renderer leaves out.
-            Part::Halo(_) => {
-                size *= cues.glow;
-                (
-                    middle + turned * (mote.at + wobble),
-                    turn * mote.turn,
-                    toned(EYE_GLOW, 0.7 * bright),
-                )
+                (middle + turned * mote.at, turn * mote.turn, color)
             }
             Part::Orbit => {
                 size *= 1.0 + 0.35 * body.speaking;
@@ -889,12 +970,12 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
             }
             Part::Neck => {
                 let (start, frame, turn, length) = throat;
-                let at = Vec3::new(mote.at.x * 0.035, -mote.at.y * length, mote.at.z * 0.035);
-                let lit = lit(frame * mote.out, to_body);
+                let at = Vec3::new(mote.at.x * 0.04, -mote.at.y * length, mote.at.z * 0.04);
+                let lit = lit(frame * mote.out, to_body, RIM_SIZE);
                 (start + frame * (at + wobble), turn * mote.turn, lit)
             }
             Part::Torso => {
-                let lit = lit(faced * mote.out, to_body);
+                let lit = lit(faced * mote.out, to_body, RIM_SIZE);
                 (neck + faced * (mote.at + wobble), facing * mote.turn, lit)
             }
             Part::Drift => {
@@ -908,22 +989,37 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
                     toned(colour, bright * (1.0 - 0.6 * fallen)),
                 )
             }
-            Part::Upper(side) | Part::Lower(side) => {
-                let ((start, frame, turn, length), radius) = match mote.part {
-                    Part::Upper(_) => (arms[side].0, 0.04 - 0.006 * mote.at.y),
-                    _ => (arms[side].1, 0.033 - 0.006 * mote.at.y),
-                };
+            // Each rod as long, of its bone, as it rests, so that it stretches as the bone does.
+            Part::Rod(side, bone) => {
+                let (start, frame, turn, length) = arms[side].0[bone];
+                let radius = thickness(bone, mote.at.y);
                 let at = Vec3::new(mote.at.x * radius, -mote.at.y * length, mote.at.z * radius);
-                let lit = lit(frame * mote.out, to_body);
+                size.y *= length;
+                (
+                    start + frame * (at + wobble),
+                    turn * mote.turn,
+                    toned(colour, bright),
+                )
+            }
+            Part::Upper(side) | Part::Lower(side) => {
+                let bone = usize::from(matches!(mote.part, Part::Lower(_)));
+                let (start, frame, turn, length) = arms[side].0[bone];
+                let radius = thickness(bone, mote.at.y);
+                let at = Vec3::new(mote.at.x * radius, -mote.at.y * length, mote.at.z * radius);
+                let lit = lit(frame * mote.out, to_body, RIM_SIZE);
                 (start + frame * (at + wobble), turn * mote.turn, lit)
             }
-            Part::Hand(side) => {
-                let (_, frame, turn, _) = arms[side].1;
-                (
-                    arms[side].2 + frame * (mote.at + wobble),
-                    turn * mote.turn,
-                    toned(hands, bright),
-                )
+            Part::Hand(side) | Part::Gleam(side) => {
+                let (_, frame, turn, _) = arms[side].0[1];
+                let at = arms[side].1 + frame * (mote.at + wobble);
+                match mote.part {
+                    Part::Hand(_) => (at, turn * mote.turn, toned(hands, bright)),
+                    _ => (
+                        behind(at, cues.eyes, ahead),
+                        turn * mote.turn,
+                        toned(haloed, bright),
+                    ),
+                }
             }
         };
         cubes.push(Cube {
@@ -933,6 +1029,12 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
             orientation: orientation.to_array(),
         });
     }
+}
+
+/// How thick the arm's `bone` is, as a half, `along` of the way from its start to its end.
+fn thickness(bone: usize, along: f32) -> f32 {
+    let (start, end) = BONES[bone];
+    start + (end - start) * along
 }
 
 #[cfg(test)]

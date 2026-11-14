@@ -80,7 +80,8 @@ Seeing stage 1's visor block on the headset's preview, the maintainer found it m
 - **The arms** reach from each shoulder to each hand by two-bone inverse kinematics, the elbows bending out and down, to the controller's grip or a tracked hand's palm; a hand neither tracks hangs at the side. Each hand is a small, brighter cluster; tracked joints may become a few cubes of it in stage 2.
 - **Motion:** every cube drifts a little about where it rests, cheaply, with a phase of its own, on stage 1's timeline, and every fade dissolves the cubes where they rest.
 - **Light, refined after the first build:** the cubes are the person's own light in their colour, brightest at each part's middle as seen and dimmer and smaller at its outline, shimmering a little, so that a person glows as the concepts did, translucent-looking at the edges by brightness alone, with no blending, sorting or pass. They are small and of many sizes, with air between them, and dissolve strongly below the chest into cubes that fall and fade; the eyes are small, round and soft, never two flat squares. Everyone is a warm coral until stage 3's colours, which the swarm takes whole (`Cues::colour`).
-- **Budget:** 310 cubes a person in full, 137 beyond 5 m, and the head's 32 alone beyond 15 m, in the batch Tomori's cubes already draw, with no new draw call. On the desktop's RTX 4090, two eyes of 1832 by 1920 with four samples, eight people in view add 0.06 ms of the GPU's frame and about 30,000 triangles an eye; a Quest 3 would spend roughly 0.45 ms for four people and 0.9 ms for eight, and a fifth of a millisecond of its CPU, which its frame log is to confirm. A frame with others in the space allocates nothing.
+- **Readable at a distance, refined again:** the second build went too sparse to read as a person from 3.6 m, so the third is the middle ground: a head twice as dense, packed round like head B; dense shoulders and upper chest, sparse only at the edges and below the chest; arms of a few slender rods along each bone, as the maintainer suggested, tapering to the wrist, which read as one limb where small cubes broke into dots; the hands small, bright clusters; two crisp, round eyes, each three flat boxes in a socket that frames it, warming to gold with a halo behind; and a tidy orbit. With no bloom pass, glow is a larger, dimmer copy behind the eyes and hands, by brightness and size alone.
+- **Budget:** 396 cubes a person in full, 176 beyond 5 m, and the head's 42 alone beyond 15 m, in the batch Tomori's cubes already draw, with no new draw call. On the desktop's RTX 4090, two eyes of 1832 by 1920 with four samples, eight people in view add about 0.07 ms of the GPU's frame and about 38,000 triangles an eye; a Quest 3 would spend roughly 0.75 ms for four people and 1 ms for eight, and about 0.4 and 0.7 ms of its CPU, which its frame log is to confirm. A frame with others in the space allocates nothing.
 
 `design/people.md` describes it as built.
 
@@ -124,7 +125,7 @@ Neither choice changes your role or what you may do.
 
 **Network.** Drawing adds nothing to what is sent in stages 2–4 beyond the tag, a few bytes once in the space state. Stage 1's rays add about 130 B a frame for each ray drawn in full, about 9 KiB/s while pointing, and nothing otherwise. Today's load is the concern, and it is unchanged. Four people with both hands tracked each download about 830 KiB/s, and the server sends about 3.3 MiB/s. If that matters, a later change can send presence in a compact binary form (joints as 16-bit offsets from the wrist cut it about fourfold) or relay hands less often to someone far away. Neither is needed to draw people.
 
-**GPU, per person on a Quest 3** (as first proposed; the swarm, revised after stage 1, is 310 cubes in full and 137 beyond 5 m, about 3.7 k and 1.6 k triangles, as **The look, revised after stage 1** says):
+**GPU, per person on a Quest 3** (as first proposed; the swarm, revised after stage 1, is 396 cubes in full and 176 beyond 5 m, about 4.8 k and 2.1 k triangles, as **The look, revised after stage 1** says):
 
 | Part | Instances |
 | --- | --- |
@@ -141,8 +142,8 @@ That is about 110 instances and ~1.3 k triangles, in the instanced cube batch al
 
 **Level of detail by distance:**
 
-- beyond 5 m, a tracked hand is drawn as one palm block, and the swarm with fewer, larger cubes, 137 of its 310 (built with the swarm, revised after stage 1);
-- beyond 15 m, only the head and label are drawn, the swarm's head alone, 32 cubes;
+- beyond 5 m, a tracked hand is drawn as one palm block, and the swarm with fewer, larger cubes, 176 of its 396 (built with the swarm, revised after stage 1);
+- beyond 15 m, only the head and label are drawn, the swarm's head alone, 42 cubes;
 - beyond 40 m, only the label is drawn;
 - labels fade out beyond 6 m unless the person speaks or is pointed at.
 
@@ -193,7 +194,7 @@ The maintainer agreed with the recommendation, November 2026:
 5. **Pointing at a person** as attention: later, in stage 4.
 6. **A build registering a person's look:** later, not staged here.
 7. **New, a gaze cue:** someone looking at you is shown on their head, from the head pose already relayed, with hysteresis (stage 1, the label's part in stage 3).
-8. **Revised after stage 1, the look:** a simpler swarm than the agent's, shaped as a person, in their colour: a body and arms, by two-bone inverse kinematics to each hand, and no legs, dissolving below the chest; the head the second concept's rounded cluster, its eyes the gaze cue and its orbit quickening while they speak; about 320 cubes a person in full, fewer beyond 5 m and the head alone beyond 15 m (**The look, revised after stage 1**).
+8. **Revised after stage 1, the look:** a simpler swarm than the agent's, shaped as a person, in their colour: a body and arms, by two-bone inverse kinematics to each hand, and no legs, dissolving below the chest; the head the second concept's rounded cluster, its eyes the gaze cue and its orbit quickening while they speak; about 400 cubes a person in full, fewer beyond 5 m and the head alone beyond 15 m (**The look, revised after stage 1**).
 
 ## Design documents this would change
 
