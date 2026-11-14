@@ -127,6 +127,8 @@ mod tests {
 
     #[test]
     fn a_failure_is_kept_until_vibration_works_again() {
+        let lost = crate::test_log::watch("Cannot vibrate the Left controller: lost");
+        let busy = crate::test_log::watch("Cannot vibrate the Right controller: busy");
         let mut haptics = Haptics::default();
         let failing = Recorder {
             fail: Some("lost"),
@@ -143,6 +145,8 @@ mod tests {
         };
         haptics.apply(&other, Hand::Right, Haptic::Stop);
         assert_eq!(haptics.failure(), Some("busy"));
+        assert_eq!(lost.records().len(), 1);
+        assert_eq!(busy.records()[0].0, log::Level::Warn);
         haptics.apply(&Recorder::default(), Hand::Right, Haptic::Stop);
         assert_eq!(haptics.failure(), None);
     }

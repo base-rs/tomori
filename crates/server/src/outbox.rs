@@ -672,6 +672,7 @@ mod tests {
 
     #[test]
     fn errors_are_capped_until_they_are_sent() {
+        crate::test_log::record();
         let outbox = Outbox::new();
         for index in 0..100 {
             outbox.message(ServerMessage::Error {
@@ -697,6 +698,7 @@ mod tests {
 
     #[test]
     fn an_unread_control_queue_closes_the_connection() {
+        crate::test_log::record();
         let outbox = Outbox::new();
         for _ in 0..CONTROL_LIMIT * 2 {
             outbox.message(ServerMessage::LEFT);

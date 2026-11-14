@@ -944,12 +944,17 @@ mod tests {
 
     #[test]
     fn a_message_too_large_for_the_connection_is_replaced_by_an_error_saying_so() {
+        crate::test_log::record();
         let message = ServerMessage::Error {
             error: "x".repeat(tomori_protocol::MAX_FRAME_BYTES),
             space: None,
             panel: None,
             wall: None,
         };
+        let said = crate::test_log::watch(format!(
+            "A server message was not sent: frame of {} bytes exceeds the limit.",
+            serde_json::to_vec(&message).unwrap().len()
+        ));
         // Too large for today's limit, which an older client is sent within.
         let mut output = Vec::new();
         encode(&message, &mut output, tomori_protocol::MAX_FRAME_BYTES);
@@ -968,5 +973,6 @@ mod tests {
         decoder.push(&output);
         let frame = decoder.next_frame().unwrap().unwrap();
         assert_eq!(frame.to_server_message().unwrap(), message);
+        assert!(said.seen());
     }
 }

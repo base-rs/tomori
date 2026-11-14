@@ -570,48 +570,11 @@ pub(crate) mod tests {
         assert_eq!(Refresh::default().wait(start), Duration::ZERO);
     }
 
-    /// Every log record of this process's tests, so that a test can find its own.
-    struct Recorder(std::sync::Mutex<Vec<(log::Level, String)>>);
-
-    impl log::Log for Recorder {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            self.0
-                .lock()
-                .unwrap()
-                .push((record.level(), record.args().to_string()));
-        }
-
-        fn flush(&self) {}
-    }
-
-    static LOG: Recorder = Recorder(std::sync::Mutex::new(Vec::new()));
-
-    /// The records logged so far that mention `about`, recording from the first call on.
-    fn logged(about: &str) -> Vec<(log::Level, String)> {
-        static RECORDING: std::sync::Once = std::sync::Once::new();
-        RECORDING.call_once(|| {
-            log::set_logger(&LOG).expect("only these tests log to a recorder");
-            log::set_max_level(log::LevelFilter::Info);
-        });
-        log::Log::flush(&LOG);
-        assert!(log::Log::enabled(&LOG, &log::Metadata::builder().build()));
-        LOG.0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, line)| line.contains(about))
-            .cloned()
-            .collect()
-    }
-
     #[test]
     fn a_rate_limit_is_waited_for_and_logged_once_while_it_lasts() {
         let source = "o/limited";
-        assert!(logged(source).is_empty());
+        let said = crate::test_log::watch(source);
+        assert!(!said.seen());
         let now = Instant::now();
         let mut board = Board::new("github", source, "GitHub");
         let limited =
@@ -619,7 +582,7 @@ pub(crate) mod tests {
         // The first read finds the limit used up: it is said once, at info, with how long the wait is.
         assert!(board.fetched(Err(limited()), now));
         assert_jittered(&board.refresh, now, Duration::from_secs(3_600));
-        let lines = logged(source);
+        let lines = said.records();
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert_eq!(lines[0].0, log::Level::Info);
         assert!(lines[0].1.contains("rate limit"), "{lines:?}");
@@ -638,7 +601,7 @@ pub(crate) mod tests {
             }),
         };
         assert!(board.fetched(Ok(low.clone()), now));
-        assert_eq!(logged(source).len(), 1);
+        assert_eq!(said.records().len(), 1);
         // Once a read finds the limit reset, the next time it runs low is said again.
         let plenty = Fetched {
             cards: Vec::new(),
@@ -649,11 +612,11 @@ pub(crate) mod tests {
         };
         board.fetched(Ok(plenty), now);
         board.fetched(Ok(low), now);
-        assert_eq!(logged(source).len(), 2);
+        assert_eq!(said.records().len(), 2);
         // Other failures are warnings, each time, and end the limit.
         board.fetched(Err(Failure::new("GitHub answered 502")), now);
         board.fetched(Err(Failure::new("GitHub answered 502")), now);
-        let lines = logged(source);
+        let lines = said.records();
         assert_eq!(lines.len(), 4, "{lines:?}");
         assert!(
             lines[2..]
@@ -661,7 +624,7 @@ pub(crate) mod tests {
                 .all(|(level, _)| *level == log::Level::Warn)
         );
         board.fetched(Err(limited()), now);
-        assert_eq!(logged(source).len(), 5);
+        assert_eq!(said.records().len(), 5);
     }
 
     #[test]

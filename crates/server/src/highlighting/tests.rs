@@ -186,6 +186,9 @@ fn panels_without_code_are_projected_without_highlighting() {
 
 #[test]
 fn code_is_plain_when_it_cannot_be_highlighted() {
+    let said = crate::test_log::watch(
+        "Showing code panels plain: could not start highlighting them: the system refused tomori-highlight.",
+    );
     // When no thread can be started for it.
     crate::system::refuse("tomori-highlight");
     let (recording, given) = recording();
@@ -200,6 +203,7 @@ fn code_is_plain_when_it_cannot_be_highlighted() {
     let projecting = Projecting::new(found(&code_reply("fn f() {}")));
     let replies = block_on(highlight(projecting, failing));
     assert!(replies[0].0[0].0.code.as_ref().unwrap().spans.is_empty());
+    assert!(said.seen());
 }
 
 #[test]
