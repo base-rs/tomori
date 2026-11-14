@@ -1,0 +1,13 @@
+# The Test workflow's profile, selected with NEXTEST_PROFILE=ci or --profile ci. See design/testing.md.
+[profile.ci]
+# Run every test and report every failure, rather than stopping at the first.
+fail-fast = false
+# Flag tests running for over a minute, as Cargo's test harness does.
+slow-timeout = { period = "60s" }
+# Write each test's result and time, which the workflow uploads and summarises.
+junit = { path = "junit.xml" }
+
+# The exhaustive checks take minutes under coverage. Started first, they run beside the rest rather than holding up the end of the run.
+[[profile.ci.overrides]]
+filter = 'test(/ferns_are_modest_for_the_quest|backdrop_stands_beyond_the_fence|a_projection_of_code_panels_at_every_limit|a_projection_with_every_published_chart_at_its_largest|the_agent_coming_to_anyone_on_the_trail/)'
+priority = 100
