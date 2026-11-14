@@ -95,10 +95,26 @@ fn notice(body: String) -> crate::stage::Content {
     }
 }
 
-/// What `contexts` says where it leaves out walls and panels to fit [`LISTING_BYTES`].
-fn cut(panels: usize, walls: usize) -> String {
+/// How many of `entries` fit in a page of `contexts` beside `taken` bytes of what it says besides them, each as it is
+/// sent, in both forms, with the comma after it, the next in order: at least one, since each is far shorter than the
+/// room, and so at least one however much is taken, so that paging always moves on.
+fn fitting<'a>(taken: usize, entries: impl Iterator<Item = &'a Value>) -> usize {
+    let budget = LISTING_BYTES.saturating_sub(LISTING_ROOM.saturating_add(taken));
+    let (mut bytes, mut fit) = (0, 0);
+    for entry in entries {
+        bytes += sent(entry) + 2;
+        if bytes > budget && fit > 0 {
+            break;
+        }
+        fit += 1;
+    }
+    fit
+}
+
+/// What `contexts` says where a page holds walls and panels `from` to `to`, counted from 1, of `total`, the walls first.
+fn paged(from: usize, to: usize, total: usize) -> String {
     format!(
-        "{panels} panels and {walls} walls are left out to fit; read them by setting what you need with set_context, or ask fewer to be set."
+        "Walls and panels {from} to {to} of {total} are listed, the walls first. List those after with offset {to}."
     )
 }
 
@@ -162,8 +178,10 @@ pub(crate) enum Target {
 impl Hub {
     /// The `contexts` tool: the parameters the environment of the calling session's space declares now, every setting
     /// of each of its walls and panels that holds any, those not shown marked so, and the context each panel that
-    /// depends on any shows now.
-    pub(crate) fn tool_contexts(&self, session: &str) -> Result<Value, String> {
+    /// depends on any shows now: the walls and then the panels, from the `offset`th, as many as fit in
+    /// [`LISTING_BYTES`] as the result is sent, saying how many there are in all and the offset the next begin at, so
+    /// that the agent pages through them, as through `panels`, and every one is told on some page.
+    pub(crate) fn tool_contexts(&self, session: &str, offset: usize) -> Result<Value, String> {
         let state = self.lock();
         let space = self.calling_space(&state, session)?;
         let record = state.space(&space).expect("found above");
@@ -184,7 +202,7 @@ impl Hub {
             })
             .collect();
         // Every wall holding a setting, shown here or not, as one the environment no longer declares.
-        let mut walls: Vec<Value> = stage
+        let walls: Vec<Value> = stage
             .wall_contexts(environment)
             .map(|(id, settings)| {
                 let shown = projection.wall(id);
@@ -238,26 +256,24 @@ impl Hub {
                     told
                 }),
         );
+        let total = walls.len() + panels.len();
+        let offset = offset.min(total);
         let mut told = json!({
             "space": space,
             "environment": environment,
             "parameters": parameters,
-            "walls": walls,
-            "panels": panels,
         });
-        // Within its bound as it is sent, the last panels and then the last walls left out, saying how many.
-        let (mut left_panels, mut left_walls) = (0, 0);
-        while sent(&told) + LISTING_ROOM > LISTING_BYTES && !(panels.is_empty() && walls.is_empty())
-        {
-            if panels.pop().is_some() {
-                left_panels += 1;
-            } else {
-                walls.pop();
-                left_walls += 1;
-            }
-            told["walls"] = json!(walls);
-            told["panels"] = json!(panels);
-            told["cut"] = json!(cut(left_panels, left_walls));
+        let end = offset + fitting(sent(&told), walls.iter().chain(&panels).skip(offset));
+        let (from_walls, from_panels) =
+            (offset.min(walls.len()), offset.saturating_sub(walls.len()));
+        let (to_walls, to_panels) = (end.min(walls.len()), end.saturating_sub(walls.len()));
+        told["walls"] = json!(walls[from_walls..to_walls]);
+        told["panels"] = json!(panels[from_panels..to_panels]);
+        told["total"] = json!(total);
+        told["offset"] = json!(offset);
+        if end < total {
+            told["next"] = json!(end);
+            told["note"] = json!(paged(offset + 1, end, total));
         }
         Ok(told)
     }

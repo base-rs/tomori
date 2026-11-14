@@ -105,3 +105,19 @@ fn a_chip_s_value_is_said_in_words_and_instants_in_utc() {
     );
     assert_eq!(spoken(&ContextValue::Unknown), "");
 }
+
+#[test]
+fn a_page_of_contexts_holds_as_many_as_fit_and_always_at_least_one() {
+    let entry = json!({"wall": "w".repeat(1000)});
+    let entries = vec![entry; 100];
+    let each = sent(&entries[0]) + 2;
+    // Beside nothing else, as many as fit in what is read and its room.
+    assert_eq!(
+        fitting(0, entries.iter()),
+        (LISTING_BYTES - LISTING_ROOM) / each
+    );
+    // Beside more than the page holds, its budget is nothing rather than wrapping round, and one is still told.
+    assert_eq!(fitting(LISTING_BYTES, entries.iter()), 1);
+    assert_eq!(fitting(usize::MAX, entries.iter()), 1);
+    assert_eq!(fitting(0, std::iter::empty()), 0);
+}

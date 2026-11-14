@@ -37,7 +37,8 @@ pub use frame::{
 };
 pub use keepalive::Keepalive;
 pub use limits::{
-    Limits, PROJECTION_FLOATING, PROJECTION_PANELS, PROJECTION_SLOTS, PROJECTION_WALLS,
+    DECLARED_WALLS, Limits, PROJECTION_FLOATING, PROJECTION_PANELS, PROJECTION_SLOTS,
+    PROJECTION_WALLS,
 };
 pub use message::{
     ATTENTION_LIMIT, AnswerTarget, ClientMessage, Decision, ENVIRONMENT_LIMIT, NO_SPEECH,

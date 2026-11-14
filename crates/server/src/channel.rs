@@ -69,8 +69,9 @@ pub struct Described {
     pub offers: Vec<String>,
 }
 
-/// The most panels whose refused updates a side's channel remembers having said, the earliest forgotten first.
-pub const REFUSED: usize = 64;
+/// The most panels whose refused updates a side's channel remembers having said, the earliest forgotten first: twice
+/// as many as it may show.
+pub const REFUSED: usize = 2 * tomori_environment::PANEL_LIMIT;
 
 impl Channel {
     /// Note that an update of the panel `id` was refused once it could be made. Returns whether to say so: not where it
@@ -401,26 +402,33 @@ impl Intents {
 }
 
 /// How many changes a side may make to the panels it publishes in a space at once, and how many more each second after:
-/// as many at once as the panels it may show, [`tomori_environment::PANEL_LIMIT`], 32, so that it puts up, or updates,
-/// every one together, and half as many each second after, 16, so that a side updating every one each second has each
-/// one's latest made within two. Each change sends the panel again to everyone in the space, in a projection patch to a
+/// a page, [`PUBLISH_PAGE`], half the panels it may show, [`tomori_environment::PANEL_LIMIT`], 64 at once, and as many
+/// each second after, so that a side updating every one each second has each one's latest made within two, and one
+/// putting up all 128 has a page up at once and the rest at the hub's next sweep, within a second. A page, rather than
+/// every panel at once, so that no one message to a space's clients carries all 128 panels whole: a patch carries at
+/// most a page and what changed since, and a client that applies no patches is sent the projection whole within its
+/// frame however many changed. Each change sends the panel again to everyone in the space, in a projection patch to a
 /// client that applies them, coalesced for a connection that has not taken the last. Only changes the stage takes
 /// count: the same again, one to a panel dismissed, one refused and a retraction of nothing cost nothing.
-pub const PUBLISH_BURST: f32 = tomori_environment::PANEL_LIMIT as f32;
-pub const PUBLISHES_PER_SECOND: f32 = PUBLISH_BURST / 2.0;
+pub const PUBLISH_BURST: f32 = PUBLISH_PAGE as f32;
+pub const PUBLISHES_PER_SECOND: f32 = PUBLISH_BURST;
+
+/// The most panels a side puts up, or updates, at once: half as many as it may show, 64, so that a page of them, every
+/// series of each chart at every point, is one patch of at most about 1 MiB. See [`PUBLISH_BURST`].
+pub const PUBLISH_PAGE: usize = tomori_environment::PANEL_LIMIT / 2;
 
 /// How many bytes of panels a side may publish in a space at once, and how many more each second after: 16 KiB at once
-/// for each panel it may show, 512 KiB, so that it puts up every one together even where each is a chart of every
-/// series at every point, about 13 KiB, and a quarter of that each second, 128 KiB, 8 KiB for each change it may make,
-/// as much as every one of its panels a live chart of three series over 181 points, under 4 KiB, changing each second.
+/// for each panel of a page, 1 MiB, so that it puts up a page together even where each is a chart of every series at
+/// every point, about 13 KiB, and 4 KiB each second for each panel it may show, 512 KiB, as much as every one of its
+/// panels a live chart of three series over 181 points, under 4 KiB, changing each second.
 pub const PUBLISH_BYTES_BURST: f32 = PUBLISH_BURST * 16.0 * 1024.0;
-pub const PUBLISH_BYTES_PER_SECOND: f32 = PUBLISH_BYTES_BURST / 4.0;
+pub const PUBLISH_BYTES_PER_SECOND: f32 = tomori_environment::PANEL_LIMIT as f32 * 4.0 * 1024.0;
 
 /// How many times a side may publish or retract in a space at once, and how many more each second after, whether or
-/// not they change anything, so that a side sending nothing new as fast as it can never keeps the hub busy: 160 and 80,
-/// five times and two and a half times the panels it may show, so that a side publishing every one each second, as on
-/// a timer, is never refused for it.
-pub const MESSAGE_BURST: f32 = PUBLISH_BURST * 5.0;
+/// not they change anything, so that a side sending nothing new as fast as it can never keeps the hub busy: 640 and
+/// 320, five times and two and a half times the panels it may show, so that a side publishing every one each second,
+/// as on a timer, is never refused for it.
+pub const MESSAGE_BURST: f32 = tomori_environment::PANEL_LIMIT as f32 * 5.0;
 pub const MESSAGES_PER_SECOND: f32 = MESSAGE_BURST / 2.0;
 
 /// How soon after the last a side may update the same panel: once a second, as fast as a live chart needs, with a tenth
@@ -716,8 +724,7 @@ mod tests {
         publishes.charge(at(900), Some("a"), 100);
         publishes.forget("a");
         assert!(publishes.ready(at(901), Some("a"), 100));
-        // The space's changes: a burst, as many as the panels a side may show, then half as many a second; retractions
-        // too.
+        // The space's changes: a burst, a page, then as many a second; retractions too.
         let mut publishes = Publishes::new(start);
         for index in 0..PUBLISH_BURST as usize {
             let panel = format!("p{index}");
@@ -726,57 +733,64 @@ mod tests {
         }
         assert!(!publishes.ready(start, Some("late"), 10));
         assert!(!publishes.ready(start, None, 0));
-        assert!(!publishes.ready(at(62), None, 0));
-        assert!(publishes.ready(at(63), None, 0));
-        publishes.charge(at(63), None, 0);
+        assert!(!publishes.ready(at(15), None, 0));
+        assert!(publishes.ready(at(16), None, 0));
+        publishes.charge(at(16), None, 0);
         // A clock that goes back refills nothing.
         assert!(!publishes.ready(start, Some("earlier"), 10));
-        // Bytes: a burst, then 128 KiB a second; a panel larger than what is left waits until the bucket is full.
+        // Bytes: a burst, then 512 KiB a second; a panel larger than what is left waits until the bucket is full.
         let mut publishes = Publishes::new(start);
-        let chart = 192 * 1024;
+        let chart = 384 * 1024;
         for panel in ["a", "b"] {
             assert!(publishes.ready(start, Some(panel), chart));
             publishes.charge(start, Some(panel), chart);
         }
         assert!(!publishes.ready(start, Some("c"), chart));
-        assert!(publishes.ready(at(500), Some("c"), chart));
+        assert!(!publishes.ready(at(200), Some("c"), chart));
+        assert!(publishes.ready(at(260), Some("c"), chart));
         let mut publishes = Publishes::new(start);
         let huge = 2400 * 1024;
         assert!(publishes.ready(start, Some("a"), huge));
         publishes.charge(start, Some("a"), huge);
-        assert!(!publishes.ready(at(10_000), Some("b"), 1));
-        assert!(publishes.ready(at(60_000), Some("b"), 1));
+        assert!(!publishes.ready(at(2_600), Some("b"), 1));
+        assert!(publishes.ready(at(2_700), Some("b"), 1));
         // Messages, whatever they change: a burst, then half as many a second.
         let mut publishes = Publishes::new(start);
         for _ in 0..MESSAGE_BURST as usize {
             assert_eq!(publishes.message(start), Ok(()));
         }
         assert!(publishes.message(start).is_err());
-        assert!(publishes.message(at(12)).is_err());
-        assert_eq!(publishes.message(at(13)), Ok(()));
+        assert!(publishes.message(at(3)).is_err());
+        assert_eq!(publishes.message(at(4)), Ok(()));
     }
 
     /// What a space's panels may change grows with how many a side may show, so that a side showing as many as it may
     /// is held no harder for each than one showing a few: these are the numbers `design/projection.md` states.
     #[test]
     fn a_space_s_rates_are_those_the_panels_a_side_may_show_need() {
-        assert_eq!(tomori_environment::PANEL_LIMIT, 32);
-        assert_eq!((PUBLISH_BURST, PUBLISHES_PER_SECOND), (32.0, 16.0));
+        assert_eq!(tomori_environment::PANEL_LIMIT, 128);
+        assert_eq!((PUBLISH_BURST, PUBLISHES_PER_SECOND), (64.0, 64.0));
         assert_eq!(
             (PUBLISH_BYTES_BURST, PUBLISH_BYTES_PER_SECOND),
-            (512.0 * 1024.0, 128.0 * 1024.0)
+            (1024.0 * 1024.0, 512.0 * 1024.0)
         );
-        assert_eq!((MESSAGE_BURST, MESSAGES_PER_SECOND), (160.0, 80.0));
-        // Every panel a side may show is put up at once, each a chart of every series at every point, 16 KiB; one more
-        // would wait, were it not refused first.
+        assert_eq!((MESSAGE_BURST, MESSAGES_PER_SECOND), (640.0, 320.0));
+        // A page of panels is put up at once, each a chart of every series at every point, 16 KiB; one more waits.
         let start = Instant::now();
         let mut publishes = Publishes::new(start);
-        for index in 0..tomori_environment::PANEL_LIMIT {
+        for index in 0..PUBLISH_PAGE {
             let panel = format!("p{index}");
             assert!(publishes.ready(start, Some(&panel), 16 * 1024));
             publishes.charge(start, Some(&panel), 16 * 1024);
         }
         assert!(!publishes.ready(start, Some("more"), 1));
+        // The rest, live charts of 4 KiB each, at the hub's next sweep, a second later.
+        let later = start + Duration::from_secs(1);
+        for index in PUBLISH_PAGE..tomori_environment::PANEL_LIMIT {
+            let panel = format!("p{index}");
+            assert!(publishes.ready(later, Some(&panel), 4 * 1024));
+            publishes.charge(later, Some(&panel), 4 * 1024);
+        }
         // A side publishing every one each second, whether or not each changed, is never refused for how often it
         // calls, for as long as it likes.
         let mut publishes = Publishes::new(start);

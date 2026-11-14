@@ -13,7 +13,7 @@ use super::{Content, DECLARED_WALLS, Kept, Placed, Pose, Stage, Walls, blocks};
 pub const PUBLISHED: usize = tomori_environment::PANEL_LIMIT;
 
 /// Why a panel past [`PUBLISHED`] is refused, saying how many that is.
-static MOST_PUBLISHED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+pub(super) static MOST_PUBLISHED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     format!("An environment publishes at most {PUBLISHED} panels in a space.")
 });
 

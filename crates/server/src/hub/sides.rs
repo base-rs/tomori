@@ -197,7 +197,7 @@ impl Hub {
     /// [`Self::channel_publish`] at `now`. Updates waiting that are due are made first, the oldest first, and a fresh one
     /// after them, at once where the changes left allow it, and otherwise waits behind them, while an update of a panel
     /// already waiting takes its place there, so that every panel's latest update is made in turn: with the changes a
-    /// space may make, 16 a second, a side updating its 32 panels every second has each one's latest made within 2
+    /// space may make, 64 a second, a side updating its 128 panels every second has each one's latest made within 2
     /// seconds, and at the next sweep after.
     pub(super) fn channel_publish_at(
         &self,

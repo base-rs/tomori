@@ -561,16 +561,17 @@ fn charts(seq: u64) -> Projection {
         pose: Pose::upright_facing([0.6, 1.5, -1.2], HOME.to_array()),
     };
     panels.push(Panel::new("aside", "Aside", "Floating.", aside).with_version(5));
-    let wall = |id: &str, x: f32| {
+    // One above the other, the lower nearer, every slot near enough to read.
+    let wall = |id: &str, y: f32| {
         Wall::new(
             id,
             WallKind::Added,
-            Pose::upright_facing([x, 1.5, -3.0], [x, 1.5, 0.0]),
+            Pose::upright_facing([0.0, y, -3.0], [0.0, y, 0.0]),
         )
         .with_grid(tomori_protocol::Grid::from((8, 2)))
     };
     Projection::new("s", "sky")
-        .with_walls(vec![wall("wall-1", -3.0), wall("wall-2", 3.0)])
+        .with_walls(vec![wall("wall-1", 1.2), wall("wall-2", 2.4)])
         .with_panels(panels)
 }
 
@@ -1365,5 +1366,179 @@ fn a_curved_wall_s_chips_stand_within_its_row_of_slots() {
         label.rows[0].plain().contains("A long"),
         "{}",
         label.rows[0].plain()
+    );
+}
+
+/// A wall of a list, code, a chart, a volume and two more lists, `away` metres ahead of home, versioned `version`, and
+/// a text panel floating far away beside it.
+fn far_wall(away: f32, version: u64) -> Projection {
+    use tomori_protocol::diagram::{Diagram, Node};
+    let mut diagram = Diagram::default();
+    diagram.nodes.push(Node::new("a", "A"));
+    diagram.extent = [300, 300, 200];
+    let code = Code::new("rust", 1).with_spans(vec![Span::new(0, 2, TokenKind::Keyword)]);
+    let chart = crate::chart::fixtures::pressure();
+    let list = |index: u32| {
+        Panel::new(
+            format!("list-{index}"),
+            format!("Queue {index}"),
+            format!("- [ ] first at {version}\n- [ ] second"),
+            on("wall-1", index),
+        )
+    };
+    let far = Place::Free {
+        pose: Pose::upright_facing([3.0, 1.5, -away], HOME.to_array()),
+    };
+    let panels = vec![
+        list(0),
+        Panel::new("code", "main.rs", "fn main() {}", on("wall-1", 1)).with_code(code),
+        Panel::new("chart", "Pressure", chart.summary(), on("wall-1", 2)).with_chart(chart),
+        Panel::new("volume", "Pair", "- A", on("wall-1", 3)).with_diagram(diagram),
+        list(4),
+        list(5),
+        Panel::new("aside", "Aside", "Floating far away.", far),
+    ];
+    Projection::new("s", "sky")
+        .with_walls(vec![wall(Pose::upright_facing(
+            [0.0, 1.5, -away],
+            [0.0, 1.5, 0.0],
+        ))])
+        .with_panels(
+            panels
+                .into_iter()
+                .map(|panel| panel.with_version(version))
+                .collect(),
+        )
+}
+
+/// Paced, as the frame step's projector is, a panel in a wall's slot too far away for its text to be read is drawn as
+/// its title alone, larger, at its slot's size, laid out not at all and drawn again only as its title or frame
+/// changes; one floating, and a volume, are drawn whole however far; and coming near, each is laid out to be drawn
+/// whole a few a frame, the nearest first, and not again where it stays within the margin.
+#[test]
+fn a_panel_too_far_away_to_read_is_drawn_as_its_title_alone_until_it_comes_near() {
+    let shown = far_wall(12.0, 5);
+    // What the volume and the floating panel cost alone, laid out and drawn whole.
+    let mut whole = shown.clone();
+    whole
+        .panels
+        .retain(|panel| ["volume", "aside"].contains(&panel.id.as_str()));
+    let before = counts();
+    Projector::paced().update(input(&whole, HOME, None));
+    let alone = (counts().0 - before.0, counts().1 - before.1);
+    let mut projector = Projector::paced();
+    let (laid, drawn) = counts();
+    let output = projector.update(input(&shown, HOME, None));
+    // The others are laid out not at all, and drawn as their titles.
+    assert_eq!(counts(), (laid + alone.0, drawn + alone.1 + 5));
+    let far: Vec<&str> = ["list-0", "code", "chart", "list-4", "list-5"]
+        .into_iter()
+        .filter(|id| projector.faces[*id].far)
+        .collect();
+    assert_eq!(far, ["list-0", "code", "chart", "list-4", "list-5"]);
+    assert!(!projector.faces["volume"].far && !projector.faces["aside"].far);
+    let title = output
+        .sheets
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_ref())
+        .find(|face| face.plain().contains("Queue 0"))
+        .expect("drawn as its title");
+    assert!(!title.plain().contains("first at"));
+    assert!(title.pixel > 2.0 * PIXEL);
+    // At its slot's size, to within half a font pixel, as its face drawn whole would be.
+    let (width, height) = title.size();
+    let (columns, rows) = super::super::fit(&shown.panels[0], Fit::SLOT);
+    let whole = sized(columns, rows);
+    assert!((width - whole.0).abs() < 1e-4, "{width} {whole:?}");
+    assert!(
+        (height - whole.1).abs() <= title.pixel / 2.0 + 1e-4,
+        "{height} {whole:?}"
+    );
+    assert!(!projector.scrollable("list-0"));
+    // Nothing of it is pointed at, nor its chart read.
+    let model = Mat4::IDENTITY;
+    let list = projector.faces.get_mut("list-0").unwrap();
+    assert_eq!(list.item(Fit::SLOT, model, 0, Vec3::ZERO), None);
+    assert_eq!(list.chip(Fit::SLOT, model, Vec3::ZERO), None);
+    let chart = projector.faces.get_mut("chart").unwrap();
+    assert!(chart.readout(Fit::SLOT, model, Vec3::ZERO).is_none());
+    assert!(chart.linked(Fit::SLOT, 3.0).is_none());
+    // What they show changing, at a new version, draws and lays out nothing, and takes no turn; a title changing draws
+    // that one again.
+    let mut changed = far_wall(12.0, 6);
+    for (panel, was) in changed.panels.iter_mut().zip(&shown.panels) {
+        if ["volume", "aside"].contains(&panel.id.as_str()) {
+            panel.version = was.version;
+        }
+    }
+    let before = counts();
+    projector.update(input(&changed, HOME, None));
+    assert_eq!(counts(), before);
+    let mut retitled = changed.clone();
+    retitled.panels[0].title = "Queue zero".into();
+    projector.update(input(&retitled, HOME, None));
+    assert_eq!(counts(), (before.0, before.1 + 1));
+    // Halfway between where it is drawn far and whole again, nothing changes.
+    let between = HOME - Vec3::Z * (12.0 - 5.0);
+    let before = counts();
+    projector.update(input(&retitled, between, None));
+    assert!(projector.faces["list-0"].far);
+    assert_eq!(counts(), before);
+    // Near, a few a frame are laid out to be drawn whole, the nearest first, until every one is, as they are now.
+    let near = HOME - Vec3::Z * (12.0 - 2.5);
+    let mut frames = 0;
+    while ["list-0", "code", "chart", "list-4", "list-5"]
+        .iter()
+        .any(|id| projector.faces[*id].far)
+    {
+        let before = counts();
+        projector.update(input(&retitled, near, None));
+        frames += 1;
+        assert!(counts().0 - before.0 <= NEARING);
+    }
+    assert_eq!(frames, 5_usize.div_ceil(NEARING));
+    assert!(face(&projector, "list-0").plain().contains("first at 6"));
+    // Far again, each is drawn as its title, forgetting what was laid out of it.
+    projector.update(input(&retitled, HOME, None));
+    assert!(projector.faces["list-4"].far && projector.faces["list-4"].sizes.is_empty());
+}
+
+/// Paced, of the panels that arrive together, more than a frame lays out, those nearest stand first: the nearest
+/// wall's, then those floating as near, then the farther wall's, and last any on a wall not shown or in a place this
+/// client does not know.
+#[test]
+fn panels_arriving_together_stand_the_nearest_first() {
+    let mut shown = lists(5);
+    // The far wall first in the projection's order, then the near one.
+    shown.walls[0].pose = Pose::upright_facing([0.0, 1.2, -4.0], [0.0, 1.2, 0.0]);
+    shown.walls[1].pose = Pose::upright_facing([0.0, 2.4, -3.0], [0.0, 2.4, 0.0]);
+    shown
+        .panels
+        .push(Panel::new("lost", "Lost", "Elsewhere.", on("gone", 0)).with_version(5));
+    shown
+        .panels
+        .push(Panel::new("odd", "Odd", "Unknown.", Place::Unknown).with_version(5));
+    let mut projector = Projector::paced();
+    projector.update(input(&shown, HOME, None));
+    let standing: Vec<&str> = shown
+        .panels
+        .iter()
+        .filter(|panel| projector.faces.contains_key(&panel.id))
+        .map(|panel| panel.id.as_str())
+        .collect();
+    // The near wall's, chart-16 to chart-23.
+    let near: Vec<String> = (16..16 + ARRIVALS)
+        .map(|index| format!("chart-{index}"))
+        .collect();
+    assert_eq!(standing, near);
+    // In turn, every one stands, those nowhere last.
+    for _ in 0..(shown.panels.len().div_ceil(ARRIVALS)) {
+        projector.update(input(&shown, HOME, None));
+    }
+    assert!(
+        shown
+            .panels
+            .iter()
+            .all(|panel| projector.faces.contains_key(&panel.id))
     );
 }

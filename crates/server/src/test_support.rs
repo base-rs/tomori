@@ -488,6 +488,16 @@ impl TestClient {
         self.greet(participant, name, None, (true, false, false));
     }
 
+    /// Say hello as [`Self::hello_projected`] does, stating `limits`, so that it is sent what is projected within them.
+    pub fn hello_projected_within(
+        &mut self,
+        participant: &str,
+        name: &str,
+        limits: tomori_protocol::Limits,
+    ) {
+        self.greet_within(participant, name, None, (true, false, false), Some(limits));
+    }
+
     /// Say hello as [`Self::hello`] does, as a client that reads whether pairing is open, as an owner's is told. See `design/security.md`.
     pub fn hello_reading_pairing(&mut self, participant: &str, name: &str) {
         self.greet(participant, name, None, (false, true, false));
@@ -513,7 +523,18 @@ impl TestClient {
         participant: &str,
         name: &str,
         presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
+        wants: (bool, bool, bool),
+    ) -> Vec<tomori_protocol::EnvironmentInfo> {
+        self.greet_within(participant, name, presents, wants, None)
+    }
+
+    fn greet_within(
+        &mut self,
+        participant: &str,
+        name: &str,
+        presents: Option<Vec<tomori_protocol::EnvironmentVersion>>,
         (projection, pairing_window, images): (bool, bool, bool),
+        limits: Option<tomori_protocol::Limits>,
     ) -> Vec<tomori_protocol::EnvironmentInfo> {
         self.send(&ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
@@ -531,7 +552,7 @@ impl TestClient {
             projection_patches: false,
             live_panels: false,
             spawns: false,
-            limits: None,
+            limits,
         });
         // The welcome is the first reply to hello.
         let environments;
