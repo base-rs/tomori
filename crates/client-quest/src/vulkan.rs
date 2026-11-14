@@ -39,7 +39,13 @@ struct Raw {
 
 impl Gpu {
     /// The runtime's Vulkan device, with `VK_EXT_fragment_density_map` enabled where `foveate` and the GPU can draw at it.
-    pub fn new(xr: &xr::Instance, system: xr::SystemId, foveate: bool) -> Result<Self> {
+    /// And with the adapter's own format features, for 2 samples a pixel, where `adapter_samples` asks for them, as `graphics::adapter_samples` says.
+    pub fn new(
+        xr: &xr::Instance,
+        system: xr::SystemId,
+        foveate: bool,
+        adapter_samples: bool,
+    ) -> Result<Self> {
         const API: u32 = vk::API_VERSION_1_1;
         let requirements = xr.graphics_requirements::<xr::Vulkan>(system)?;
         ensure!(
@@ -114,7 +120,12 @@ impl Gpu {
             .expose_adapter(physical)
             .context("exposing XR Vulkan adapter")?;
         // The GPU's timestamps, where it has them, for the frame log; see `design/rendering.md`.
-        let features = adapter.features & tomori_render::profiler::FEATURES;
+        let wanted = if adapter_samples {
+            tomori_render::profiler::FEATURES | tomori_render::graphics::ADAPTER_SAMPLES
+        } else {
+            tomori_render::profiler::FEATURES
+        };
+        let features = adapter.features & wanted;
         let limits = wgpu::Limits::default();
         let device_extensions = adapter.adapter.required_device_extensions(features);
         let mut device_ptrs: Vec<_> = device_extensions.iter().map(|e| e.as_ptr()).collect();

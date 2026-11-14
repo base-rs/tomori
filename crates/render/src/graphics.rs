@@ -164,41 +164,99 @@ pub(crate) fn camera_buffer(device: &wgpu::Device) -> wgpu::Buffer {
 /// The samples per pixel the headset and desktop window draw with unless told otherwise: 4, for multisample anti-aliasing.
 pub const SAMPLES: u32 = 4;
 
-/// `requested` samples per pixel if `adapter` can draw both `format` and the scene's depth with them, or else 1, which draws without multisampling.
+/// `requested` samples per pixel if `adapter` can draw both `format` and the scene's depth with them, or else the most it
+/// can that cost no more, down to 1, which draws without multisampling; see [`choose_samples`].
 ///
-/// Only 1 and 4 are offered: they are the counts wgpu allows without adapter-specific format features, which the headset's device does not enable.
+/// 1 and 4 are the counts wgpu allows without adapter-specific format features; 2, which the headset offers since a
+/// tiled GPU draws it at little more than 1 where 4 costs it more, is drawn only by a device made with
+/// [`ADAPTER_SAMPLES`] (see [`supported_samples_on`]), so never here.
 pub fn supported_samples(
     adapter: &wgpu::Adapter,
     format: wgpu::TextureFormat,
     requested: u32,
 ) -> u32 {
-    let supported = |format: wgpu::TextureFormat| {
-        adapter
-            .get_texture_format_features(format)
-            .flags
-            .sample_count_supported(SAMPLES)
-    };
-    if requested >= SAMPLES && supported(format) && supported(wgpu::TextureFormat::Depth32Float) {
-        SAMPLES
-    } else {
-        1
-    }
+    supported_samples_on(adapter, wgpu::Features::empty(), format, requested)
 }
 
-/// The samples per pixel asked for by `value`, such as the headset's `tomori.msaa` intent extra: `4` or `on` for multisample anti-aliasing, `1`, `0` or `off` for none, and [`SAMPLES`] when absent or not understood.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// As [`supported_samples`], for a device made with `features`, which draws 2 samples only with [`ADAPTER_SAMPLES`],
+/// as a device is made where [`adapter_samples`] says.
+pub fn supported_samples_on(
+    adapter: &wgpu::Adapter,
+    features: wgpu::Features,
+    format: wgpu::TextureFormat,
+    requested: u32,
+) -> u32 {
+    choose_device_samples(requested, features, |count| {
+        [format, wgpu::TextureFormat::Depth32Float]
+            .iter()
+            .all(|format| {
+                adapter
+                    .get_texture_format_features(*format)
+                    .flags
+                    .sample_count_supported(count)
+            })
+    })
+}
+
+/// Whether a device asked to draw `requested` samples a pixel is made with [`ADAPTER_SAMPLES`]: wherever more than one is
+/// asked for, since fewer than asked may be drawn, 2 among them, where the GPU cannot draw 4.
+pub fn adapter_samples(requested: u32) -> bool {
+    requested > 1
+}
+
+/// As [`choose_samples`], for a device made with `features`: 2 only with [`ADAPTER_SAMPLES`].
+pub fn choose_device_samples(
+    requested: u32,
+    features: wgpu::Features,
+    supported: impl Fn(u32) -> bool,
+) -> u32 {
+    choose_samples(requested, |count| {
+        (count != 2 || features.contains(ADAPTER_SAMPLES)) && supported(count)
+    })
+}
+
+/// The samples per pixel drawn for `requested`, of those `supported` says the GPU draws: `requested` itself, or else the
+/// most of fewer offered, 2 then 1, never more, which would cost more than was asked for.
+pub fn choose_samples(requested: u32, supported: impl Fn(u32) -> bool) -> u32 {
+    [SAMPLES, 2]
+        .into_iter()
+        .filter(|count| *count <= requested)
+        .find(|count| supported(*count))
+        .unwrap_or(1)
+}
+
+/// The feature a device is made with to draw with samples a pixel other than 1 and 4, such as 2: the adapter's own format
+/// features.
+pub const ADAPTER_SAMPLES: wgpu::Features =
+    wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+
+/// The samples per pixel a Quest 3 draws with unless told otherwise: 2, with each eye drawn at twice the runtime's
+/// recommended size, since its text reads sharpest so and a tiled GPU draws 2 samples at little more than 1. Only a
+/// device measured to hold its frames so draws it by default; see `design/rendering.md`.
+pub const HEADSET_SAMPLES: u32 = 2;
+
+/// The samples per pixel asked for by `value`, such as `TOMORI_MSAA` for `tomori --xr`, as [`requested_samples_or`],
+/// and [`SAMPLES`] when absent or not understood.
 pub fn requested_samples(value: Option<&str>) -> u32 {
+    requested_samples_or(value, SAMPLES)
+}
+
+/// The samples per pixel asked for by `value`, such as the headset's `tomori.msaa` intent extra: `4` or `on` for
+/// multisample anti-aliasing, `2` for half as many samples, `1`, `0` or `off` for none, and `default` when absent or not
+/// understood, such as [`HEADSET_SAMPLES`] on a Quest 3.
+pub fn requested_samples_or(value: Option<&str>, default: u32) -> u32 {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return SAMPLES;
+        return default;
     };
     match value.to_ascii_lowercase().as_str() {
         "0" | "1" | "off" => 1,
+        "2" => 2,
         "4" | "on" => SAMPLES,
         _ => {
             log::warn!(
-                "Multisampling {value:?} is not 1, 4, on or off; using {SAMPLES} samples per pixel."
+                "Multisampling {value:?} is not 1, 2, 4, on or off; using {default} samples per pixel."
             );
-            SAMPLES
+            default
         }
     }
 }
@@ -3043,6 +3101,46 @@ mod tests {
     }
 
     #[test]
+    fn a_device_draws_2_samples_only_when_made_for_them() {
+        let one_and_two = |count| count == 1 || count == 2;
+        // A GPU of 1 and 2 asked for 4 draws 2, on a device made for it, as every device asked for more than 1 is.
+        assert!(adapter_samples(4) && adapter_samples(2));
+        assert!(!adapter_samples(1));
+        assert_eq!(choose_device_samples(4, ADAPTER_SAMPLES, one_and_two), 2);
+        assert_eq!(choose_device_samples(2, ADAPTER_SAMPLES, one_and_two), 2);
+        // A device not made for it draws 1, rather than a count it would refuse.
+        assert_eq!(
+            choose_device_samples(4, wgpu::Features::empty(), one_and_two),
+            1
+        );
+        assert_eq!(
+            choose_device_samples(2, wgpu::Features::empty(), |_| true),
+            1
+        );
+        assert_eq!(
+            choose_device_samples(4, wgpu::Features::empty(), |_| true),
+            4
+        );
+    }
+
+    #[test]
+    fn the_samples_drawn_are_those_asked_for_or_fewer() {
+        let all = |_| true;
+        let one_and_four = |count| count == 1 || count == 4;
+        let one = |count| count == 1;
+        assert_eq!(choose_samples(4, all), 4);
+        assert_eq!(choose_samples(2, all), 2);
+        assert_eq!(choose_samples(1, all), 1);
+        // 2 where the GPU draws only 1 and 4 is 1, not the costlier 4.
+        assert_eq!(choose_samples(2, one_and_four), 1);
+        assert_eq!(choose_samples(4, one_and_four), 4);
+        // 4 where the GPU draws only 2 is 2, and where it draws neither 1.
+        assert_eq!(choose_samples(4, |count| count == 2), 2);
+        assert_eq!(choose_samples(4, one), 1);
+        assert_eq!(choose_samples(0, all), 1);
+    }
+
+    #[test]
     fn multisampling_is_asked_for_by_count_or_switch() {
         log::set_max_level(log::LevelFilter::Trace);
         assert_eq!(requested_samples(None), SAMPLES);
@@ -3053,10 +3151,16 @@ mod tests {
         for off in ["0", "1", "off", "Off"] {
             assert_eq!(requested_samples(Some(off)), 1, "{off:?}");
         }
-        // Counts wgpu doesn't allow without adapter-specific features, and nonsense, keep the default.
-        for other in ["2", "8", "lots"] {
+        // Half as many, nearly free on a tiled GPU.
+        assert_eq!(requested_samples(Some("2")), 2);
+        // Counts the renderer doesn't offer, and nonsense, keep the default.
+        for other in ["8", "lots"] {
             assert_eq!(requested_samples(Some(other)), SAMPLES, "{other:?}");
         }
+        // The headset's own default, which a count overrides.
+        assert_eq!(requested_samples_or(None, HEADSET_SAMPLES), 2);
+        assert_eq!(requested_samples_or(Some("lots"), HEADSET_SAMPLES), 2);
+        assert_eq!(requested_samples_or(Some("4"), HEADSET_SAMPLES), 4);
     }
 
     /// Draws as the headset does, into the two layers of one swapchain-like image, with every pass the headset draws in the scene pass, and the caption after it.
@@ -3076,6 +3180,7 @@ mod tests {
                     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
                     assert_eq!(supported_samples(&adapter, format, SAMPLES), 4);
                     assert_eq!(supported_samples(&adapter, format, 1), 1);
+                    assert_eq!(supported_samples(&adapter, format, 0), 1);
                     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
                     let texture = device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("headset test swapchain image"),
