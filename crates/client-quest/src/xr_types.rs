@@ -92,15 +92,199 @@ pub fn joints(joints: &xr::HandJointLocations) -> [Joint; hands::JOINT_COUNT] {
     })
 }
 
-/// The size of each eye's image: the largest the runtime recommends for either eye, so that one two-layer image holds both.
-pub fn eye_size(views: &[xr::ViewConfigurationView]) -> (u32, u32) {
+/// The size of each eye's image: the largest the runtime recommends for either eye, so that one two-layer image holds both,
+/// `scale` times as wide and as high (see [`resolution`]), at most as large as the runtime allows for either and as the
+/// GPU's device makes a texture, `most_texture` on a side.
+pub fn eye_size(views: &[xr::ViewConfigurationView], scale: f32, most_texture: u32) -> (u32, u32) {
     let largest = |size: fn(&xr::ViewConfigurationView) -> u32| {
         views.iter().map(size).max().unwrap_or_default()
     };
+    let most = |size: fn(&xr::ViewConfigurationView) -> u32| {
+        views.iter().map(size).min().unwrap_or_default()
+    };
+    let scaled = |recommended: u32, most: u32| {
+        ((recommended as f32 * scale).round() as u32)
+            .min(most)
+            .min(most_texture)
+    };
     (
-        largest(|view| view.recommended_image_rect_width),
-        largest(|view| view.recommended_image_rect_height),
+        scaled(
+            largest(|view| view.recommended_image_rect_width),
+            most(|view| view.max_image_rect_width),
+        ),
+        scaled(
+            largest(|view| view.recommended_image_rect_height),
+            most(|view| view.max_image_rect_height),
+        ),
     )
+}
+
+/// The least and greatest scale of each eye's image over the runtime's recommendation that [`resolution`] allows: from
+/// half, to twice as wide and high, four times the pixels, beyond which the eyes' attachments grow past what the
+/// headset's memory and GPU sensibly hold.
+pub const RESOLUTIONS: std::ops::RangeInclusive<f32> = 0.5..=2.0;
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+/// How each eye is drawn unless told otherwise: its scale of the runtime's recommended size and its samples a pixel, and
+/// the rule that chose them, for the log.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeDefaults {
+    pub resolution: f32,
+    pub samples: u32,
+    pub rule: &'static str,
+}
+
+/// The devices measured to hold their frames with each eye drawn sharper than the runtime recommends, by their Android
+/// model (`android.os.Build.MODEL`), exactly, with how: a Quest 3 at twice the recommended size with 2 samples, its
+/// GPU's eyes 10.75 ms a frame, 11.45 at the 95th percentile, of 72 Hz's 13.9. A device is added only once it has been
+/// measured so (see `design/rendering.md`); a Quest 3S, whose GPU is the Quest 3's at a lower clock, is not, nor a
+/// Quest 2 or a Pico.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub const MEASURED: &[(&str, f32, u32)] =
+    &[("Quest 3", 2.0, tomori_render::graphics::HEADSET_SAMPLES)];
+
+/// How each eye of the device of Android model `model` is drawn unless told otherwise: as [`MEASURED`] says for it, or
+/// else at the runtime's recommended size with 4 samples, as before.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn eye_defaults(model: Option<&str>) -> EyeDefaults {
+    let model = model.map(str::trim);
+    MEASURED
+        .iter()
+        .find(|(measured, _, _)| model == Some(*measured))
+        .map(|(_, resolution, samples)| EyeDefaults {
+            resolution: *resolution,
+            samples: *samples,
+            rule: "measured on this model",
+        })
+        .unwrap_or(EyeDefaults {
+            resolution: 1.0,
+            samples: tomori_render::graphics::SAMPLES,
+            rule: "the recommended size with 4 samples, as this model has not been measured",
+        })
+}
+
+/// The scale of each eye's image over the runtime's recommendation asked for by `value`, as the headset's
+/// `tomori.resolution` intent extra or `TOMORI_RESOLUTION` for `tomori --xr`: such as `1.23` for about the Quest 3's
+/// panels' own pixels, 2064 × 2208, within [`RESOLUTIONS`]; `default` when absent or not understood, as
+/// [`eye_defaults`] says.
+pub fn resolution(value: Option<&str>, default: f32) -> f32 {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return default;
+    };
+    match value.parse::<f32>() {
+        Ok(scale) if RESOLUTIONS.contains(&scale) => scale,
+        _ => {
+            log::warn!(
+                "Ignored resolution {value:?}: use a scale from {} to {}",
+                RESOLUTIONS.start(),
+                RESOLUTIONS.end()
+            );
+            default
+        }
+    }
+}
+
+/// The bytes the eyes' images take, each eye `width` by `height` at `samples` a pixel: the runtime's `images` swapchain
+/// images of two layers, four bytes a pixel, and the eyes' own attachments, each eye's 32-bit depth and, multisampled,
+/// its multisampled colour, which are transient, kept in tile memory and lazily allocated where the GPU allows.
+pub fn eye_memory(width: u32, height: u32, images: usize, samples: u32) -> (u64, u64) {
+    let layer = u64::from(width) * u64::from(height) * 4;
+    let swapchain = layer * 2 * images as u64;
+    let colour = if samples > 1 { u64::from(samples) } else { 0 };
+    let attachments = layer * 2 * (u64::from(samples) + colour);
+    (swapchain, attachments)
+}
+
+/// The runtime's filters for the eyes' projection layer as it composes it, by `XR_FB_composition_layer_settings`, asked
+/// for by `value`, as the headset's `tomori.compositor_filter` intent extra or `TOMORI_COMPOSITOR_FILTER` for
+/// `tomori --xr`: `off`, the default, or one or more of `normal` or `quality` supersampling and `sharpen` or
+/// `quality-sharpen` sharpening, joined by `+`, as `quality+sharpen`. Supersampling filters the eyes' images as the
+/// runtime resamples them for the display, which an eye drawn at more pixels than the display has (see [`resolution`])
+/// needs to look no more aliased than its pixels; sharpening, as text is read. A value not understood is off, with a
+/// warning.
+pub fn compositor_filter(value: Option<&str>) -> xr::CompositionLayerSettingsFlagsFB {
+    let none = xr::CompositionLayerSettingsFlagsFB::EMPTY;
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return none;
+    };
+    let lower = value.to_ascii_lowercase();
+    let flags: Option<Vec<_>> = lower
+        .split('+')
+        .map(|filter| match filter.trim() {
+            "off" | "none" => Some(none),
+            "normal" => Some(xr::CompositionLayerSettingsFlagsFB::NORMAL_SUPER_SAMPLING),
+            "quality" => Some(xr::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING),
+            "sharpen" => Some(xr::CompositionLayerSettingsFlagsFB::NORMAL_SHARPENING),
+            "quality-sharpen" => Some(xr::CompositionLayerSettingsFlagsFB::QUALITY_SHARPENING),
+            _ => None,
+        })
+        .collect();
+    flags
+        .map(|flags| flags.into_iter().fold(none, |all, flag| all | flag))
+        .unwrap_or_else(|| {
+            log::warn!(
+                "Ignored compositor filter {value:?}: use off, or normal, quality, sharpen or quality-sharpen, joined by +"
+            );
+            none
+        })
+}
+
+/// The settings chained to the eyes' projection layer for the compositor's filters `flags`.
+pub fn layer_settings(
+    flags: xr::CompositionLayerSettingsFlagsFB,
+) -> xr::sys::CompositionLayerSettingsFB {
+    xr::sys::CompositionLayerSettingsFB {
+        ty: xr::sys::CompositionLayerSettingsFB::TYPE,
+        next: std::ptr::null(),
+        layer_flags: flags,
+    }
+}
+
+/// Chain `settings`, where the filters are asked for and offered, to `layer`, the eyes' projection layer of a frame, as
+/// every frame's is, or nothing: its `next`, which nothing else of Tomori's chains to.
+pub fn chain_settings(
+    layer: &mut xr::sys::CompositionLayerProjection,
+    settings: Option<&xr::sys::CompositionLayerSettingsFB>,
+) {
+    layer.next = settings.map_or(std::ptr::null(), |settings| {
+        (settings as *const xr::sys::CompositionLayerSettingsFB).cast()
+    });
+}
+
+/// What the log says of the compositor's filters, `flags` as [`compositor_filter`] asked for them, where the runtime
+/// `offers` them.
+pub fn compositor_summary(flags: xr::CompositionLayerSettingsFlagsFB, offers: bool) -> String {
+    let named = [
+        (
+            xr::CompositionLayerSettingsFlagsFB::NORMAL_SUPER_SAMPLING,
+            "normal supersampling",
+        ),
+        (
+            xr::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING,
+            "quality supersampling",
+        ),
+        (
+            xr::CompositionLayerSettingsFlagsFB::NORMAL_SHARPENING,
+            "normal sharpening",
+        ),
+        (
+            xr::CompositionLayerSettingsFlagsFB::QUALITY_SHARPENING,
+            "quality sharpening",
+        ),
+    ];
+    let names: Vec<_> = named
+        .iter()
+        .filter(|(flag, _)| flags.contains(*flag))
+        .map(|(_, name)| *name)
+        .collect();
+    match (names.is_empty(), offers) {
+        (true, _) => "compositor filter off".to_owned(),
+        (false, true) => format!("compositor filter {}", names.join(" and ")),
+        (false, false) => format!(
+            "compositor filter off: the runtime has no XR_FB_composition_layer_settings for {}",
+            names.join(" and ")
+        ),
+    }
 }
 
 /// The sRGB colour format to draw into, of the swapchain formats the runtime offers.
@@ -365,10 +549,120 @@ mod tests {
             max_swapchain_sample_count: 4,
         };
         assert_eq!(
-            eye_size(&[view(1680, 1700), view(1600, 1760)]),
+            eye_size(&[view(1680, 1700), view(1600, 1760)], 1.0, 8192),
             (1680, 1760)
         );
-        assert_eq!(eye_size(&[]), (0, 0));
+        assert_eq!(eye_size(&[], 1.0, 8192), (0, 0));
+        // Scaled, about the Quest 3's own pixels, and at most what the runtime allows.
+        assert_eq!(eye_size(&[view(1680, 1760)], 1.23, 8192), (2066, 2165));
+        assert_eq!(eye_size(&[view(1680, 1760)], 2.0, 8192), (3360, 3520));
+        assert_eq!(eye_size(&[view(3000, 1760)], 2.0, 8192), (4096, 3520));
+        // And at most what the GPU makes a texture of.
+        assert_eq!(eye_size(&[view(1680, 1760)], 2.0, 3400), (3360, 3400));
+    }
+
+    #[test]
+    fn the_eyes_images_take_their_pixels_layers_and_samples() {
+        // At twice the Quest 3's recommendation, with 2 samples: about 284 MB of swapchain, and 378 MB of attachments
+        // were they not transient.
+        assert_eq!(eye_memory(3360, 3520, 3, 2), (283_852_800, 378_470_400));
+        // Without multisampling, depth alone.
+        assert_eq!(eye_memory(1680, 1760, 3, 1), (70_963_200, 23_654_400));
+    }
+
+    #[test]
+    fn the_compositor_filter_is_off_unless_asked_for() {
+        use xr::CompositionLayerSettingsFlagsFB as Flags;
+        assert_eq!(compositor_filter(None), Flags::EMPTY);
+        assert_eq!(compositor_filter(Some(" ")), Flags::EMPTY);
+        assert_eq!(compositor_filter(Some("off")), Flags::EMPTY);
+        assert_eq!(
+            compositor_filter(Some("normal")),
+            Flags::NORMAL_SUPER_SAMPLING
+        );
+        assert_eq!(
+            compositor_filter(Some(" Quality ")),
+            Flags::QUALITY_SUPER_SAMPLING
+        );
+        assert_eq!(compositor_filter(Some("sharpen")), Flags::NORMAL_SHARPENING);
+        assert_eq!(
+            compositor_filter(Some("quality + quality-sharpen")),
+            Flags::QUALITY_SUPER_SAMPLING | Flags::QUALITY_SHARPENING
+        );
+        assert_eq!(compositor_filter(Some("quality+blur")), Flags::EMPTY);
+        assert_eq!(
+            compositor_summary(Flags::EMPTY, true),
+            "compositor filter off"
+        );
+        assert_eq!(
+            compositor_summary(
+                Flags::QUALITY_SUPER_SAMPLING | Flags::NORMAL_SHARPENING,
+                true
+            ),
+            "compositor filter quality supersampling and normal sharpening"
+        );
+        assert_eq!(
+            compositor_summary(
+                Flags::NORMAL_SUPER_SAMPLING | Flags::QUALITY_SHARPENING,
+                false
+            ),
+            "compositor filter off: the runtime has no XR_FB_composition_layer_settings for normal supersampling and quality sharpening"
+        );
+    }
+
+    #[test]
+    fn only_a_measured_model_draws_its_eyes_sharper_by_default() {
+        let quest3 = eye_defaults(Some("Quest 3"));
+        assert_eq!((quest3.resolution, quest3.samples), (2.0, 2));
+        assert_eq!(quest3.rule, "measured on this model");
+        assert_eq!(eye_defaults(Some(" Quest 3 ")), quest3);
+        for other in [
+            Some("Quest 3S"),
+            Some("Quest 2"),
+            Some("Quest Pro"),
+            Some("Pico 4"),
+            Some(""),
+            None,
+        ] {
+            let defaults = eye_defaults(other);
+            assert_eq!(
+                (defaults.resolution, defaults.samples),
+                (1.0, 4),
+                "{other:?}"
+            );
+            assert!(defaults.rule.contains("not been measured"));
+        }
+    }
+
+    #[test]
+    fn the_compositor_filter_is_chained_to_the_layer_only_when_asked_for() {
+        let settings = layer_settings(xr::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING);
+        assert_eq!(settings.ty, xr::sys::CompositionLayerSettingsFB::TYPE);
+        assert!(settings.next.is_null());
+        assert_eq!(
+            settings.layer_flags,
+            xr::CompositionLayerSettingsFlagsFB::QUALITY_SUPER_SAMPLING
+        );
+        // SAFETY: a projection layer of no views, zeroed, as the runtime would be given it.
+        let mut layer: xr::sys::CompositionLayerProjection = unsafe { std::mem::zeroed() };
+        chain_settings(&mut layer, Some(&settings));
+        assert_eq!(layer.next, (&raw const settings).cast());
+        chain_settings(&mut layer, None);
+        assert!(layer.next.is_null());
+    }
+
+    #[test]
+    fn the_resolution_is_a_scale_of_the_recommendation_within_reason() {
+        assert_eq!(resolution(None, 1.0), 1.0);
+        assert_eq!(resolution(None, 2.0), 2.0);
+        assert_eq!(resolution(Some(" "), 1.0), 1.0);
+        assert_eq!(resolution(Some("1.23"), 2.0), 1.23);
+        assert_eq!(resolution(Some(" 1.5 "), 1.0), 1.5);
+        assert_eq!(resolution(Some("0.5"), 1.0), 0.5);
+        assert_eq!(resolution(Some("1"), 2.0), 1.0);
+        for ignored in ["0.4", "2.1", "high", "NaN"] {
+            assert_eq!(resolution(Some(ignored), 2.0), 2.0, "{ignored:?}");
+        }
     }
 
     #[test]

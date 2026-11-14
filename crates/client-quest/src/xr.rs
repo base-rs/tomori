@@ -41,9 +41,14 @@ pub fn run_desktop(
     ));
     run(
         &(),
-        crate::graphics::SAMPLES,
+        // `TOMORI_MSAA`, as the headset's `tomori.msaa`.
+        crate::graphics::requested_samples(std::env::var("TOMORI_MSAA").ok().as_deref()),
         // `TOMORI_FOVEATION`, as the headset's `tomori.foveation`; a desktop runtime without Meta's foveation draws as before.
         foveation::Request::parse(std::env::var("TOMORI_FOVEATION").ok().as_deref()),
+        // `TOMORI_RESOLUTION`, as the headset's `tomori.resolution`.
+        xr_types::resolution(std::env::var("TOMORI_RESOLUTION").ok().as_deref(), 1.0),
+        // `TOMORI_COMPOSITOR_FILTER`, as the headset's `tomori.compositor_filter`.
+        xr_types::compositor_filter(std::env::var("TOMORI_COMPOSITOR_FILTER").ok().as_deref()),
         || false,
         conversation,
         connection,
@@ -54,11 +59,14 @@ pub fn run_desktop(
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 
-/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; it falls back to 1 where the GPU cannot. `foveation` is the fixed foveation asked for, where the runtime and GPU can; see `design/rendering.md`.
+/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; where the GPU cannot draw them, it draws the most it can of fewer, never more (`graphics::choose_samples`). `foveation` is the fixed foveation asked for, where the runtime and GPU can, and `resolution` the scale of each eye's image over the runtime's recommendation (`xr_types::resolution`); see `design/rendering.md`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     platform: &impl xr::PlatformInfo,
     samples: u32,
     foveation: foveation::Request,
+    resolution: f32,
+    compositor_filter: xr::CompositionLayerSettingsFlagsFB,
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
@@ -112,6 +120,17 @@ pub fn run(
     extensions.fb_render_model = supported.fb_render_model;
     extensions.ext_hand_tracking = supported.ext_hand_tracking;
     extensions.ext_user_presence = supported.ext_user_presence;
+    // The compositor's filters, enabled only where asked for and offered, so that other instances are as before.
+    let filtered = compositor_filter != xr::CompositionLayerSettingsFlagsFB::EMPTY
+        && supported.fb_composition_layer_settings;
+    extensions.fb_composition_layer_settings = filtered;
+    let compositor_summary =
+        xr_types::compositor_summary(compositor_filter, supported.fb_composition_layer_settings);
+    let compositor_filter = if filtered {
+        compositor_filter
+    } else {
+        xr::CompositionLayerSettingsFlagsFB::EMPTY
+    };
     let foveation_extensions = offered.enabled(foveation);
     foveation_extensions.enable(&mut extensions);
     #[cfg(target_os = "android")]
@@ -131,6 +150,13 @@ pub fn run(
         platform,
     )?;
     log::info!("OpenXR runtime: {:?}", instance.properties()?);
+    // Whether the compositor's filters were enabled at the instance, as the runtime loaded them.
+    log::info!(
+        "OpenXR composition layer settings: offered={}, asked for={}, enabled={}",
+        supported.fb_composition_layer_settings,
+        filtered,
+        instance.exts().fb_composition_layer_settings.is_some()
+    );
     // Each step of startup can take a while; between them, acknowledge the activity's lifecycle, which NativeActivity waits for on its main thread, so that a pause as the launch settles is acknowledged promptly between steps, though not during one. How long each took is logged below. See `design/arrival.md`.
     let mut steps = xr_types::StartupSteps::new(started);
     steps.done("instance");
@@ -146,11 +172,22 @@ pub fn run(
             .contains(&BLEND),
         "Runtime must support opaque VR"
     );
-    let (width, height) = xr_types::eye_size(&views);
     // Declaration order matters: all XR session resources are dropped before
     // the wgpu-owned Vulkan device and instance.
     // The density map's device extension is enabled only for a runtime that can foveate, so that others' devices are as before.
-    let gpu = Gpu::new(&instance, system, foveation_extensions.maps())?;
+    // The adapter's own format features are enabled wherever multisampling is asked for, so that whichever count is drawn,
+    // 2 among them, the device allows it.
+    let gpu = Gpu::new(
+        &instance,
+        system,
+        foveation_extensions.maps(),
+        crate::graphics::adapter_samples(samples),
+    )?;
+    let (width, height) = xr_types::eye_size(
+        &views,
+        resolution,
+        gpu.device.limits().max_texture_dimension_2d,
+    );
     let plan = foveation::Plan::new(foveation, gpu.density, foveation_extensions);
     if let Err(why) = plan {
         log::info!("Fixed foveation off: {why}");
@@ -197,10 +234,25 @@ pub fn run(
     if destroyed() {
         return Ok(());
     }
-    let samples = crate::graphics::supported_samples(&gpu.adapter, format, samples);
+    let asked = samples;
+    let samples =
+        crate::graphics::supported_samples_on(&gpu.adapter, gpu.device.features(), format, samples);
+    if samples != asked {
+        log::info!("Drawing {samples}x multisampled, as the GPU cannot draw the {asked} asked for");
+    }
     // Each eye's scene pass resolves its samples into the swapchain image before it ends, so the multisampled colour and depth stay in tile memory where the GPU allows, as transient attachments; see `design/desktop.md`.
+    let (swapchain_bytes, attachment_bytes) =
+        xr_types::eye_memory(width, height, images.len(), samples);
     log::info!(
-        "Drawing {samples}x multisampled; transient attachments save memory: {:?}",
+        "Drawing {samples}x multisampled; the swapchain's {} images take {} MB, and the eyes' depth{} {} MB, transient, which saves memory: {:?}",
+        images.len(),
+        swapchain_bytes / 1_000_000,
+        if samples > 1 {
+            " and multisampled colour"
+        } else {
+            ""
+        },
+        attachment_bytes / 1_000_000,
         gpu.adapter.get_info().transient_saves_memory
     );
     // Before the renderer makes its pipelines, so that they are made against the eyes' passes with their density map.
@@ -242,6 +294,19 @@ pub fn run(
         height,
         samples,
         sceneries,
+    );
+    log::info!(
+        "Drawing each eye {width}x{height} at {resolution}x the runtime's recommendation, at most {}x{}, {samples}x multisampled, {foveation_summary}, {compositor_summary}",
+        views
+            .iter()
+            .map(|view| view.max_image_rect_width)
+            .min()
+            .unwrap_or_default(),
+        views
+            .iter()
+            .map(|view| view.max_image_rect_height)
+            .min()
+            .unwrap_or_default(),
     );
     steps.done("renderer");
     log::info!("{steps}");
@@ -492,13 +557,16 @@ pub fn run(
                     )
             })
             .collect();
-        stream.end(
-            frame.predicted_display_time,
-            BLEND,
-            &[&xr::CompositionLayerProjection::new()
-                .space(&space)
-                .views(&projection_views)],
-        )?;
+        // The compositor's filters, chained to every frame's projection layer where asked for and offered.
+        let settings = xr_types::layer_settings(compositor_filter);
+        let mut raw = xr::CompositionLayerProjection::new()
+            .space(&space)
+            .views(&projection_views)
+            .into_raw();
+        xr_types::chain_settings(&mut raw, filtered.then_some(&settings));
+        // SAFETY: the layer is as it was made, with the settings, which outlive the frame's end, chained to it.
+        let layer = unsafe { xr::CompositionLayerProjection::from_raw(raw) };
+        stream.end(frame.predicted_display_time, BLEND, &[&layer])?;
         timer.add(Segment::Runtime, released.elapsed());
         timer.add(Segment::Frame, waited.elapsed());
         frames += 1;

@@ -207,8 +207,11 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
         Ok(_) if pump.destroyed => Ok(()),
         // xr::run owns the connection, so it closes before Destroy is acknowledged.
         Ok(android) => {
-            let samples = android_samples(&android);
+            let defaults = android_eye_defaults(&android);
+            let samples = android_samples(&android, defaults.samples);
             let foveation = android_foveation(&android);
+            let resolution = android_resolution(&android, defaults.resolution);
+            let compositor_filter = android_compositor_filter(&android);
             let panel_lod = android_panel_lod(&android);
             let (mut conversation, connection) = android_connection(android);
             conversation.set_panel_lod(panel_lod);
@@ -224,6 +227,8 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
                 &platform,
                 samples,
                 foveation,
+                resolution,
+                compositor_filter,
                 || pump.poll(Duration::ZERO),
                 conversation,
                 connection,
@@ -242,14 +247,32 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
     }
 }
 
-/// The samples per pixel the headset draws with: the intent extra `tomori.msaa`, as with `am start -e tomori.msaa off`, or 4 for multisample anti-aliasing.
+/// How the headset draws each eye unless told otherwise, by its model, as `xr_types::eye_defaults` says, logged with the rule that chose it.
 #[cfg(target_os = "android")]
-fn android_samples(android: &android::Android) -> u32 {
+fn android_eye_defaults(android: &android::Android) -> xr_types::EyeDefaults {
+    let model = android.device_name().unwrap_or_else(|error| {
+        log::warn!("Cannot read the device's model: {error:#}");
+        None
+    });
+    let defaults = xr_types::eye_defaults(model.as_deref());
+    log::info!(
+        "Eyes by default for {}: {}x the recommended size, {}x multisampled, {}",
+        model.as_deref().unwrap_or("an unknown model"),
+        defaults.resolution,
+        defaults.samples,
+        defaults.rule
+    );
+    defaults
+}
+
+/// The samples per pixel the headset draws with: the intent extra `tomori.msaa`, as with `am start -e tomori.msaa 4`, `1` or `off` for none, and `default` when absent, as `android_eye_defaults` says; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_samples(android: &android::Android, default: u32) -> u32 {
     let value = android.intent_extra("tomori.msaa").unwrap_or_else(|error| {
         log::warn!("Cannot read the tomori.msaa intent extra: {error:#}");
         None
     });
-    graphics::requested_samples(value.as_deref())
+    graphics::requested_samples_or(value.as_deref(), default)
 }
 
 /// The fixed foveation the headset draws with: the intent extra `tomori.foveation`, as with `am start -e tomori.foveation low`, `none` to turn it off or `high:own` for Tomori's own density map at high, and high when absent; see `design/rendering.md`.
@@ -274,6 +297,32 @@ fn android_panel_lod(android: &android::Android) -> tomori_scene::projection::Pa
             None
         });
     tomori_scene::projection::PanelLod::parse(value.as_deref())
+}
+
+/// The scale of each eye's image over the runtime's recommendation: the intent extra `tomori.resolution`, as with `am start -e tomori.resolution 1.23`, and `default` when absent, as `android_eye_defaults` says; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_resolution(android: &android::Android, default: f32) -> f32 {
+    let value = android
+        .intent_extra("tomori.resolution")
+        .unwrap_or_else(|error| {
+            log::warn!("Cannot read the tomori.resolution intent extra: {error:#}");
+            None
+        });
+    xr_types::resolution(value.as_deref(), default)
+}
+
+/// The compositor's filters for the eyes' layer: the intent extra `tomori.compositor_filter`, as with `am start -e tomori.compositor_filter quality`, and off when absent; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_compositor_filter(
+    android: &android::Android,
+) -> openxr::CompositionLayerSettingsFlagsFB {
+    let value = android
+        .intent_extra("tomori.compositor_filter")
+        .unwrap_or_else(|error| {
+            log::warn!("Cannot read the tomori.compositor_filter intent extra: {error:#}");
+            None
+        });
+    xr_types::compositor_filter(value.as_deref())
 }
 
 /// The intent extras `tomori.server`, `tomori.name` and `tomori.token` override the defaults, as with `am start -e tomori.server 10.0.0.2`.
