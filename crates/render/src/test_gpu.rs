@@ -146,6 +146,79 @@ pub fn validate_wgsl(label: &str, source: &str) {
     )
     .validate(&module)
     .unwrap_or_else(|error| panic!("{}", error.emit_to_string_with_path(source, label)));
+    if let Some(function) = passes_a_uniform_by_value(&module) {
+        panic!(
+            "{label}: {function} is given a uniform by value in a vertex shader, which the Quest's driver cannot \
+             compile for both eyes by multiview: give it the fields it reads"
+        );
+    }
+}
+
+/// The name of a function a vertex entry point of `module` calls, directly or not, that takes as an argument the type of
+/// a uniform, or of an element of a uniform array, such as an eye's camera; or none. The Quest 3's Adreno driver fails
+/// to make a pipeline drawing both eyes by multiview of such a shader, answering `vkCreateGraphicsPipelines` with
+/// `VK_ERROR_UNKNOWN`, which wgpu takes, silently, as the device lost.
+fn passes_a_uniform_by_value(module: &naga::Module) -> Option<String> {
+    let uniforms: Vec<_> = module
+        .global_variables
+        .iter()
+        .filter(|(_, global)| global.space == naga::AddressSpace::Uniform)
+        .map(|(_, global)| match module.types[global.ty].inner {
+            naga::TypeInner::Array { base, .. } => base,
+            _ => global.ty,
+        })
+        .collect();
+    let mut called = Vec::new();
+    for entry in &module.entry_points {
+        if entry.stage == naga::ShaderStage::Vertex {
+            calls(module, &entry.function.body, &mut called);
+        }
+    }
+    called
+        .into_iter()
+        .map(|handle| &module.functions[handle])
+        .find(|function| {
+            function
+                .arguments
+                .iter()
+                .any(|argument| uniforms.contains(&argument.ty))
+        })
+        .map(|function| function.name.clone().unwrap_or_default())
+}
+
+/// Every function `block` of `module` calls, directly or not, into `called`.
+fn calls(
+    module: &naga::Module,
+    block: &naga::Block,
+    called: &mut Vec<naga::Handle<naga::Function>>,
+) {
+    for statement in block.iter() {
+        match statement {
+            naga::Statement::Call { function, .. } => {
+                if !called.contains(function) {
+                    called.push(*function);
+                    calls(module, &module.functions[*function].body, called);
+                }
+            }
+            naga::Statement::Block(inner) => calls(module, inner, called),
+            naga::Statement::If { accept, reject, .. } => {
+                calls(module, accept, called);
+                calls(module, reject, called);
+            }
+            naga::Statement::Switch { cases, .. } => {
+                for case in cases {
+                    calls(module, &case.body, called);
+                }
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => {
+                calls(module, body, called);
+                calls(module, continuing, called);
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +257,47 @@ mod tests {
             let again = found(&Ok(gpu), Some("1")).expect("the GPU found");
             assert_eq!(again.adapter.get_info().name, name);
         });
+    }
+
+    #[test]
+    #[should_panic(expected = "scaled is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_a_uniform_by_value_is_refused() {
+        validate_wgsl(
+            "eye.wgsl",
+            "struct Eye { matrix: mat4x4<f32>, pixels: f32 }
+@group(0) @binding(0) var<uniform> eyes: array<Eye, 2>;
+fn grown(eye: Eye) -> f32 { return eye.pixels; }
+fn scaled(eye: Eye, by: f32) -> f32 {
+    var total = 0.0;
+    if by > 0.0 { total = grown(eye); } else { total = 1.0; }
+    loop { if total > 0.0 { break; } continuing { total = total + 1.0; } }
+    switch u32(by) { default: { total = total * by; } }
+    { total = total + 0.0; }
+    return total * by;
+}
+@vertex
+fn vs_main(@builtin(instance_index) view: u32, @location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    let eye = eyes[view % 2u];
+    return eye.matrix * vec4<f32>(at * scaled(eye, 2.0) * scaled(eye, 1.0), 1.0);
+}
+",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "grown is given a uniform by value in a vertex shader")]
+    fn a_vertex_shader_passing_its_uniform_by_value_is_refused() {
+        validate_wgsl(
+            "camera.wgsl",
+            "struct Camera { matrix: mat4x4<f32>, pixels: f32 }
+@group(0) @binding(0) var<uniform> camera: Camera;
+fn grown(camera: Camera) -> f32 { return camera.pixels; }
+@vertex
+fn vs_main(@location(0) at: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return camera.matrix * vec4<f32>(at * grown(camera), 1.0);
+}
+",
+        );
     }
 
     #[test]
