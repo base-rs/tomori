@@ -231,8 +231,9 @@ impl Step {
         frame
     }
 
-    /// Follow `source`, the participant a watcher sees from, whose head it then leaves out of the people it draws, since
-    /// it sees from inside it; their rays it draws, as everyone's. See `design/spectator.md`.
+    /// Follow `source`, the participant a watcher sees from, whose swarm it then leaves out of the people it draws, since
+    /// it sees from inside their head and draws their controllers and hands as theirs; their rays it draws, as
+    /// everyone's. See `design/spectator.md`.
     pub fn follow(&mut self, source: Option<u32>) {
         self.followed = source;
     }

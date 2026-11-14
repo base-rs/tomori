@@ -173,6 +173,10 @@ pub enum Report {
     Replaying(bool),
     /// Whether agent speech is playing on this device, live or played again, and even while muted locally or skipped, and how loud, from 0 to 1, as [`crate::playback::PlayerControl::agent_speech`] says. Reported once a frame, after [`Self::Replaying`], so that the agent can be seen speaking for as long as it is heard.
     AgentSpeech { playing: bool, level: f32 },
+    /// The others whose voices are playing on this device, by their numbers, as
+    /// [`crate::playback::PlayerControl::voices`] says. Reported once a frame, after [`Self::AgentSpeech`], so that
+    /// each can be seen speaking. See `design/people.md`.
+    Voices(crate::playback::Voices),
 }
 
 /// The client's side of its conversation with a server, which a [`Connection`] carries out and reports to. `tomori-scene`'s `Conversation` is Tomori's.
@@ -872,6 +876,7 @@ impl Connection {
         session.report(Report::Replaying(self.speaker.is_replaying()));
         let (playing, level) = self.speaker.agent_speech();
         session.report(Report::AgentSpeech { playing, level });
+        session.report(Report::Voices(self.speaker.voices()));
         self.listen_live();
         self.cue(session);
         Slowest::keep(&mut self.slowest, Kind::named("cues"), started);

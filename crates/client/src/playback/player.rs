@@ -49,6 +49,38 @@ struct Shared {
     scene: Mutex<SceneSlot>,
     /// The participant's ambience level, as the bits of an `f32` gain, for the ambience's thread as it starts.
     ambience_gain: AtomicU32,
+    /// The others whose voices were playing at the last render, each one's number and one in a slot, the rest 0.
+    voices: [AtomicU32; VOICES],
+}
+
+/// How many others' voices playing at once the player tells the application of at most.
+pub const VOICES: usize = 16;
+
+/// The others whose voices play, by their numbers, at most [`VOICES`] of them, held without allocating, since the
+/// player tells them every frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Voices {
+    sources: [u32; VOICES],
+    count: usize,
+}
+
+impl Voices {
+    /// Their numbers.
+    pub fn as_slice(&self) -> &[u32] {
+        &self.sources[..self.count]
+    }
+}
+
+impl FromIterator<u32> for Voices {
+    /// The first [`VOICES`] of `sources`.
+    fn from_iter<I: IntoIterator<Item = u32>>(sources: I) -> Self {
+        let mut voices = Self::default();
+        for source in sources.into_iter().take(VOICES) {
+            voices.sources[voices.count] = source;
+            voices.count += 1;
+        }
+        voices
+    }
 }
 
 /// Plays what a [`crate::Client`] receives: drains its audio into a [`Mixer`] and renders the mix for an output device.
@@ -233,6 +265,14 @@ impl Player {
                 .to_bits(),
             Ordering::Relaxed,
         );
+        // The others' voices playing, each in a slot of its own, so that the application reads them without waiting.
+        let mut voices = mixer.voices();
+        for slot in &self.shared.voices {
+            slot.store(
+                voices.next().map_or(0, |source| source.wrapping_add(1)),
+                Ordering::Relaxed,
+            );
+        }
         // Only the application reads the statistics, rarely, so the callback skips publishing them rather than wait.
         if let Ok(mut statistics) = self.shared.statistics.try_lock() {
             *statistics = mixer.statistics();
@@ -278,6 +318,18 @@ impl PlayerControl {
             self.shared.speaking.load(Ordering::Relaxed),
             f32::from_bits(self.shared.level.load(Ordering::Relaxed)),
         )
+    }
+
+    /// The others whose voices were playing at the last render, rather than buffering or absent, by their numbers, at most
+    /// [`VOICES`] of them: the people drawn for them quicken as they speak. See `design/people.md`.
+    pub fn voices(&self) -> Voices {
+        self.shared
+            .voices
+            .iter()
+            .map(|slot| slot.load(Ordering::Relaxed))
+            .filter(|slot| *slot != 0)
+            .map(|slot| slot - 1)
+            .collect()
     }
 
     /// Play a sound cue, once, from `direction`. It is local: never sent and never a source, and [`Self::clear`] does not stop it.

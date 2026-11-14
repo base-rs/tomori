@@ -614,7 +614,7 @@ pub struct Step {
     watching: bool,
     dropped: usize,
     asked: bool,
-    /// The participant a watcher sees from, whose head it does not draw. See `design/spectator.md`.
+    /// The participant a watcher sees from, whose swarm it does not draw. See `design/spectator.md`.
     followed: Option<u32>,
 }
 
@@ -2654,7 +2654,9 @@ impl Step {
         conversation.point(attended(Side::Right));
         conversation.point_left(attended(Side::Left), left_first);
         // The others, each drawn between the presence updates that bring them, about a frame behind, from the same tracks
-        // an environment's client side is given their hands from. See `design/people.md`.
+        // an environment's client side is given their hands from, their orbits quick while their voices play. See
+        // `design/people.md`.
+        self.people.hear(conversation.voices());
         self.people.update(
             now,
             dt,

@@ -487,6 +487,9 @@ pub struct Conversation {
     replaying: bool,
     /// Agent speech playing on this device at the last frame, live or played again, which the swarm speaks with.
     speech: SpeechActivity,
+    /// The others whose voices played on this device at the last frame, by their numbers, whose orbits quicken. See
+    /// `design/people.md`.
+    voices: tomori_client::playback::Voices,
     /// Whether the agent is still speaking here, whether it is the participant's turn, and what they spoke over. See `design/speech.md`.
     turn: crate::turn::Turn,
     /// The agent's state as the server says it, smoothed for showing. See `design/agent-state.md`.
@@ -647,6 +650,7 @@ impl Conversation {
             muted: false,
             replaying: false,
             speech: SpeechActivity::default(),
+            voices: Default::default(),
             turn: crate::turn::Turn::default(),
             agent: crate::agent_view::AgentView::default(),
             feedback: feedback::Settings::default(),
@@ -1621,6 +1625,12 @@ impl Conversation {
     /// Whether a replay or catch-up is playing, from the player, once per frame.
     pub fn set_replaying(&mut self, replaying: bool) {
         self.replaying = replaying;
+    }
+
+    /// The others whose voices play on this device, by their numbers, from the player, once per frame: the orbit about
+    /// each one's head quickens while it plays. See `design/people.md`.
+    pub fn voices(&self) -> &[u32] {
+        self.voices.as_slice()
     }
 
     /// Agent speech playing on this device, from the player, once per frame: live or played again, and even while muted here, since the others still hear it. The swarm speaks while it plays; see `design/speech.md`.
@@ -5196,6 +5206,9 @@ impl Session for Conversation {
         }
         if let Report::Tick { now, .. } = report {
             self.turn.tick(now);
+        }
+        if let Report::Voices(voices) = report {
+            self.voices = voices;
         }
         if let Report::AgentSpeech { playing, level } = report {
             self.speech = SpeechActivity {

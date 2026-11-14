@@ -17,7 +17,7 @@ pub use jitter_buffer::{JitterBuffer, JitterOptions};
 pub use limiter::{CEILING, Limiter};
 pub(crate) use mixer::is_agent;
 pub use mixer::{Direction, Layout, Mixer, MixerOptions, Sound};
-pub use player::{Player, PlayerControl};
+pub use player::{Player, PlayerControl, VOICES, Voices};
 
 /// Counters describing how playback handled imperfect input, summed across sources.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

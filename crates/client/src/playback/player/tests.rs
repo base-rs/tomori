@@ -199,6 +199,27 @@ fn agent_speech_is_reported_while_it_plays_live_or_again_even_muted() {
 }
 
 #[test]
+fn the_others_voices_are_reported_while_they_play_but_never_the_agent_s() {
+    let (sender, mut player, control) = player();
+    assert_eq!(control.voices().as_slice(), [] as [u32; 0]);
+    sender.send(frame(2, 0, 100)).unwrap();
+    sender.send(frame(5, 0, 100)).unwrap();
+    sender.send(frame(AGENT_SOURCE, 0, 100)).unwrap();
+    sender.send(frame(REPLAY_SOURCE, 0, 100)).unwrap();
+    render(&mut player, FRAME);
+    let mut voices = control.voices().as_slice().to_vec();
+    voices.sort_unstable();
+    assert_eq!(voices, [2, 5]);
+    // Once their buffers run dry, nobody's voice plays.
+    render(&mut player, FRAME);
+    assert_eq!(control.voices(), Voices::default());
+    // No more than so many are told of.
+    let many: Voices = (0..VOICES as u32 + 4).collect();
+    assert_eq!(many.as_slice().len(), VOICES);
+    assert_eq!(many.as_slice()[VOICES - 1], VOICES as u32 - 1);
+}
+
+#[test]
 fn agent_speech_is_muted_locally_and_a_replay_is_reported_while_it_plays() {
     let (sender, mut player, control) = player();
     control.set_agent_muted(true);

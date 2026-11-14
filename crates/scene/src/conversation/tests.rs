@@ -5300,6 +5300,19 @@ fn speech_frame(conversation: &mut Conversation, at: Instant, playing: bool) {
     );
 }
 
+#[test]
+fn the_others_voices_playing_are_kept_from_each_frame_s_report() {
+    let mut conversation = crate::test_support::conversation("Ada");
+    assert!(conversation.voices().is_empty());
+    Session::report(
+        &mut conversation,
+        Report::Voices([2, 3].into_iter().collect()),
+    );
+    assert_eq!(conversation.voices(), [2, 3]);
+    Session::report(&mut conversation, Report::Voices(Default::default()));
+    assert!(conversation.voices().is_empty());
+}
+
 /// Agent speech of `message` announced, live.
 fn announce(conversation: &mut Conversation, message: &str) {
     conversation.apply(Event::Message(ServerMessage::Speech {
