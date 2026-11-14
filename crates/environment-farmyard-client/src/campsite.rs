@@ -39,9 +39,9 @@ const EASE: f32 = 0.25;
 /// The longest frame the foresight toasts over, in seconds.
 const FRAME_MOST: f32 = 0.1;
 /// How long the holder's foresight of their marshmallow catching or going out may differ from what the server side
-/// says before it gives way to it: as long as their hand takes to reach the side through presence, a tick of the side
-/// and its word to come back, so that the side agreeing ends the difference first, and one the side never lit, as when
-/// the holder's foresight ran ahead of it, goes out.
+/// says before it gives way to it, out of the fire's heat, where the side lights a black one too: as long as their hand
+/// takes to reach the side through presence, a tick of the side and its word to come back, so that the side agreeing
+/// ends the difference first, and one the side never lit, as when the holder's foresight ran ahead of it, goes out.
 pub const GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A stick as it is drawn this frame: which, where, the shade of its marshmallow and whether it burns.
@@ -326,6 +326,12 @@ impl Sticks {
                 // What the holder foresaw differs anew from what the side says now, as it says it only as it changes.
                 self.differs.remove(&lit.body);
                 *since = lit.since;
+                // Caught just now, as the side says, it burns on from here for the holder too, at once.
+                if lit.since.is_some()
+                    && let Some(flame) = self.flames.get_mut(&lit.body)
+                {
+                    *flame = flame.max(campsite::BURNS);
+                }
             }
         }
         if let Some(size) = event.size {
@@ -525,7 +531,10 @@ impl Sticks {
                         *flame =
                             campsite::burns_at(*flame, black, marshmallow, seconds, shown_size);
                         let foreseen = *flame > 0.0;
-                        if foreseen == alight {
+                        // Black in the heat, the side lights it too once it sees it so, so it is not put out there
+                        // only to catch again; the grace runs from when it leaves the heat.
+                        let heated = campsite::burning_at(black, marshmallow, shown_size);
+                        if foreseen == alight || heated {
                             self.differs.remove(&body);
                             foreseen
                         } else if now

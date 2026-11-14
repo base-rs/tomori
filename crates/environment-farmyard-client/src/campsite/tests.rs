@@ -739,24 +739,39 @@ fn the_holder_foresees_their_marshmallow_catching_and_going_out_and_gives_way_to
             .iter()
             .all(|burning| !*burning)
     );
-    // Back in the fire, it catches again; but the side never saying so, as when the holder's foresight ran ahead of it,
-    // it goes out once the grace has passed, as it is for everyone else.
+    // Back in the fire, it catches again and burns on there however long the side takes to say so, never put out only
+    // to catch again as the side says it caught.
     let frames = held_for(&mut sticks, over_the_fire(), &mut now, 1.0);
     let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(frames[first..].iter().all(|burning| *burning));
+    sticks.changed(&lit(3, Some(3_000)), 3_000);
+    assert!(
+        held_for(&mut sticks, over_the_fire(), &mut now, 0.2)
+            .iter()
+            .all(|burning| *burning)
+    );
+    let frames = held_for(&mut sticks, pool, &mut now, 0.3);
+    assert!(frames.iter().skip(1).all(|burning| !*burning), "{frames:?}");
+    sticks.changed(&lit(3, None), 4_000);
+    // In the fire again, the side never saying it caught, as when the holder's foresight ran ahead of it, and pulled
+    // out, it goes out once the grace has passed, as it is for everyone else.
+    let frames = held_for(&mut sticks, over_the_fire(), &mut now, 0.3);
+    let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(frames[first..].iter().all(|burning| *burning));
+    let frames = held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0);
     let last = frames.iter().rposition(|burning| *burning).unwrap();
-    let alight = (last + 1 - first) as f32 * 0.016;
+    assert!(frames[..=last].iter().all(|burning| *burning));
+    let alight = (last + 1) as f32 * 0.016;
     assert!((alight - GRACE.as_secs_f32()).abs() < 0.04, "{alight}");
     assert!(frames[last + 1..].iter().all(|burning| !*burning));
-    // The side saying it caught while the holder foresees it out, it is drawn alight once the grace has passed, and
-    // burns on as the side says.
+    // The side saying it caught while the holder foresees it out, as when it was pulled out as it turned black, it is
+    // drawn alight at once and burns on as the side says.
     sticks.changed(&lit(3, Some(5_000)), 5_000);
-    let frames = held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0);
-    let first = frames.iter().position(|burning| *burning).unwrap();
     assert!(
-        (first as f32 * 0.016 - GRACE.as_secs_f32()).abs() < 0.04,
-        "{first}"
+        held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0)
+            .iter()
+            .all(|burning| *burning)
     );
-    assert!(frames[first..].iter().all(|burning| *burning));
     // A brown one, never alight.
     sticks.changed(
         &Event {
