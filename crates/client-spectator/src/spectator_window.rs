@@ -7,7 +7,6 @@ use crate::{
     pipewire_video::{self, Producer, Video},
     spectator_feed::Feed,
     spectator_view::{RenderInputs, SpectatorView},
-    swarm::Swarm,
 };
 use anyhow::Result;
 use glam::Vec2;
@@ -26,7 +25,6 @@ pub struct SpectatorWindow {
     queue: wgpu::Queue,
     width: u32,
     height: u32,
-    swarm: Swarm,
     occluded: bool,
     first_frame: bool,
     spectator: SpectatorView,
@@ -63,7 +61,7 @@ impl SpectatorWindow {
         } else {
             (gpu.width, gpu.height)
         };
-        let mut renderer = Renderer::with_sceneries(
+        let renderer = Renderer::with_sceneries(
             &gpu.device,
             &gpu.queue,
             render_format,
@@ -72,8 +70,6 @@ impl SpectatorWindow {
             samples,
             feed.sceneries(),
         );
-        let initial = crate::environment::Environment::initial(renderer.environments());
-        renderer.set_environment(initial);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,
@@ -88,7 +84,6 @@ impl SpectatorWindow {
             queue: gpu.queue,
             width: gpu.width,
             height: gpu.height,
-            swarm: Swarm::default(),
             occluded: false,
             first_frame: true,
             spectator: SpectatorView::new(feed),
@@ -151,7 +146,6 @@ impl SpectatorWindow {
             device: &self.device,
             queue: &self.queue,
             renderer: &mut self.renderer,
-            swarm: &mut self.swarm,
             target,
             aspect: size.x / size.y,
         });

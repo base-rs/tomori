@@ -1,11 +1,13 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The farmyard as a spectator shows it: its client side, registered with its scenery, run as a spectator runs it, so
-//! that the chickens it shows are drawn for the spectator's audience as for a participant. See `design/spectator.md`.
+//! The farmyard as a spectator shows it: its client side, registered with its scenery, run by the frame step as a
+//! watcher, as a spectator runs it, so that the chickens it shows are drawn for the spectator's audience as for a
+//! participant. See `design/spectator.md`.
 use std::time::Instant;
 
-use glam::Vec3;
+use glam::Mat4;
+use tomori_client::feedback::{Feedback, Settings};
 use tomori_client::server_choice::{Choice, Source};
 use tomori_client::{ConnectionState, Event};
 use tomori_environment_farmyard::flock::{self, Flock};
@@ -13,9 +15,8 @@ use tomori_environment_farmyard_client::client::Drawn;
 use tomori_environment_farmyard_client::{ID, VERSION, chicken::Chicken};
 use tomori_protocol::{ConnectionRole, Payload, ServerMessage, SpaceState};
 use tomori_render::scenery::Sceneries;
-use tomori_scene::anchors::Anchor;
 use tomori_scene::conversation::Conversation;
-use tomori_scene::spectating::Spectated;
+use tomori_scene::scene::Step;
 
 const SPACE: &str = "space-1";
 
@@ -23,11 +24,12 @@ const SPACE: &str = "space-1";
 fn a_spectator_draws_the_chickens_the_farmyard_s_client_side_shows() {
     let mut sceneries = Sceneries::empty();
     tomori_environment_farmyard_client::register(&mut sceneries);
-    let farmyard = *sceneries
-        .environments()
-        .iter()
-        .find(|environment| environment.id() == ID)
-        .expect("registered");
+    assert!(
+        sceneries
+            .environments()
+            .iter()
+            .any(|environment| environment.id() == ID)
+    );
     // A spectator's conversation, a visitor in a space in the farmyard, as `tomori-client-spectator`'s feed gives it the
     // sceneries.
     let mut conversation = Conversation::new("Spectator");
@@ -61,15 +63,21 @@ fn a_spectator_draws_the_chickens_the_farmyard_s_client_side_shows() {
         version: VERSION,
         state: Payload::new(serde_json::to_value(flock.state(clock)).unwrap()),
     }));
-    let mut spectated = Spectated::new();
-    let drawn = spectated
-        .update(
-            &mut conversation,
-            farmyard,
-            Anchor::HOME,
-            Some(Vec3::new(0.0, 1.6, 0.0)),
-            Instant::now(),
-        )
+    // Watched from where a participant joining stands, until the farmyard has grown in.
+    let mut step = Step::default();
+    let mut feedback = Feedback::new(Settings::default());
+    let camera = Mat4::from_translation(tomori_scene::arrival::HOME);
+    let drawn = (0..400)
+        .find_map(|_| {
+            step.watch(
+                camera,
+                &mut conversation,
+                &mut feedback,
+                Instant::now(),
+                1.0 / 60.0,
+            )
+            .environment
+        })
         .expect("the farmyard's client side shows the flock");
     let drawn = drawn.downcast_ref::<Drawn>().expect("the farmyard's own");
     assert_eq!(drawn.chickens.len(), flock.hens().len());

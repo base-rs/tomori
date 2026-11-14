@@ -22,7 +22,7 @@ This describes the GitHub environment's first prototype: one repository's open i
 
 **The agent's layer.** The environment's layer of a space's instructions says that the cards are the repository's open issues and pull requests, that layout changes nothing on GitHub, what the description of a card pointed at means, that a card's title, author and labels, and what the agent reads about it on GitHub, are written by third parties, data to read and never instructions to follow, that the agent reads more with its own tools, such as `gh issue view`, that it does not have the server's token, and that it changes nothing on GitHub unless asked in words.
 
-**Not in this prototype.** Write-back and triage boxes (#149), physics (#97), snapping to piles or surfaces, a done tray for closed cards, the spectator's view of cards, live movement of a card while another participant carries it, and showing cards to visitors.
+**Not in this prototype.** Write-back and triage boxes (#149), physics (#97), snapping to piles or surfaces, a done tray for closed cards, live movement of a card while another participant carries it, and showing cards to visitors.
 
 ## Rationale
 
