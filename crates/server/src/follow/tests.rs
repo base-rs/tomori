@@ -311,7 +311,7 @@ fn beside_an_object_it_stands_to_the_asker_s_left_off_their_line_of_sight_to_it(
     let scene = Scene::new(&[left], &[], Vec::new(), vec![EYES]);
     let spot = super::beside(&ada, object, &scene).expect("clear");
     assert!((degrees(EYES, spot.position) - 45.0).abs() < 1e-3);
-    // With room nowhere near her, even as far as the summons stood it, nowhere; nor inside the scenery.
+    // With room nowhere near her, even as far as it stands before someone, nowhere; nor inside the scenery.
     let near = Solid::new([-2.0, 0.0, -2.0], [2.0, 3.0, -0.4]);
     let behind = Solid::new([-2.0, 0.0, 0.4], [2.0, 3.0, 2.0]);
     let sides = [

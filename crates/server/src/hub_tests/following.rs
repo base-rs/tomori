@@ -11,7 +11,7 @@ use crate::follow::CONVERSATION;
 use crate::hub::following::{COMMIT, DWELL, EMPTY, GLANCE, GLIDE, LEFT};
 use tomori_protocol::{AgentMovement, Movement};
 
-/// What the agent of `space` does: where it is summoned to, where it faces, and whether it is pinned.
+/// What the agent of `space` does: where it stands away from home, where it faces, and whether it is pinned.
 pub(super) fn agent(
     hub: &Hub,
     space: &str,
@@ -19,7 +19,7 @@ pub(super) fn agent(
     let state = hub.lock();
     let record = state.space(space).unwrap();
     (
-        record.summoned,
+        record.away,
         record.following.faces(),
         record.following.pinned,
     )
@@ -89,12 +89,12 @@ pub(super) fn level(a: [f32; 3], b: [f32; 3]) -> f32 {
     (a[0] - b[0]).hypot(a[2] - b[2])
 }
 
-/// Where the agent of `space` is summoned to.
-pub(super) fn summoned(hub: &Hub, space: &str) -> Option<[f32; 3]> {
+/// Where the agent of `space` stands away from home.
+pub(super) fn away_at(hub: &Hub, space: &str) -> Option<[f32; 3]> {
     hub.lock()
         .space(space)
         .unwrap()
-        .summoned
+        .away
         .map(|pose| pose.position)
 }
 
@@ -129,8 +129,8 @@ pub(super) fn last_state(client: &Client) -> Option<tomori_protocol::SpaceState>
 pub(super) const ADA: [f32; 3] = [0.0, 1.6, 2.0];
 
 #[test]
-fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_entourage_staying_home()
-{
+fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_wall_and_workers_staying_home()
+ {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     // Ada stands 4.3 m from the agent's home, looking towards it.
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
@@ -140,7 +140,7 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
     // It turns to her at once, for everyone, and moves nothing yet.
     assert_eq!(agent(&hub, &space), (None, Some(ADA), false));
     let state = last_state(&ada).expect("told");
-    assert_eq!((state.facing, state.summoned), (Some(ADA), None));
+    assert_eq!((state.facing, state.away), (Some(ADA), None));
     // A tap, let go before it commits, only turned it.
     release(&ada, "u1");
     hub.flush_snapshots(start + COMMIT + Duration::from_millis(100));
@@ -151,8 +151,8 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
     let held = Instant::now() + COMMIT;
     assert!(hub.snapshot_deadline().is_some_and(|due| due <= held));
     hub.flush_snapshots(held);
-    let (summoned, facing, pinned) = agent(&hub, &space);
-    let at = summoned.expect("gone to her");
+    let (away, facing, pinned) = agent(&hub, &space);
+    let at = away.expect("gone to her");
     assert!(
         (level(at.position, ADA) - CONVERSATION).abs() < 1e-3,
         "{at:?}"
@@ -167,12 +167,9 @@ fn it_turns_as_someone_presses_x_and_goes_beside_them_once_they_hold_it_its_ento
         tomori_protocol::Pose::upright_facing(at.position, [ADA[0], 1.7, ADA[2]]).orientation
     );
     assert_eq!((facing, pinned), (None, false));
-    // Its wall and its workers stay home, and its way there is a glide.
+    // Its way there is a glide.
     let state = last_state(&ada).expect("told");
-    assert_eq!(
-        (state.summoner, state.via, state.stream),
-        (None, None, false)
-    );
+    assert_eq!((state.via, state.stream), (None, false));
     // It stands for her, as clients are told.
     assert_eq!(state.partner, Some(ADA));
     // Arrived, well within 3 m of her, a follow-up from where she stands only turns it, even a step further away.
@@ -213,7 +210,7 @@ fn with_someone_in_its_way_it_glides_there_by_a_waypoint() {
     press(&ada, "u1");
     hub.flush_snapshots(Instant::now() + COMMIT);
     let state = last_state(&ada).expect("told");
-    assert!(state.summoned.is_some());
+    assert!(state.away.is_some());
     assert!(state.via.is_some() && !state.stream, "{:?}", state.via);
 }
 
@@ -226,7 +223,7 @@ fn far_away_it_streams_there() {
     hub.flush_snapshots(Instant::now() + COMMIT);
     let state = last_state(&ada).expect("told");
     assert!(state.stream);
-    assert!(state.summoned.is_some());
+    assert!(state.away.is_some());
     // Once there, it no longer streams.
     hub.flush_snapshots(Instant::now() + Duration::from_secs(10));
     assert!(!last_state(&ada).expect("told").stream);
@@ -568,8 +565,7 @@ fn moving_only_when_asked_its_own_move_leaves_its_wall_and_workers_home() {
     // It goes before her, and nothing goes with it: the projection is not sent again.
     hub.agent_move_agent("session", "front ada", None).unwrap();
     let state = last_state(&ada).expect("told");
-    assert!(state.summoned.is_some());
-    assert_eq!(state.summoner, None);
+    assert!(state.away.is_some());
     assert!(ada.projections().is_empty());
 }
 
@@ -654,7 +650,7 @@ fn stopped_on_its_way_by_words_with_nothing_in_them_it_faces_them_from_there_tur
     let stopped = agent(&hub, &space).0.expect("stopped on its way");
     assert!(level(stopped.position, going.position) > 0.5, "{stopped:?}");
     assert_eq!(stopped.orientation, going.orientation);
-    assert_eq!(last_state(&ada).expect("told").summoned, Some(stopped));
+    assert_eq!(last_state(&ada).expect("told").away, Some(stopped));
     // Going round a post by a waypoint, it stops off the straight line to her, where it would face her otherwise
     // turned: it faces her from where it stops instead.
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
@@ -783,14 +779,13 @@ fn called_it_comes_beside_them_and_stays_pinned_turning_only_until_sent_home_or_
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
     ada.send(ClientMessage::CallAgent);
-    let (summoned, _, pinned) = agent(&hub, &space);
-    let at = summoned.expect("called");
+    let (away, _, pinned) = agent(&hub, &space);
+    let at = away.expect("called");
     assert!(pinned);
-    // Following the speaker, it stands beside them, its entourage home.
+    // Following the speaker, it stands beside them.
     assert!((level(at.position, ADA) - CONVERSATION).abs() < 1e-3);
     let state = last_state(&ada).expect("told");
     assert!(state.pinned);
-    assert_eq!(state.summoner, None);
     // Pinned, it only turns to whoever speaks, and stays however quiet it is.
     let bob = Client::greeted(&hub, Access::open(), "bob");
     bob.join(&space);
@@ -888,9 +883,8 @@ fn an_owner_sets_how_it_moves_and_keeping_it_home_brings_it_home_and_ends_its_pi
     // Called, it stands beside her, as following would, nothing with it, pinned.
     ada.send(ClientMessage::CallAgent);
     let state = last_state(&ada).expect("told");
-    assert_eq!(state.summoner, None);
     assert!(state.pinned);
-    assert!((level(state.summoned.expect("called").position, ADA) - CONVERSATION).abs() < 1e-3);
+    assert!((level(state.away.expect("called").position, ADA) - CONVERSATION).abs() < 1e-3);
     // A way it does not know is refused; the same again changes nothing.
     ada.send(ClientMessage::SetAgentMovement {
         movement: AgentMovement::new(Movement::Unknown, None),
@@ -912,7 +906,7 @@ fn an_owner_sets_how_it_moves_and_keeping_it_home_brings_it_home_and_ends_its_pi
         state.movement,
         Some(AgentMovement::new(Movement::Follow, Some(30)))
     );
-    assert!(state.pinned && state.summoned.is_some());
+    assert!(state.pinned && state.away.is_some());
     // Kept home, it goes home and its pin ends; and the space keeps the setting.
     ada.send(ClientMessage::SetAgentMovement {
         movement: AgentMovement::new(Movement::Home, Some(90)),
@@ -977,18 +971,17 @@ fn a_space_kept_restores_how_its_agent_moves_and_a_way_a_newer_server_kept_leave
 }
 
 #[test]
-fn its_own_tool_pins_it_or_takes_it_to_someone_its_entourage_home_while_it_follows() {
+fn its_own_tool_pins_it_or_takes_it_to_someone_while_it_follows() {
     let (hub, _jobs, space, _commands, ada) = following(Some(90));
     hub.serve_tools(tomori_backend::ToolServer::new(
         "tomori",
         "http://127.0.0.1:1/mcp",
     ));
     ada.send(looking(ADA, [0.0, 1.6, -3.0]));
-    // To Ada, in front of her: its entourage stays home, and it goes home again once quiet.
+    // To Ada, in front of her, and it goes home again once quiet.
     hub.agent_move_agent("session", "front ada", None).unwrap();
     let state = last_state(&ada).expect("told");
-    assert!(state.summoned.is_some() && !state.pinned);
-    assert_eq!(state.summoner, None);
+    assert!(state.away.is_some() && !state.pinned);
     assert_eq!(state.partner, Some(ADA));
     // Asked to stay, it is pinned.
     let stayed = hub.agent_move_agent("session", "stay", None).unwrap();

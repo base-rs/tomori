@@ -1319,11 +1319,11 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let asked = tomori_protocol::AgentMovement::default();
     let follow = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Follow, None);
     let kept = tomori_protocol::AgentMovement::new(tomori_protocol::Movement::Home, None);
-    let report = |summoned, pinned, movement, anchor: Option<&str>| {
+    let report = |away, pinned, movement, anchor: Option<&str>| {
         agent(
             &anchors,
             &AgentState {
-                summoned,
+                away,
                 pinned,
                 movement,
                 anchor: anchor.map(str::to_owned),
@@ -1379,7 +1379,7 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let pinned = agent(
         &anchors,
         &AgentState {
-            summoned: Some(ahead),
+            away: Some(ahead),
             pinned: true,
             pinned_by: Some("Ada".to_owned()),
             partner: Some("Ada#23".to_owned()),
@@ -1394,7 +1394,7 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let followed = agent(
         &anchors,
         &AgentState {
-            summoned: Some(ahead),
+            away: Some(ahead),
             pinned_by: Some("Ada".to_owned()),
             returns_in: Some(std::time::Duration::from_millis(72_400)),
             movement: follow,
@@ -1407,7 +1407,7 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
     let walking = agent(
         &anchors,
         &AgentState {
-            summoned: Some(ahead),
+            away: Some(ahead),
             walking: Some("Samuel#11".to_owned()),
             movement: follow,
             ..AgentState::default()
@@ -1420,7 +1420,7 @@ fn the_agent_goes_in_front_of_someone_facing_them_and_says_where_it_is() {
         agent(
             &anchors,
             &AgentState {
-                summoned: Some(ahead),
+                away: Some(ahead),
                 facing: Some(facing),
                 movement: follow,
                 ..AgentState::default()

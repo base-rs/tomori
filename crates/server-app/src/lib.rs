@@ -467,7 +467,7 @@ mod tests {
      {
         use tomori_environment::sightlines::{Solid, Spot, noticed, readable, seen};
         use tomori_protocol::{
-            Pose, TOMORI_WALL, Wall, WallKind, WallShape, cluster, entourage, wall,
+            Pose, TOMORI_WALL, Wall, WallKind, WallShape, cluster, stance, wall,
         };
         let spot = |pose: Pose| Spot::new(pose.position, pose.yaw());
         let solids: Vec<Solid> = tomori_environment_farmyard::layout::solids()
@@ -520,7 +520,7 @@ mod tests {
             // Its wall's home is beneath its agent's, on the floor where participants arrive, unless it says otherwise.
             let wall = environment
                 .stage()
-                .unwrap_or_else(|| entourage::wall_beneath(&agent, arrival.position[1]));
+                .unwrap_or_else(|| stance::wall_beneath(&agent, arrival.position[1]));
             assert_eq!(
                 readable(&spot(arrival), &spot(wall), solids),
                 Ok(()),
@@ -538,12 +538,12 @@ mod tests {
                 "{id}"
             );
             assert!(
-                agent.position[1] - entourage::SWARM[1] - (home.position[1] + entourage::ROW_HALF)
-                    >= entourage::GAP - 1e-5,
+                agent.position[1] - stance::SWARM[1] - (home.position[1] + stance::ROW_HALF)
+                    >= stance::GAP - 1e-5,
                 "{id}"
             );
             assert!(
-                home.position[1] - entourage::ROW_HALF >= cluster::FLOOR + entourage::CLEARANCE,
+                home.position[1] - stance::ROW_HALF >= cluster::FLOOR + stance::CLEARANCE,
                 "{id}"
             );
             assert!((home.yaw() - agent.yaw()).sin().abs() < 1e-4, "{id}");
@@ -552,7 +552,7 @@ mod tests {
                 .with_grid(wall::ARC_GRID)
                 .with_scale(wall::ARC_SCALE);
             let eyes = [0.0, tomori_environment::sightlines::EYES, 0.0];
-            assert!(entourage::seen_beneath(eyes, &agent, &tomori), "{id}");
+            assert!(stance::seen_beneath(eyes, &agent, &tomori), "{id}");
         }
     }
 }

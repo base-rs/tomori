@@ -692,7 +692,7 @@ impl Random {
 }
 
 /// Every way the hub changes what a space projects, at random, by participants, the agent's replies and its tools, the
-/// agent summoned and sent home, and the space changing environment: after each burst, what a client holds from the
+/// agent called and sent home, and the space changing environment: after each burst, what a client holds from the
 /// patches it was sent is what a client joining now would be sent whole, built afresh rather than sent because the
 /// projection was touched, so that a change that forgets to send it shows here, and no patch is ever refused.
 #[test]
@@ -909,7 +909,7 @@ fn every_change_the_hub_makes_patched_in_turn_is_the_projection_built_afresh() {
                             ada.send(super::looking([1.0, 1.6, 1.0], [1.0, 1.6, -2.0]));
                             ada.send(ClientMessage::CallAgent);
                         } else {
-                            ada.send(ClientMessage::PlaceAgent { at: None });
+                            ada.send(ClientMessage::SendAgentHome);
                         }
                         true
                     }

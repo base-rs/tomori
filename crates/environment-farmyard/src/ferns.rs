@@ -1045,7 +1045,7 @@ const CLEAR_WAYS: u32 = 20;
 /// 0.1 m more on every side, as the server's `follow` stands it, seen from their eyes.
 pub fn taken(at: Vec2, solids: &[Solid]) -> u64 {
     use tomori_environment::sightlines::EYES;
-    use tomori_protocol::entourage::SWARM;
+    use tomori_protocol::stance::SWARM;
     let eyes = Vec3::new(at.x, trail::HEIGHT + EYES, at.y);
     let half = Vec3::from_array(SWARM.map(|reach| reach / 2.0 + 0.1));
     let near: Vec<&Solid> = solids

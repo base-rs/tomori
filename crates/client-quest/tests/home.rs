@@ -1,20 +1,16 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The agent's entourage in the farmyard, drawn on lavapipe: its workers on their arc and its Tomori wall beneath it, at
-//! home and summoned, the wall folding, travelling and unfolding beneath the agent before whoever summoned it, the
-//! workers gliding after it. `TOMORI_ENTOURAGE_PREVIEW`, set to a directory, saves the renders there to look at:
-//! `travel.png`, the wall at home, mid-fold, mid-journey and unfolded at its travel spot; for each arrangement compared,
-//! `arc-*.png`, three, six and ten workers, down the sheet, at home and summoned, across it; `signs.png`, the first four
-//! workers' signs close up, summoned; `signs-viewpoints.png`, the default arc of six, summoned, seen from in front, 45°
-//! to its left and 70° to its right, each sign turned to face whoever looks; `home.png`, the agent at home with its wall
-//! beneath it, from the arrival; `summoned.png`, the agent summoned by someone seated, their eyes 1 m up, and by
-//! someone standing, 1.6 m and 1.8 m, down the sheet; and `workbench.png`, the agent at its workbench in the yard's
-//! corner, its workers in the ring about it, from the arrival turned towards it, from the yard before it, from within
-//! the ring and from straight above, down the sheet; and `ring-under.png`, the agent's home floating 5.3 m above the
-//! yard, seen from the arrival looking up at it, its ring on the floor, out of sight, and under it, at the swarm's foot,
-//! down the sheet. See `design/projection.md`, `design/environments.md`, `design/farmyard.md` and
-//! `design/interaction.md`.
+//! The agent's home in the farmyard, drawn on lavapipe: its workers on their arc and its Tomori wall beneath it.
+//! `TOMORI_HOME_PREVIEW`, set to a directory, saves the renders there to look at: for each arrangement compared,
+//! `arc-*.png`, three, six and ten workers, down the sheet; `signs.png`, the first four workers' signs close up;
+//! `signs-viewpoints.png`, the default arc of six seen from in front, 45° to its left and 70° to its right, each sign
+//! turned to face whoever looks; `home.png`, the agent at home with its wall beneath it, from the arrival;
+//! `workbench.png`, the agent at its workbench in the yard's corner, its workers in the ring about it, from the arrival
+//! turned towards it, from the yard before it, from within the ring and from straight above, down the sheet; and
+//! `ring-under.png`, the agent's home floating 5.3 m above the yard, seen from the arrival looking up at it, its ring on
+//! the floor, out of sight, and under it, at the swarm's foot, down the sheet. See `design/projection.md`,
+//! `design/environments.md`, `design/farmyard.md` and `design/interaction.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +24,7 @@ use tomori_environment_farmyard_client::layout;
 use tomori_protocol::{
     Anchors, ConnectionRole, EnvironmentInfo, Panel, Participant, Place, Pose, Projection,
     ServerMessage, SpaceState, TOMORI_WALL, Wall, WallKind, WallShape, Worker, WorkerState,
-    cluster, entourage,
+    cluster, stance,
 };
 use tomori_render::{
     graphics::Renderer,
@@ -66,7 +62,7 @@ const WORKERS: [(&str, WorkerState); 10] = [
     ("Update the farmyard design", WorkerState::Error),
     ("Benchmark speech synthesis", WorkerState::Running),
     ("Tidy the hand menu", WorkerState::Waiting),
-    ("Write the travel tests", WorkerState::Running),
+    ("Write the following tests", WorkerState::Running),
 ];
 
 fn farmyard() -> Environment {
@@ -90,7 +86,7 @@ fn carried(at: Vec3) -> Pose {
 
 /// The Tomori wall's home in the farmyard, as the server stands it: beneath the agent's home.
 fn home_wall() -> Pose {
-    entourage::wall_beneath(&carried(layout::AGENT_HOME), cluster::FLOOR)
+    stance::wall_beneath(&carried(layout::AGENT_HOME), cluster::FLOOR)
 }
 
 /// The Tomori wall at `pose`, as the server sends it: six slots curved along an arc of 2.3 m.
@@ -134,16 +130,20 @@ fn panels() -> Vec<Panel> {
         Panel::new(
             "panel-3",
             "Summary",
-            "The wall travels with the agent.",
+            "The wall stays home as the agent goes.",
             place(2),
         ),
-        Panel::new("panel-4", "Next", "Try summoning on the headset.", place(4)),
+        Panel::new(
+            "panel-4",
+            "Next",
+            "Try calling Tomori on the headset.",
+            place(4),
+        ),
     ]
 }
 
-/// The space's state, with `workers` of them, and the agent summoned to `summoned`, by someone whose eyes are at
-/// `summoner`.
-fn state(workers: usize, summoned: Option<(Pose, [f32; 3])>) -> SpaceState {
+/// The space's state, with `workers` of them, the agent at home.
+fn state(workers: usize) -> SpaceState {
     let environment = farmyard();
     SpaceState {
         id: SPACE.into(),
@@ -174,9 +174,6 @@ fn state(workers: usize, summoned: Option<(Pose, [f32; 3])>) -> SpaceState {
                 Pose::at(layout::ARRIVAL.to_array())
                     .facing_towards(layout::ARRIVAL_FACING.to_array()),
             ),
-        summoned: summoned.map(|(at, _)| at),
-        summoner: summoned.map(|(_, eyes)| eyes),
-        summons: true,
         ..Default::default()
     }
 }
@@ -205,7 +202,7 @@ fn joined(workers: usize, placement: Option<Placement>) -> Conversation {
         name: None,
     }));
     conversation.apply(Event::Message(ServerMessage::Space {
-        state: Box::new(state(workers, None)),
+        state: Box::new(state(workers)),
     }));
     conversation.apply(Event::Message(ServerMessage::Projection {
         projection: Box::new(
@@ -218,54 +215,8 @@ fn joined(workers: usize, placement: Option<Placement>) -> Conversation {
     conversation
 }
 
-/// Where the eyes are of Ada, who summons the agent: at home, turned 70° to the right, towards the open yard.
-const SUMMONER: [f32; 3] = [0.0, 1.6, 0.0];
-
-/// The way Ada looks to summon the agent, along the ground.
-fn summoning() -> Vec3 {
-    let yaw = -70f32.to_radians();
-    Vec3::new(-yaw.sin(), 0.0, -yaw.cos())
-}
-
-/// Where the agent stands, summoned by someone whose eyes are at `eyes`, drawn 1.6 m before them, low by their knees,
-/// as `entourage::summoned` stands it, 2.3 m before them, a little above their eyes, facing them; and where the server
-/// stands its Tomori wall meanwhile, in the open yard: beneath it, facing them, as `tomori-server`'s `stage::travel`
-/// stands it, which its own tests check.
-fn summons_by(eyes: [f32; 3]) -> (Pose, Pose) {
-    let at = Vec3::from_array(eyes) + summoning() * 1.6 - Vec3::Y * 0.9;
-    let agent = entourage::summoned(at.to_array(), eyes, cluster::FLOOR);
-    let beneath = entourage::wall_beneath(&agent, cluster::FLOOR).position;
-    (
-        agent,
-        Pose::upright_facing(beneath, [eyes[0], beneath[1], eyes[2]]),
-    )
-}
-
-/// The agent and its wall, summoned by Ada, standing at home.
-fn summons() -> (Pose, Pose) {
-    summons_by(SUMMONER)
-}
-
-/// Summon the agent, for everyone, as the server tells of it.
-fn summon(conversation: &mut Conversation, workers: usize) {
-    summon_by(conversation, workers, SUMMONER);
-}
-
-/// Summon the agent by someone whose eyes are at `eyes`, for everyone, as the server tells of it.
-fn summon_by(conversation: &mut Conversation, workers: usize, eyes: [f32; 3]) {
-    let (agent, wall) = summons_by(eyes);
-    conversation.apply(Event::Message(ServerMessage::Space {
-        state: Box::new(state(workers, Some((agent, eyes)))),
-    }));
-    conversation.apply(Event::Message(ServerMessage::Projection {
-        projection: Box::new(
-            Projection::new(SPACE, farmyard().id())
-                .with_walls(walls(wall))
-                .with_panels(panels()),
-        ),
-    }));
-    conversation.take_actions();
-}
+/// Where the eyes are of Ada, at home.
+const ADA: [f32; 3] = [0.0, 1.6, 0.0];
 
 /// Step the scene for `seconds` from `now`, as `senses` say, and return the last frame.
 fn run<'a>(
@@ -333,12 +284,12 @@ impl WorkerPlacement for Row {
 }
 
 #[test]
-fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
+fn the_workers_arrangements_at_home_in_the_farmyard_compared_their_signs_facing_whoever_looks() {
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("entourage test eye"),
+            label: Some("home test eye"),
             size: wgpu::Extent3d {
                 width: WIDTH,
                 height: HEIGHT,
@@ -375,7 +326,7 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
                 &panels.list(Mat4::IDENTITY),
             );
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("entourage readback"),
+                label: Some("home readback"),
                 size: (WIDTH * HEIGHT * 4) as u64,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
@@ -410,113 +361,17 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
         let capture = |frame: &Frame, eyes: Vec3, towards: Vec3| {
             capture_with(frame, eyes, towards - Vec3::Y * 0.12, 1.3)
         };
-        let preview = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW").map(std::path::PathBuf::from);
-        let eyes = Vec3::from_array(SUMMONER);
+        let preview = std::env::var_os("TOMORI_HOME_PREVIEW").map(std::path::PathBuf::from);
+        if let Some(directory) = &preview {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let eyes = Vec3::from_array(ADA);
         let home = senses(eyes, Vec3::NEG_Z);
-        let turned = senses(eyes, summoning());
-        // Looking at the agent at home, and where Ada turns to summon it.
+        // Looking at the agent at home.
         let agent_home = Vec3::from_array(carried(layout::AGENT_HOME).position);
         let towards_home = Vec3::new(agent_home.x, 0.0, agent_home.z).normalize();
-
-        // The wall folds where it stood, travels and unfolds before her, its panels with it.
-        let mut conversation = joined(6, None);
-        let mut step = Step::default();
         let mut feedback = Feedback::new(Settings::default());
         let start = Instant::now();
-        let mut now = start;
-        // Seen between its home and where it goes, so that its whole journey is in view.
-        let between = (summoning()
-            + Vec3::from_array(home_wall().position)
-                .with_y(0.0)
-                .normalize())
-        .normalize();
-        let frame = run(
-            &mut step,
-            &mut conversation,
-            &mut feedback,
-            &turned,
-            8.0,
-            &mut now,
-        );
-        let before = capture(&frame, eyes, between);
-        summon(&mut conversation, 6);
-        let frame = run(
-            &mut step,
-            &mut conversation,
-            &mut feedback,
-            &turned,
-            0.15,
-            &mut now,
-        );
-        let folding = capture(&frame, eyes, between);
-        let frame = run(
-            &mut step,
-            &mut conversation,
-            &mut feedback,
-            &turned,
-            0.6,
-            &mut now,
-        );
-        let travelling = capture(&frame, eyes, between);
-        let frame = run(
-            &mut step,
-            &mut conversation,
-            &mut feedback,
-            &turned,
-            6.0,
-            &mut now,
-        );
-        let arrived = capture(&frame, eyes, summoning());
-        // Each step of its journey looks different; arrived, its panels stand before her.
-        assert_ne!(before, folding);
-        assert_ne!(folding, travelling);
-        assert_ne!(travelling, arrived);
-        assert!(frame.projection.len() > 6, "its slots and panels are drawn");
-        // The workers stand about her, on the arc through the agent, as far from her eyes as it is, to either side of
-        // it, about its height, none above 2.6 m nor below 1 m.
-        let agent = Vec3::from_array(summons().0.position);
-        check_arc(&frame, agent, eyes, "summoned");
-        for station in frame.stations {
-            let at = Vec3::from_array(station.position);
-            assert!((1.0..=2.6).contains(&at.y), "{at}");
-            assert_eq!(station.facing, SUMMONER);
-        }
-        if let Some(directory) = &preview {
-            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
-            for (index, drawn) in [&before, &folding, &travelling, &arrived]
-                .into_iter()
-                .enumerate()
-            {
-                let (x, y) = (index as u32 % 2 * WIDTH, index as u32 / 2 * HEIGHT);
-                image::imageops::replace(&mut sheet, drawn, x.into(), y.into());
-            }
-            std::fs::create_dir_all(directory).unwrap();
-            sheet
-                .save(directory.join("travel.png"))
-                .expect("the preview is saved");
-        }
-        // Sent home, they go home with it.
-        conversation.apply(Event::Message(ServerMessage::Space {
-            state: Box::new(state(6, None)),
-        }));
-        conversation.apply(Event::Message(ServerMessage::Projection {
-            projection: Box::new(
-                Projection::new(SPACE, farmyard().id())
-                    .with_walls(walls(home_wall()))
-                    .with_panels(panels()),
-            ),
-        }));
-        let frame = run(
-            &mut step,
-            &mut conversation,
-            &mut feedback,
-            &home,
-            8.0,
-            &mut now,
-        );
-        for station in frame.stations {
-            assert_eq!(station.facing, [0.0, 1.6, 0.0]);
-        }
 
         // The arrangements compared: the default, the arc as it stood before, and one row.
         let arrangements: [(&str, Option<Placement>); 3] = [
@@ -525,7 +380,7 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
             ("arc-row", Some(Arc::new(Row))),
         ];
         for (name, placement) in arrangements {
-            let mut sheet = image::RgbaImage::new(WIDTH * 2, HEIGHT * 3);
+            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
             for (row, workers) in [3, 6, 10].into_iter().enumerate() {
                 let mut conversation = joined(workers, placement.clone());
                 let mut now = start;
@@ -540,23 +395,7 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
                 );
                 assert_eq!(frame.stations.len(), workers);
                 let at_home = capture(&frame, eyes, towards_home);
-                summon(&mut conversation, workers);
-                let frame = run(
-                    &mut step,
-                    &mut conversation,
-                    &mut feedback,
-                    &turned,
-                    8.0,
-                    &mut now,
-                );
-                let summoned = capture(&frame, eyes, summoning());
                 image::imageops::replace(&mut sheet, &at_home, 0, (row as u32 * HEIGHT).into());
-                image::imageops::replace(
-                    &mut sheet,
-                    &summoned,
-                    WIDTH.into(),
-                    (row as u32 * HEIGHT).into(),
-                );
                 // Close up, as Ada turns her head to each of the first four workers' signs.
                 if name == "arc-default" && workers == 6 {
                     let mut close = image::RgbaImage::new(WIDTH * 2, HEIGHT * 2);
@@ -581,27 +420,17 @@ fn the_tomori_wall_and_the_workers_follow_the_summoned_agent_in_the_farmyard() {
                     .expect("the preview is saved");
             }
         }
-        // Walking about the default arc of six workers, summoned into the open yard: from in front of it, where Ada
-        // stands, 45° to its left and 70° to its right about its middle. Each sign turns to
-        // face her wherever she stands, upright, its rows centred above its worker. She stands 4.5 m from its middle,
-        // to see the whole arc.
+        // Walking about the default arc of six workers at home: from in front of it, where Ada stands, 45° to its left
+        // and 70° to its right about its middle. Each sign turns to face her wherever she stands, upright, its rows
+        // centred above its worker. She stands 4.5 m from its middle, to see the whole arc.
         let mut conversation = joined(6, None);
         let mut step = Step::default();
         let mut now = start;
-        run(
-            &mut step,
-            &mut conversation,
-            &mut feedback,
-            &home,
-            8.0,
-            &mut now,
-        );
-        summon(&mut conversation, 6);
         let frame = run(
             &mut step,
             &mut conversation,
             &mut feedback,
-            &turned,
+            &home,
             8.0,
             &mut now,
         );
@@ -653,7 +482,7 @@ fn render(
 ) -> image::RgbaImage {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("entourage stack eye"),
+        label: Some("home stack eye"),
         size: wgpu::Extent3d {
             width: WIDTH,
             height: HEIGHT,
@@ -682,7 +511,7 @@ fn render(
         &panels.list(Mat4::IDENTITY),
     );
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("entourage stack readback"),
+        label: Some("home stack readback"),
         size: (WIDTH * HEIGHT * 4) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
@@ -814,7 +643,7 @@ fn check_stack(frame: &Frame, wall: &Wall, eyes: Vec3, towards: Vec3, label: &st
     for quad in &quads {
         for corner in quad {
             assert!(
-                corner.y >= entourage::CLEARANCE,
+                corner.y >= stance::CLEARANCE,
                 "{label}: a slot reaches {corner} into the floor"
             );
         }
@@ -854,7 +683,7 @@ fn check_stack(frame: &Frame, wall: &Wall, eyes: Vec3, towards: Vec3, label: &st
         .map(|corner| corner.y)
         .fold(f32::MIN, f32::max);
     assert!(
-        swarm_bottom - wall_top >= entourage::GAP - 0.05,
+        swarm_bottom - wall_top >= stance::GAP - 0.05,
         "{label}: {swarm_bottom} above {wall_top}"
     );
     // No worker is hidden behind a slot, nor stands near one, at the edge of where it is pointed at either.
@@ -889,16 +718,16 @@ fn check_stack(frame: &Frame, wall: &Wall, eyes: Vec3, towards: Vec3, label: &st
 }
 
 #[test]
-fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seated_or_standing() {
+fn the_tomori_wall_stands_beneath_the_agent_at_home_in_the_farmyard() {
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut sceneries = Sceneries::empty();
         tomori_environment_farmyard_client::register(&mut sceneries);
-        let preview = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW").map(std::path::PathBuf::from);
+        let preview = std::env::var_os("TOMORI_HOME_PREVIEW").map(std::path::PathBuf::from);
         let mut feedback = Feedback::new(Settings::default());
 
         // At home: from where participants arrive, the agent at its bench, its wall beneath it, its workers about it.
-        let eyes = Vec3::from_array(SUMMONER);
+        let eyes = Vec3::from_array(ADA);
         let agent_home = Vec3::from_array(carried(layout::AGENT_HOME).position);
         let towards = (agent_home - eyes).with_y(0.0).normalize();
         let mut conversation = joined(6, None);
@@ -915,8 +744,8 @@ fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seat
         let home = tomori_wall(home_wall());
         check_stack(&frame, &home, eyes, towards, "at home");
         check_arc(&frame, agent_home, eyes, "at home");
-        assert!(entourage::seen_beneath(
-            SUMMONER,
+        assert!(stance::seen_beneath(
+            ADA,
             &carried(layout::AGENT_HOME),
             &home
         ));
@@ -936,66 +765,6 @@ fn the_tomori_wall_stands_beneath_the_agent_at_home_and_summoned_by_someone_seat
                 .expect("the preview is saved");
         }
 
-        // Summoned by someone seated, their eyes 1 m up, and by someone standing, 1.6 m and 1.8 m: the agent a little
-        // above their eyes, or high enough for its wall, and the wall beneath it, read below their eyes.
-        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
-        for (row, height) in [1.0f32, 1.6, 1.8].into_iter().enumerate() {
-            let eyes = Vec3::new(0.0, height, 0.0);
-            let mut conversation = joined(6, None);
-            let mut step = Step::default();
-            let mut now = Instant::now();
-            let turned = senses(eyes, summoning());
-            run(
-                &mut step,
-                &mut conversation,
-                &mut feedback,
-                &turned,
-                8.0,
-                &mut now,
-            );
-            summon_by(&mut conversation, 6, eyes.to_array());
-            let frame = run(
-                &mut step,
-                &mut conversation,
-                &mut feedback,
-                &turned,
-                10.0,
-                &mut now,
-            );
-            let (agent, wall) = summons_by(eyes.to_array());
-            let label = format!("summoned, eyes {height} m up");
-            assert!(
-                (agent.position[1] - entourage::summoned_height(height, cluster::FLOOR)).abs()
-                    < 1e-5
-            );
-            assert!(agent.position[1] >= entourage::LOWEST_AGENT - 1e-5);
-            assert!(wall.position[1] < height, "{label}");
-            // The swarm has glided there.
-            assert!(Vec3::from_array(frame.agent).distance(Vec3::from_array(agent.position)) < 0.6);
-            let wall = tomori_wall(wall);
-            assert!(
-                entourage::seen_beneath(eyes.to_array(), &agent, &wall),
-                "{label}"
-            );
-            check_stack(&frame, &wall, eyes, summoning(), &label);
-            check_arc(&frame, Vec3::from_array(agent.position), eyes, &label);
-            let drawn = render(
-                &device,
-                &queue,
-                &sceneries,
-                &frame,
-                eyes,
-                summoning() - Vec3::Y * 0.2,
-                1.6,
-            );
-            image::imageops::replace(&mut sheet, &drawn, 0, (row as u32 * HEIGHT).into());
-        }
-        if let Some(directory) = &preview {
-            std::fs::create_dir_all(directory).unwrap();
-            sheet
-                .save(directory.join("summoned.png"))
-                .expect("the preview is saved");
-        }
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }
@@ -1020,7 +789,7 @@ fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_
         let mut feedback = Feedback::new(Settings::default());
         // Ten workers, the farmyard's home anchor a ring, as the server sends them.
         let mut conversation = joined(10, None);
-        let mut ringed = state(10, None);
+        let mut ringed = state(10);
         ringed.anchors = ringed
             .anchors
             .with_workers(carried(layout::AGENT_HOME))
@@ -1040,7 +809,7 @@ fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_
             ])),
         }));
         conversation.take_actions();
-        let eyes = Vec3::from_array(SUMMONER);
+        let eyes = Vec3::from_array(ADA);
         let agent = Vec3::from_array(carried(layout::AGENT_HOME).position);
         let towards = (agent - eyes).with_y(0.0).normalize();
         let mut step = Step::default();
@@ -1125,7 +894,7 @@ fn at_home_the_workers_ring_the_agent_at_its_workbench_those_behind_it_over_the_
             );
             image::imageops::replace(&mut sheet, &drawn, 0, (row as u32 * HEIGHT).into());
         }
-        if let Some(directory) = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW") {
+        if let Some(directory) = std::env::var_os("TOMORI_HOME_PREVIEW") {
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir_all(&directory).unwrap();
             sheet
@@ -1153,13 +922,13 @@ fn a_home_floating_high_with_its_ring_under_it_has_its_ring_at_the_swarm_s_foot_
                 ..home
             }
         };
-        let eyes = Vec3::from_array(SUMMONER);
+        let eyes = Vec3::from_array(ADA);
         let agent = Vec3::from_array(high.position);
         let towards = (agent - eyes).normalize();
         let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
         for (row, ring) in [RingAt::Floor, RingAt::UnderHome].into_iter().enumerate() {
             let mut conversation = joined(3, None);
-            let mut floating = state(3, None);
+            let mut floating = state(3);
             floating.anchors = Anchors::new()
                 .with_agent(high)
                 .with_workers(high)
@@ -1232,7 +1001,7 @@ fn a_home_floating_high_with_its_ring_under_it_has_its_ring_at_the_swarm_s_foot_
             }
             image::imageops::replace(&mut sheet, &drawn, 0, (row as u32 * HEIGHT).into());
         }
-        if let Some(directory) = std::env::var_os("TOMORI_ENTOURAGE_PREVIEW") {
+        if let Some(directory) = std::env::var_os("TOMORI_HOME_PREVIEW") {
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir_all(&directory).unwrap();
             sheet

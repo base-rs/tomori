@@ -819,8 +819,7 @@ fn station_panel(
         None => state_label(&state),
     };
     let [sx, sy, sz] = position;
-    // Facing this client's viewer, wherever they walk, or whoever the agent faces, the eyes at home unless it is
-    // summoned; upright, turning only about its own upright, so that it never leans.
+    // Facing this client's viewer, wherever they walk, or else the eyes at home; upright, turning only about its own upright, so that it never leans.
     let face = viewer.unwrap_or(station.facing);
     let normal = facing_from(position, face, station.facing);
     let right = [normal[2], 0.0, -normal[0]];
@@ -1032,8 +1031,8 @@ use tomori_scene::delegation::{SIGN_REACH, sign_scale};
 /// share a sign's place, and a sign rises above its station before it moves aside at all. Where every such
 /// place is taken, as for very many stations at one spot, the sign stands above its own station, overlapping another,
 /// rather than further off. A sign stays where it is while its station does, through metadata, status, order and
-/// membership changes; when stations move, as when the workers' arrangement changes or the agent is summoned and they
-/// glide after it, every moved station's sign is forgotten before any is placed again, so that none is pushed aside by
+/// membership changes; when stations move, as when the workers' arrangement changes and they glide
+/// there, every moved station's sign is forgotten before any is placed again, so that none is pushed aside by
 /// where a neighbour's stood. A post preserves association. Kept by identity: the sign's place, then the station's
 /// place, whom it faces and how large it is drawn that it was worked out for.
 #[derive(Default)]
@@ -4357,18 +4356,13 @@ mod tests {
     #[test]
     fn signs_turned_to_face_any_viewer_never_reach_one_another() {
         use tomori_scene::anchors::{Anchor, EYES, HomeArc};
-        // Sixteen workers, each with a title six rows long, the longest a sign shows, at home, summoned and about a
-        // workers anchor across a yard, where its signs are drawn larger.
-        let summoner = glam::Vec3::new(3.0, 1.5, 1.0);
-        let summoned = Anchor {
-            position: summoner + glam::Vec3::new(1.5, -0.1, -0.6),
-            orientation: glam::Quat::IDENTITY,
-        };
+        // Sixteen workers, each with a title six rows long, the longest a sign shows, at home and about a workers anchor
+        // across a yard, where its signs are drawn larger.
         let yard = Anchor {
             position: glam::Vec3::new(2.0, 1.5, -7.7),
             orientation: glam::Quat::IDENTITY,
         };
-        for (origin, audience) in [(Anchor::AGENT, EYES), (summoned, summoner), (yard, EYES)] {
+        for (origin, audience) in [(Anchor::AGENT, EYES), (yard, EYES)] {
             let stations: Vec<Station> = (0..16)
                 .map(|slot| Station {
                     facing: audience.to_array(),
@@ -4464,25 +4458,19 @@ mod tests {
     }
 
     #[test]
-    fn on_the_default_arc_no_sign_reaches_another_worker_nor_another_sign_at_home_or_summoned() {
+    fn on_the_default_arc_no_sign_reaches_another_worker_nor_another_sign_at_home_or_about_an_anchor()
+     {
         use tomori_scene::anchors::{Anchor, EYES, HomeArc};
         // How far about its middle a worker's flock or completed cube reaches.
         const WORKER: f32 = 0.2;
-        // At home, and summoned 1.6 m before someone standing to the right, turned towards the yard.
-        let summoner = glam::Vec3::new(3.0, 1.5, 1.0);
-        let summoned = Anchor {
-            position: summoner + glam::Vec3::new(1.5, -0.1, -0.6),
-            orientation: glam::Quat::IDENTITY,
-        };
-        // About a workers anchor further than the arc's radius, as the farmyard's beside its coop, 3.6 m from where
-        // participants arrive, and one across a yard, 8 m off: the arc widens, its signs drawn larger with it.
+        // At home, and about a workers anchor further than the arc's radius, as the farmyard's beside its coop, 3.6 m
+        // from where participants arrive, and one across a yard, 8 m off: the arc widens, its signs drawn larger with it.
         let anchor = |x: f32, z: f32| Anchor {
             position: glam::Vec3::new(x, 1.5, z),
             orientation: glam::Quat::IDENTITY,
         };
         for (origin, audience) in [
             (Anchor::AGENT, EYES),
-            (summoned, summoner),
             (anchor(-1.6, -3.2), EYES),
             (anchor(2.0, -7.7), EYES),
         ] {

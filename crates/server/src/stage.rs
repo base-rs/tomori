@@ -7,7 +7,7 @@
 //! with the space across restarts. See `design/projection.md`.
 //!
 //! **Two kinds of wall.** Every space has one Tomori wall, which belongs to the space and stands beneath Tomori in every
-//! environment, beneath the agent's home (`tomori_protocol::entourage::wall_beneath`), at the environment's `stage`
+//! environment, beneath the agent's home (`tomori_protocol::stance::wall_beneath`), at the environment's `stage`
 //! anchor, which overrides it, or, with neither, at [`default_stage`]; what is on it stays as the
 //! space changes environment. Each environment also has walls of its own: those it declares, and those its owners add.
 //! They and the panels left floating in it are kept for the space and that environment together, since positions mean
@@ -132,7 +132,7 @@ pub const SCHEMA: u32 = 1;
 pub const ARC_RADIUS: f32 = 2.3;
 
 /// Where the Tomori wall stands in an environment that declares neither a `stage` nor an `agent` anchor: beneath the
-/// swarm at its default home, as `tomori_protocol::entourage::wall_beneath` stands it, the middle of its curved row of
+/// swarm at its default home, as `tomori_protocol::stance::wall_beneath` stands it, the middle of its curved row of
 /// slots straight ahead of home, beneath the swarm's middle, low enough that the swarm and every worker station are seen
 /// over it, upright and facing home.
 pub fn default_stage() -> Pose {

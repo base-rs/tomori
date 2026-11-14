@@ -226,7 +226,7 @@ impl SpaceRecord {
     pub(super) fn agent_anchor(&self) -> Option<&str> {
         self.agent_at
             .as_ref()
-            .filter(|(_, pose)| self.summoned == Some(*pose))
+            .filter(|(_, pose)| self.away == Some(*pose))
             .map(|(anchor, _)| anchor.as_str())
     }
 

@@ -33,13 +33,13 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         instructions: None,
     });
     let state = ada.space(|state| state.title == "Yard");
-    // The space opens with the agent at home, moving only when asked, and the server keeps no summons.
-    assert!(!state.summons);
+    // The space opens with the agent at home, moving only when asked.
+    assert!(state.away.is_none());
     assert_eq!(
         state.movement,
         Some(tomori_protocol::AgentMovement::default())
     );
-    assert_eq!(state.summoned, None);
+    assert_eq!(state.away, None);
     let token = eventually(|| server.tools_token());
     let session = tomori_backend::Session::id(&backend.started()[0]);
     let presence = content(&call(&server, &token, &session, "presence", json!({}))).clone();
@@ -62,7 +62,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     let called = loop {
         ada.send(&ClientMessage::CallAgent);
         let answer = ada.wait_for(|message| match message {
-            tomori_protocol::ServerMessage::Space { state } if state.summoned.is_some() => {
+            tomori_protocol::ServerMessage::Space { state } if state.away.is_some() => {
                 Some(Some(state.clone()))
             }
             tomori_protocol::ServerMessage::Error { .. } => Some(None),
@@ -74,7 +74,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     };
     assert!(called.pinned);
     // Straight towards her from its home, 2 m from her eyes, a little above them, as following stands it.
-    let at = called.summoned.unwrap().position;
+    let at = called.away.unwrap().position;
     assert!(((at[0] - 1.0).hypot(at[2]) - 2.0).abs() < 1e-3, "{at:?}");
     let ((x, z), (hx, hz)) = ((at[0] - 1.0, at[2]), (-1.0, -2.3));
     assert!(
@@ -108,7 +108,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
     .clone();
     assert_eq!(home["moved"], true);
     assert_eq!(home["agent"]["at_home"], true);
-    ada.space(|state: &SpaceState| state.summoned.is_none());
+    ada.space(|state: &SpaceState| state.away.is_none());
     // Home again changes nothing.
     let again = content(&call(
         &server,
@@ -142,14 +142,12 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         (result["isError"] != true).then_some(result)
     });
     assert_eq!(content(&to_ada)["moved"], true);
-    let state = ada.space(|state: &SpaceState| state.summoned.is_some());
-    let at = state.summoned.unwrap();
+    let state = ada.space(|state: &SpaceState| state.away.is_some());
+    let at = state.away.unwrap();
     // 2.3 m in front of her, a little above her eyes.
     assert!(close(at.position, [1.0, 1.9, -2.3]), "{at:?}");
     // It faces her.
     assert!(at.yaw().abs() < 1e-3, "{}", at.yaw());
-    // Nothing goes with it: its status wall and its workers stay home.
-    assert_eq!(state.summoner, None);
 
     // Somewhere it cannot go, or someone not here, is refused, saying why.
     assert!(
@@ -259,7 +257,7 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
             .movement
             .is_some_and(|movement| movement.mode == tomori_protocol::Movement::Home)
     });
-    assert_eq!((kept.summoned, kept.pinned), (None, false));
+    assert_eq!((kept.away, kept.pinned), (None, false));
     assert!(
         failure(&call(
             &server,
@@ -300,5 +298,5 @@ fn a_participant_calls_the_agent_and_the_agent_goes_home_when_asked() {
         environment: "minimal".to_owned(),
     });
     let moved = ada.space(|state: &SpaceState| state.environment == "minimal");
-    assert_eq!(moved.summoned, None);
+    assert_eq!(moved.away, None);
 }

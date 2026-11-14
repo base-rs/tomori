@@ -745,17 +745,17 @@ impl Environment {
 
     /// Where the space's own status wall's home stands in a space in it, in the space's coordinates: the wall its
     /// [`StatusWall::at`] stands, carried, if it gives a valid one, or else beneath its agent's home carried, if it gives
-    /// a valid one, as `tomori_protocol::entourage::wall_beneath` stands it on the floor where participants arrive; or
+    /// a valid one, as `tomori_protocol::stance::wall_beneath` stands it on the floor where participants arrive; or
     /// none, for the default, [`crate::stage::default_stage`], beneath the agent's default home. Where its status wall is
     /// one of its own, the space's own is not shown, and this is where it would stand. It never travels with the agent.
     ///
     /// ```
-    /// use tomori_protocol::{Pose, cluster::FLOOR, entourage};
+    /// use tomori_protocol::{Pose, cluster::FLOOR, stance};
     /// use tomori_server::Environment;
     ///
     /// let pod = Pose::at([2.0, 1.6, -4.0]).facing_towards([0.0, 1.6, 0.0]);
     /// let observe = Environment::new("observe", "Observe").with_agent(pod);
-    /// assert_eq!(observe.tomori_wall_home(), Some(entourage::wall_beneath(&pod, FLOOR)));
+    /// assert_eq!(observe.tomori_wall_home(), Some(stance::wall_beneath(&pod, FLOOR)));
     /// let stage = Pose::at([0.0, 1.2, -2.5]).facing_towards([0.0, 1.6, 0.0]);
     /// assert_eq!(observe.with_stage(stage).tomori_wall_home(), Some(stage));
     /// assert_eq!(Environment::new("plain", "Plain").tomori_wall_home(), None);
@@ -763,7 +763,7 @@ impl Environment {
     pub fn tomori_wall_home(&self) -> Option<tomori_protocol::Pose> {
         self.carried(self.stage().as_ref()).or_else(|| {
             let agent = self.carried(self.agent.as_ref())?;
-            crate::stage::valid(&tomori_protocol::entourage::wall_beneath(
+            crate::stage::valid(&tomori_protocol::stance::wall_beneath(
                 &agent,
                 tomori_protocol::cluster::FLOOR,
             ))
@@ -827,7 +827,7 @@ impl Environment {
     /// where participants arrive, `Pose::at(balcony).facing_towards(arrival)`. The agent appears there as the space
     /// opens, and returns there when sent home or once a conversation it followed is quiet. Without one, the swarm
     /// stands 1.4 m up and 2.3 m straight ahead of home, facing home. The status wall's home is beneath it, unless
-    /// [`Self::with_status_wall`] says otherwise; only then keep it at least `tomori_protocol::entourage::LOWEST_AGENT`,
+    /// [`Self::with_status_wall`] says otherwise; only then keep it at least `tomori_protocol::stance::LOWEST_AGENT`,
     /// 1.4 m, above the floor, for the wall to stand beneath it with a gap. Make it seen from where participants
     /// arrive, and a wall beneath it read: see `tomori_environment::sightlines`. The server sends it in the space's
     /// state, carried into the space's coordinates, if it is then finite, within 30 m of home and has an orientation,
@@ -1144,7 +1144,7 @@ impl Environments {
     /// Where the projection walls stand in a space in the environment `id`, in the space's coordinates: the Tomori wall
     /// at its home, the environment's `stage` anchor carried into them, if it is then finite, within
     /// [`crate::stage::REACH`] and has an orientation, made upright; or else beneath the agent's home, the environment's
-    /// `agent` anchor carried into them as [`Self::anchors`] carries it, as `tomori_protocol::entourage::wall_beneath`
+    /// `agent` anchor carried into them as [`Self::anchors`] carries it, as `tomori_protocol::stance::wall_beneath`
     /// stands it; or else at [`crate::stage::default_stage`], beneath the agent's default home; and the environment's
     /// own walls, carried as it is, none when it is not offered. See `design/projection.md`.
     pub(crate) fn walls<'a>(&'a self, id: &'a str) -> crate::stage::Walls<'a> {
@@ -1646,7 +1646,7 @@ mod tests {
         let beneath = offered.walls("observe").tomori;
         assert_eq!(
             beneath,
-            tomori_protocol::entourage::wall_beneath(&pod, tomori_protocol::cluster::FLOOR)
+            tomori_protocol::stance::wall_beneath(&pod, tomori_protocol::cluster::FLOOR)
         );
         assert_eq!(
             [beneath.position[0], beneath.position[2]],
@@ -1667,10 +1667,8 @@ mod tests {
         assert_eq!(offered.walls("far").tomori, crate::stage::default_stage());
         assert_eq!(offered.walls(SKY).tomori, crate::stage::default_stage());
         let default_agent = Pose::at(crate::stage::AGENT).facing_towards([0.0, 1.4, 0.0]);
-        let default_beneath = tomori_protocol::entourage::wall_beneath(
-            &default_agent,
-            tomori_protocol::cluster::FLOOR,
-        );
+        let default_beneath =
+            tomori_protocol::stance::wall_beneath(&default_agent, tomori_protocol::cluster::FLOOR);
         let default = crate::stage::default_stage();
         assert!(
             default_beneath
@@ -1685,7 +1683,7 @@ mod tests {
         let offered = offered.with(Environment::new("low", "Low").with_agent(low));
         assert_eq!(
             offered.walls("low").tomori.position[1],
-            tomori_protocol::entourage::LOWEST_WALL
+            tomori_protocol::stance::LOWEST_WALL
         );
         // Anchors tell environments apart.
         let plain = Environment::new("observe", "Observe");

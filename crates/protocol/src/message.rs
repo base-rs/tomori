@@ -970,15 +970,9 @@ pub enum ClientMessage {
     FetchImage {
         image: String,
     },
-    /// Summon the current space's agent to `at`, in the space's coordinates, facing along its +Z, for everyone in the
-    /// space, or, without it, send it home. Participants only. A client sends one with a place only to an older server,
-    /// whose [`crate::SpaceState::summons`] is set, and one without to send the agent home, to such a server or one
-    /// that sends [`crate::SpaceState::movement`]; a server that no longer keeps summons drops one with a place. See
-    /// `design/environments.md`.
-    PlaceAgent {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        at: Option<Pose>,
-    },
+    /// Send the current space's agent home, for everyone, as **Send Tomori home** does, ending its pin. Participants
+    /// only, and only to a server that sends [`crate::SpaceState::movement`]. See `design/environments.md`.
+    SendAgentHome,
     /// Bring the current space's agent to this participant, beside them, and pin it there, for everyone, as **Call
     /// Tomori here** does: it stays until sent home. Participants only, and only to a server that sends
     /// [`crate::SpaceState::movement`]; refused while that setting keeps the agent home. See `design/environments.md`.

@@ -62,12 +62,11 @@ impl Conversation {
     }
 
     /// Where the agent and the workers stand now: in a space, the agent where it went or was called, facing whoever it
-    /// turned to, or else at the home its state gives, the workers about it while its entourage goes with it, gathered
-    /// about whoever it went to, or else about the workers anchor, or else the agent's home, gathered about the eyes at
-    /// home, as they stay while it follows the speaker, each that is valid,
-    /// by the placement registered for its environment where this build draws it at the space's version; and the
-    /// carriage of that environment's own coordinates into the space's, where it draws it. Otherwise, as outside a
-    /// space, the default layout. See `design/environments.md`.
+    /// turned to, or else at the home its state gives, and the workers about the workers anchor, or else the agent's
+    /// home, gathered about the eyes at home, as they stay wherever the agent goes, each that is valid, by the placement
+    /// registered for its environment where this build draws it at the space's version; and the carriage of that
+    /// environment's own coordinates into the space's, where it draws it. Otherwise, as outside a space, the default
+    /// layout. See `design/environments.md`.
     pub fn arrangement(&self) -> crate::anchors::Arrangement {
         let mut arrangement = crate::anchors::Arrangement::default();
         let Some((space, _)) = self.joined_space() else {
@@ -104,7 +103,7 @@ impl Conversation {
                     .filter(|sweep| tomori_protocol::cluster::valid_sweep(*sweep));
             }
         }
-        arrangement.agent = anchor(space.summoned).unwrap_or(arrangement.home);
+        arrangement.agent = anchor(space.away).unwrap_or(arrangement.home);
         // Turned to whoever began speaking to it, about the vertical. See `design/environments.md`.
         if let Some(facing) = space
             .facing
@@ -123,14 +122,10 @@ impl Conversation {
         arrangement.stream = space.stream;
         // Away, it draws in near whoever it stands for, or whoever it turned to.
         arrangement.partner = space
-            .summoned
+            .away
             .and(space.partner.or(space.facing))
             .map(glam::Vec3::from_array)
             .filter(|eyes| crate::anchors::within(*eyes, crate::anchors::REACH));
-        // Away, its workers go with it, gathered about whoever it went to, or, from a server that does not say, about
-        // whoever it faces, 1.2 m before it, as a trigger leaves it; but not from a server that has it follow the
-        // speaker, which says so by sending how it moves and nobody they gather about: they stay home.
-        let entourage = space.summoner.is_some() || space.movement.is_none();
         // The space's other anchors, and where the server seats its workers, so that every client lays them out alike.
         arrangement.clusters = space
             .anchors
@@ -140,17 +135,6 @@ impl Conversation {
             .cloned()
             .collect();
         arrangement.layouts.clone_from(&space.clusters);
-        if space.summoned.is_some() && entourage {
-            arrangement.workers = arrangement.agent;
-            arrangement.extent = None;
-            arrangement.formation = tomori_protocol::cluster::Formation::Arc;
-            arrangement.sweep = None;
-            arrangement.audience = space
-                .summoner
-                .map(glam::Vec3::from_array)
-                .filter(|eyes| crate::anchors::within(*eyes, crate::anchors::REACH))
-                .unwrap_or_else(|| arrangement.agent.place(glam::Vec3::new(0.0, 0.2, 1.2)));
-        }
         // The environment drawn: one this build cannot draw at the space's version is the grid.
         let environment = self.environment_of(space);
         arrangement.placement = self
@@ -173,11 +157,10 @@ impl Conversation {
     }
 
     /// Whether this participant may send the agent home in the joined space: a participant, not a visitor, on a
-    /// server that keeps summons, as an older one does, or says how the agent moves. See `design/environments.md`.
+    /// server that says how the agent moves. See `design/environments.md`.
     pub fn sends_agent_home(&self) -> bool {
-        self.joined_space().is_some_and(|(space, _)| {
-            (space.summons || space.movement.is_some()) && self.role.participates()
-        })
+        self.joined_space()
+            .is_some_and(|(space, _)| space.movement.is_some() && self.role.participates())
     }
 
     /// How the joined space's agent moves, where the server says, and whether this participant may change it, as an
@@ -197,11 +180,10 @@ impl Conversation {
             return;
         }
         let space = self.space.as_mut().expect("in the space joined");
-        space.summoned = None;
-        space.summoner = None;
+        space.away = None;
         space.facing = None;
         space.partner = None;
-        self.send(ClientMessage::PlaceAgent { at: None });
+        self.send(ClientMessage::SendAgentHome);
     }
 
     /// Whether the hand menu offers **Call Tomori here**: to a participant, where the space lets the agent move, unless
@@ -219,7 +201,7 @@ impl Conversation {
                     <= CALLED_NEAR
             })
         };
-        let here = space.pinned && space.summoned.as_ref().is_some_and(near);
+        let here = space.pinned && space.away.as_ref().is_some_and(near);
         movable && self.role.participates() && !here
     }
 

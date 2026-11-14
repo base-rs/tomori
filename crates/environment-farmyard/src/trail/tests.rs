@@ -497,7 +497,7 @@ fn the_trail_is_one_model_drawn_above_the_meadow_and_beyond_the_fence_the_same_e
 fn the_agent_coming_to_anyone_on_the_trail_finds_a_spot_2_m_from_them_clear_of_the_plants_and_pines()
  {
     use tomori_environment::sightlines::{EYES, Solid};
-    use tomori_protocol::entourage::SWARM;
+    use tomori_protocol::stance::SWARM;
     // As the server's `follow` stands the agent: its middle 2 m from their eyes, horizontally, 0.1 m above them, facing
     // them, its box its swarm's reach and 0.1 m more on every side, seen from their eyes.
     let (conversation, rise, margin) = (2.0, 0.1, 0.1);

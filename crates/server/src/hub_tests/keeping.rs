@@ -71,15 +71,15 @@ fn while_it_thinks_it_turns_to_whoever_it_answers_and_follows_them_once_they_set
     assert_eq!(agent(&hub, &space).0, Some(for_ada));
     // Then it follows her, within its dwell, which is for someone else, to stand beside her again, facing her.
     hub.flush_snapshots(Instant::now() + SETTLE);
-    let (summoned, facing, pinned) = agent(&hub, &space);
-    let to_her = summoned.expect("followed");
+    let (away, facing, pinned) = agent(&hub, &space);
+    let to_her = away.expect("followed");
     assert!(
         (level(to_her.position, far) - CONVERSATION).abs() < 1e-3,
         "{to_her:?}"
     );
     assert_eq!((facing, pinned), (None, false));
     let state = last_state(&ada).expect("told");
-    assert_eq!((state.summoned, state.partner), (Some(to_her), Some(far)));
+    assert_eq!((state.away, state.partner), (Some(to_her), Some(far)));
     // On its way, her moving turns it nowhere: it faces where it goes.
     stands(&ada, [3.0, 1.6, 5.3], [3.0, 1.6, 0.0]);
     assert_eq!(agent(&hub, &space).1, None);
@@ -185,7 +185,7 @@ fn within_3_m_it_only_turns_whichever_way_they_face_and_while_they_travel_it_wai
     hub.flush_snapshots(Instant::now() + SETTLE);
     let state = last_state(&ada).expect("told");
     assert!(state.stream);
-    assert!((level(state.summoned.expect("followed").position, far) - CONVERSATION).abs() < 1e-3);
+    assert!((level(state.away.expect("followed").position, far) - CONVERSATION).abs() < 1e-3);
 }
 
 #[test]
@@ -661,7 +661,7 @@ fn home_it_still_speaks_to_whom_it_talks_with_but_not_once_they_spoke_long_ago_o
     stands(&ada, ADA, [0.0, 1.6, -3.0]);
     answered(&hub, &ada, &commands, &space);
     // Sent home, it still talks with Ada.
-    ada.send(ClientMessage::PlaceAgent { at: None });
+    ada.send(ClientMessage::SendAgentHome);
     assert_eq!(agent(&hub, &space).0, None);
     let far = [12.0, 1.6, 8.0];
     stands(&ada, far, [12.0, 1.6, 0.0]);
@@ -671,7 +671,7 @@ fn home_it_still_speaks_to_whom_it_talks_with_but_not_once_they_spoke_long_ago_o
     assert!((level(to_her.position, far) - CONVERSATION).abs() < 1e-3);
     hub.speech_sent(&space);
     hub.drive_event(&space, Event::Idle);
-    ada.send(ClientMessage::PlaceAgent { at: None });
+    ada.send(ClientMessage::SendAgentHome);
     // That reply was no conversation of hers: ten minutes after she last spoke to it, it speaks from home.
     hub.lock()
         .space_mut(&space)
@@ -691,7 +691,7 @@ fn home_it_still_speaks_to_whom_it_talks_with_but_not_once_they_spoke_long_ago_o
     sent(&hub, &commands, &space);
     hub.drive_event(&space, Event::Idle);
     assert!(agent(&hub, &space).0.is_some());
-    ada.send(ClientMessage::PlaceAgent { at: None });
+    ada.send(ClientMessage::SendAgentHome);
     ada.send(ClientMessage::Leave);
     reported(&hub, &space);
     hub.speech_queued(&space, 1);

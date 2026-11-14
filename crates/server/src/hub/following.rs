@@ -97,7 +97,7 @@ pub(crate) struct Captured {
     pub home: Pose,
 }
 
-/// A glide under way: from where, and where the agent was summoned to before, through which points, since when and how
+/// A glide under way: from where, and where the agent stood away from home before, through which points, since when and how
 /// fast.
 #[derive(Clone, Debug)]
 struct Glide {
@@ -323,11 +323,11 @@ impl Following {
         unspoken != std::mem::replace(&mut self.told, unspoken)
     }
 
-    /// Where the agent stands at `now`, summoned to `summoned` or else at `home`: along its glide, while it glides,
+    /// Where the agent stands at `now`, away from home at `away` or else at `home`: along its glide, while it glides,
     /// or its way home, while it goes home.
-    pub(super) fn at(&self, summoned: Option<Pose>, home: Pose, now: Instant) -> Pose {
-        let pose = summoned.unwrap_or(home);
-        match self.glide.clone().or_else(|| self.homeward(summoned, home)) {
+    pub(super) fn at(&self, away: Option<Pose>, home: Pose, now: Instant) -> Pose {
+        let pose = away.unwrap_or(home);
+        match self.glide.clone().or_else(|| self.homeward(away, home)) {
             Some(glide) => Pose {
                 position: glide.at(now),
                 ..pose
@@ -336,10 +336,10 @@ impl Following {
         }
     }
 
-    /// Its way home, at home's `home`, while it was sent home and is summoned nowhere since: by its waypoint over the
+    /// Its way home, at home's `home`, while it was sent home and has gone nowhere since: by its waypoint over the
     /// ground, until it arrives, where it goes by one.
-    fn homeward(&self, summoned: Option<Pose>, home: Pose) -> Option<Glide> {
-        let (from, started) = self.homing.filter(|_| summoned.is_none())?;
+    fn homeward(&self, away: Option<Pose>, home: Pose) -> Option<Glide> {
+        let (from, started) = self.homing.filter(|_| away.is_none())?;
         let path = match self.homeway {
             Some((via, _)) => vec![via, home.position],
             None => vec![home.position],
@@ -362,10 +362,10 @@ impl Following {
     }
 
     /// Whether it is on its way somewhere at `now`, or home.
-    pub(super) fn moving(&self, summoned: Option<Pose>, home: Pose, now: Instant) -> bool {
+    pub(super) fn moving(&self, away: Option<Pose>, home: Pose, now: Instant) -> bool {
         self.glide
             .clone()
-            .or_else(|| self.homeward(summoned, home))
+            .or_else(|| self.homeward(away, home))
             .is_some_and(|glide| glide.ends() > now)
     }
 
@@ -436,7 +436,7 @@ impl super::SpaceRecord {
         let environment = &self.model.environment;
         let mut solids = environments.solids(environment);
         let agent = self
-            .summoned
+            .away
             .unwrap_or_else(|| home(&environments.anchors(environment)));
         solids.push(follow::body(&agent));
         solids
@@ -487,7 +487,7 @@ impl Hub {
         let anchors = environments.anchors(&record.model.environment);
         let following = &record.following;
         let home = home(&anchors);
-        let moving = following.moving(record.summoned, home, now);
+        let moving = following.moving(record.away, home, now);
         // Where it has reached, while it is on its way.
         let partner = following
             .partner()
@@ -498,15 +498,15 @@ impl Hub {
             .and_then(|key| state.participants.get(key))
             .map(|walker| crate::presence::handle(&walker.name, walker.tag));
         let report = crate::presence::AgentState {
-            summoned: record.summoned,
-            at: moving.then(|| following.at(record.summoned, home, now)),
+            away: record.away,
+            at: moving.then(|| following.at(record.away, home, now)),
             facing: following.faces(),
             pinned: following.pinned,
             pinned_by: following.pinned_by.clone(),
             partner,
             walking,
             returns_in: following.returns_in(
-                record.summoned.is_some(),
+                record.away.is_some(),
                 record.model.movement(),
                 state.partner_gone(space),
                 now,
@@ -557,11 +557,11 @@ impl Hub {
             following.walked(now);
             woken.notify(usize::MAX);
         }
-        if following.moving(record.summoned, home, now) {
+        if following.moving(record.away, home, now) {
             return;
         }
         // It keeps facing them, as they move about, without turning at each sway.
-        let agent = following.at(record.summoned, home, now);
+        let agent = following.at(record.away, home, now);
         let faces = following.facing.map_or_else(
             || follow::faces(&agent),
             |facing| follow::towards(agent.position, facing),
@@ -572,7 +572,7 @@ impl Hub {
         }
         following.facing = Some(head.position);
         following.poll.get_or_insert(now + POLL);
-        if record.summoned.is_some() {
+        if record.away.is_some() {
             record.partner = Some(head.position);
         }
         if state.touch_space_paced(space, now) {
@@ -633,7 +633,7 @@ impl Hub {
         let others = self.huddled(state, space, participant, captured, now);
         let record = state.space(space).expect("the caller found it");
         let following = &record.following;
-        let agent = following.at(record.summoned, captured.home, now);
+        let agent = following.at(record.away, captured.home, now);
         if !others.is_empty() {
             let mut huddle = vec![captured.speaker];
             huddle.extend(others.iter().copied());
@@ -809,9 +809,9 @@ impl Hub {
     }
 
     /// Bring the agent of `space` to `participant`, and pin it there, for everyone, at `now`, as **Call Tomori here**
-    /// does: at their conversation spot, as following stands it, or, with nowhere clear there, in front of them, as a
-    /// summons stood it, its status wall and workers staying home. Refused where the space keeps it home, or before they
-    /// report where they are.
+    /// does: at their conversation spot, as following stands it, or, with nowhere clear there, in front of them,
+    /// [`tomori_protocol::stance::NEAR`] away, its status wall and workers staying home. Refused where the space keeps
+    /// it home, or before they report where they are.
     pub(super) fn call_agent(
         &self,
         state: &mut HubState,
@@ -834,14 +834,14 @@ impl Hub {
         let record = state.space(space).expect("found above");
         let from = record
             .following
-            .at(record.summoned, captured.home, now)
+            .at(record.away, captured.home, now)
             .position;
         let head = captured.speaker.head;
         let at = follow::spot(from, &captured.speaker, &captured.scene)
             .unwrap_or_else(|| crate::presence::before(&head));
         let route = follow::route(from, at.position, &captured.scene);
-        let was = record.summoned;
-        state.summon(space, Some(at), Some(head.position));
+        let was = record.away;
+        state.place_agent(space, Some(at), Some(head.position));
         state.agent_moved(space, (from, was), at, route, now);
         state
             .space_mut(space)
@@ -879,7 +879,7 @@ impl Hub {
         };
         let record = state.space(space).expect("the caller found it");
         let home = home(&self.environments().anchors(&record.model.environment));
-        let from = record.following.at(record.summoned, home, now).position;
+        let from = record.following.at(record.away, home, now).position;
         let at = follow::spot(from, &speaker, &scene)
             .unwrap_or_else(|| crate::presence::before(&speaker.head));
         (at, speaker.head.position)
@@ -921,10 +921,10 @@ impl Hub {
     ) {
         let record = state.space(space).expect("the caller found it");
         let (scene, _, home) = self.scene(state, space);
-        let from = record.following.at(record.summoned, home, now).position;
+        let from = record.following.at(record.away, home, now).position;
         let route = follow::route(from, at.position, &scene);
-        let was = record.summoned;
-        state.summon(space, Some(at), Some(eyes));
+        let was = record.away;
+        state.place_agent(space, Some(at), Some(eyes));
         state.agent_moved(space, (from, was), at, route, now);
         state
             .space_mut(space)
@@ -1160,13 +1160,13 @@ impl HubState {
         // Barely begun, it stays where it was; else it stops where it has reached, facing whoever it went to from
         // there, rather than as it would have faced them from where it was going, unless that is within [`FACE`] of
         // it, as it is coming straight towards them, so that it turns no more than it must.
-        record.summoned = if follow::distance(reached, glide.from) < 0.05 {
+        record.away = if follow::distance(reached, glide.from) < 0.05 {
             glide.was
         } else {
-            record.summoned.map(|summoned| {
+            record.away.map(|away| {
                 let stopped = Pose {
                     position: reached,
-                    ..summoned
+                    ..away
                 };
                 match eyes {
                     Some(eyes)
@@ -1181,7 +1181,7 @@ impl HubState {
                 }
             })
         };
-        if record.summoned.is_none() {
+        if record.away.is_none() {
             record.partner = None;
         }
         log::info!("The agent of space {space} stopped where it was, as nothing was said.");
@@ -1268,7 +1268,7 @@ impl HubState {
             .unwrap_or_default();
         let record = self.space_mut(space).expect("the caller found it");
         let following = &mut record.following;
-        let agent = following.at(record.summoned, captured.home, now);
+        let agent = following.at(record.away, captured.home, now);
         let speaker = captured.speaker;
         let eyes = speaker.head.position;
         let scene = &captured.scene;
@@ -1322,7 +1322,7 @@ impl HubState {
             return;
         };
         let route = follow::route(agent.position, spot.position, scene);
-        following.start(agent.position, record.summoned, spot.position, route, now);
+        following.start(agent.position, record.away, spot.position, route, now);
         following.terrain = scene.ground.clone().zip(Some(captured.home));
         following.facing = None;
         following.glance = None;
@@ -1331,7 +1331,7 @@ impl HubState {
         let arrives = following.glide.as_ref().map_or(now, Glide::ends);
         following.moved = Some((arrives, participant.to_owned()));
         following.poll.get_or_insert(now + POLL);
-        record.summoned = Some(spot);
+        record.away = Some(spot);
         record.partner = Some(eyes);
         let with = if huddle {
             format!("{name} and those with them")
@@ -1359,14 +1359,14 @@ impl HubState {
     pub(super) fn agent_home(&mut self, space: &str, reason: &str, now: Instant) -> bool {
         let record = self.space_mut(space).expect("the caller found it");
         let turned = record.following.faces().is_some() || record.following.pinned;
-        let homing = match (record.summoned, &record.following.glide) {
+        let homing = match (record.away, &record.following.glide) {
             (None, _) => record.following.homing,
             (Some(_), Some(glide)) => Some((glide.at(now), now)),
-            (Some(summoned), None) => Some((summoned.position, now)),
+            (Some(away), None) => Some((away.position, now)),
         };
         let terrain = record.following.terrain.take();
         // Over the ground, where the straight way home passes below it, as from a deck down to home beneath it.
-        let homeway = match (record.summoned, &terrain) {
+        let homeway = match (record.away, &terrain) {
             (None, _) => record.following.homeway,
             (Some(_), Some((ground, home))) => homing.and_then(|(from, _)| {
                 follow::over_ground(from, home.position, Some(ground))
@@ -1393,7 +1393,7 @@ impl HubState {
             told: record.following.told,
             ..Following::default()
         };
-        let moved = self.summon(space, None, None);
+        let moved = self.place_agent(space, None, None);
         if moved {
             log::info!("The agent of space {space} went home, as {reason}.");
         } else if turned {
@@ -1496,8 +1496,8 @@ impl HubState {
         pinned
     }
 
-    /// The agent of `space` was moved by a participant or by its own tool to `at`, from `from`, where it was summoned to
-    /// `was`, at `now`, by `route`: its glide is followed from there, so that where it is stays known, and the return
+    /// The agent of `space` was moved by a participant or by its own tool to `at`, from `from`, where it stood away from
+    /// home at `was`, at `now`, by `route`: its glide is followed from there, so that where it is stays known, and the return
     /// home waits for a quiet conversation again.
     pub(super) fn agent_moved(
         &mut self,
@@ -1650,7 +1650,7 @@ impl HubState {
         let record = self.space_mut(space).expect("found above");
         let setting = record.model.movement();
         let empty = record.model.participants.is_empty();
-        let away = record.summoned.is_some();
+        let away = record.away.is_some();
         let following = &mut record.following;
         let mut changed = false;
         // Its reply over, it keeps with them no more, unless they speak to it again.
@@ -1737,7 +1737,7 @@ impl HubState {
 }
 
 impl Following {
-    /// Begin a glide from `from`, where it was summoned to `was`, to `to` by `route` at `now`, as clients are told.
+    /// Begin a glide from `from`, where it stood away from home at `was`, to `to` by `route` at `now`, as clients are told.
     fn start(
         &mut self,
         from: [f32; 3],

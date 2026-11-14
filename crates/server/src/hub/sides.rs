@@ -538,9 +538,9 @@ impl Hub {
         }
         // What its stage keeps for the environment left is the last forgotten. See `design/projection.md`.
         record.stage.leave(&left);
-        // The agent appears at the new environment's home for it, wherever it was summoned to in the last, and that
+        // The agent appears at the new environment's home for it, wherever it stood in the last, and that
         // environment's placements wait for its anchors from now.
-        record.summoned = None;
+        record.away = None;
         record.agent_at = None;
         record.anchored = Instant::now();
         record.partner = None;

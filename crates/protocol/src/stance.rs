@@ -6,20 +6,19 @@
 //! agree on: the swarm above, the middle of the wall's row of slots [`BENEATH`] directly beneath the swarm's middle,
 //! facing the way the agent faces, with a clear gap between the swarm's lowest reach and the top of the row, and both
 //! clear of the floor. Seen from whoever the agent faces, the wall stands beneath the swarm, never behind it:
-//! [`seen_beneath`]. Its name, and that of [`summoned`], are from when the wall and the workers travelled with the agent
-//! as it was summoned; nothing travels with it now, and the wall stays home. See `design/environments.md` and
-//! `design/projection.md`.
+//! [`seen_beneath`]. The agent goes to someone, [`near`] them, on its own: the wall and the workers stay home. See
+//! `design/environments.md` and `design/projection.md`.
 //!
 //! ```
-//! use tomori_protocol::{Pose, cluster::FLOOR, entourage};
+//! use tomori_protocol::{Pose, cluster::FLOOR, stance};
 //!
 //! // The default layout: the agent 1.4 m up, 2.3 m ahead of home, facing home, and its wall beneath it, at 0.52 m.
 //! let agent = Pose::at([0.0, 1.4, -2.3]).facing_towards([0.0, 1.4, 0.0]);
-//! let wall = entourage::wall_beneath(&agent, FLOOR);
+//! let wall = stance::wall_beneath(&agent, FLOOR);
 //! assert!((wall.position[1] - 0.52).abs() < 1e-5);
 //! assert_eq!([wall.position[0], wall.position[2]], [0.0, -2.3]);
-//! // Summoned by someone seated, their eyes 1 m up, the agent stands high enough for its wall beneath it.
-//! assert_eq!(entourage::summoned_height(1.0, FLOOR), entourage::LOWEST_AGENT);
+//! // Going to someone seated, their eyes 1 m up, the agent stands no lower than at its default home.
+//! assert_eq!(stance::near_height(1.0, FLOOR), stance::LOWEST_AGENT);
 //! ```
 use crate::projection::layout::{ARC_SCALE, SLOT_SIZE};
 use crate::{Pose, Wall};
@@ -46,20 +45,17 @@ pub const CLEARANCE: f32 = 0.3;
 /// row's bottom edge stands about 0.39 m above the floor, and its label, below the row, about 0.34 m.
 pub const LOWEST_WALL: f32 = 0.52;
 
-/// The lowest the middle of a summoned agent stands above the floor, in metres: high enough for its wall beneath it, as
-/// the default agent's home, 1.4 m.
+/// The lowest the middle of the agent stands above the floor when it goes to someone, in metres: as high as the default
+/// agent's home, 1.4 m, high enough for a wall beneath it.
 pub const LOWEST_AGENT: f32 = LOWEST_WALL + BENEATH;
 
-/// How far above the eyes of whoever summoned it the middle of a summoned agent stands, in metres: a little above, so
-/// that its wall beneath stands at a comfortable reading height below those eyes, about 0.58 m, and is seen beneath it.
+/// How far above the eyes of whoever it goes to the middle of the agent stands, in metres: a little above, as high as a
+/// wall beneath it would stand at a comfortable reading height below those eyes, about 0.58 m, seen beneath it.
 pub const RISE: f32 = 0.3;
 
-/// How far from the head of whoever summoned it, horizontally, a summoned agent stands at least, in metres: as far as
-/// the agent's default home stands from home, so that its entourage stands about them as it stands about home by
-/// default: its workers on the arc through it, which needs that much room for their columns and signs to stand clear of
-/// one another and of the swarm in front of them, and its wall beneath it, six slots across, read as from home and seen
-/// below the swarm.
-pub const SUMMONED: f32 = 2.3;
+/// How far from the head of whoever it goes to, horizontally, the agent stands at least, in metres: as far as the
+/// agent's default home stands from home, so that it stands before them as it stands before home by default.
+pub const NEAR: f32 = 2.3;
 
 /// How far below the swarm's lowest reach, as seen from whoever it faces, the top of every slot of the wall beneath it
 /// stands at least, in radians: 1°.
@@ -73,16 +69,16 @@ pub fn wall_beneath(agent: &Pose, floor: f32) -> Pose {
     Pose::upright([x, (y - BENEATH).max(floor + LOWEST_WALL), z], agent.yaw())
 }
 
-/// The height the middle of a summoned agent stands at, for whoever summoned it with their eyes at `eyes`, on a floor at
+/// The height the middle of the agent stands at when it goes to someone with their eyes at `eyes`, on a floor at
 /// `floor`: [`RISE`] above their eyes, but never lower than [`LOWEST_AGENT`] above the floor, however they sit or stand.
-pub fn summoned_height(eyes: f32, floor: f32) -> f32 {
+pub fn near_height(eyes: f32, floor: f32) -> f32 {
     (eyes + RISE).max(floor + LOWEST_AGENT)
 }
 
-/// Where a summoned agent stands, drawn towards `at` by someone whose eyes are at `eyes`, on a floor at `floor`: the way
-/// `at` lies from them, at least [`SUMMONED`] from them horizontally, straight ahead of them where `at` is above or
-/// below them, at [`summoned_height`], facing them.
-pub fn summoned(at: [f32; 3], eyes: [f32; 3], floor: f32) -> Pose {
+/// Where the agent stands when it goes to someone whose eyes are at `eyes`, towards `at`, on a floor at `floor`: the way
+/// `at` lies from them, at least [`NEAR`] from them horizontally, straight ahead of them where `at` is above or below
+/// them, at [`near_height`], facing them.
+pub fn near(at: [f32; 3], eyes: [f32; 3], floor: f32) -> Pose {
     let (x, z) = (at[0] - eyes[0], at[2] - eyes[2]);
     let across = x.hypot(z);
     let (dx, dz) = if across > 1e-4 {
@@ -90,10 +86,10 @@ pub fn summoned(at: [f32; 3], eyes: [f32; 3], floor: f32) -> Pose {
     } else {
         (0.0, -1.0)
     };
-    let away = across.max(SUMMONED);
+    let away = across.max(NEAR);
     let spot = [
         eyes[0] + dx * away,
-        summoned_height(eyes[1], floor),
+        near_height(eyes[1], floor),
         eyes[2] + dz * away,
     ];
     Pose::at(spot).facing_towards(eyes)
@@ -171,7 +167,7 @@ mod tests {
             .with_scale(ARC_SCALE)
     }
 
-    /// The wall beneath the agent at `agent`, facing `eyes`, as it stands while the agent is summoned.
+    /// A wall beneath the agent at `agent`, facing `eyes`.
     fn beneath_facing(agent: &Pose, eyes: [f32; 3]) -> Wall {
         let home = wall_beneath(agent, FLOOR);
         tomori(Pose::upright_facing(
@@ -198,7 +194,8 @@ mod tests {
     }
 
     #[test]
-    fn a_summoned_agent_stands_above_the_eyes_and_its_wall_beneath_it_at_any_height_of_eyes() {
+    fn the_agent_near_someone_stands_above_their_eyes_with_room_for_a_wall_beneath_it_at_any_height_of_eyes()
+     {
         // From someone seated low, about 1 m, to someone tall, about 1.8 m, standing.
         for tenth in 9..=19 {
             let eyes = [0.4, tenth as f32 / 10.0, 2.0];
@@ -208,9 +205,9 @@ mod tests {
                     0.3,
                     eyes[2] + towards[1] * distance,
                 ];
-                let agent = summoned(at, eyes, FLOOR);
+                let agent = near(at, eyes, FLOOR);
                 let level = (agent.position[0] - eyes[0]).hypot(agent.position[2] - eyes[2]);
-                assert!(level >= SUMMONED - 1e-4 && (level - distance.max(SUMMONED)).abs() < 1e-4);
+                assert!(level >= NEAR - 1e-4 && (level - distance.max(NEAR)).abs() < 1e-4);
                 assert!(agent.position[1] >= eyes[1] + RISE - 1e-5);
                 assert!(agent.position[1] >= LOWEST_AGENT - 1e-5);
                 let wall = beneath_facing(&agent, eyes);
@@ -225,15 +222,15 @@ mod tests {
             }
         }
         // Straight above or below them, it stands straight ahead.
-        let ahead = summoned([0.0, 3.0, 0.0], [0.0, 1.6, 0.0], FLOOR);
-        assert_eq!(ahead.position, [0.0, 1.6 + RISE, -SUMMONED]);
+        let ahead = near([0.0, 3.0, 0.0], [0.0, 1.6, 0.0], FLOOR);
+        assert_eq!(ahead.position, [0.0, 1.6 + RISE, -NEAR]);
     }
 
     #[test]
     fn a_wall_behind_the_swarm_or_level_with_it_is_not_seen_beneath_it() {
         let eyes = [0.0, 1.6, 0.0];
         let agent = Pose::at([0.0, 1.4, -1.5]).facing_towards(eyes);
-        // Behind it, 2.3 m before the eyes and 1.08 m below them, as the travel spot stood before.
+        // Behind it, 2.3 m before the eyes and 1.08 m below them.
         let behind = tomori(Pose::upright_facing([0.0, 0.52, -2.3], [0.0, 0.52, 0.0]));
         assert!(!seen_beneath(eyes, &agent, &behind));
         // Level with it.
