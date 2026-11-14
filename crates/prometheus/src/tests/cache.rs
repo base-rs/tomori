@@ -247,7 +247,11 @@ fn an_instant_query_in_a_bucket_is_evaluated_at_its_start_and_read_once_a_bucket
     let start = Timestamp::from_millis(1_700_000_010_000);
     fake.success(vector());
     client
-        .query_with("up", Timestamp::from_millis(start.millis() + 2_500), bucket)
+        .query_with(
+            "up",
+            Timestamp::from_millis(start.millis() + 2_500),
+            bucket.clone(),
+        )
         .unwrap();
     assert_eq!(time(&fake.next()), "1700000010.000");
     for offset in [0, 7_000, 14_999] {
@@ -255,7 +259,7 @@ fn an_instant_query_in_a_bucket_is_evaluated_at_its_start_and_read_once_a_bucket
             .query_with(
                 "up",
                 Timestamp::from_millis(start.millis() + offset),
-                bucket,
+                bucket.clone(),
             )
             .unwrap();
     }
@@ -265,7 +269,7 @@ fn an_instant_query_in_a_bucket_is_evaluated_at_its_start_and_read_once_a_bucket
         .query_with(
             "up",
             Timestamp::from_millis(start.millis() + 15_000),
-            bucket,
+            bucket.clone(),
         )
         .unwrap();
     assert_eq!(time(&fake.next()), "1700000025.000");
@@ -276,7 +280,11 @@ fn an_instant_query_in_a_bucket_is_evaluated_at_its_start_and_read_once_a_bucket
     for _ in 0..2 {
         fake.success(vector());
         plain
-            .query_with("up", Timestamp::from_millis(start.millis() + 4_000), bucket)
+            .query_with(
+                "up",
+                Timestamp::from_millis(start.millis() + 4_000),
+                bucket.clone(),
+            )
             .unwrap();
         assert_eq!(time(&fake.next()), "1700000010.000");
     }
@@ -362,7 +370,9 @@ fn a_window_kept_and_fresh_is_answered_without_a_request() {
     let brief = Call::new().fresh(Duration::from_millis(20));
     thread::sleep(Duration::from_millis(40));
     fake.success(matrix(&[(pod("a"), 1, &[1.0, 2.0])]));
-    client.query_range_with("up", window(0, 2), brief).unwrap();
+    client
+        .query_range_with("up", window(0, 2), brief.clone())
+        .unwrap();
     assert_eq!(asked(&fake.next()), (1, 2));
     fake.success(matrix(&[(pod("a"), 2, &[2.0, 3.0])]));
     client.query_range_with("up", window(0, 3), brief).unwrap();
@@ -482,6 +492,142 @@ fn series_a_label_filter_leaves_alike_stay_apart_across_reads() {
             ("a".into(), 0, vec![2.0, 2.0, 2.0]),
         ]
     );
+}
+
+#[test]
+fn answers_read_with_different_label_filters_are_kept_apart() {
+    let fake = Fake::start();
+    let client = fake
+        .client()
+        .labels(LabelFilter::only(["pod"]))
+        .cache(Cache::new().fresh(Duration::from_secs(60)))
+        .build()
+        .unwrap();
+    let zone = Call::new().labels(LabelFilter::only(["pod", "zone"]));
+    let metric = json!({"pod": "a", "zone": "1"});
+    fake.success(matrix(&[(metric.clone(), 0, &[1.0, 2.0])]));
+    let plain = client.query_range("up", window(0, 1)).unwrap();
+    fake.next();
+    // The same range with another filter is not answered from what the client's filter kept.
+    fake.success(matrix(&[(metric.clone(), 0, &[1.0, 2.0])]));
+    let zoned = client
+        .query_range_with("up", window(0, 1), zone.clone())
+        .unwrap();
+    assert_eq!(asked(&fake.next()), (0, 1));
+    assert_eq!(plain.data[0].metric.len(), 1);
+    assert_eq!(zoned.data[0].metric.len(), 2);
+    // Each is kept under its own filter, and a call naming the client's own filter shares the client's answers.
+    let again = client
+        .query_range_with("up", window(0, 1), zone.clone())
+        .unwrap();
+    assert_eq!(again.data[0].metric.len(), 2);
+    let same = Call::new().labels(LabelFilter::only(["pod"]));
+    let again = client.query_range_with("up", window(0, 1), same).unwrap();
+    assert_eq!(again.data[0].metric.len(), 1);
+    nothing_sent(&fake);
+    // A moving window asks only for the steps its own filter's answer lacks.
+    fake.success(matrix(&[(metric.clone(), 1, &[2.0, 3.0])]));
+    let moved = client
+        .query_range_with("up", window(0, 2), zone.clone())
+        .unwrap();
+    assert_eq!(asked(&fake.next()), (1, 2));
+    assert_eq!(moved.data[0].metric.len(), 2);
+    // Instant queries too.
+    fake.success(vector());
+    client.query("up", at()).unwrap();
+    fake.next();
+    fake.success(vector());
+    client.query_with("up", at(), zone.clone()).unwrap();
+    fake.next();
+    client.query_with("up", at(), zone).unwrap();
+    client.query("up", at()).unwrap();
+    nothing_sent(&fake);
+    let stats = client.cache_stats();
+    assert_eq!((stats.entries, stats.misses, stats.tails), (4, 4, 1));
+
+    // A filter's names count towards what an answer weighs.
+    let weighed = |filter: LabelFilter| {
+        let cache = Cache::new().fresh(Duration::from_secs(60));
+        let client = fake.client().cache(cache).build().unwrap();
+        fake.success(vector());
+        client
+            .query_with("up", at(), Call::new().labels(filter))
+            .unwrap();
+        fake.next();
+        client.cache_stats().bytes
+    };
+    let long = (0..16).map(|index| format!("label_{index}_{}", "x".repeat(64)));
+    assert!(weighed(LabelFilter::only(long)) > weighed(LabelFilter::only(["pod"])) + 16 * 64);
+}
+
+#[test]
+fn identical_calls_in_flight_together_with_different_filters_send_their_own_requests() {
+    let fake = Fake::start();
+    let client = fake.client().cache(Cache::new()).build().unwrap();
+    let call = |name: &'static str| {
+        let client = client.clone();
+        thread::spawn(move || {
+            client.query_with("up", at(), Call::new().labels(LabelFilter::only([name])))
+        })
+    };
+    let pods = call("pod");
+    fake.next();
+    // Asked while the first is in flight, the second is not answered by it: it sends its own.
+    let urls = call("url");
+    fake.next();
+    fake.success(vector());
+    fake.success(vector());
+    let pods = pods.join().unwrap().unwrap().data.into_vector().unwrap();
+    let urls = urls.join().unwrap().unwrap().data.into_vector().unwrap();
+    assert!(pods[0].metric.contains_key("pod") && !pods[0].metric.contains_key("url"));
+    assert!(urls[0].metric.contains_key("url") && !urls[0].metric.contains_key("pod"));
+    let stats = client.cache_stats();
+    assert_eq!((stats.misses, stats.deduped), (2, 0));
+}
+
+#[test]
+fn points_remembered_with_a_call_s_label_filter_are_kept_under_it() {
+    let fake = Fake::start();
+    let client = fake
+        .client()
+        .labels(LabelFilter::only(["pod"]))
+        .cache(Cache::new())
+        .build()
+        .unwrap();
+    let zone = Call::new().labels(LabelFilter::only(["pod", "zone"]));
+    fake.success(matrix(&[(
+        json!({"pod": "a", "zone": "1"}),
+        0,
+        &[0.0, 1.0, 2.0],
+    )]));
+    let series = client
+        .query_range_with("up", window(0, 2), zone.clone())
+        .unwrap()
+        .data;
+    fake.next();
+    let restarted = fake
+        .client()
+        .labels(LabelFilter::only(["pod"]))
+        .cache(Cache::new())
+        .build()
+        .unwrap();
+    restarted
+        .remember_with("up", window(0, 2), &series, zone.clone())
+        .unwrap();
+    // Read with the filter it was remembered under, only the steps after it are asked for.
+    fake.success(matrix(&[(
+        json!({"pod": "a", "zone": "1"}),
+        2,
+        &[2.0, 3.0],
+    )]));
+    restarted
+        .query_range_with("up", window(0, 3), zone)
+        .unwrap();
+    assert_eq!(asked(&fake.next()), (2, 3));
+    // With the client's own filter, the whole window.
+    fake.success(matrix(&[(pod("a"), 0, &[0.0, 1.0, 2.0, 3.0])]));
+    restarted.query_range("up", window(0, 3)).unwrap();
+    assert_eq!(asked(&fake.next()), (0, 3));
 }
 
 #[test]

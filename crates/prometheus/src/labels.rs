@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 /// assert!(!filter.keeps("url"));
 /// assert!(LabelFilter::all().keeps("url"));
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LabelFilter {
     /// The names kept, or `None` to keep every label.
     names: Option<BTreeSet<String>>,
@@ -43,6 +43,16 @@ impl LabelFilter {
     pub fn keeps(&self, name: &str) -> bool {
         self.names.as_ref().is_none_or(|names| names.contains(name))
     }
+
+    /// The memory the names take, for the cache's estimate of a key that holds the filter.
+    pub(crate) fn weight(&self) -> usize {
+        self.names.as_ref().map_or(0, |names| {
+            names
+                .iter()
+                .map(|name| size_of::<String>() + name.capacity() + 4 * size_of::<usize>())
+                .sum()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -56,5 +66,13 @@ mod tests {
         assert!(!filter.keeps("__name__"));
         assert!(LabelFilter::all().keeps("__name__"));
         assert!(!LabelFilter::only(Vec::<String>::new()).keeps("pod"));
+    }
+
+    #[test]
+    fn a_filter_weighs_its_names() {
+        assert_eq!(LabelFilter::all().weight(), 0);
+        let one = LabelFilter::only(["pod"]).weight();
+        assert!(one >= 3);
+        assert!(LabelFilter::only(["pod", "location"]).weight() > one);
     }
 }

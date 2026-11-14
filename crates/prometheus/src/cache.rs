@@ -8,7 +8,7 @@ use std::mem::size_of;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::{Data, Error, Labels, Point, Range, Response, Sample, Series};
+use crate::{Data, Error, LabelFilter, Labels, Point, Range, Response, Sample, Series};
 
 /// How many answers a cache keeps unless the application sets another bound.
 pub const DEFAULT_CACHE_ENTRIES: usize = 1024;
@@ -112,33 +112,42 @@ pub struct CacheStats {
     pub bytes: usize,
 }
 
-/// What an answer is kept under: an instant query's expression and time, or a range query's expression, step and phase, the milliseconds its points lie past a multiple of the step, so that ranges whose points coincide share their points.
+/// What an answer is kept under: an instant query's expression and time, or a range query's expression, step and phase, the milliseconds its points lie past a multiple of the step, so that ranges whose points coincide share their points; and the call's own label filter where it differs from the client's, `None` for the client's, so that answers filtered differently are never mixed while calls without a filter of their own copy none.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Key {
     Instant {
         expression: String,
         at: i64,
+        labels: Option<LabelFilter>,
     },
     Range {
         expression: String,
         step: i64,
         phase: i64,
+        labels: Option<LabelFilter>,
     },
 }
 
 impl Key {
-    pub fn range(expression: &str, range: &Range) -> Self {
+    pub fn range(expression: &str, range: &Range, labels: Option<LabelFilter>) -> Self {
         let step = step_millis(range);
         Self::Range {
             expression: expression.to_owned(),
             step,
             phase: range.start.millis().rem_euclid(step),
+            labels,
         }
     }
 
     fn expression(&self) -> &str {
         match self {
             Self::Instant { expression, .. } | Self::Range { expression, .. } => expression,
+        }
+    }
+
+    fn labels(&self) -> Option<&LabelFilter> {
+        match self {
+            Self::Instant { labels, .. } | Self::Range { labels, .. } => labels.as_ref(),
         }
     }
 }
@@ -941,9 +950,9 @@ fn weigh_data(data: &Data) -> usize {
         }
 }
 
-/// The memory the cache's bookkeeping takes for an entry under `key`: the key, twice more in the index of uses and of expiries, the entry, and the hash map's share.
+/// The memory the cache's bookkeeping takes for an entry under `key`: the key, its label filter's names included, twice more in the index of uses and of expiries, the entry, and the hash map's share.
 fn weigh_key(key: &Key) -> usize {
-    3 * (size_of::<Key>() + key.expression().len())
+    3 * (size_of::<Key>() + key.expression().len() + key.labels().map_or(0, LabelFilter::weight))
         + size_of::<Entry>()
         + size_of::<Reverse<(Instant, u64, Key)>>()
         + 2 * size_of::<u64>()
