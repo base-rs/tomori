@@ -393,6 +393,7 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_eithe
         }],
         size: None,
         burnt: Vec::new(),
+        lit: Vec::new(),
     };
     let theirs = Hand::new(Vec3::new(-4.0, 1.2, -14.0), glam::Quat::IDENTITY);
     let output = client.update(
@@ -424,6 +425,7 @@ fn the_campsite_s_sticks_come_with_the_farmyard_s_state_and_are_taken_with_eithe
         toast: Vec::new(),
         size: Some(1.0),
         burnt: Vec::new(),
+        lit: Vec::new(),
     };
     let mut sounds = 0;
     let mut fire = 0.0;

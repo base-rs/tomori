@@ -28,6 +28,7 @@ fn shared(change: impl FnOnce(&mut Shared)) -> Shared {
         toast: vec![0.0; STICKS],
         size: 0.0,
         burnt: Vec::new(),
+        burning: vec![None; STICKS],
     };
     change(&mut shared);
     shared
@@ -77,6 +78,7 @@ fn holding(index: usize, epoch: u32, held: Option<Held>) -> Event {
         toast: Vec::new(),
         size: None,
         burnt: Vec::new(),
+        lit: Vec::new(),
     }
 }
 
@@ -267,6 +269,10 @@ fn a_marshmallow_held_in_the_fire_is_foreseen_toasting_and_eases_to_what_the_ser
             }],
             size: None,
             burnt: Vec::new(),
+            lit: vec![campsite::Lit {
+                body: campsite::body(1),
+                since: Some(2),
+            }],
         },
         0,
     );
@@ -282,7 +288,7 @@ fn a_marshmallow_held_in_the_fire_is_foreseen_toasting_and_eases_to_what_the_ser
         shown = sticks.shown(&[], &[], now, 0);
     }
     assert_eq!(shown[1].shade, campsite::SHADES - 1);
-    // Black, in the heat, it burns.
+    // Black, in the heat, it burns, as the side says.
     assert!(shown[1].burning);
     assert_eq!(sticks.toast(1), campsite::BLACK);
 }
@@ -377,6 +383,7 @@ fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_sa
     sticks.share(&shared(|shared| {
         shared.sticks.bodies[3].held = held_by(9);
         shared.toast[3] = campsite::BLACK;
+        shared.burning[3] = Some(0);
         shared.toast[0] = campsite::GOLDEN;
     }));
     let now = Instant::now();
@@ -404,6 +411,7 @@ fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_sa
             }],
             size: None,
             burnt: Vec::new(),
+            lit: Vec::new(),
         },
         0,
     );
@@ -425,6 +433,7 @@ fn a_marshmallow_another_holds_or_left_lying_is_as_toasted_as_the_server_side_sa
             ],
             size: None,
             burnt: Vec::new(),
+            lit: Vec::new(),
         },
         0,
     );
@@ -494,6 +503,7 @@ fn a_visitor_takes_no_stick_and_what_lands_is_heard_lightly_or_splashing() {
         toast: Vec::new(),
         size: None,
         burnt: Vec::new(),
+        lit: Vec::new(),
     };
     assert_eq!(sticks.changed(&landed(3.0, false), 0).len(), 1);
     assert!(sticks.changed(&landed(0.6, false), 0).is_empty());
@@ -537,6 +547,7 @@ fn a_stick_on_its_way_back_fades_out_as_toasted_as_it_was_and_in_on_its_log_fres
             }],
             size: None,
             burnt: Vec::new(),
+            lit: Vec::new(),
         },
         1_000,
     );
@@ -561,9 +572,77 @@ fn a_stick_on_its_way_back_fades_out_as_toasted_as_it_was_and_in_on_its_log_fres
     assert_eq!(back.shade, 0);
 }
 
+/// Stick `index` taken by `participant`, this participant, with their right hand by its handle, as it leans on its log,
+/// at `now`, the side agreeing.
+fn take_mine(sticks: &mut Sticks, index: usize, participant: u32, now: Instant) {
+    sticks.update(
+        [grab(index, hand_on(index), Phase::Began, Side::Right)].iter(),
+        Some(participant),
+        now,
+        0,
+    );
+    sticks.changed(&holding(index, 1, held_by(participant)), 0);
+}
+
+/// A frame at `now` of stick `index` in the right hand of `participant`, this participant, at `hand`: how it is drawn.
+fn frame(sticks: &mut Sticks, index: usize, participant: u32, hand: Hand, now: Instant) -> Shown {
+    sticks.update(
+        [grab(index, hand, Phase::Changed, Side::Right)].iter(),
+        Some(participant),
+        now,
+        0,
+    );
+    sticks.shown(&[], &[], now, 0)[index]
+}
+
+/// The side saying stick `index`'s marshmallow caught, `since`, or went out.
+fn lit(index: usize, since: Option<u64>) -> Event {
+    Event {
+        clock: since.unwrap_or_default(),
+        sticks: Update::default(),
+        toast: Vec::new(),
+        size: None,
+        burnt: Vec::new(),
+        lit: vec![campsite::Lit {
+            body: campsite::body(index),
+            since,
+        }],
+    }
+}
+
+/// Frames of stick `index` in the right hand of this participant, number 9, at `hand`, every 16 ms for `seconds` from
+/// `now`, which it moves on: whether it is drawn burning in each.
+fn held_for(sticks: &mut Sticks, hand: Hand, now: &mut Instant, seconds: f32) -> Vec<bool> {
+    (0..(seconds / 0.016).round() as usize)
+        .map(|_| {
+            *now += Duration::from_millis(16);
+            frame(sticks, 3, 9, hand, *now).burning
+        })
+        .collect()
+}
+
+/// A hand holding a stick's marshmallow two metres from the heart of the fire, beyond its heat.
+fn away_from_the_fire() -> Hand {
+    Hand::new(
+        over_the_fire().position + Vec3::X * 2.0,
+        over_the_fire().orientation,
+    )
+}
+
+/// A hand holding a stick's marshmallow under the pool's water, and where it is.
+fn in_the_pool() -> (Hand, Vec3) {
+    let reach = campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD;
+    let along = Vec3::new(0.0, -0.6, 1.0).normalize();
+    let under = tomori_environment_farmyard::layout::POOL - Vec3::Y * 0.1;
+    let hand = Hand::new(
+        under - along * reach,
+        Quat::from_rotation_arc(Vec3::NEG_Z, along),
+    );
+    (hand, under)
+}
+
 #[test]
-fn a_burnt_marshmallow_catches_in_the_fire_burns_on_out_of_it_for_a_while_and_goes_out_or_in_the_pool()
- {
+fn another_s_marshmallow_burns_as_the_side_says_wherever_it_is_and_for_one_joining_late() {
     let mut sticks = Sticks::new();
     sticks.share(&shared(|shared| {
         shared.sticks.bodies[3].held = held_by(9);
@@ -572,54 +651,168 @@ fn a_burnt_marshmallow_catches_in_the_fire_burns_on_out_of_it_for_a_while_and_go
         shared.toast[1] = campsite::BROWN;
     }));
     let start = Instant::now();
-    let frame = Duration::from_millis(100);
-    // In the fire, the black one catches and the brown one, toasting, does not.
-    let shown = sticks.shown(&[(9, over_the_fire()), (8, over_the_fire())], &[], start, 0);
-    assert!(shown[3].burning);
-    assert!(!shown[1].burning);
+    // Black in the fire, it is not drawn alight until the side says it caught, as the side alone burns it.
+    let hands = [(9, over_the_fire()), (8, over_the_fire())];
+    let shown = sticks.shown(&hands, &[], start, 0);
+    assert!(!shown[3].burning && !shown[1].burning);
     assert_eq!(shown[3].index, 3);
-    // Carried two metres from the fire, it burns on for as long as it may, and then goes out.
-    let away = Hand::new(
-        over_the_fire().position + Vec3::X * 2.0,
-        over_the_fire().orientation,
+    sticks.changed(&lit(3, Some(1_200)), 1_200);
+    assert_eq!(sticks.lit(3), Some(1_200));
+    let shown = sticks.shown(&hands, &[], start, 1_200);
+    assert!(shown[3].burning && !shown[1].burning);
+    // Carried away from the fire, and into the pool, it burns on until the side says it went out.
+    let away = [(9, away_from_the_fire()), (8, away_from_the_fire())];
+    let later = start + Duration::from_secs(60);
+    assert!(sticks.shown(&away, &[], later, 61_200)[3].burning);
+    assert!(sticks.shown(&[(9, in_the_pool().0)], &[], later, 61_200)[3].burning);
+    sticks.changed(&lit(3, None), 61_250);
+    assert!(!sticks.shown(&away, &[], later, 61_250)[3].burning);
+    // What is not a stick changes nothing.
+    sticks.changed(
+        &Event {
+            lit: vec![campsite::Lit {
+                body: 7,
+                since: Some(0),
+            }],
+            ..lit(3, None)
+        },
+        61_300,
     );
-    let mut now = start;
-    let mut alight = Duration::ZERO;
-    for _ in 0..(campsite::BURNS as usize * 10 + 20) {
-        now += frame;
-        let shown = sticks.shown(&[(9, away), (8, away)], &[], now, 0);
-        assert_eq!(campsite::heat(shown[3].marshmallow), 0.0);
-        assert!(!shown[1].burning);
-        if shown[3].burning {
-            alight += frame;
-        }
-    }
-    let burned = alight.as_secs_f32();
-    assert!((burned - campsite::BURNS).abs() <= 0.15, "{burned}");
-    // Back in the fire, it catches again; and plunged into the pool, it goes out at once.
-    now += frame;
-    assert!(sticks.shown(&[(9, over_the_fire())], &[], now, 0)[3].burning);
-    let reach = campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD;
-    let along = Vec3::new(0.0, -0.6, 1.0).normalize();
-    let under = tomori_environment_farmyard::layout::POOL - Vec3::Y * 0.1;
-    let pool = Hand::new(
-        under - along * reach,
-        Quat::from_rotation_arc(Vec3::NEG_Z, along),
+    assert_eq!(sticks.lit(3), None);
+    // Someone joining as one burns, away from the fire, sees it alight at once, as the side shares it; and one fading on
+    // its way back, unlit.
+    let mut late = Sticks::new();
+    late.share(&shared(|shared| {
+        shared.sticks.bodies[3].held = held_by(9);
+        shared.toast[3] = campsite::BLACK;
+        shared.burning[3] = Some(30_000);
+        shared.burning.truncate(2);
+    }));
+    assert_eq!(late.lit(3), None);
+    late.share(&shared(|shared| {
+        shared.sticks.bodies[3].held = held_by(9);
+        shared.toast[3] = campsite::BLACK;
+        shared.burning[3] = Some(30_000);
+    }));
+    let shown = late.shown(&[(9, away_from_the_fire())], &[], later, 61_000);
+    assert!(shown[3].burning);
+    assert_eq!(campsite::heat(shown[3].marshmallow), 0.0);
+    assert_eq!(shown.iter().filter(|stick| stick.burning).count(), 1);
+}
+
+#[test]
+fn the_holder_foresees_their_marshmallow_catching_and_going_out_and_gives_way_to_the_side() {
+    let mut sticks = Sticks::new();
+    sticks.share(&shared(|shared| shared.toast[3] = campsite::BLACK));
+    let mut now = Instant::now();
+    take_mine(&mut sticks, 3, 9, now);
+    // In the fire, it catches as soon as it is drawn in the heat, before the side says so; the side saying so within
+    // the grace, it burns on.
+    let frames = held_for(&mut sticks, over_the_fire(), &mut now, 0.2);
+    let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(frames[first..].iter().all(|burning| *burning));
+    sticks.changed(&lit(3, Some(1_000)), 1_000);
+    assert!(
+        held_for(&mut sticks, over_the_fire(), &mut now, 1.0)
+            .iter()
+            .all(|burning| *burning)
     );
-    now += frame;
-    let shown = sticks.shown(&[(9, pool)], &[], now, 0);
-    assert!(shown[3].marshmallow.distance(under) < 1e-3);
-    assert!(!shown[3].burning);
-    // Lifted out of the water, it stays out.
-    now += frame;
-    assert!(!sticks.shown(&[(9, away)], &[], now, 0)[3].burning);
+    // Carried out of the heat, it burns on; plunged into the pool, it goes out at once, before the side says so, and
+    // stays out once it does.
+    assert!(
+        held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0)
+            .iter()
+            .all(|burning| *burning)
+    );
+    let (pool, under) = in_the_pool();
+    let frames = held_for(&mut sticks, pool, &mut now, 0.3);
+    assert!(frames.iter().skip(1).all(|burning| !*burning), "{frames:?}");
+    assert!(
+        sticks.shown(&[], &[], now, 0)[3]
+            .marshmallow
+            .distance(under)
+            < 1e-3
+    );
+    sticks.changed(&lit(3, None), 2_000);
+    assert!(
+        held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0)
+            .iter()
+            .all(|burning| !*burning)
+    );
+    // Back in the fire, it catches again and burns on there however long the side takes to say so, never put out only
+    // to catch again as the side says it caught.
+    let frames = held_for(&mut sticks, over_the_fire(), &mut now, 1.0);
+    let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(frames[first..].iter().all(|burning| *burning));
+    sticks.changed(&lit(3, Some(3_000)), 3_000);
+    assert!(
+        held_for(&mut sticks, over_the_fire(), &mut now, 0.2)
+            .iter()
+            .all(|burning| *burning)
+    );
+    let frames = held_for(&mut sticks, pool, &mut now, 0.3);
+    assert!(frames.iter().skip(1).all(|burning| !*burning), "{frames:?}");
+    sticks.changed(&lit(3, None), 4_000);
+    // In the fire again, the side never saying it caught, as when the holder's foresight ran ahead of it, and pulled
+    // out, it goes out once the grace has passed, as it is for everyone else.
+    let frames = held_for(&mut sticks, over_the_fire(), &mut now, 0.3);
+    let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(frames[first..].iter().all(|burning| *burning));
+    let frames = held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0);
+    let last = frames.iter().rposition(|burning| *burning).unwrap();
+    assert!(frames[..=last].iter().all(|burning| *burning));
+    let alight = (last + 1) as f32 * 0.016;
+    assert!((alight - GRACE.as_secs_f32()).abs() < 0.04, "{alight}");
+    assert!(frames[last + 1..].iter().all(|burning| !*burning));
+    // The side saying it caught while the holder foresees it out, as when it was pulled out as it turned black, it is
+    // drawn alight at once and burns on as the side says.
+    sticks.changed(&lit(3, Some(5_000)), 5_000);
+    assert!(
+        held_for(&mut sticks, away_from_the_fire(), &mut now, 1.0)
+            .iter()
+            .all(|burning| *burning)
+    );
+    // Under the pool's water while the side still says it burns, as when it never saw it there, it is out until the
+    // grace has passed, and then alight as the side says; and out at once as the side says it went out.
+    let frames = held_for(&mut sticks, pool, &mut now, 1.0);
+    let first = frames.iter().position(|burning| *burning).unwrap();
+    assert!(
+        ((first + 1) as f32 * 0.016 - GRACE.as_secs_f32()).abs() < 0.04,
+        "{first}"
+    );
+    assert!(frames[first..].iter().all(|burning| *burning));
+    sticks.changed(&lit(3, None), 6_000);
+    assert!(
+        held_for(&mut sticks, away_from_the_fire(), &mut now, 0.2)
+            .iter()
+            .all(|burning| !*burning)
+    );
+    // A brown one, never alight.
+    sticks.changed(
+        &Event {
+            toast: vec![campsite::Toasted {
+                body: campsite::body(3),
+                toast: campsite::BROWN,
+            }],
+            ..lit(3, None)
+        },
+        6_000,
+    );
+    assert!(
+        held_for(&mut sticks, over_the_fire(), &mut now, 1.0)
+            .iter()
+            .all(|burning| !*burning)
+    );
 }
 
 #[test]
 fn another_s_burning_marshmallow_thrown_trails_unbroken_from_their_hand_on_its_snapshots() {
     use tomori_physics::message::Snapshot;
     let mut sticks = Sticks::new();
-    sticks.share(&shared(|shared| shared.toast[2] = campsite::BLACK));
+    sticks.share(&shared(|shared| {
+        shared.toast[2] = campsite::BLACK;
+        shared.burning[2] = Some(800);
+    }));
     let body = campsite::body(2);
     // Held by someone else, swung through the fire, its marshmallow over its heart as they let go, and thrown on at
     // 2 m/s, a snapshot every twentieth of a second, the first as the side says they let go.
@@ -659,6 +852,7 @@ fn another_s_burning_marshmallow_thrown_trails_unbroken_from_their_hand_on_its_s
                     toast: Vec::new(),
                     size: None,
                     burnt: Vec::new(),
+                    lit: Vec::new(),
                 },
                 sent,
             );
@@ -826,6 +1020,7 @@ fn a_burning_log_chars_glows_and_shrinks_and_fades_back_onto_the_woodpile_fresh(
             burnt: [campsite::log_body(6), 7]
                 .map(|body| campsite::Burnt { body, burnt: 0.0 })
                 .to_vec(),
+            lit: Vec::new(),
         },
         1_000,
     );
@@ -861,6 +1056,7 @@ fn the_fire_is_drawn_as_big_as_the_side_says_eased_there_toasting_and_crackling_
             toast: Vec::new(),
             size: Some(1.0),
             burnt: Vec::new(),
+            lit: Vec::new(),
         },
         10_000,
     );
@@ -886,11 +1082,10 @@ fn the_fire_is_drawn_as_big_as_the_side_says_eased_there_toasting_and_crackling_
     }
     // A clock that jumps crackles nothing.
     assert!(sticks.crackles(60_000).is_empty());
-    // A marshmallow held further off than a small fire reaches burns black in a big one.
+    // A black marshmallow held further off than a small fire reaches is foreseen catching in a big one.
     sticks.share(&with_logs(|shared| {
         shared.size = 1.0;
         shared.toast[1] = campsite::BLACK;
-        shared.sticks.bodies[1].held = held_by(5);
     }));
     let along = Vec3::new(1.0, 0.0, 0.0);
     let marshmallow = campsite::heart_at(1.0) + Vec3::X * 0.9;
@@ -898,10 +1093,14 @@ fn the_fire_is_drawn_as_big_as_the_side_says_eased_there_toasting_and_crackling_
     let hand = marshmallow
         - along * (campsite::STICK_LENGTH - campsite::MARSHMALLOW_INSET - campsite::HOLD);
     let hand = Hand::new(hand, Quat::from_rotation_arc(Vec3::NEG_Z, along));
-    let later = now + Duration::from_secs(5);
-    sticks.shown(&[(5, hand)], &[], later, 20_000);
-    let shown = sticks.shown(&[(5, hand)], &[], later + Duration::from_secs(1), 20_000);
-    assert!(shown[1].burning);
+    let mut later = now + Duration::from_secs(5);
+    take_mine(&mut sticks, 1, 5, later);
+    let mut caught = false;
+    for _ in 0..30 {
+        later += Duration::from_millis(16);
+        caught |= frame(&mut sticks, 1, 5, hand, later).burning;
+    }
+    assert!(caught);
 }
 
 #[test]
@@ -949,6 +1148,7 @@ fn what_moves_and_rests_of_the_campsite_is_shown_of_the_sticks_and_the_logs_alik
         toast: Vec::new(),
         size: None,
         burnt: Vec::new(),
+        lit: Vec::new(),
     };
     sticks.changed(&event(1_000, true), 1_000);
     sticks.changed(&event(1_100, false), 1_100);
@@ -962,4 +1162,116 @@ fn what_moves_and_rests_of_the_campsite_is_shown_of_the_sticks_and_the_logs_alik
             < 1e-3
     );
     assert!(logs[2].transform.w_axis.truncate().distance(log.position) < 1e-3);
+}
+
+#[test]
+fn played_against_the_side_one_pulled_out_as_it_turns_black_burns_for_everyone_and_for_one_joining_late()
+ {
+    use tomori_environment::Presence;
+    use tomori_environment_farmyard::side;
+    use tomori_protocol::Pose as Seen;
+    let start = Instant::now();
+    let mut side = side::Sticks::new(start);
+    let (mut holder, mut watcher) = (Sticks::new(), Sticks::new());
+    holder.share(&side.shared());
+    watcher.share(&side.shared());
+    let mut now = start;
+    // A frame of the side's tick, the holder, participant 3, gripping stick 1 at `hand`, their presence bringing it to
+    // the side as it is: how the holder and the watcher draw it.
+    let mut frame = |side: &mut side::Sticks,
+                     holder: &mut Sticks,
+                     watcher: &mut Sticks,
+                     hand: Hand,
+                     phase: Phase|
+     -> (bool, bool) {
+        now += Duration::from_millis(50);
+        let clock = now.duration_since(start).as_millis() as u64;
+        let presence = [Presence::new(
+            3,
+            Seen::at((hand.position + Vec3::new(0.0, 0.5, 0.4)).to_array()),
+            None,
+            Some(Seen {
+                position: hand.position.to_array(),
+                orientation: hand.orientation.to_array(),
+            }),
+            now,
+        )];
+        for intent in holder.update(
+            [grab(1, hand, phase, Side::Right)].iter(),
+            Some(3),
+            now,
+            clock,
+        ) {
+            side.ask(3, &serde_json::to_string(&intent).unwrap(), &presence);
+        }
+        if let Some(event) = side.update(&presence, now, clock) {
+            holder.changed(&event, clock);
+            watcher.changed(&event, clock);
+        }
+        let mine = holder.shown(&[], &[], now, clock)[1].burning;
+        let theirs = watcher.shown(&[(3, hand)], &[], now, clock)[1].burning;
+        (mine, theirs)
+    };
+    frame(
+        &mut side,
+        &mut holder,
+        &mut watcher,
+        hand_on(1),
+        Phase::Began,
+    );
+    // Held over the heart of the fire until it turns black, and pulled out the moment it does.
+    let mut held = 0;
+    while side.lit(1).is_none() {
+        let (_, theirs) = frame(
+            &mut side,
+            &mut holder,
+            &mut watcher,
+            over_the_fire(),
+            Phase::Changed,
+        );
+        assert_eq!(theirs, side.lit(1).is_some());
+        held += 1;
+        assert!(held < 400, "never caught");
+    }
+    assert!(side.toast(1) >= campsite::BLACK);
+    // Out of the heat, it burns on for everyone, and for someone joining now.
+    for _ in 0..100 {
+        let (mine, theirs) = frame(
+            &mut side,
+            &mut holder,
+            &mut watcher,
+            away_from_the_fire(),
+            Phase::Changed,
+        );
+        assert!(mine && theirs);
+    }
+    let mut late = Sticks::new();
+    late.share(&side.shared());
+    let shown = late.shown(&[(3, away_from_the_fire())], &[], Instant::now(), 0);
+    assert!(shown[1].burning);
+    assert_eq!(shown[1].shade, campsite::SHADES - 1);
+    // Until it goes out, for everyone at once.
+    let mut frames = 100;
+    while side.lit(1).is_some() {
+        let (_, theirs) = frame(
+            &mut side,
+            &mut holder,
+            &mut watcher,
+            away_from_the_fire(),
+            Phase::Changed,
+        );
+        assert_eq!(theirs, side.lit(1).is_some());
+        frames += 1;
+        assert!(frames < 1_000, "never went out");
+    }
+    let burned = frames as f32 * 0.05;
+    assert!((burned - campsite::BURNS).abs() <= 0.15, "{burned}");
+    let (mine, theirs) = frame(
+        &mut side,
+        &mut holder,
+        &mut watcher,
+        away_from_the_fire(),
+        Phase::Changed,
+    );
+    assert!(!mine && !theirs);
 }

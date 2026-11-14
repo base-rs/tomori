@@ -572,6 +572,7 @@ fn what_the_campsite_shares_reads_back_apart_from_the_flock_s_and_the_beach_s() 
         }],
         size: None,
         burnt: Vec::new(),
+        lit: Vec::new(),
     };
     let text = serde_json::to_string(&event).unwrap();
     assert_eq!(
@@ -587,6 +588,26 @@ fn what_the_campsite_shares_reads_back_apart_from_the_flock_s_and_the_beach_s() 
         serde_json::to_string(&quiet).unwrap(),
         r#"{"clock":5,"sticks":{}}"#
     );
+    // A marshmallow catching says since when, and one going out says none.
+    let lit = Event {
+        lit: vec![
+            Lit {
+                body: body(2),
+                since: Some(4_000),
+            },
+            Lit {
+                body: body(3),
+                since: None,
+            },
+        ],
+        ..quiet.clone()
+    };
+    let text = serde_json::to_string(&lit).unwrap();
+    assert_eq!(
+        text,
+        r#"{"clock":5,"sticks":{},"lit":[{"body":102,"since":4000},{"body":103,"since":null}]}"#
+    );
+    assert_eq!(serde_json::from_str::<Event>(&text).unwrap(), lit);
     // Never one of the flock's events, nor the beach's, nor they one of its.
     assert!(serde_json::from_str::<crate::beach::Event>(&text).is_err());
     let flock = r#"{"clock":5,"chicken":1,"behaviour":{"began":0}}"#;
@@ -601,11 +622,12 @@ fn what_the_campsite_shares_reads_back_apart_from_the_flock_s_and_the_beach_s() 
     let state = serde_json::json!({
         "clock": 1,
         "chickens": [],
-        "campsite": {"sticks": {"bodies": [{"body": 100, "epoch": 3, "at": [0, 0, 0, 0, 0, 0, 10000]}]}, "toast": [0.5]},
+        "campsite": {"sticks": {"bodies": [{"body": 100, "epoch": 3, "at": [0, 0, 0, 0, 0, 0, 10000]}]}, "toast": [0.5], "burning": [2500]},
     });
     let read = shared(&state);
     assert_eq!(read.sticks.bodies[0].epoch, 3);
     assert_eq!(read.toast, [0.5]);
+    assert_eq!(read.burning, [Some(2_500)]);
     assert_eq!(
         shared(&serde_json::json!({"clock": 1, "chickens": []})),
         Shared::default()
