@@ -1614,6 +1614,107 @@ mod tests {
         });
     }
 
+    /// A copy frozen to a window, floating ahead, is drawn as a participant's client draws it: its chips, its time chip
+    /// marked frozen, and its chart over that window. See `design/panel-context.md`.
+    #[test]
+    fn the_spectator_draws_a_frozen_copy_with_its_chips() {
+        use tomori_protocol::chart::{AxisLabel, Chart, Colour, Series, SeriesStyle, TimeAxis};
+        use tomori_protocol::context::{ChipPress, ContextChip, ContextSetting, ContextValue};
+        use tomori_protocol::{Panel, Place, Projection};
+        let mut feed = Feed::with_audio(
+            SpectatorOptions::default(),
+            Box::new(Silent),
+            Box::new(Nowhere),
+        );
+        feed.conversation
+            .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
+        feed.conversation
+            .apply(Event::State(ConnectionState::Connected {
+                source: 1,
+                server: "Test".into(),
+                role: tomori_protocol::ConnectionRole::Visitor,
+                certificate: None,
+                backends: vec![],
+                roots: vec![],
+                environments: vec![],
+                utterance_limit: None,
+                name: None,
+            }));
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Space {
+                state: Box::new(SpaceState {
+                    id: "space".into(),
+                    projection: true,
+                    ..Default::default()
+                }),
+            }));
+        let (from_ms, to_ms) = (1_794_450_000_000, 1_794_451_800_000);
+        let chart = Chart::new(10)
+            .with_time(TimeAxis::Fixed { from_ms, to_ms })
+            .with_labels(vec![
+                AxisLabel::new(0, "11-12 02:20"),
+                AxisLabel::new(9, "02:50 UTC"),
+            ])
+            .with_series(Series::new(
+                "p99",
+                Colour::Amber,
+                SeriesStyle::Line,
+                vec![Some(41.0); 10],
+            ));
+        let frozen = Panel::new(
+            "panel-4",
+            "Latency",
+            chart.summary(),
+            Place::Free {
+                pose: tomori_protocol::Pose::upright_facing([0.0, 1.5, -1.6], [0.0, 1.6, 0.0]),
+            },
+        )
+        .with_chart(chart)
+        .with_context(vec![
+            ContextChip::new(
+                "region",
+                "Region",
+                ContextValue::Text {
+                    text: "EU-WEST1".into(),
+                },
+                ContextSetting::Fixed,
+            ),
+            ContextChip::new(
+                "time",
+                "Time",
+                ContextValue::Window { from_ms, to_ms },
+                ContextSetting::Fixed,
+            )
+            .with_press(ChipPress::Unfreeze),
+        ]);
+        feed.conversation
+            .apply(Event::Message(ServerMessage::Projection {
+                projection: Box::new(Projection::new("space", "").with_panels(vec![frozen])),
+            }));
+        feed.conversation.take_actions();
+        for _ in 0..4 {
+            feed.build_frame(&BTreeMap::new(), 4.0 / 3.0, 1.0 / 60.0, Instant::now());
+        }
+        let face = feed
+            .projected()
+            .sheets
+            .iter()
+            .filter(|sheet| sheet.model.is_some())
+            .filter_map(|sheet| sheet.canvas.as_deref())
+            .map(|canvas| {
+                canvas
+                    .rows
+                    .iter()
+                    .map(tomori_scene::ui_text::Row::plain)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .find(|plain| plain.starts_with("Latency"))
+            .expect("the frozen copy is drawn");
+        assert!(face.contains("❄"), "{face}");
+        assert!(face.contains("EU-WEST1"), "{face}");
+    }
+
     #[test]
     fn with_nobody_to_follow_the_spectator_watches_from_its_spawn_point() {
         use tomori_protocol::spawn::{self, Spawn};

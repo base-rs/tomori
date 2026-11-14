@@ -1636,6 +1636,23 @@ mod tests {
                 },
                 serde_json::json!({"type": "choose_panel_row", "panel": "panel-1", "row": "pod7"}),
             ),
+            (
+                ClientMessage::FreezePanel {
+                    panel: "panel-1".into(),
+                    frozen: true,
+                    revision: Some(9),
+                },
+                serde_json::json!({"type": "freeze_panel", "panel": "panel-1", "frozen": true,
+                    "revision": 9}),
+            ),
+            (
+                ClientMessage::FreezePanel {
+                    panel: "panel-1".into(),
+                    frozen: false,
+                    revision: None,
+                },
+                serde_json::json!({"type": "freeze_panel", "panel": "panel-1", "frozen": false}),
+            ),
         ];
         // A panel's version is sent as its revision, the name a client that ticks sends back, from a server that keeps
         // one, and read as 0 from an older one; so is a wall's, and a live panel's data seq.

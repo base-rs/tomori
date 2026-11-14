@@ -129,9 +129,10 @@ pub(crate) enum Trigger {
     /// pull attracts nothing.
     CarriedWall,
     /// A choosable row of an environment's list panel, pointed at, not carried, for a participant: the pull chooses it,
-    /// for its environment, as A does (see `design/panel-actions.md`). The trigger is the environment's selecting
-    /// control, and the row is the environment's content, so the pull is the environment's, while everywhere else on a
-    /// panel it is Tomori's, doing nothing in a space.
+    /// for its environment, as A does (see `design/panel-actions.md`); or a chip of a panel's context that says what
+    /// pressing it does, as a copy's time chip freezing or unfreezing it: the pull presses it, as A does (see
+    /// `design/panel-context.md`). The trigger is the selecting control, and the row is the environment's content, so the
+    /// pull is the row's, while everywhere else on a panel it is Tomori's, doing nothing in a space.
     Row,
     /// Anything else of Tomori's the ray is on, such as a panel, a card or a worker: the pull attracts the swarm, as
     /// ever, and never reaches the environment behind it.

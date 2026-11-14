@@ -650,6 +650,9 @@ struct HandState {
     panel: Option<String>,
     /// The checklist item or row of a list the ray met last frame, by its panel and line.
     item: Option<(String, u32)>,
+    /// The chip of a panel's context the ray met last frame, by its panel and parameter, which the trigger presses where
+    /// it says pressing does something.
+    chip: Option<(String, String)>,
     /// How far along the ray the card it met last frame was, which the grip picks up instead of a panel behind it.
     card_reach: f32,
     /// The pad the ray pointed at last frame, which a pull begun on it, or A, chooses, and the pulls of the trigger on
@@ -687,6 +690,7 @@ impl Default for HandState {
             aim: precedence::Aim::Nothing,
             panel: None,
             item: None,
+            chip: None,
             card_reach: f32::INFINITY,
             pad: None,
             pad_selector: crate::client_side::Selector::default(),
@@ -1630,13 +1634,24 @@ impl Step {
                 .and_then(|item| conversation.choosable_row(item))
                 .filter(|_| conversation.ticks())
         });
+        // A chip that says what pressing it does, as freezing a copy, which a pull begun on it does, as A does.
+        let presses = Hands::from_fn(|side| {
+            self.hands[side]
+                .chip
+                .as_ref()
+                .and_then(|chip| conversation.chip_press(chip))
+                .filter(|_| conversation.ticks())
+        });
         let rungs = Hands::from_fn(|side| {
             let aim = self.hands[side].aim;
             precedence::Trigger::first(|rung| match rung {
                 precedence::Trigger::Menu => menu_shown || in_arrival,
                 precedence::Trigger::Transcript => side == Side::Right && wrist_active,
                 precedence::Trigger::CarriedWall => self.projector.carried_wall_in(side).is_some(),
-                precedence::Trigger::Row => aim == precedence::Aim::Tomori && rows[side].is_some(),
+                precedence::Trigger::Row => {
+                    aim == precedence::Aim::Tomori
+                        && (rows[side].is_some() || presses[side].is_some())
+                }
                 precedence::Trigger::Tomori => aim == precedence::Aim::Tomori,
                 precedence::Trigger::Pad => aim == precedence::Aim::Pad,
                 precedence::Trigger::Environment => side == Side::Right && focus.is_some(),
@@ -1702,21 +1717,31 @@ impl Step {
         // Pressed as far as choosing takes, on the row it began on, it chooses that row, with the choosing click.
         for side in Side::BOTH {
             let others = holding(self, (side, 2));
+            // A row, or else a chip, by what it is, so that moving from one to another begins again.
+            let key = rows[side]
+                .as_ref()
+                .map(|(panel, row)| format!("{panel}\n{row}"))
+                .or_else(|| {
+                    presses[side]
+                        .as_ref()
+                        .map(|(panel, press)| format!("{panel}\n{press:?}"))
+                });
             if let Some(crate::client_side::Select::Pressed(_)) =
                 self.hands[side].row_selector.update_beside(
-                    rows[side]
-                        .as_ref()
-                        .map(|(panel, row)| format!("{panel}\n{row}"))
-                        .as_deref()
+                    key.as_deref()
                         .filter(|_| rungs[side] == precedence::Trigger::Row),
                     triggers[side],
                     crate::client_side::Press::default(),
                     others,
                 )
-                && let Some(row) = rows[side].clone()
-                && conversation.choose_row_at(row)
             {
-                feedback.emit_on(feedback::Event::Choose, side.into(), now);
+                let done = match rows[side].clone() {
+                    Some(row) => conversation.choose_row_at(row),
+                    None => presses[side]
+                        .clone()
+                        .is_some_and(|press| conversation.press_chip_at(press)),
+                };
+                done.then(|| feedback.emit_on(feedback::Event::Choose, side.into(), now));
             }
         }
         // A trigger pull that misses the hand menu's rows does nothing while it shows, nor while the transcript shows.
@@ -2363,6 +2388,7 @@ impl Step {
             // What the trigger and A choose next frame.
             hand.pad = resolved.pad.map(|(key, _, _)| key);
             hand.item = resolved.item.clone();
+            hand.chip = chip_of(resolved.target.as_ref());
             // The panel pointed at, not one carried, which the right stick and the wheel scroll next.
             hand.panel = resolved
                 .panel
@@ -2386,6 +2412,7 @@ impl Step {
         let serving = self.serving(Side::Right);
         conversation.point_pad(resolved[serving].pad.is_some());
         conversation.point_item(resolved[serving].item.clone());
+        conversation.point_chip(chip_of(resolved[serving].target.as_ref()));
         // What the trigger and B act on next frame, the right ray's alone in the environment for now.
         let right_object = resolved.right.object.clone();
         if let Some(client) = self.client.as_mut() {
@@ -2516,13 +2543,27 @@ impl Step {
                     .and_then(|projection| projection.panel(panel))
             {
                 // A choosable row says how to choose it, or, just chosen, that it was; a checklist item how to tick it.
-                let chosen = rows_now[side].as_ref().map(|(panel, row)| {
-                    if conversation.just_chose(panel, row) {
-                        crate::projection::ItemAction::Chosen
-                    } else {
-                        crate::projection::ItemAction::Choose
-                    }
-                });
+                let chosen = rows_now[side]
+                    .as_ref()
+                    .map(|(panel, row)| {
+                        if conversation.just_chose(panel, row) {
+                            crate::projection::ItemAction::Chosen
+                        } else {
+                            crate::projection::ItemAction::Choose
+                        }
+                    })
+                    // A chip that freezes or unfreezes its panel says so.
+                    .or_else(|| {
+                        chip_of(resolved.target.as_ref())
+                            .filter(|_| conversation.ticks())
+                            .and_then(|chip| conversation.chip_press(&chip))
+                            .map(|(_, press)| match press {
+                                tomori_protocol::context::ChipPress::Freeze => {
+                                    crate::projection::ItemAction::Freeze
+                                }
+                                _ => crate::projection::ItemAction::Unfreeze,
+                            })
+                    });
                 let tick = chosen
                     .or_else(|| {
                         resolved
@@ -2888,6 +2929,18 @@ impl Step {
     }
 }
 
+/// The chip of a panel's context `target` names, by its panel and parameter, if it names one.
+fn chip_of(target: Option<&tomori_protocol::Resource>) -> Option<(String, String)> {
+    match target? {
+        tomori_protocol::Resource::Panel {
+            panel,
+            chip: Some(chip),
+            ..
+        } => Some((panel.clone(), chip.clone())),
+        _ => None,
+    }
+}
+
 /// What one hand's ray is on this frame, of everything it meets, Tomori's own interface first.
 #[derive(Clone, Debug, Default)]
 struct Resolved {
@@ -3098,6 +3151,55 @@ pub mod fixtures {
         conversation.take_actions();
     }
 
+    /// Showing a copy of a latency chart floating at `at`, facing `viewer`, its region pinned and its time following,
+    /// its time chip doing `press` pressed, at version 6, in [`SPACE`].
+    pub fn show_copy(
+        conversation: &mut Conversation,
+        at: glam::Vec3,
+        viewer: glam::Vec3,
+        press: tomori_protocol::context::ChipPress,
+    ) {
+        use tomori_protocol::context::{ContextChip, ContextSetting, ContextValue};
+        conversation.apply(space(|state| state.projection = true));
+        let chart = tomori_protocol::chart::Chart::new(10)
+            .with_time(tomori_protocol::chart::TimeAxis::Live { step_ms: 6_000 });
+        let mut copy = tomori_protocol::Panel::new(
+            "panel-4",
+            "Latency",
+            "",
+            tomori_protocol::Place::Free {
+                pose: tomori_protocol::Pose::upright_facing(at.to_array(), viewer.to_array()),
+            },
+        )
+        .with_context(vec![
+            ContextChip::new(
+                "region",
+                "Region",
+                ContextValue::Text {
+                    text: "EU-WEST1".into(),
+                },
+                ContextSetting::Fixed,
+            ),
+            ContextChip::new(
+                "time",
+                "Time",
+                ContextValue::Live { minutes: 1 },
+                ContextSetting::Follows,
+            )
+            .with_press(press),
+        ])
+        .with_version(6);
+        copy.chart = Some(Box::new(chart));
+        conversation.apply(Event::Message(ServerMessage::Projection {
+            projection: Box::new(
+                tomori_protocol::Projection::new(SPACE, "sky")
+                    .with_walls(vec![tomori_wall()])
+                    .with_panels(vec![copy]),
+            ),
+        }));
+        conversation.take_actions();
+    }
+
     /// Showing `walls` and `panels` in [`SPACE`], whose server takes wall changes and locks walls.
     pub fn show_lockable_walls(
         conversation: &mut Conversation,
@@ -3117,14 +3219,22 @@ pub mod fixtures {
     /// of [`show_checklist`] or the queue of [`show_queue`].
     #[cfg(test)]
     pub fn label_hint(projection: &[crate::controller_ui::Sheet]) -> Option<String> {
+        ["Agenda", "Queue"]
+            .into_iter()
+            .find_map(|title| titled_label_hint(projection, title))
+    }
+
+    /// The last row of the label on the ray in `projection` naming the panel titled `title`, as [`label_hint`] finds
+    /// it: such as the copy of [`show_copy`], titled `Latency`.
+    #[cfg(test)]
+    pub fn titled_label_hint(
+        projection: &[crate::controller_ui::Sheet],
+        title: &str,
+    ) -> Option<String> {
         projection
             .iter()
             .filter_map(|sheet| sheet.canvas.as_deref())
-            .find(|canvas| {
-                let plain = canvas.plain();
-                (plain.starts_with("Agenda") || plain.starts_with("Queue"))
-                    && canvas.rows.len() <= 4
-            })
+            .find(|canvas| canvas.plain().starts_with(title) && canvas.rows.len() <= 4)
             .and_then(|canvas| {
                 canvas
                     .plain()

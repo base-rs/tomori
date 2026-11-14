@@ -1224,6 +1224,61 @@ mod tests {
     }
 
     #[test]
+    fn enter_or_a_click_on_a_copy_s_time_chip_freezes_it_as_a_and_the_trigger_do() {
+        let mut conversation = lobby(ConnectionRole::Owner);
+        let ahead = arrival::HOME + Head::default().transform().transform_vector3(-Vec3::Z) * 1.2;
+        show_copy(
+            &mut conversation,
+            ahead,
+            arrival::HOME,
+            tomori_protocol::context::ChipPress::Freeze,
+        );
+        let mut desktop = desktop(&mut conversation);
+        let now = Instant::now();
+        let freeze = Action::Send(ClientMessage::FreezePanel {
+            panel: "panel-4".into(),
+            frozen: true,
+            revision: Some(6),
+        });
+        // Over the upper part of the window, the mouse comes to the copy's time chip, whose label names Enter.
+        let on_chip = (0..160).find_map(|step| {
+            let (column, row) = (step % 16, step / 16);
+            let at = Vec2::new(
+                SIZE.x * (0.3 + 0.025 * column as f32),
+                SIZE.y * (0.2 + 0.03 * row as f32),
+            );
+            desktop.cursor_moved(at);
+            let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+            (titled_label_hint(&drawn.frame.projection, "Latency").as_deref()
+                == Some("Enter  freeze"))
+            .then_some(at)
+        });
+        assert!(on_chip.is_some(), "the mouse meets the time chip");
+        // Enter freezes it, as seen.
+        tap(&mut desktop, Key::A, &mut conversation);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(conversation.take_actions(), std::slice::from_ref(&freeze));
+        // So does a click, the left button being the trigger.
+        desktop.mouse(Button::Left, true);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        desktop.mouse(Button::Left, false);
+        desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(conversation.take_actions(), [freeze]);
+        // Frozen, its chip unfreezes it, as its label says.
+        show_copy(
+            &mut conversation,
+            ahead,
+            arrival::HOME,
+            tomori_protocol::context::ChipPress::Unfreeze,
+        );
+        let drawn = desktop.frame(&mut conversation, &mut felt(), now, SIZE);
+        assert_eq!(
+            titled_label_hint(&drawn.frame.projection, "Latency").as_deref(),
+            Some("Enter  unfreeze")
+        );
+    }
+
+    #[test]
     fn a_panel_carried_with_g_docks_on_a_wall_only_once_page_up_pushes_it_there() {
         use tomori_protocol::{Grid, Panel, Place, Pose as Placed, Wall, WallKind};
         let mut conversation = lobby(ConnectionRole::Owner);

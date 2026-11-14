@@ -62,11 +62,21 @@ pub(super) struct Published {
     /// `design/panel-context.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) waited: Option<super::held::Waited>,
+    /// When it was published, in milliseconds since the Unix epoch: the instant a live chart's last point stands for.
+    #[serde(default)]
+    pub(super) at_ms: i64,
 }
 
 /// Why a row of an instance its side has not published yet is not chosen: what it shows is its panel's, not its own.
 pub const COPYING: &str =
     "That copy is not ready yet: its environment has not shown it in its context.";
+
+/// Now, in milliseconds since the Unix epoch.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as i64)
+}
 
 /// How long an instance whose panel was retracted stays, saying so, before it is taken away, in seconds.
 pub const WITHDRAWN_SECS: u64 = 300;
@@ -448,6 +458,9 @@ pub(super) struct Resting {
         deserialize_with = "super::context::read"
     )]
     pub(super) context: super::context::Settings,
+    /// For a copy frozen, the time setting of its own it had before, kept so that unfreezing it gives it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) thaw: Option<super::context::Setting>,
 }
 
 fn is_zero(missed: &u32) -> bool {
@@ -499,6 +512,7 @@ impl Resting {
                 .and_then(|published| published.of.clone()),
             depends: kept.instance_depends(),
             context: kept.context.clone(),
+            thaw: kept.thaw.clone(),
         }
     }
 }
@@ -517,6 +531,7 @@ pub struct Publishing {
     columns: Vec<ListColumn>,
     depends: Vec<String>,
     window: Option<(i64, i64)>,
+    at_ms: i64,
 }
 
 impl Publishing {
@@ -598,6 +613,7 @@ impl Publishing {
             columns,
             depends,
             window,
+            at_ms: now_ms(),
         };
         Ok(publishing)
     }
@@ -737,6 +753,7 @@ impl Stage {
             columns,
             depends,
             window,
+            at_ms,
         } = publishing;
         let earlier = self
             .kept_published(walls.environment, &id)
@@ -759,6 +776,7 @@ impl Stage {
             gone: None,
             window,
             waited: None,
+            at_ms,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -795,6 +813,7 @@ impl Stage {
             arranged: false,
             published: Some(published),
             context: super::context::Settings::new(),
+            thaw: None,
         };
         // Back where it rested, where that is still there.
         if let Some(resting) = resting {
@@ -802,6 +821,7 @@ impl Stage {
             kept.created = resting.created;
             kept.pinned = resting.pinned;
             kept.context = resting.context;
+            kept.thaw = resting.thaw;
             kept.published
                 .as_mut()
                 .expect("a panel published is kept with what makes it so")
