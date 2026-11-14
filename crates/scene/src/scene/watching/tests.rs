@@ -291,10 +291,11 @@ fn a_watcher_leaves_out_the_head_it_sees_from_and_draws_the_rest_of_whom_it_foll
     let head = crate::people::CUBES - 4;
     let frame = watcher.watch(camera(), &mut conversation, &mut felt(), start, FRAME);
     assert_eq!(frame.people[0].cubes.len(), head + 1);
-    // Following them, it sees from inside their head, which it leaves out, and draws their ray.
+    // Following them, it sees from inside their head, which it leaves out, and draws their ray, close as their head is.
     watcher.follow(Some(2));
     let later = start + std::time::Duration::from_secs_f32(FRAME);
-    let frame = watcher.watch(camera(), &mut conversation, &mut felt(), later, FRAME);
+    let inside = Mat4::from_translation(Vec3::new(0.5, 1.6, -1.0));
+    let frame = watcher.watch(inside, &mut conversation, &mut felt(), later, FRAME);
     assert_eq!(frame.people[0].source, 2);
     assert_eq!(frame.people[0].cubes.len(), 1);
     // A participant's own step draws everyone's head, whatever it was told to follow.

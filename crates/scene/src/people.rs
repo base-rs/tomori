@@ -512,8 +512,9 @@ fn figure(
     head: bool,
 ) -> usize {
     let middle = present.head.position + present.head.orientation * MIDDLE;
-    // Fainter close to the eyes, and not drawn at all closer still.
-    let near = eyes.map_or(1.0, |eyes| {
+    // Fainter close to the eyes, and not drawn at all closer still; but for the one a watcher sees from, whose head is
+    // left out and whose rays are drawn whole, close as their head is to its eyes.
+    let near = eyes.filter(|_| head).map_or(1.0, |eyes| {
         ((eyes.distance(middle) - NEAREST) / (NEAR - NEAREST)).clamp(0.0, 1.0)
     });
     let fade = fade.clamp(0.0, 1.0) * near;
