@@ -1,6 +1,6 @@
 # Proposal: Drawing Other People
 
-Status: **proposal**, November 2026. Nothing here is a requirement until a stage brings it into the design documents it changes (listed at the end), which take precedence.
+Status: **proposal, decided**, November 2026. The maintainer agreed with the recommendation and added a gaze cue (see **Decisions**). Nothing here is a requirement until a stage brings it into the design documents it changes (listed at the end), which take precedence.
 
 It builds on presence as the protocol carries it (`design/spaces.md`, `design/clients.md`), the others' hands drawn between their updates for what they hold (#417, `tomori-scene`'s `relayed`, `design/physics.md`), the two rays and when each is shown (`docs/proposals/two-handed-pointing.md`, `design/interaction.md`), names and handles (`design/security.md`), the agent's `presence` tool (`design/mcp.md`), the render world and culling (`design/rendering.md`, `docs/proposals/rendering-architecture.md`), and the spectator's frame step (`design/spectator.md`).
 
@@ -10,10 +10,15 @@ On #417's review the maintainer noticed that nobody is drawn: in a space you can
 
 > Draw other people's heads, hands and rays — yes, it makes sense to me to go in that direction.
 
+On this proposal's review they said:
+
+> I think we can have some fun stylising these — we don't have to be "humans" or trying to make it photo-realistic. Probably seeing that someone is looking at you is helpful for conversations. I basically agree with your proposal.
+
 ## Recommendation in brief
 
 - **A person is a head, two hands and their rays.** There is no body. Each part is built from the cubes Tomori already draws everything with.
-  - **The head** is a rounded block about the size of a head, in the person's colour, with a dark visor band across the front, like a headset. It faces where they look.
+  - **The head** is a rounded block about the size of a head, in the person's colour, with a dark visor band across the front, like a headset. It faces where they look. It is stylised for fun, not a human or photo-realistic likeness, and needs no face.
+  - **A gaze cue:** while someone looks at you, their visor band glows towards you, so eye contact reads in conversation. It is worked out from the head pose already relayed, so nothing more is sent.
   - **A tracked hand** is drawn as its joints and bones, tinted, the way the headset already draws your own tracked hands.
   - **A controller** is a small stylised controller in their colour, not the runtime's model of your own hardware.
   - **A ray** uses your own ray's style, in their colour. It is drawn only while it is drawn in full on their headset, ending in a small dot on whatever it meets. A stub or a hidden ray is never drawn.
@@ -22,7 +27,7 @@ On #417's review the maintainer noticed that nobody is drawn: in a space you can
 - **Motion on #417's timeline.** Heads, hands and rays are drawn between updates, one update behind, from the same `Relayed` tracks that what someone holds already follows, so a stick and the hand holding it can never disagree. There is no extrapolation. A jump of more than 1.5 m is cut, not glided. Someone silent for 2 s fades out. Someone who leaves fades out where they stood.
 - **Privacy: nothing new about your body is sent.** Head, controllers and hand joints already go to everyone in the space. Only two things would newly be sent: each ray's aim and length while it is drawn in full, and the tag. A per-device setting, *Others see: everything / head only / my name only*, limits what this headset sends. Nothing is recorded.
 - **Cheap.** About 110 cube instances per person, in the batch Tomori's cubes already draw, plus one label. That is roughly 1.3 k triangles and two draws per person, culled by the render world, with less detail at a distance.
-- **Staged:** (1) heads and rays; (2) hands and controllers, with the privacy setting; (3) colours, labels and handles; (4) pointing at people, others' ray ends on panels, and level of detail.
+- **Staged:** (1) heads, the gaze cue and rays; (2) hands and controllers, with the privacy setting; (3) colours, labels and handles; (4) pointing at people, others' ray ends on panels, and level of detail.
 
 ## What exists today
 
@@ -30,7 +35,7 @@ On #417's review the maintainer noticed that nobody is drawn: in a space you can
 | --- | --- | --- |
 | Presence sent | Every frame (~72 Hz on a Quest 3, unevenly): head pose, left and right controller poses while tracked, both tracked hands' 26 joints with radii, plus `carried` and `rays`, which are the server's alone | `ClientMessage::Presence`, `tomori_scene::scene::Presence` |
 | Presence relayed | `source`, head, left, right, hands, to every other member of the space, as sent. `carried` and `rays` are not relayed | `tomori-server`'s `hub.rs`, `ServerMessage::Presence` |
-| Controller poses | The headset sends the **grip** poses it draws its own controllers at (`xr.rs` binds `input/grip/pose`). Its rays come from the **aim** poses, which are not sent. `presence::Seen` on the server calls the sent poses aim poses, so the agent's `presence` may read pointing along the grip's −Z (to check) | `client-quest/src/xr.rs`, `server/src/presence.rs` |
+| Controller poses | The headset sends the **grip** poses it draws its own controllers at (`xr.rs` binds `input/grip/pose`). Its rays come from the **aim** poses, which are not sent. `presence::Seen` on the server calls the sent poses aim poses, and the agent's `presence` reads pointing along their −Z, so it points along the grip, not the aim (confirmed; stage 1 fixes it) | `client-quest/src/xr.rs`, `server/src/presence.rs` |
 | Size | About 400 B a frame with controllers (≈ 28 KiB/s) and 3.9 KB with both hands tracked (≈ 280 KiB/s) per sender, as JSON, multiplied by each other member | measured on representative messages |
 | Drawn | Nobody. Environments' client sides get the others' hands (`Input::hands`), drawn between updates about a frame behind (`relayed`), for what they hold. The spectator draws the participant it follows: their controllers and hands, as theirs | `scene/relayed.rs`, `spectator.md` |
 | Names | `SpaceState::participants` gives each person's name, `source` and engagement. Tags are the server's and the agent's and are never sent to clients | `security.md`, **Tags** |
@@ -47,6 +52,14 @@ On #417's review the maintainer noticed that nobody is drawn: in a space you can
 | B. A small flock of cubes | Matches the swarm | Confused with the agent and its workers, the very things people point at |
 | C. A face or mask | Warmer | Uncanny without expression data. Picks a face for someone who did not choose one |
 | D. A glTF character | Rich | Needs assets and an animator per person, and choices of body and identity. Costs a skinned draw per person. Better left to a later "a build registers a person look" hook, like the agent's avatars (`avatars.md`) |
+
+**Stylised, for fun.** The visor block is the starting point, not a final likeness. People are not drawn as humans or photo-realistically, and need no face. Playful shapes and colours within Tomori's cube style are welcome: a tilted visor, ears or antennae of small cubes, a two-tone top. Whatever the look, its front and the way it faces must read at once, since the gaze cue and conversation depend on it.
+
+**The gaze cue.** Seeing that someone is looking at you helps conversation, so it is shown on their head:
+
+- **When:** another person's head forward is within about 10° of the line from their head to yours, and you are within about 8 m. Hysteresis keeps it steady: the cue starts within 10° and holds until beyond 15°, and it eases in over 0.2 s and out over 0.4 s, so a glance across you does not flicker.
+- **How:** their visor band brightens and glows towards you, a little lighter on the side that faces you. In stage 3 their label also lifts slightly while they look at you, as it does while they speak.
+- **Only yours:** each headset works it out for itself, from the head poses it already receives, about one update behind like the rest. Nothing new is sent, and nobody else sees that you are being looked at. The spectator shows the cue towards the participant it follows.
 
 **Hands.** A tracked hand is drawn as joints and bones (`BONES`), small cubes tinted towards the person's colour. That is what the renderer already draws for your own hands, and its geometry is already in presence. A controller is drawn as a small rounded body with a tracking ring, in their colour, at its grip pose. The runtime's render model shows *your* hardware, which may not be theirs, and it is a textured mesh for each hand. Where presence carries both joints and a controller pose, as with Meta's simultaneous hands and controllers, the hand is drawn. A hand that loses tracking fades over 0.15 s rather than freezing. Switching between controllers and hands cross-fades.
 
@@ -127,14 +140,16 @@ That is about 110 instances and ~1.3 k triangles, in the instanced cube batch al
 
 Each stage keeps every test passing, is reviewable alone, and changes nothing for someone alone in a space.
 
-1. **Heads and rays.**
+1. **Heads, the gaze cue and rays.**
    - `tomori_scene::people`, with `Relayed` generalised to whole presence; environments' hands read from the same tracks.
-   - The visor head, in a neutral colour, fading on silence, leaving, jumps and up close.
+   - The visor head, stylised, in a neutral colour, fading on silence, leaving, jumps and up close.
+   - The gaze cue on the visor band, from the relayed head poses alone, with its hysteresis. It belongs with the head because it needs nothing else; the label's part of it waits for labels in stage 3.
    - Rays: presence gains an optional `pointing: [Option<Ray>; 2]`, each ray's aim pose and length while drawn in full. The server relays it and resolves `presence`'s pointing from it, rather than from the grip poses.
    - `Frame::people`, which the spectator draws, leaving out the head of whoever it follows.
    - Tests:
      - `relayed` keeps #417's figures, and a held stick and the drawn hand agree each frame;
      - fade timings;
+     - the gaze cue starts within 10°, holds to 15°, does not flicker for a head wavering at the edge, and is shown only to the one looked at;
      - protocol round trips with and without `pointing`;
      - the server relays `pointing` and resolves pointing from it;
      - a lavapipe preview, `TOMORI_PEOPLE_PREVIEW`, of two people at a wall;
@@ -144,20 +159,23 @@ Each stage keeps every test passing, is reviewable alone, and changes nothing fo
    - *Others see* in the hand menu, honoured by what is sent.
    - Tests: drawing chooses hand over controller; each setting sends what it says; head-only holding still passes reach checks.
 3. **Colours, labels and handles.**
-   - `Participant::tag`, the palette with deterministic collision, labels with handles where names collide, speaking and away.
+   - `Participant::tag`, the palette with deterministic collision, labels with handles where names collide, speaking, away, and the label's lift while someone looks at you.
    - Tests: every client gives every person the same colour for one participant list; an older server's state falls back to `source`; handles show only while shared.
 4. **Pointing at people and polish.**
    - `Resource::Participant` and its description; others' ray-end dots on panels; level of detail and label culling; the floor disc if it earns its place.
    - Tests: attention resolves and describes a person, the handle where shared; dots are drawn on the face they end on and change nothing of it; the frame log on the headset with four people.
 
-## Open questions for the maintainer
+## Decisions
 
-1. **The head:** is the visor block right for Tomori's look, or would you rather something softer, such as a rounded mask?
-2. **Tags to clients:** may the server send each participant's tag in the space state, so that colours stay stable across reconnects? It is shown today only by the agent, aloud.
-3. **Others' rays:** a full beam while it is drawn in full on their headset, as recommended, or only the dot where it ends?
-4. **Privacy default:** show everything by default, with *head only* and *my name only* as the setting, or default to head and controllers with joints opt-in?
-5. **Pointing at a person** as attention (`[Pointing at Ada]`): wanted now, or later?
-6. **Later:** should a build be able to register a person's look, as it registers the agent's avatars?
+The maintainer agreed with the recommendation, November 2026:
+
+1. **The head:** the visor block to start, stylised for fun rather than human or photo-realistic, with no face (**1. What others look like**).
+2. **Tags to clients:** yes, each participant's tag is sent in the space state, for stable colours (stage 3).
+3. **Others' rays:** the full beam while it is drawn in full on their headset, ending in a dot (stage 1).
+4. **Privacy default:** *Others see: everything*, with *head only* and *my name only* as the setting (stage 2).
+5. **Pointing at a person** as attention: later, in stage 4.
+6. **A build registering a person's look:** later, not staged here.
+7. **New, a gaze cue:** someone looking at you is shown on their head, from the head pose already relayed, with hysteresis (stage 1, the label's part in stage 3).
 
 ## Design documents this would change
 
