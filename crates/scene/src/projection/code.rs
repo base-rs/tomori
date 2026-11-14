@@ -13,7 +13,7 @@ use crate::{
     canvas::Canvas,
     shapes::Mark,
     transcript::{BRIGHT, DIM},
-    ui_text::{Row, Style, cut},
+    ui_text::{Row, Style, cut, indent_step, wrap_code},
 };
 
 /// One row of a code panel's code, as wrapped: the line it is of, from 0, whether it is that line's first, and its
@@ -25,7 +25,7 @@ pub(super) struct CodeRow {
     cells: Vec<crate::ui_text::Cell>,
 }
 
-/// A code panel's code laid out: every row its lines take, each wrapped as [`wrap_code`](crate::ui_text::wrap_code) wraps it at its columns of code,
+/// A code panel's code laid out: every row its lines take, each wrapped as [`wrap_code`] wraps it at its columns of code,
 /// coloured by kind as [`palette`] colours them, and how many of its block's lines it holds and was not sent, so that
 /// its face shows any part of it. Spans that are not valid for its body, as `valid_spans` checks them, are ignored, and
 /// the code laid out plain. Laid out once for each panel's code, rather than each frame, as a panel holds up to
@@ -51,7 +51,7 @@ impl CodeLayout {
         }
         let mut at = 0;
         let lines: Vec<&str> = panel.body.split('\n').take(CODE_LINES).collect();
-        let step = crate::ui_text::indent_step(lines.iter().copied());
+        let step = indent_step(lines.iter().copied());
         let room = columns - GUTTER;
         let mut rows = Vec::new();
         for (number, line) in lines.iter().enumerate() {
@@ -65,7 +65,7 @@ impl CodeLayout {
                 }
             }
             at += line.chars().count() + 1;
-            let mut wrapped = crate::ui_text::wrap_code(&cut(&spans, usize::MAX), room, step, None);
+            let mut wrapped = wrap_code(&cut(&spans, usize::MAX), room, step, None);
             // A line cut by the server ends with a dim "…": past what the panel holds, or, from an older server, at 64
             // characters.
             if let Some(last) = wrapped
