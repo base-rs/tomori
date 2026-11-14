@@ -9,7 +9,7 @@
 //! **Bounded.** A chart is drawn without trusting it: [`bounded`] holds every count and string to the spec's bounds and
 //! every value to [`CHART_MAGNITUDE`] first, and the drawing holds what it makes to a fixed number of pieces, whatever
 //! the chart, so that its mesh, with every label, always fits the vertex buffer a wall's panel has: each series' line
-//! to [`LINE_VERTICES`] vertices, or its [`share`] of them in a chart of more than [`UNMARKED`] series, so that eight
+//! to [`LINE_VERTICES`] vertices, or its [`share`] of them in a chart of more than [`UNSHARED`] series, so that eight
 //! are drawn in no more pieces than four, its points closer than [`SIMPLIFY`] to the line through their neighbours
 //! merged away and, where that is not enough, each stretch of its points kept as its lowest and highest; a dashed
 //! line's dashes to one for each period across the plot, its points, where too many, to each period's lowest and
@@ -70,100 +70,21 @@ pub const MARKERS: usize = 16;
 /// overlapping ends of its parts would notch the outside of the turn or overshoot it.
 pub const JOINTS: usize = 64;
 /// How many of [`LINE_VERTICES`], [`MARKERS`] or [`JOINTS`], `most`, each series of a chart of `series` may take: all
-/// of them for a chart of up to [`UNMARKED`] series, and an equal share of as many as that many take for one of more,
+/// of them for a chart of up to [`UNSHARED`] series, and an equal share of as many as that many take for one of more,
 /// so that a chart of eight series is drawn in no more pieces than one of four.
 pub fn share(most: usize, series: usize) -> usize {
-    most * UNMARKED / series.max(UNMARKED)
+    most * UNSHARED / series.max(UNSHARED)
 }
 
 /// How near, in font pixels, a point may be to the line through its neighbours and be merged away: less than a pixel
 /// at any distance a panel is read from.
 pub const SIMPLIFY: f32 = 0.2;
-/// How many of a chart's series are told apart by their colour and dashes alone: those after them, the fifth to the
-/// eighth, are each marked along their line by a [`Marker`] of their own, so that a chart of eight series tells each
-/// apart without its colour.
-pub const UNMARKED: usize = 4;
-/// How many marks a marked series has across the plot, at most: one in each of as many equal columns, each series'
-/// a quarter of a column from the last's, so that two series' marks never stand at the same place.
-pub const MARKS: usize = 8;
+/// How many series a chart may have and each still take all of [`LINE_VERTICES`], [`MARKERS`] and [`JOINTS`]: past
+/// them, each takes its [`share`].
+pub const UNSHARED: usize = 4;
 /// The most rows a chart's legend takes: its series wrap onto the next where they do not fit across one, and those
 /// that do not fit in all of them are said as how many more.
 pub const LEGEND_ROWS: usize = 2;
-
-/// How a marked series is marked along its line, and in its legend's key: a dot, a ring, a ring about a dot or a
-/// square.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Marker {
-    Dot,
-    Ring,
-    Ringed,
-    Square,
-}
-
-impl Marker {
-    /// The marker of the series `index`, from 0: none for the first [`UNMARKED`], and one of each after them.
-    pub fn of(index: usize) -> Option<Self> {
-        [Self::Dot, Self::Ring, Self::Ringed, Self::Square]
-            .get(index.checked_sub(UNMARKED)?)
-            .copied()
-    }
-
-    /// The mark that stands for it in a row of text, as its legend's key.
-    pub fn mark(self) -> crate::shapes::Mark {
-        match self {
-            Self::Dot => crate::shapes::Mark::Dot,
-            Self::Ring => crate::shapes::Mark::Ring { dot: false },
-            Self::Ringed => crate::shapes::Mark::Ring { dot: true },
-            Self::Square => crate::shapes::Mark::Check { ticked: false },
-        }
-    }
-
-    /// The shapes that draw it about `centre` in `color`, on a backing of the plot's colour, so that a ring or a square
-    /// reads as hollow over its line.
-    fn shapes(self, centre: [f32; 2], color: Rgba) -> Vec<Shape> {
-        let backing = Shape::Dot {
-            centre,
-            radius: 4.25,
-            color: [PLOT[0], PLOT[1], PLOT[2], 1.0],
-        };
-        let [x, y] = centre;
-        match self {
-            Self::Dot => vec![
-                backing,
-                Shape::Dot {
-                    centre,
-                    radius: 3.0,
-                    color,
-                },
-            ],
-            Self::Ring => vec![
-                backing,
-                Shape::Ring {
-                    centre,
-                    radius: 3.5,
-                    color,
-                },
-            ],
-            Self::Ringed => vec![
-                backing,
-                Shape::Ring {
-                    centre,
-                    radius: 3.5,
-                    color,
-                },
-                Shape::Dot {
-                    centre,
-                    radius: 1.25,
-                    color,
-                },
-            ],
-            Self::Square => vec![
-                backing,
-                Shape::frame(x - 2.75, y - 2.75, [5.5, 5.5], 1.25, color),
-            ],
-        }
-    }
-}
 
 /// The colour of `colour`, opaque, or `alpha` opaque.
 pub fn ink(colour: Colour, alpha: f32) -> Rgba {
@@ -1110,15 +1031,6 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
             area.thinned.insert(0, (index, runs));
         }
     }
-    // The series after the first few marked along their lines, each by its own marker, on the line as it is drawn.
-    for (index, series) in chart.series.iter().enumerate().skip(UNMARKED) {
-        if let Some(marker) = Marker::of(index)
-            && series.style != SeriesStyle::Bars
-            && let Some(area) = drawing.plot.as_ref()
-        {
-            series_marks(&plot, area, index, marker, shapes);
-        }
-    }
     // Its badge, at the plot's top right, on a backing of its tone.
     if let Some(Note {
         text, tone: kind, ..
@@ -1251,58 +1163,6 @@ fn bars(
             height: (y1 - y0).abs(),
             color,
         });
-    }
-}
-
-/// The marks of the series `index` along its line, as `marker` draws them: one in each of [`MARKS`] equal columns
-/// across the plot, placed by its index within the column, where its line is drawn there, a thinned line's where it is
-/// drawn, within the plot; none across a gap or a break, nor beyond either end of the value axis.
-fn series_marks(
-    plot: &Plot<'_>,
-    area: &PlotArea,
-    index: usize,
-    marker: Marker,
-    shapes: &mut Vec<Shape>,
-) {
-    let series = &plot.chart.series[index];
-    let color = ink(series.colour, 1.0);
-    let column = plot.width / MARKS as f32;
-    let offset = ((index - UNMARKED) as f32 + 0.5) / (CHART_SERIES - UNMARKED) as f32;
-    let last = plot.chart.points.saturating_sub(1).max(1) as f32;
-    let thinned = area.thinned.iter().find(|(thinned, _)| *thinned == index);
-    let (low, high) = plot.range;
-    for mark in 0..MARKS {
-        let x = plot.left + column * (mark as f32 + offset);
-        let value = match thinned {
-            Some((_, runs)) => area.drawn(runs, x),
-            None => plot.value(index, (x - plot.left) / plot.width * last),
-        };
-        if let Some(value) = value.filter(|value| (low..=high).contains(value)) {
-            shapes.extend(marker.shapes([x, plot.y(value)], color));
-        }
-    }
-}
-
-impl Plot<'_> {
-    /// The value of the series `index` at `at`, a point's index or a share of the way between it and the next, where
-    /// its line is drawn: on the straight line between the two, or a step's held from the first; `None` across a gap
-    /// or a break, or past its last point.
-    fn value(&self, index: usize, at: f32) -> Option<f32> {
-        let edge = Edge::Series {
-            index: index as u32,
-        };
-        let point = at.floor() as usize;
-        let first = self.edge(edge, point)?;
-        let share = at - point as f32;
-        if self.broken(edge, point) {
-            return None;
-        }
-        let next = self.edge(edge, point + 1)?;
-        Some(if self.stepped(edge) {
-            first
-        } else {
-            first + (next - first) * share
-        })
     }
 }
 
@@ -1552,9 +1412,9 @@ fn columns(points: &[[f32; 2]], most: usize) -> Vec<[f32; 2]> {
     drawn
 }
 
-/// The legend of `chart`, in rows `columns` wide: each series' key, a short line in its colour, two dashes for a dashed
-/// series and its marker in it for a marked one, its name and its latest value, on a fixed window its newest, as
-/// [`Chart::current`] reads it, `--` where it has none now, or
+/// The legend of `chart`, in rows `columns` wide: each series' key, a short line in its colour, or two dashes for a
+/// dashed series, its name and its latest value, on a fixed window its newest, as [`Chart::current`] reads it, `--`
+/// where it has none now, or
 /// `no data` where it has none at all, dim; then each reference line's label and value. Each is whole, the series
 /// first, wrapping onto the next row where one does not fit, in at most [`LEGEND_ROWS`], and those that do not fit in
 /// them said at the end as how many more, `+3`; a reference line's only where it fits in the rows the series take,
@@ -1563,7 +1423,7 @@ fn columns(points: &[[f32; 2]], most: usize) -> Vec<[f32; 2]> {
 pub fn legend(chart: &Chart, columns: usize) -> Vec<Vec<Cell>> {
     let chart = &bounded(chart);
     let mut items: Vec<Vec<Span>> = Vec::new();
-    for (index, series) in chart.series.iter().enumerate() {
+    for series in &chart.series {
         let color = ink(series.colour, 1.0);
         let (text, color) = match chart.current(series) {
             Some((_, value)) => (format!(" {} {}", series.name, brief(value)), color),
@@ -1572,15 +1432,14 @@ pub fn legend(chart: &Chart, columns: usize) -> Vec<Vec<Cell>> {
             }
             None => (format!(" {} no data", series.name), DIM),
         };
-        // Its key a short line, or, for a dashed series, two dashes, so that the legend always says its style, and a
-        // marked series' marker in its middle.
+        // Its key a short line, or, for a dashed series, two dashes, so that the legend always says its style.
         let key = Style::plain(ink(series.colour, 1.0));
         let rule = || crate::shapes::Mark::Rule.span(1, key);
         let mut item = vec![rule()];
-        match Marker::of(index) {
-            Some(marker) => item.extend([marker.mark().span(1, key), rule()]),
-            None if series.dashed => item.extend([Span::new(" ", key), rule()]),
-            None => item.push(rule()),
+        if series.dashed {
+            item.extend([Span::new(" ", key), rule()]);
+        } else {
+            item.push(rule());
         }
         item.push(Span::new(text, Style::plain(color)));
         items.push(item);
@@ -1792,11 +1651,10 @@ pub mod fixtures {
     }
 
     /// A chart at every bound of the spec, as many pieces as one can be drawn with: eight dashed series of 256 points
-    /// swinging from one end of the range to the other at every point, lines, steps and areas, the last four marked,
-    /// four shades between the first four that cross at every step, four dashed reference lines, and every label, name,
-    /// badge and status at its longest. Without `gaps`, every swing passes beyond both fixed ends of the value axis, so
-    /// that every segment is clipped; with them, every third point of each series is missing, so that its line is in
-    /// many short runs.
+    /// swinging from one end of the range to the other at every point, lines, steps and areas, four shades between the
+    /// first four that cross at every step, four dashed reference lines, and every label, name, badge and status at its
+    /// longest. Without `gaps`, every swing passes beyond both fixed ends of the value axis, so that every segment is
+    /// clipped; with them, every third point of each series is missing, so that its line is in many short runs.
     pub fn largest(gaps: bool) -> Chart {
         let long = |count: usize| "W".repeat(count);
         let mut chart = Chart::new(super::CHART_POINTS)
@@ -1851,8 +1709,8 @@ pub mod fixtures {
     }
 
     /// Requests a second in each of eight regions over 15 minutes, a line each in the palette's colours, in its order,
-    /// the fifth to the eighth marked, one stepping, one dashed and one an area, the regions' names as long as a
-    /// console's, a gap where one stopped reporting, and a 1,000 limit across.
+    /// one stepping, one dashed and one an area, the regions' names as long as a console's, a gap where one stopped
+    /// reporting, and a 1,000 limit across.
     pub fn regions() -> Chart {
         let names = [
             "eu-west-1",
