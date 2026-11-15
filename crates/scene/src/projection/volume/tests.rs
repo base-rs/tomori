@@ -528,6 +528,305 @@ mod projector {
         );
         assert_eq!(projector.focus(), None);
     }
+
+    /// `frames` frames of `input` made by `make`, the last one's output.
+    fn frames(
+        projector: &mut Projector,
+        frames: usize,
+        mut make: impl FnMut(usize) -> Input<'static>,
+    ) -> crate::projection::Output {
+        let mut output = crate::projection::Output::default();
+        for frame in 0..frames {
+            output = projector.update(make(frame));
+        }
+        output
+    }
+
+    fn gripped(mut input: Input<'_>, grip: bool) -> Input<'_> {
+        input.grip = Some(if grip { 1.0 } else { 0.0 });
+        input
+    }
+
+    /// The volume of [`floating`], leaked, so that inputs may borrow it for as long as a test.
+    fn leaked() -> (&'static Projection, Pose) {
+        let (projection, pose) = floating();
+        (Box::leak(Box::new(projection)), pose)
+    }
+
+    #[test]
+    fn the_grip_on_a_node_pulls_it_with_the_ray_its_neighbours_following_and_let_go_without_it_springs_home()
+     {
+        let (projection, pose) = leaked();
+        let mut projector = Projector::default();
+        let now = Instant::now();
+        let b = world(projection, pose, Vec3::ZERO);
+        let at_b = towards(b);
+        let output = projector.update(gripped(
+            input(Some(projection), at_b, false, Hold::default(), now),
+            true,
+        ));
+        assert_eq!(output.pulled, Some(crate::sides::Side::Right));
+        assert!(projector.carrying_in(crate::sides::Side::Right));
+        assert!(
+            projector.held_in(crate::sides::Side::Right).is_none(),
+            "the node, not the volume"
+        );
+        // Held there, it is named, focused on, and the ray ends on it.
+        let output = frames(&mut projector, 200, |_| {
+            gripped(
+                input(Some(projection), towards(b), false, Hold::default(), now),
+                true,
+            )
+        });
+        assert_eq!(output.part, Some(Part::Node("b".into())));
+        assert_eq!(output.volumes[0].focus, Some(1));
+        assert!(
+            output.end.is_some_and(|end| end.distance(b) < 0.01),
+            "{:?}",
+            output.end
+        );
+        // Reeled in towards home by the stick, its neighbours follow.
+        let reeled = frames(&mut projector, 72, |_| {
+            let mut reel = gripped(
+                input(Some(projection), towards(b), false, Hold::default(), now),
+                true,
+            );
+            reel.stick = glam::Vec2::new(0.0, -0.4);
+            reel
+        });
+        let end = reeled.end.unwrap();
+        assert!(
+            end.distance(b) > 0.4 && end.distance(HOME) < b.distance(HOME) - 0.4,
+            "{end}"
+        );
+        let mut instances = Vec::new();
+        reeled.volumes[0].instances(&mut instances);
+        // Its neighbour a, a sphere, came part of the way with it.
+        let a_home = world(projection, pose, Vec3::new(-200.0, 0.0, 0.0));
+        assert!(
+            instances[0].position.distance(a_home) > 0.1,
+            "{:?}",
+            instances[0].position
+        );
+        // Let go out there, it is felt and springs home, and the server's layout is drawn again.
+        let output = projector.update(gripped(
+            input(Some(projection), towards(b), false, Hold::default(), now),
+            false,
+        ));
+        assert_eq!(output.pulled, Some(crate::sides::Side::Right));
+        assert!(!projector.carrying_in(crate::sides::Side::Right));
+        let output = frames(&mut projector, 400, |_| {
+            input(Some(projection), None, false, Hold::default(), now)
+        });
+        let mut instances = Vec::new();
+        output.volumes[0].instances(&mut instances);
+        assert!(
+            instances[1].position.distance(b) < 1e-3,
+            "{:?}",
+            instances[1].position
+        );
+        assert!(projector.springs.is_empty());
+    }
+
+    #[test]
+    fn a_node_let_go_within_its_volume_stays_pinned_until_the_trigger_on_the_volume_puts_it_back() {
+        let (mut projection, pose) = floating();
+        // Another node 10 cm behind c, within reach of the hand too, though further.
+        let mut behind = tomori_protocol::diagram::Node::new("e", "E");
+        behind.at = [200, 0, -100];
+        projection.panels[0]
+            .diagram
+            .as_mut()
+            .unwrap()
+            .nodes
+            .push(behind);
+        let projection: &'static Projection = Box::leak(Box::new(projection));
+        let mut projector = Projector::default();
+        let now = Instant::now();
+        // Taken by touch, the hand beside c, and moved 10 cm up, within the volume.
+        let c = world(projection, pose, Vec3::new(200.0, 0.0, 0.0));
+        let hand = |at: Vec3| Ray::new(at, -Vec3::Z);
+        let output = projector.update(gripped(
+            input(
+                Some(projection),
+                hand(c + Vec3::X * 0.05),
+                false,
+                Hold::default(),
+                now,
+            ),
+            true,
+        ));
+        assert_eq!(output.pulled, Some(crate::sides::Side::Right));
+        let up = c + Vec3::new(0.05, 0.08, 0.0);
+        // Held well in front of the volume first, then brought back within it as the grip lets go: where the hand lets
+        // it go decides.
+        let out = c + Vec3::new(0.05, 0.0, 0.5);
+        frames(&mut projector, 30, |_| {
+            gripped(
+                input(Some(projection), hand(out), false, Hold::default(), now),
+                true,
+            )
+        });
+        projector.update(input(
+            Some(projection),
+            hand(up),
+            false,
+            Hold::default(),
+            now,
+        ));
+        let output = frames(&mut projector, 400, |_| {
+            input(Some(projection), None, false, Hold::default(), now)
+        });
+        let mut instances = Vec::new();
+        output.volumes[0].instances(&mut instances);
+        let pinned = instances[2].position;
+        assert!(pinned.distance(c + Vec3::Y * 0.08) < 0.01, "{pinned}");
+        assert!(projector.springs["panel-1"].springs.pinned(2));
+        // The trigger on the volume's face, off its nodes, puts everything back; on nothing, nothing.
+        let face = towards(world(projection, pose, Vec3::new(100.0, 120.0, 0.0)));
+        projector.update(input(
+            Some(projection),
+            towards(Vec3::new(5.0, 1.5, -1.2)),
+            true,
+            Hold::default(),
+            now,
+        ));
+        assert!(projector.springs["panel-1"].springs.pinned(2));
+        projector.update(input(Some(projection), face, false, Hold::default(), now));
+        projector.update(input(Some(projection), face, true, Hold::default(), now));
+        assert!(!projector.springs["panel-1"].springs.any_pinned());
+        frames(&mut projector, 400, |_| {
+            input(Some(projection), None, false, Hold::default(), now)
+        });
+        assert!(projector.springs.is_empty());
+    }
+
+    #[test]
+    fn two_hands_holding_two_nodes_light_the_path_between_them() {
+        let (mut projection, pose) = floating();
+        let diagram = projection.panels[0].diagram.as_mut().unwrap();
+        let mut apart = tomori_protocol::diagram::Node::new("d", "D");
+        apart.at = [0, 150, 0];
+        apart.group = Some(0);
+        diagram.nodes.push(apart);
+        diagram.groups.push(Group::new("aside", "Aside"));
+        let projection: &'static Projection = Box::leak(Box::new(projection));
+        let mut projector = Projector::default();
+        let now = Instant::now();
+        let a = towards(world(projection, pose, Vec3::new(-200.0, 0.0, 0.0)));
+        let c = towards(world(projection, pose, Vec3::new(200.0, 0.0, 0.0)));
+        let left = |grip: f32| Hold {
+            ray: c,
+            grip: Some(grip),
+            active: true,
+            pointing: true,
+            nearer: f32::INFINITY,
+            ..Hold::default()
+        };
+        projector.update(input(Some(projection), a, false, left(0.0), now));
+        let output = projector.update(gripped(
+            input(Some(projection), a, false, left(1.0), now),
+            true,
+        ));
+        assert!(
+            projector.carrying_in(crate::sides::Side::Left)
+                && projector.carrying_in(crate::sides::Side::Right)
+        );
+        assert_eq!(output.volumes[0].focus, None);
+        let mut instances = Vec::new();
+        output.volumes[0].instances(&mut instances);
+        // a, b and c, and the edges between them, lit; d dimmed, with its label.
+        let grey = rgb(tomori_protocol::chart::Colour::Grey);
+        let teal = tomori_protocol::chart::Colour::Teal.rgb();
+        assert_eq!(instances[3].colour, teal.map(|channel| channel * DIMMED));
+        assert_eq!(instances[0].colour, grey);
+        assert_eq!(instances[1].colour, grey);
+        assert_eq!(output.left.part, Some(Part::Node("c".into())));
+        // Beads move along the path.
+        assert!(counted(&instances, Solid::Sphere) > 2 + BEADS);
+        // The projection gone, nothing is held or pulled about.
+        projector.update(input(None, a, false, left(1.0), now));
+        assert!(!projector.carrying_in(crate::sides::Side::Right) && projector.springs.is_empty());
+    }
+
+    #[test]
+    fn a_changed_or_withdrawn_volume_forgets_its_nodes_pulled_about() {
+        let (projection, pose) = leaked();
+        let mut projector = Projector::default();
+        let now = Instant::now();
+        let at_b = towards(world(projection, pose, Vec3::ZERO));
+        projector.update(gripped(
+            input(Some(projection), at_b, false, Hold::default(), now),
+            true,
+        ));
+        assert!(projector.carrying_in(crate::sides::Side::Right));
+        // The agent updates it, as many nodes as before but in another order, a and c swapped and b moved: b is still
+        // the node held, by its id, its layout laid out again from where the server now lays it.
+        let mut reordered = projection.clone();
+        let diagram = reordered.panels[0].diagram.as_mut().unwrap();
+        diagram.nodes.swap(0, 2);
+        diagram.nodes.swap(0, 1);
+        diagram.nodes[0].at = [0, 100, 0];
+        for edge in &mut diagram.edges {
+            *edge = Edge::new(0, 2);
+        }
+        let reordered: &'static Projection = Box::leak(Box::new(reordered));
+        let output = projector.update(gripped(
+            input(Some(reordered), at_b, false, Hold::default(), now),
+            true,
+        ));
+        assert!(projector.carrying_in(crate::sides::Side::Right));
+        assert_eq!(output.part, Some(Part::Node("b".into())));
+        assert_eq!(output.volumes[0].focus, Some(0));
+        let live = &projector.springs["panel-1"];
+        assert_eq!(live.springs.held(0), Some(0));
+        assert!(Arc::ptr_eq(&live.base, &projector.meshes["panel-1"]));
+        // Updated again without the node held, it is let go and the layout forgotten.
+        let mut changed = reordered.clone();
+        changed.panels[0].diagram.as_mut().unwrap().nodes.remove(0);
+        changed.panels[0].diagram.as_mut().unwrap().edges.clear();
+        let changed: &'static Projection = Box::leak(Box::new(changed));
+        projector.update(gripped(
+            input(Some(changed), at_b, false, Hold::default(), now),
+            true,
+        ));
+        assert!(!projector.carrying_in(crate::sides::Side::Right));
+        assert!(projector.springs.is_empty());
+        // A squeeze on nothing of a volume takes no node.
+        let output = projector.update(gripped(
+            input(
+                Some(changed),
+                towards(Vec3::new(5.0, 1.5, -1.2)),
+                false,
+                Hold::default(),
+                now,
+            ),
+            false,
+        ));
+        assert_eq!(output.pulled, None);
+        // A squeeze of a hand not tracked takes nothing.
+        let mut untracked = gripped(
+            input(Some(projection), at_b, false, Hold::default(), now),
+            true,
+        );
+        untracked.active = false;
+        let output = projector.update(untracked);
+        assert_eq!(output.pulled, None);
+        projector.update(input(Some(projection), at_b, false, Hold::default(), now));
+        // Pulled with the hand not tracked, it stays where it was.
+        projector.update(gripped(
+            input(Some(projection), at_b, false, Hold::default(), now),
+            true,
+        ));
+        let mut lost = gripped(
+            input(Some(projection), at_b, false, Hold::default(), now),
+            true,
+        );
+        lost.active = false;
+        let output = projector.update(lost);
+        assert!(projector.carrying_in(crate::sides::Side::Right));
+        assert!(output.end.is_some());
+    }
 }
 
 /// A target `id` of `kind`, here at `at`, marked `mark`.
@@ -1420,4 +1719,133 @@ fn a_legend_of_groups_and_kinds_stands_below_the_diagram_with_a_solid_for_each_k
 
 fn widths_of(entries: &[Entry]) -> Vec<usize> {
     entries.iter().map(Entry::cells).collect()
+}
+
+#[test]
+fn a_volume_posed_moves_its_nodes_edges_and_labels_where_they_stand_and_keeps_its_canvases() {
+    let mut drawn = diagram(
+        &[
+            ("a", Shape::Box, [-200, 0, 0]),
+            ("b", Shape::Box, [0, 0, 0]),
+            ("c", Shape::Box, [200, 0, 0]),
+        ],
+        vec![edge(0, 1, Style::Solid, Arrow::Forward)],
+    );
+    drawn.edges[0].label = "feeds".into();
+    drawn.edges[0].via = vec![[-100, 100, 0]];
+    // Nine groups at the top, the last past the palette and so labelled, as is the layer within it, which has a member,
+    // and one of no members.
+    for index in 0..9 {
+        drawn.groups.push(Group::new(format!("g{index}"), ""));
+    }
+    let mut layer = Group::new("layer", "");
+    layer.kind = GroupKind::Layer;
+    layer.parent = Some(8);
+    drawn.groups.push(layer);
+    drawn.groups.push(Group::new("none", "Empty"));
+    drawn.nodes[0].group = Some(9);
+    let mesh = Mesh::new(&drawn);
+    let mut posed = mesh.posed();
+    // Before it is moved, its nodes stand where the server laid them, its edge straight and no layer's floor drawn.
+    assert_eq!(posed.node_at(0), Vec3::new(-200.0, 0.0, 0.0));
+    assert_eq!(posed.edges[0].0.len(), 2);
+    assert!(
+        posed
+            .parts
+            .iter()
+            .all(|part| !matches!(part.owner, Owner::Group(_)))
+    );
+    let at = [
+        Vec3::new(-200.25, 0.5, 300.75),
+        Vec3::new(0.0, 50.0, 0.0),
+        Vec3::new(200.0, 0.0, 0.0),
+    ];
+    posed.repose(&at, None);
+    // Where they stand to a fraction of a millimetre, its edge between them, its solids with them.
+    assert_eq!(posed.node_at(0), at[0]);
+    assert_eq!(posed.parts[0].position, at[0]);
+    let path = &posed.edges[0].0;
+    assert!((path[0] - at[0]).length() < 40.0 && (path[1] - at[1]).length() < 40.0);
+    // Its extent, before which its labels are brought, is the box about its nodes as they stand.
+    assert_eq!(posed.diagram.extent, [501, 200, 702]);
+    // Its labels are the same canvases, each moved with what it names: a node's above it, the edge's above its middle,
+    // the group past the palette's about its member, and the empty one's where it was.
+    assert_eq!(posed.labels.len(), mesh.labels.len());
+    for (moved, kept) in posed.labels.iter().zip(&mesh.labels) {
+        assert!(Arc::ptr_eq(&moved.canvas, &kept.canvas));
+        match moved.owner {
+            Owner::Node(node) => assert_eq!(moved.at.x, at[node].x),
+            Owner::Edge(_) => assert!((moved.at.z - at[0].z / 2.0).abs() < 1.0),
+            Owner::Group(8 | 9) => {
+                assert!((moved.at.z - (at[0].z + 30.0 + GROUP_MARGIN_MM)).abs() < 1e-3)
+            }
+            Owner::Group(_) => assert_eq!(moved.at, kept.at),
+        }
+    }
+    // Two held light the path between them.
+    posed.repose(
+        &at,
+        Some(Highlight {
+            nodes: vec![0, 1],
+            edges: vec![0],
+        }),
+    );
+    assert!(posed.lit(Owner::Node(0), None) && !posed.lit(Owner::Node(2), None));
+    assert!(posed.lit(Owner::Edge(0), None) && !posed.lit(Owner::Group(8), None));
+    assert_eq!(posed.source(), mesh.source());
+}
+
+/// The largest diagram a volume draws: 64 boxes and 128 edges that point.
+fn largest() -> Diagram {
+    let nodes: Vec<(String, Shape, [i16; 3])> = (0..64)
+        .map(|index| {
+            (
+                format!("n{index}"),
+                Shape::Box,
+                [(index % 8) * 150, (index / 8) * 150, 0],
+            )
+        })
+        .collect();
+    let named: Vec<(&str, Shape, [i16; 3])> = nodes
+        .iter()
+        .map(|(id, shape, at)| (id.as_str(), *shape, *at))
+        .collect();
+    let edges = (0..128u16)
+        .map(|index| {
+            edge(
+                index % 64,
+                (index * 7 + 1) % 64,
+                Style::Solid,
+                Arrow::Forward,
+            )
+        })
+        .collect();
+    diagram(&named, edges)
+}
+
+/// A frame's work while a participant pulls a node of the largest diagram about, a step of its springs, which a frame
+/// takes one or two of, and its nodes, edges and labels moved, is well within a frame: on an Apple M4 Pro in a release
+/// build in November 2026 it took 21 µs, measured over 600 frames; a Quest 3's cores score about a third of its single
+/// core in Geekbench 6, so there about 70 µs, under one percent of an 11 ms frame at 90 Hz, and less for a diagram of
+/// thirty nodes. The bound is far looser than that, so that it holds on a loaded runner with coverage; it guards against
+/// gross regressions at the bounds, such as making everything the volume draws again each frame many times over, and
+/// says nothing of how the cost grows, which the bounds on nodes and edges hold.
+#[test]
+fn moving_the_largest_diagram_s_nodes_each_frame_costs_far_less_than_a_frame() {
+    let drawn = largest();
+    let mesh = Mesh::new(&drawn);
+    let mut posed = mesh.posed();
+    let mut springs = springs::Springs::new(&drawn);
+    springs.hold(0, 9, Vec3::new(0.0, 0.0, 500.0));
+    let frames = 600;
+    let started = std::time::Instant::now();
+    for frame in 0..frames {
+        springs.move_to(0, Vec3::new(frame as f32, 0.0, 500.0));
+        springs.step(springs::STEP, Vec3::new(0.0, 0.0, 2_000.0));
+        posed.repose(springs.positions(), None);
+    }
+    let each = started.elapsed() / frames;
+    eprintln!("a frame of 64 nodes and 128 edges pulled about took {each:?}");
+    assert!(each < std::time::Duration::from_micros(500), "{each:?}");
+    assert_eq!(posed.node_at(9), springs.positions()[9]);
 }

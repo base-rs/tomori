@@ -70,6 +70,11 @@ const MIDDLE_ARROW: f32 = 0.6;
 const ARROW_LIGHT: f32 = 0.6;
 /// How many pieces each span of an edge's curve through its waypoints is drawn in.
 const CURVE_PIECES: usize = 8;
+/// How far above a node's surface its label stands, and above an edge's middle its own, in millimetres.
+const NODE_LABEL_MM: f32 = 18.0;
+const EDGE_LABEL_MM: f32 = 12.0;
+/// How far a group's box reaches beyond its members' as they are pulled about, in millimetres.
+const GROUP_MARGIN_MM: f32 = 20.0;
 /// How far within a node's surface an edge ends, in millimetres, so that it meets it without a seam.
 const EMBED_MM: f32 = 1.0;
 /// A dashed edge's dashes and gaps, and a dotted one's spacing, in millimetres, and the most of either along an edge.
@@ -146,7 +151,7 @@ pub struct Instance {
 enum Owner {
     Node(usize),
     Edge(usize),
-    Group,
+    Group(usize),
 }
 
 /// A solid of a volume, in its own millimetres.
@@ -170,7 +175,7 @@ struct Label {
 
 /// What a volume draws, built once from its diagram: its solids and labels in its own millimetres, where its nodes
 /// and edges are, which the ray meets, and which edges move.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Mesh {
     /// The diagram as it was sent, by which it is kept, and as it is drawn, within its bounds.
     source: Diagram,
@@ -191,6 +196,15 @@ pub struct Mesh {
     legend: Vec<Entry>,
     /// Its world edges to things here, drawn in the space.
     leaders: Vec<leaders::Leader>,
+    /// The nodes and edges lit, the rest dimmed, while no node is focused on, as a path between two held.
+    highlight: Option<Highlight>,
+}
+
+/// Which nodes and edges of a volume are lit, by their indices, the rest dimmed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Highlight {
+    pub nodes: Vec<usize>,
+    pub edges: Vec<usize>,
 }
 
 /// A node's grey, the colour a node in no group is unless it says another, and an explicit grey: as bright as the chart
@@ -356,7 +370,95 @@ fn along(direction: Vec3) -> Mat3 {
 impl Mesh {
     /// What `diagram` draws, as [`Diagram::bounded`] holds it, whatever a server sent.
     pub fn new(source: &Diagram) -> Self {
-        let diagram = source.bounded();
+        Self::built(source, source.bounded(), None)
+    }
+
+    /// It as drawn while a participant pulls its nodes about, its nodes where the server laid them out, its edges
+    /// straight between them and its groups by their colour alone, its labels' canvases kept; [`Mesh::repose`] then
+    /// moves its nodes. See [`springs`].
+    pub fn posed(&self) -> Self {
+        let mut diagram = self.diagram.clone();
+        for edge in &mut diagram.edges {
+            edge.via.clear();
+        }
+        // Drawn by its colour alone while its members move, a floor or frame stretching after them being only more to
+        // follow.
+        for group in &mut diagram.groups {
+            group.kind = GroupKind::Cluster;
+        }
+        Self::built(&self.source, diagram, Some(self))
+    }
+
+    /// Move its nodes to `at`, in its millimetres, as a participant pulls them about, where they stand to a fraction of a
+    /// millimetre: its nodes' solids, its edges' solids along their new paths, its labels with what they name and its
+    /// extent the box about its nodes, before which its labels are brought; and light, where `highlight` says, those
+    /// nodes and edges and dim the rest. Nothing else is made again: its labels' canvases, its legend and its cards are
+    /// kept. A mesh from [`Mesh::posed`], whose edges have no waypoints and whose groups are drawn as nothing but colour.
+    pub fn repose(&mut self, at: &[Vec3], highlight: Option<Highlight>) {
+        let count = self.nodes.len().min(at.len());
+        for (index, at) in at.iter().enumerate().take(count) {
+            self.nodes[index].0 = *at;
+            self.parts[index].position = *at;
+        }
+        self.parts.truncate(self.diagram.nodes.len());
+        for (index, edge) in self.diagram.edges.iter().enumerate() {
+            let (from, to) = (usize::from(edge.from), usize::from(edge.to));
+            let body = |node: usize| {
+                let node = &self.diagram.nodes[node];
+                body(node.shape, node.width())
+            };
+            let path = edge_path(
+                edge,
+                (self.nodes[from].0, self.nodes[to].0),
+                &[],
+                (body(from), body(to)),
+            );
+            edge_parts(edge, index, &path, self.edges[index].1, &mut self.parts);
+            self.edges[index].0 = path;
+        }
+        // Each group's label about its members as they stand.
+        let mut bounds: Vec<Option<(Vec3, Vec3)>> = vec![None; self.diagram.groups.len()];
+        for (node, (at, radius)) in self.diagram.nodes.iter().zip(&self.nodes) {
+            let mut group = node.group;
+            while let Some(index) = group.map(usize::from).filter(|index| *index < bounds.len()) {
+                let reach = Vec3::splat(radius + GROUP_MARGIN_MM);
+                let (low, high) = bounds[index].unwrap_or((*at - reach, *at + reach));
+                bounds[index] = Some((low.min(*at - reach), high.max(*at + reach)));
+                group = self.diagram.groups[index].parent;
+            }
+        }
+        for label in &mut self.labels {
+            label.at = match label.owner {
+                Owner::Node(node) => {
+                    self.nodes[node].0 + Vec3::Y * (self.nodes[node].1 + NODE_LABEL_MM)
+                }
+                Owner::Edge(edge) => middle_of(&self.edges[edge].0) + Vec3::Y * EDGE_LABEL_MM,
+                Owner::Group(group) => match bounds[group] {
+                    Some((low, high)) => Vec3::new(low.x, high.y, high.z),
+                    None => label.at,
+                },
+            };
+        }
+        let reach = self.nodes.iter().fold(Vec3::ZERO, |reach, (at, radius)| {
+            reach.max(at.abs() + Vec3::splat(radius + GROUP_MARGIN_MM))
+        });
+        let most = f32::from(tomori_protocol::diagram::EXTENT_MM);
+        self.diagram.extent = (reach * 2.0)
+            .to_array()
+            .map(|side| side.round().clamp(1.0, most) as u16);
+        self.highlight = highlight;
+    }
+
+    /// What `diagram`, as `source` holds it within its bounds, draws, its labels' and cards' canvases those of `kept`,
+    /// of the same diagram, where it is given.
+    fn built(source: &Diagram, diagram: Diagram, kept: Option<&Mesh>) -> Self {
+        let mut canvases = kept.map(|mesh| mesh.labels.iter().map(|label| label.canvas.clone()));
+        let mut canvas = |make: &dyn Fn() -> Canvas| {
+            canvases
+                .as_mut()
+                .and_then(Iterator::next)
+                .unwrap_or_else(|| Arc::new(make()))
+        };
         let point = |at: [i16; 3]| Vec3::new(f32::from(at[0]), f32::from(at[1]), f32::from(at[2]));
         let mut parts = Vec::new();
         let mut labels = Vec::new();
@@ -387,27 +489,13 @@ impl Mesh {
         let mut pointing = Vec::new();
         for (index, edge) in diagram.edges.iter().enumerate() {
             let (from, to) = (usize::from(edge.from), usize::from(edge.to));
-            let mut path: Vec<Vec3> = std::iter::once(nodes[from].0)
-                .chain(edge.via.iter().copied().map(point))
-                .chain(std::iter::once(nodes[to].0))
-                .collect();
-            // From surface to surface, of each end's solid as it is drawn.
-            let last = path.len() - 1;
-            let start = (path[1] - path[0]).try_normalize().unwrap_or(Vec3::X);
-            let end = (path[last] - path[last - 1])
-                .try_normalize()
-                .unwrap_or(Vec3::X);
-            let (solid, scale, basis) = bodies[from];
-            path[0] +=
-                start * (surface(solid, scale, basis.transpose() * start) - EMBED_MM).max(0.0);
-            let (solid, scale, basis) = bodies[to];
-            path[last] -=
-                end * (surface(solid, scale, basis.transpose() * -end) - EMBED_MM).max(0.0);
-            let mut path = curved(&path);
-            // From where it points from, so that it narrows towards where it points and its beads move that way.
-            if edge.direction == Arrow::Back {
-                path.reverse();
-            }
+            let via: Vec<Vec3> = edge.via.iter().copied().map(point).collect();
+            let path = edge_path(
+                edge,
+                (nodes[from].0, nodes[to].0),
+                &via,
+                (bodies[from], bodies[to]),
+            );
             let shared = diagram.nodes[from]
                 .group
                 .filter(|group| Some(*group) == diagram.nodes[to].group)
@@ -416,21 +504,7 @@ impl Mesh {
                 || shared.map_or(EDGE, |colour| colour.map(|channel| channel * WITHIN)),
                 rgb,
             );
-            let heavier = (1.0 + 0.5 * f32::from(edge.weight.saturating_sub(1)))
-                * if edge.style == Style::Thick { 2.0 } else { 1.0 };
-            let points = matches!(edge.direction, Arrow::Forward | Arrow::Back);
-            let width = if points {
-                (TAPER_MM.0 * heavier, TAPER_MM.1 * heavier)
-            } else {
-                (TUBE_MM * heavier, TUBE_MM * heavier)
-            };
-            let owner = Owner::Edge(index);
-            tubes(&path, edge.style, width, colour, owner, &mut parts);
-            // Arrowheads where it points and along its middle, lighter than the edge, so that which way it
-            // points reads at a glance; shorter on a short edge.
-            if points {
-                parts.extend(arrowheads(&path, colour, owner));
-            }
+            let points = edge_parts(edge, index, &path, colour, &mut parts);
             if edge.style == Style::Flow {
                 flows.push(index);
             }
@@ -464,7 +538,7 @@ impl Mesh {
                                 scale,
                                 basis: Mat3::IDENTITY,
                                 colour,
-                                owner: Owner::Group,
+                                owner: Owner::Group(index),
                             });
                         }
                     }
@@ -486,7 +560,7 @@ impl Mesh {
                                 scale,
                                 basis: Mat3::IDENTITY,
                                 colour,
-                                owner: Owner::Group,
+                                owner: Owner::Group(index),
                             });
                         }
                     }
@@ -495,9 +569,9 @@ impl Mesh {
             // A group with a colour is named by the legend; one without, past the palette, by a label of its own.
             if colour.is_none() {
                 labels.push(Label {
-                    canvas: Arc::new(label(group_name(group), None, DIM, 0.6)),
+                    canvas: canvas(&|| label(group_name(group), None, DIM, 0.6)),
                     at: Vec3::new(low.x, high.y, high.z),
-                    owner: Owner::Group,
+                    owner: Owner::Group(index),
                 });
             }
         }
@@ -510,8 +584,8 @@ impl Mesh {
             let detail = (node.shape == Shape::Card && !node.detail.is_empty())
                 .then_some(node.detail.as_str());
             labels.push(Label {
-                canvas: Arc::new(label(&node.label, detail, BRIGHT, 0.85)),
-                at: at + Vec3::Y * (radius + 18.0),
+                canvas: canvas(&|| label(&node.label, detail, BRIGHT, 0.85)),
+                at: at + Vec3::Y * (radius + NODE_LABEL_MM),
                 owner: Owner::Node(index),
             });
         }
@@ -524,22 +598,26 @@ impl Mesh {
         {
             let path = &edges[index].0;
             labels.push(Label {
-                canvas: Arc::new(label(&edge.label, None, DIM, 0.7)),
-                at: middle_of(path) + Vec3::Y * 12.0,
+                canvas: canvas(&|| label(&edge.label, None, DIM, 0.7)),
+                at: middle_of(path) + Vec3::Y * EDGE_LABEL_MM,
                 owner: Owner::Edge(index),
             });
         }
-        let cards = diagram
-            .nodes
-            .iter()
-            .map(|node| {
-                (!node.detail.is_empty())
-                    .then(|| Arc::new(label(&node.label, Some(&node.detail), BRIGHT, 0.92)))
-            })
-            .collect();
+        let cards = match kept {
+            Some(mesh) => mesh.cards.clone(),
+            None => diagram
+                .nodes
+                .iter()
+                .map(|node| {
+                    (!node.detail.is_empty())
+                        .then(|| Arc::new(label(&node.label, Some(&node.detail), BRIGHT, 0.92)))
+                })
+                .collect(),
+        };
         Self {
             cards,
             legend: legend(&diagram),
+            highlight: None,
             leaders: leaders::Leader::of(&diagram),
             source: source.clone(),
             diagram,
@@ -596,6 +674,11 @@ impl Mesh {
                 leader.path(model.transform_point3(at), radius * scale.x, out)
             })
             .collect()
+    }
+
+    /// Where the node at `index` stands, in its millimetres, or its middle for one it does not have.
+    pub fn node_at(&self, index: usize) -> Vec3 {
+        self.nodes.get(index).map_or(Vec3::ZERO, |(at, _)| *at)
     }
 
     /// How many labels it draws.
@@ -674,7 +757,7 @@ impl Mesh {
         let scale = label_scale(model);
         let mut drawn: Vec<(f32, Sheet)> = Vec::new();
         for label in &self.labels {
-            if focus.is_some() && !self.lit(label.owner, focus) {
+            if !self.lit(label.owner, focus) {
                 continue;
             }
             // Its first row where a label of one stands, the rest growing upwards, away from what it names.
@@ -736,7 +819,12 @@ impl Mesh {
     /// joined to and the edges between them; everything, without a focus.
     fn lit(&self, owner: Owner, focus: Option<usize>) -> bool {
         let Some(focus) = focus else {
-            return true;
+            return match (&self.highlight, owner) {
+                (None, _) => true,
+                (Some(lit), Owner::Node(node)) => lit.nodes.contains(&node),
+                (Some(lit), Owner::Edge(edge)) => lit.edges.contains(&edge),
+                (Some(_), Owner::Group(_)) => false,
+            };
         };
         let joined = |edge: &tomori_protocol::diagram::Edge| {
             usize::from(edge.from) == focus || usize::from(edge.to) == focus
@@ -750,7 +838,7 @@ impl Mesh {
                     })
             }
             Owner::Edge(edge) => joined(&self.diagram.edges[edge]),
-            Owner::Group => false,
+            Owner::Group(_) => false,
         }
     }
 
@@ -830,8 +918,15 @@ impl Mesh {
                 usize::from(edge.from) == focus || usize::from(edge.to) == focus
             })
         };
-        let beading = (0..self.edges.len())
-            .filter(|edge| self.flows.contains(edge) || (self.pointing[*edge] && focused(*edge)));
+        let highlighted = |edge: usize| {
+            self.highlight
+                .as_ref()
+                .is_some_and(|lit| lit.edges.contains(&edge))
+        };
+        let beading = (0..self.edges.len()).filter(|edge| {
+            self.flows.contains(edge)
+                || (self.pointing[*edge] && (focused(*edge) || highlighted(*edge)))
+        });
         for edge in beading {
             let (path, colour) = &self.edges[edge];
             let length = path_length(path);
@@ -930,7 +1025,62 @@ fn entering(from: Vec3, to: Vec3, half: Vec3) -> Option<f32> {
     (near <= far && far > 0.0).then_some(near.max(0.0))
 }
 
-/// The arrowheads of an edge along `path`, from where it points from to where it points, in `colour`, a little brighter:
+/// The path of `edge` between its ends' middles `ends`, through `via`, from the surface of each end's solid, `bodies`,
+/// as it is drawn to the other's, curved through its waypoints, from where it points from to where it points.
+fn edge_path(
+    edge: &tomori_protocol::diagram::Edge,
+    ends: (Vec3, Vec3),
+    via: &[Vec3],
+    bodies: ((Solid, Vec3, Mat3), (Solid, Vec3, Mat3)),
+) -> Vec<Vec3> {
+    let mut path: Vec<Vec3> = std::iter::once(ends.0)
+        .chain(via.iter().copied())
+        .chain(std::iter::once(ends.1))
+        .collect();
+    let last = path.len() - 1;
+    let start = (path[1] - path[0]).try_normalize().unwrap_or(Vec3::X);
+    let end = (path[last] - path[last - 1])
+        .try_normalize()
+        .unwrap_or(Vec3::X);
+    let (solid, scale, basis) = bodies.0;
+    path[0] += start * (surface(solid, scale, basis.transpose() * start) - EMBED_MM).max(0.0);
+    let (solid, scale, basis) = bodies.1;
+    path[last] -= end * (surface(solid, scale, basis.transpose() * -end) - EMBED_MM).max(0.0);
+    let mut path = curved(&path);
+    // From where it points from, so that it narrows towards where it points and its beads move that way.
+    if edge.direction == Arrow::Back {
+        path.reverse();
+    }
+    path
+}
+
+/// The solids of `edge`, at `index`, along `path`, in `colour`, into `parts`: its tubes, and, where it points one way,
+/// its arrowheads where it points and along its middle, lighter than it, so that which way it points reads at a
+/// glance; whether it points one way.
+fn edge_parts(
+    edge: &tomori_protocol::diagram::Edge,
+    index: usize,
+    path: &[Vec3],
+    colour: [f32; 3],
+    parts: &mut Vec<Part>,
+) -> bool {
+    let heavier = (1.0 + 0.5 * f32::from(edge.weight.saturating_sub(1)))
+        * if edge.style == Style::Thick { 2.0 } else { 1.0 };
+    let points = matches!(edge.direction, Arrow::Forward | Arrow::Back);
+    let width = if points {
+        (TAPER_MM.0 * heavier, TAPER_MM.1 * heavier)
+    } else {
+        (TUBE_MM * heavier, TUBE_MM * heavier)
+    };
+    let owner = Owner::Edge(index);
+    tubes(path, edge.style, width, colour, owner, parts);
+    if points {
+        parts.extend(arrowheads(path, colour, owner));
+    }
+    points
+}
+
+/// The arrowheads of an edge along `path`, from where it points from to where it points, in a light tone of `colour`:
 /// one with its point at the path's end, against the target's surface, and one a little past its middle, clear of the
 /// labels above its ends, each as long as [`ARROW_MM`] says or a fifth of the edge, whichever is shorter.
 fn arrowheads(path: &[Vec3], colour: [f32; 3], owner: Owner) -> Vec<Part> {
@@ -1454,6 +1604,7 @@ impl Drawn {
 }
 
 mod leaders;
+pub mod springs;
 
 #[cfg(test)]
 mod tests;

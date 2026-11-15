@@ -435,7 +435,7 @@ fn tomori_s_crates_read_as_coloured_groups_of_shaped_kinds() {
         volume_at + glam::Quat::from_rotation_y(0.7) * towards * 1.0 + Vec3::Y * 0.4,
     ];
     test_gpu::with(|gpu| {
-        let images = rendered(gpu, &volume, &added, &eyes, volume_at);
+        let images = rendered(gpu, &volume, &added, &eyes, volume_at, None);
         let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
         image::imageops::replace(&mut sheet, &images[0], 0, 0);
         image::imageops::replace(&mut sheet, &images[1], 0, HEIGHT.into());
@@ -455,13 +455,16 @@ fn tomori_s_crates_read_as_coloured_groups_of_shaped_kinds() {
 }
 
 /// What `volume` looks like from each of `eyes`, looking at `at`, standing as the server placed it with `added` the wall
-/// beside it, each a frame of a participant whose eyes are there, so that its labels face and come towards them.
+/// beside it, each a frame of a participant whose eyes are there, so that its labels face and come towards them; and,
+/// where `pulled` names one of its nodes, that node taken with the grip, the hand below and to the right of it, and
+/// pulled 45 cm towards those eyes, the layout let settle about it.
 fn rendered(
     test_gpu::Gpu { device, queue, .. }: test_gpu::Gpu,
     volume: &tomori_protocol::Panel,
     added: &Wall,
     eyes: &[Vec3],
     at: Vec3,
+    pulled: Option<&str>,
 ) -> Vec<image::RgbaImage> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -503,14 +506,44 @@ fn rendered(
             let mut conversation = joined();
             show_projection(&mut conversation, vec![added.clone()], vec![volume.clone()]);
             let mut step = Step::default();
-            let frame = step.update(
-                &senses,
-                &mut conversation,
-                &mut felt(),
-                Instant::now(),
-                0.01,
-            );
-            assert_eq!(frame.volumes.len(), 1);
+            let now = Instant::now();
+            let first = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+            assert_eq!(first.volumes.len(), 1);
+            let drawn = first.volumes[0].clone();
+            let mut senses = senses;
+            let mut later = now;
+            let mut held = None;
+            if let Some(node) = pulled {
+                let index = drawn.mesh.diagram().node(node).expect("a node of it");
+                let at = drawn.model.transform_point3(drawn.mesh.node_at(index));
+                let towards = (*eye - at).normalize();
+                let aside = Vec3::new(0.25, -0.3, 0.0);
+                let hand = |from: f32| {
+                    let origin = at + towards * from + aside;
+                    tomori_scene::pointing::Ray::new(origin, at + towards * (from - 0.3) - origin)
+                };
+                senses.ray = hand(0.3);
+                senses.grip = Some(0.0);
+                senses.pointing = true;
+                step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+                senses.grip = Some(1.0);
+                step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
+                senses.ray = hand(0.75);
+                for frame in 1..300 {
+                    later = now + std::time::Duration::from_millis(14 * frame);
+                    step.update(&senses, &mut conversation, &mut felt(), later, 0.014);
+                }
+                held = Some((index, at + towards * 0.45));
+                later += std::time::Duration::from_millis(14);
+            }
+            let frame = step.update(&senses, &mut conversation, &mut felt(), later, 0.014);
+            // Held, it stands 45 cm nearer the eyes, focused on.
+            if let Some((index, expected)) = held {
+                let drawn = &frame.volumes[0];
+                assert_eq!(drawn.focus, Some(index));
+                let moved = drawn.model.transform_point3(drawn.mesh.node_at(index));
+                assert!((moved - expected).length() < 0.01, "{moved} {expected}");
+            }
             draw(&mut renderer, &device, &queue, &mut panels, &frame);
             let (_, left_out) = renderer.volume_counts();
             assert_eq!(left_out, 0);
@@ -527,4 +560,29 @@ fn rendered(
         .collect();
     assert!(pollster::block_on(scope.pop()).is_none());
     images
+}
+
+/// Set `TOMORI_PULLED_DIAGRAM_PREVIEW` to a PNG path to save what this renders: Tomori's crates with `scene` taken with
+/// the grip and pulled 45 cm towards the eyes, what feeds it fanned to their left, what it feeds to their right and the
+/// rest fallen back and dimmed, from 1.1 m in front and from above and to one side.
+#[test]
+fn a_node_pulled_towards_its_holder_fans_its_neighbours_either_side() {
+    let (projection, added) = projected(&format!("Here are the crates.\n\n{CRATES}"));
+    let volume = projection.panels[0].clone();
+    let Place::Free { pose } = &volume.place else {
+        unreachable!("floating beside Ada, looking at no wall")
+    };
+    let volume_at = Vec3::from_array(pose.position);
+    let towards = ((arrival::HOME - volume_at) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+    let eyes = [
+        volume_at + towards * 1.1,
+        volume_at + glam::Quat::from_rotation_y(0.9) * towards * 1.1 + Vec3::Y * 0.35,
+    ];
+    test_gpu::with(|gpu| {
+        let images = rendered(gpu, &volume, &added, &eyes, volume_at, Some("scene"));
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+        image::imageops::replace(&mut sheet, &images[0], 0, 0);
+        image::imageops::replace(&mut sheet, &images[1], 0, HEIGHT.into());
+        crate::test_support::preview("TOMORI_PULLED_DIAGRAM_PREVIEW", &sheet);
+    });
 }

@@ -343,7 +343,7 @@ fn pointing_at_a_node_or_an_edge_names_it_to_the_agent_with_each_hand() {
         text.contains("[Pointing at node \"Frame step\" (id step) in diagram \"How a frame is drawn\" (id renderer, "),
         "{text}"
     );
-    assert!(prompt.text.contains("; process, sphere, in group \"tomori-scene\"; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{text}");
+    assert!(prompt.text.contains("; process, sphere, in group \"tomori-scene\"; 1 in, 2 out; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{text}");
     assert!(
         prompt.text.contains(
             "edge \"Frame step → projection::faces: panels changed\" (edge 1) in diagram"

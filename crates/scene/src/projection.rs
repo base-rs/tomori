@@ -1476,6 +1476,8 @@ pub struct Output {
     /// What both hands hold reached the least or the most it may be, as they stretch or shrink it: to tick on the hand
     /// that took hold of it second.
     pub bounded: Option<Side>,
+    /// The hand that took hold of a node of a volume this frame, or let one go: to feel on it.
+    pub pulled: Option<Side>,
     /// What it did for the left hand: every field above but these is the right hand's.
     pub left: Left,
 }
@@ -1538,6 +1540,78 @@ pub struct Projector {
     triggers: Hands<bool>,
     /// When the projector first drew, from which the flows' movement is timed.
     started: Option<Instant>,
+    /// Each volume whose nodes this participant pulls about, or has, its live layout, and what it draws as it stands,
+    /// by its panel; and the node each hand pulls. See `design/diagrams.md`.
+    springs: HashMap<String, Live>,
+    pulling: Hands<Option<Pull>>,
+}
+
+/// A volume whose nodes this participant pulls about: the mesh of the diagram its layout is of, by which a change to
+/// its content is seen, its live layout, and what it draws as its nodes stand, moved each frame rather than made again,
+/// and whether that is as its layout stands.
+#[derive(Clone, Debug)]
+struct Live {
+    base: Arc<volume::Mesh>,
+    springs: volume::springs::Springs,
+    posed: Arc<volume::Mesh>,
+    drawn: bool,
+}
+
+impl Live {
+    fn new(base: &Arc<volume::Mesh>) -> Self {
+        Self {
+            base: base.clone(),
+            springs: volume::springs::Springs::new(base.diagram()),
+            posed: Arc::new(base.posed()),
+            drawn: false,
+        }
+    }
+
+    /// The index of the node `id`, as the diagram its layout is of has it.
+    fn node(&self, id: &str) -> Option<usize> {
+        self.base.diagram().node(id)
+    }
+}
+
+/// A node a hand pulls: of which volume, by its panel, by its id, so that a change to the diagram never has it name
+/// another, and where the hand holds it, along its ray and how far off it, or, taken by touch, how far off the hand,
+/// in the scene.
+#[derive(Clone, Debug, PartialEq)]
+struct Pull {
+    panel: String,
+    node: String,
+    reach: Option<f32>,
+    offset: Vec3,
+}
+
+impl Pull {
+    /// Where `hand` holds it now, in the scene, its stick having reeled it along its ray for `dt` seconds; `None` for a
+    /// hand not tracked.
+    fn target(&mut self, hand: &Hold, dt: f32) -> Option<Vec3> {
+        let ray = hand.ray.filter(|_| hand.active)?;
+        Some(match &mut self.reach {
+            Some(reach) => {
+                *reach =
+                    (*reach + hand.stick.y * REEL * dt.max(0.0)).clamp(REEL_RANGE.0, REEL_RANGE.1);
+                ray.at(*reach) + self.offset
+            }
+            None => ray.origin + self.offset,
+        })
+    }
+}
+
+/// How fast a hand's stick reels a node it pulls along its ray, in metres a second at full push, and how near and far.
+const REEL: f32 = 1.5;
+const REEL_RANGE: (f32, f32) = (0.15, 8.0);
+/// How far beyond a volume's extent a node let go is still within it, and so pinned, in its millimetres.
+const PIN_MARGIN_MM: f32 = 30.0;
+
+/// Which of a volume's live layout's hands `side` is.
+fn hand_index(side: Side) -> usize {
+    match side {
+        Side::Right => 0,
+        Side::Left => 1,
+    }
 }
 
 /// What the ray meets of a volume pointed at: its node, by its id, or its edge, by its index, which words begun now
@@ -1749,6 +1823,8 @@ impl Projector {
             self.editor.stop();
             self.meshes.clear();
             self.focus = None;
+            self.springs.clear();
+            self.pulling = Hands::default();
             return Output::default();
         };
         let viewer = input.viewer.unwrap_or(HOME);
@@ -1923,6 +1999,7 @@ impl Projector {
         // scrolled, within that.
         self.distances(&standing, viewer);
         let sizes = self.lay_out_standing(&standing, true);
+        self.pull(&standing, &hands, viewer, input.dt);
         if let Some((panel, rows)) = input.scroll
             && let Some(limit) = self.faces.get(panel).and_then(|faces| faces.limit)
             && rows.is_finite()
@@ -1993,11 +2070,21 @@ impl Projector {
             });
             if pressed
                 && self.held[side].is_none()
+                && self.pulling[side].is_none()
                 && let (Some((panel, _, _, distance, _)), Some(index)) = (pointed, node)
                 && distance < hand.nearer
             {
                 let focus = (panel.id.clone(), index);
                 self.focus = (self.focus.as_ref() != Some(&focus)).then_some(focus);
+            }
+            // Pressed on a volume elsewhere than a node, it puts every node pulled about back where the server laid it.
+            if pressed
+                && node.is_none()
+                && let Some((panel, _, _, distance, _)) = pointed
+                && distance < hand.nearer
+                && let Some(live) = self.springs.get_mut(&panel.id)
+            {
+                live.springs.unpin();
             }
             told[side].pointed =
                 pointed.map(|(panel, _, _, distance, point)| (panel.id.clone(), distance, point));
@@ -2094,6 +2181,68 @@ impl Projector {
                 edges[side].0 = false;
                 output.joined = Some(side);
             }
+        }
+        // A squeeze on a node of a volume, its ray on it or the hand touching it, takes hold of the node, to pull it about,
+        // rather than the volume; letting go pins it where it is within the volume, or lets it spring home from without.
+        for side in Side::BOTH {
+            let (pressed, released) = edges[side];
+            if released && let Some(mut pull) = self.pulling[side].take() {
+                // A node is pulled only while its volume's layout is kept, of a diagram that has it.
+                let live = self
+                    .springs
+                    .get_mut(&pull.panel)
+                    .expect("a node pulled has its volume's layout");
+                let node = live
+                    .node(&pull.node)
+                    .expect("a node pulled is in its diagram");
+                // Pinned where the hand lets it go, as it holds it now, if that is within the volume.
+                let within = standing
+                    .iter()
+                    .find(|(panel, ..)| panel.id == pull.panel)
+                    .is_some_and(|(panel, model, fit)| {
+                        let model = *model * volume::placed(panel, live.base.source(), *fit);
+                        let at = pull
+                            .target(&hands[side], 0.0)
+                            .map_or(live.springs.positions()[node], |at| {
+                                model.inverse().transform_point3(at)
+                            });
+                        live.springs.move_to(hand_index(side), at);
+                        let extent = live.base.source().extent;
+                        let half = Vec3::from_array(extent.map(f32::from)) / 2.0
+                            + Vec3::splat(PIN_MARGIN_MM);
+                        at.abs().cmple(half).all()
+                    });
+                live.springs.let_go(hand_index(side), within);
+                live.drawn = false;
+                output.pulled = Some(side);
+            }
+            if !pressed || self.held[side].is_some() || self.pulling[side].is_some() {
+                continue;
+            }
+            if let Some((panel, node, reach, offset)) =
+                self.node_to_take(side, &hands, &told, &standing)
+            {
+                let base = &self.meshes[&panel];
+                let live = self
+                    .springs
+                    .entry(panel.clone())
+                    .or_insert_with(|| Live::new(base));
+                let at = live.springs.positions()[node];
+                live.springs.hold(hand_index(side), node, at);
+                live.drawn = false;
+                self.pulling[side] = Some(Pull {
+                    node: base.diagram().nodes[node].id.clone(),
+                    panel,
+                    reach,
+                    offset,
+                });
+                edges[side].0 = false;
+                output.pulled = Some(side);
+            }
+        }
+        // What is taken or let go is drawn so this frame, as two nodes held light the path between them.
+        if output.pulled.is_some() {
+            self.pose(true);
         }
         // The wall editor follows one hand at a time: the one that carries the wall or drags its handle, until it lets
         // go, or else the one that squeezes now, the right first, of those carrying no panel.
@@ -2229,6 +2378,35 @@ impl Projector {
                 ]),
             };
         }
+        // A hand pulling a node points at it, and its ray ends on it, so that words begun now name it.
+        for ((panel, model, fit), side) in standing
+            .iter()
+            .flat_map(|standing| Side::BOTH.map(|side| (standing, side)))
+        {
+            let Some(pull) = self.pulling[side]
+                .as_ref()
+                .filter(|pull| pull.panel == panel.id)
+            else {
+                continue;
+            };
+            // A volume whose node is pulled is drawn as it stands, from the frame it was taken, by a diagram that has it.
+            let live = &self.springs[&panel.id];
+            let node = live
+                .node(&pull.node)
+                .expect("a node pulled is in its diagram");
+            let at = (*model * volume::placed(panel, live.base.source(), *fit))
+                .transform_point3(live.posed.node_at(node));
+            let origin = hands[side].ray.map_or(at, |ray| ray.origin);
+            told[side].pointed = Some((panel.id.clone(), origin.distance(at), at));
+            told[side].part = Some(Part::Node(pull.node.clone()));
+            told[side].item = None;
+            told[side].chip = None;
+            told[side].end = Some(at);
+            told[side].hit = hands[side]
+                .ray
+                .filter(|_| hands[side].active)
+                .map(|ray| crate::pointing::End::held(ray.origin, at));
+        }
         let pointed: Vec<String> = Side::BOTH
             .into_iter()
             .filter_map(|side| told[side].pointed.as_ref().map(|(id, ..)| id.clone()))
@@ -2241,17 +2419,28 @@ impl Projector {
             .saturating_duration_since(*self.started.get_or_insert(input.now))
             .as_secs_f32();
         for (panel, model, fit) in &standing {
-            let Some(mesh) = self.meshes.get(&panel.id) else {
+            let Some(mesh) = self.mesh_of(&panel.id) else {
                 continue;
             };
             let mut legend = Vec::new();
             volume::legend_icons(panel, mesh, *fit, *model, &mut legend);
             let model = *model * volume::placed(panel, mesh.source(), *fit);
-            let focus = self
-                .focus
-                .as_ref()
-                .filter(|(id, _)| *id == panel.id)
-                .map(|(_, node)| *node);
+            // A node held alone is focused on while it is, the nodes joined to it lit and the rest dimmed.
+            let pulled: Vec<usize> = Side::BOTH
+                .into_iter()
+                .filter_map(|side| self.pulling[side].as_ref())
+                .filter(|pull| pull.panel == panel.id)
+                .filter_map(|pull| self.springs[&panel.id].node(&pull.node))
+                .collect();
+            let focus = match pulled[..] {
+                [node] => Some(node),
+                [_, _] => None,
+                _ => self
+                    .focus
+                    .as_ref()
+                    .filter(|(id, _)| *id == panel.id)
+                    .map(|(_, node)| *node),
+            };
             mesh.sheets(model, viewer, focus, &mut output.sheets);
             output
                 .sheets
@@ -2675,6 +2864,11 @@ impl Projector {
         self.held[side].as_ref().map(|held| held.panel.as_str())
     }
 
+    /// Whether `side`'s hand pulls a node of a volume about.
+    pub fn pulling(&self, side: Side) -> bool {
+        self.pulling[side].is_some()
+    }
+
     /// The wall `side`'s hand carries, by identity.
     pub fn carried_wall_in(&self, side: Side) -> Option<&str> {
         self.editor.carrying().filter(|_| self.editor_hand == side)
@@ -2683,6 +2877,7 @@ impl Projector {
     /// Whether `side`'s hand carries a panel or a wall, alone or with the other hand.
     pub fn carrying_in(&self, side: Side) -> bool {
         self.held[side].is_some()
+            || self.pulling[side].is_some()
             || self.carried_wall_in(side).is_some()
             || self.both.as_ref().is_some_and(|both| both.second == side)
             || (self.editor.stretching() && self.editor_hand.other() == side)
@@ -2996,8 +3191,134 @@ impl Projector {
     /// far along it; `None` for a panel that is not a volume, or where the ray meets neither.
     fn meet(&self, panel: &Panel, model: Mat4, fit: Fit, ray: &Ray) -> Option<(volume::Met, f32)> {
         // Every volume shown has its mesh, kept as the projection is followed, and no other panel has one.
-        let mesh = self.meshes.get(&panel.id)?;
+        let mesh = self.mesh_of(&panel.id)?;
         mesh.hit(model * volume::placed(panel, mesh.source(), fit), ray)
+    }
+
+    /// What the volume `panel` draws: as its nodes are pulled about, while they are, or else as the server laid it out.
+    fn mesh_of(&self, panel: &str) -> Option<&Arc<volume::Mesh>> {
+        self.springs
+            .get(panel)
+            .map(|live| &live.posed)
+            .or_else(|| self.meshes.get(panel))
+    }
+
+    /// The node `side`'s hand would take hold of with a squeeze now: of which volume, its index, and where the hand
+    /// would hold it, along its ray and how far off it, or how far off the hand, in the scene: the node its ray meets
+    /// nearer than anything else takes it, or else the nearest within [`TOUCH`] of the hand.
+    fn node_to_take(
+        &self,
+        side: Side,
+        hands: &Hands<Hold>,
+        told: &Hands<Told>,
+        standing: &[Standing],
+    ) -> Option<(String, usize, Option<f32>, Vec3)> {
+        let hand = hands[side];
+        let ray = hand.ray.filter(|_| hand.active)?;
+        if let (Some((id, distance, _)), Some(Part::Node(node))) =
+            (&told[side].pointed, &told[side].part)
+            && *distance < hand.nearer
+            && let Some((model, mesh)) = standing
+                .iter()
+                .find(|(panel, ..)| panel.id == *id)
+                .and_then(|standing| self.volume_model(standing))
+            && let Some(index) = mesh.diagram().node(node)
+        {
+            let at = model.transform_point3(mesh.node_at(index));
+            let reach = (at - ray.origin).dot(ray.direction).max(0.0);
+            return Some((id.clone(), index, Some(reach), at - ray.at(reach)));
+        }
+        standing
+            .iter()
+            .filter_map(|standing| Some((&standing.0.id, self.volume_model(standing)?)))
+            .flat_map(|(id, (model, mesh))| {
+                (0..mesh.diagram().nodes.len()).map(move |index| {
+                    let at = model.transform_point3(mesh.node_at(index));
+                    (id, index, at, at.distance(ray.origin))
+                })
+            })
+            .filter(|(.., apart)| *apart <= TOUCH)
+            .min_by(|a, b| a.3.total_cmp(&b.3))
+            .map(|(id, index, at, _)| (id.clone(), index, None, at - ray.origin))
+    }
+
+    /// Where a volume standing as `standing` says draws its own millimetres in the scene, and what it draws; `None`
+    /// for a panel that is no volume.
+    fn volume_model(&self, (panel, model, fit): &Standing) -> Option<(Mat4, &Arc<volume::Mesh>)> {
+        let mesh = self.mesh_of(&panel.id)?;
+        Some((*model * volume::placed(panel, mesh.source(), *fit), mesh))
+    }
+
+    /// Follow each node a hand pulls with it, run each volume's live layout on by `dt`, as seen from `viewer`, and draw
+    /// it as it stands; forget a layout whose volume no longer stands or whose diagram changed, and one that is done,
+    /// every node home.
+    fn pull(&mut self, standing: &[Standing], hands: &Hands<Hold>, viewer: Vec3, dt: f32) {
+        self.springs.retain(|id, _| {
+            self.meshes.contains_key(id) && standing.iter().any(|(panel, ..)| panel.id == *id)
+        });
+        // A diagram whose content changed is laid out again from where the server now lays it, each node of the same id
+        // where it stood, held and pinned as it was; a node pulled that it no longer has is let go.
+        for (id, live) in &mut self.springs {
+            let base = &self.meshes[id];
+            if !Arc::ptr_eq(base, &live.base) {
+                live.springs = volume::springs::Springs::carried(
+                    &live.springs,
+                    live.base.diagram(),
+                    base.diagram(),
+                );
+                live.base = base.clone();
+                live.posed = Arc::new(base.posed());
+                live.drawn = false;
+            }
+        }
+        for side in Side::BOTH {
+            if self.pulling[side].as_ref().is_some_and(|pull| {
+                self.springs
+                    .get(&pull.panel)
+                    .is_none_or(|live| live.node(&pull.node).is_none())
+            }) {
+                self.pulling[side] = None;
+            }
+        }
+        for (panel, model, fit) in standing {
+            let Some(live) = self.springs.get_mut(&panel.id) else {
+                continue;
+            };
+            let inverse = (*model * volume::placed(panel, live.base.source(), *fit)).inverse();
+            for side in Side::BOTH {
+                let Some(pull) = self.pulling[side]
+                    .as_mut()
+                    .filter(|pull| pull.panel == panel.id)
+                else {
+                    continue;
+                };
+                let Some(target) = pull.target(&hands[side], dt) else {
+                    continue;
+                };
+                live.springs
+                    .move_to(hand_index(side), inverse.transform_point3(target));
+            }
+            live.springs.step(dt, inverse.transform_point3(viewer));
+        }
+        self.springs.retain(|_, live| !live.springs.done());
+        self.pose(false);
+    }
+
+    /// Move each volume's nodes pulled about to where they stand, but one asleep and drawn so already, unless `all`.
+    fn pose(&mut self, all: bool) {
+        for live in self.springs.values_mut() {
+            if !all && live.drawn && live.springs.asleep() {
+                continue;
+            }
+            let held = [live.springs.held(0), live.springs.held(1)];
+            let highlight = match held {
+                [Some(a), Some(b)] => volume::springs::path(live.base.diagram(), a, b)
+                    .map(|(nodes, edges)| volume::Highlight { nodes, edges }),
+                _ => None,
+            };
+            Arc::make_mut(&mut live.posed).repose(live.springs.positions(), highlight);
+            live.drawn = true;
+        }
     }
 
     /// What `met` of the volume `panel`, which the ray met, is named: its node by its id, or its edge by its index.
