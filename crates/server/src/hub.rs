@@ -1032,6 +1032,10 @@ struct UtteranceRecord {
     origin: Option<tomori_protocol::Pose>,
     /// The connection whose client asked for [`ServerMessage::TranscriptProgress`] as it began the utterance, if it did. Progress is sent only there, as the participant may reconnect with an older client, which would refuse it.
     progress: Option<ConnectionId>,
+    /// Whether its client stops recording when told [`tomori_protocol::TranscriptStage::Cut`], which is sent only then.
+    /// An older client, which would keep recording, is told that its words were cut off with
+    /// [`ServerMessage::TranscriptFailed`] instead, which stops it. See `design/speech.md`.
+    stops: bool,
     /// When it began, after which it holds Tomori's notes back for at most [`crate::events::HOLD`]. See
     /// `design/timers.md`.
     begun: Instant,
@@ -1040,6 +1044,10 @@ struct UtteranceRecord {
     /// Since when it has waited behind another utterance, if it waits now, and how long it waited before.
     waiting: Option<Instant>,
     waited: Duration,
+    /// How much of its audio has been handed to recognition, by its frames' samples at their rates, for the log.
+    audio: Duration,
+    /// The transcriber's limit, if it cut the utterance off there while it was spoken. See `design/speech.md`.
+    cut: Option<Duration>,
 }
 
 impl UtteranceRecord {
@@ -1048,22 +1056,111 @@ impl UtteranceRecord {
         (self.participant, self.space)
     }
 
-    /// Log how long the utterance took to transcribe after its end arrived, and how much of that it waited, once it has `outcome`, so that the time can be seen per utterance. Nothing is logged for one that failed while it was spoken.
+    /// Log `outcome`, what became of the utterance, as [`OutcomeLog::write`] does.
     fn log_outcome(&self, id: UtteranceId, outcome: &str) {
-        if let Some(ended) = self.ended {
-            let now = Instant::now();
-            let waited = self.waited
-                + self
-                    .waiting
-                    .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
-            log::info!(
-                "Utterance {} from participant {} {outcome} {:.2} s after its end arrived, having waited {:.2} s for the recognizer.",
-                id.0,
-                self.source,
-                now.saturating_duration_since(ended).as_secs_f64(),
-                waited.as_secs_f64()
-            );
+        self.outcome_log(id).write(outcome);
+    }
+
+    /// What the log is to say of the utterance, `id`, as it has its outcome now.
+    fn outcome_log(&self, id: UtteranceId) -> OutcomeLog {
+        let now = Instant::now();
+        OutcomeLog {
+            id,
+            source: self.source,
+            audio: self.audio,
+            cut: self.cut,
+            timing: self.ended.map(|ended| {
+                let waited = self.waited
+                    + self
+                        .waiting
+                        .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+                (now.saturating_duration_since(ended), waited)
+            }),
         }
+    }
+}
+
+/// What the log says of an utterance as it has its outcome. See [`OutcomeLog::write`].
+struct OutcomeLog {
+    id: UtteranceId,
+    source: u32,
+    audio: Duration,
+    cut: Option<Duration>,
+    /// How long its outcome took after its end arrived, and how much of that it waited for the recognizer, for one that ended.
+    timing: Option<(Duration, Duration)>,
+}
+
+impl OutcomeLog {
+    /// Log, at info, every utterance's `outcome`, whatever it is, with how long its audio was, whether it was cut off at the limit, and, for one that ended, how long its outcome took after its end arrived and how much of that it waited, so that each can be traced and where the time goes seen. What was said is never logged, only how many words were sent. See `design/speech.md`.
+    fn write(&self, outcome: &str) {
+        let cut = self.cut.map_or_else(String::new, |limit| {
+            format!(" cut off at the {} s limit,", limit.as_secs())
+        });
+        let timing = self.timing.map_or_else(String::new, |(after, waited)| {
+            format!(
+                ", {:.2} s after its end arrived, having waited {:.2} s for the recognizer",
+                after.as_secs_f64(),
+                waited.as_secs_f64()
+            )
+        });
+        log::info!(
+            "Utterance {} from participant {}, {:.1} s of audio,{cut} {outcome}{timing}.",
+            self.id.0,
+            self.source,
+            self.audio.as_secs_f64(),
+        );
+    }
+}
+
+/// How many words `text` has, which the log says of what was sent, rather than the words themselves.
+fn words(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// The note told the agent after words cut off at the transcriber's `limit`, as `[Cut off at the 10-minute limit]`. See `design/speech.md`.
+fn cut_off_at(limit: Duration) -> String {
+    format!("[Cut off at the {}]", named(limit))
+}
+
+/// What an older client, which does not read `cut`, is told as its words reach the transcriber's `limit` while it
+/// records, as a failure, which stops its recording, though the words up to the limit are still sent.
+fn cut_off_while_recorded(limit: Duration) -> String {
+    format!(
+        "Your words reached the {}, so they were cut off there; what you said up to it is being sent.",
+        named(limit)
+    )
+}
+
+/// The transcriber's `limit` as it is said, as `10-minute limit`.
+fn named(limit: Duration) -> String {
+    let seconds = limit.as_secs();
+    if seconds.is_multiple_of(60) {
+        format!("{}-minute limit", seconds / 60)
+    } else {
+        format!("{seconds}-second limit")
+    }
+}
+
+/// The note told the agent after words cut to the longest transcript that can be queued.
+const CUT_TO_QUEUE: &str = "[Cut off at the longest message that can be queued]";
+
+/// The note given with an answer cut to the longest that can be given.
+const CUT_TO_ANSWER: &str = "[Cut off at the longest answer that can be given]";
+
+/// The start of `text` that is at most `limit` bytes, cut after its last whole word that fits.
+fn fitted(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = &text[..end];
+    // After the last whole word, unless the start is one word longer than the limit.
+    match cut.rfind(char::is_whitespace) {
+        Some(space) if !text[end..].starts_with(char::is_whitespace) => cut[..space].trim_end(),
+        _ => cut.trim_end(),
     }
 }
 
@@ -2284,7 +2381,27 @@ impl HubState {
         }
     }
 
-    /// Answer the current field of `space`'s presented question as `participant`, sending the answers to the agent once the question is complete.
+    /// Tell the participant whose words `record` describes that they were cut off, as they are sent, unless they were
+    /// told as they were cut off at the transcriber's limit; only a client that reads `cut` is told. See
+    /// `design/speech.md`.
+    fn cut_to_fit(&self, record: &UtteranceRecord) {
+        if record.cut.is_none()
+            && record.stops
+            && let Some(connection) = record
+                .progress
+                .and_then(|connection| self.connections.get(&connection))
+        {
+            connection
+                .outbox
+                .message(ServerMessage::TranscriptProgress {
+                    utterance: record.client.clone(),
+                    stage: tomori_protocol::TranscriptStage::Cut,
+                    part: None,
+                });
+        }
+    }
+
+    /// Answer the current field of `space`'s presented question as `participant`, sending the answers to the agent once the question is complete. A `note` follows a text answer, as [`crate::space::SpaceModel::answer`] says.
     fn answer(
         &mut self,
         participant: &str,
@@ -2292,6 +2409,7 @@ impl HubState {
         question: &str,
         field: &str,
         text: &str,
+        note: Option<&str>,
     ) -> Result<(), String> {
         // A member answers in a space that is listed, since one is forgotten only once nobody is in it; were it not, there would be nothing to answer.
         let (record, outcome) = self
@@ -2300,7 +2418,7 @@ impl HubState {
             .and_then(|record| {
                 record
                     .model
-                    .answer(question, field, text)
+                    .answer(question, field, text, note)
                     .map(|outcome| (record, outcome))
             })?;
         match outcome {
@@ -2332,16 +2450,25 @@ impl HubState {
     }
 
     /// Close the open utterance of a connection, if any.
-    fn abandon_utterance(&mut self, connection: ConnectionId, deferred: &mut Vec<Deferred>) {
+    /// Abandon the utterance open on `connection`, if any, which ended `because`, as the log says.
+    fn abandon_utterance(
+        &mut self,
+        connection: ConnectionId,
+        because: &str,
+        deferred: &mut Vec<Deferred>,
+    ) {
         if let Some(open) = self
             .connections
             .get_mut(&connection)
             .and_then(|record| record.utterance.take())
         {
-            let ended = self
-                .utterances
-                .remove(&open.id)
-                .map(UtteranceRecord::recorder);
+            let ended = self.utterances.remove(&open.id).map(|record| {
+                record.log_outcome(
+                    open.id,
+                    &format!("was abandoned, as {because}, so nothing was sent"),
+                );
+                record.recorder()
+            });
             // A following agent's move for them stops where it is.
             ended.iter().for_each(|(participant, space)| {
                 self.agent_cancelled(space, participant, Instant::now());
@@ -3097,7 +3224,7 @@ impl Hub {
         let mut deferred = Vec::new();
         {
             let mut state = self.lock();
-            state.abandon_utterance(connection, &mut deferred);
+            state.abandon_utterance(connection, "its connection closed", &mut deferred);
             if state
                 .pairing
                 .as_ref()
@@ -3388,7 +3515,7 @@ impl Hub {
         let rejoin = record.space.clone().or_else(|| record.last_space.clone());
         // A reconnect supersedes the previous connection of the same participant.
         if let Some(previous) = previous.filter(|previous| *previous != connection) {
-            state.abandon_utterance(previous, deferred);
+            state.abandon_utterance(previous, "a new connection replaced its own", deferred);
             // A participant's connection is listed until it disconnects, which also forgets it here.
             state.connections.entry(previous).and_modify(|old| {
                 old.participant = None;
@@ -3484,7 +3611,7 @@ impl Hub {
             let connection = state.participants[member]
                 .connection
                 .expect("members are connected, since disconnecting leaves the space");
-            state.abandon_utterance(connection, deferred);
+            state.abandon_utterance(connection, "its space was deleted", deferred);
             let outbox = &state.connections[&connection].outbox;
             outbox.clear_audio();
             outbox.message(left.clone());
@@ -3616,7 +3743,9 @@ impl Hub {
                 if gap {
                     let open = record.utterance.take().expect("matched above");
                     record.failed = Some(open.client.clone());
-                    let ended = state.utterances.remove(&open.id);
+                    let ended = state.utterances.remove(&open.id).inspect(|record| {
+                        record.log_outcome(open.id, "lost some of its audio, so nothing was sent");
+                    });
                     ended
                         .iter()
                         .for_each(|record| state.agent_changed(&record.space, Instant::now()));
@@ -3631,7 +3760,15 @@ impl Hub {
                         },
                     );
                 } else {
-                    deferred.push(Deferred::Push(open.id, frame.clone()));
+                    let id = open.id;
+                    deferred.push(Deferred::Push(id, frame.clone()));
+                    // At the frame's rate, any a client sends, which recognition adapts to.
+                    let seconds = frame.samples.len() as f64 / f64::from(frame.sample_rate.max(1));
+                    state
+                        .utterances
+                        .get_mut(&id)
+                        .into_iter()
+                        .for_each(|record| record.audio += Duration::from_secs_f64(seconds));
                 }
             }
             let source = state.participants[&participant].source;
@@ -3726,23 +3863,95 @@ impl Hub {
         let Some(record) = state.utterances.remove(&utterance) else {
             return;
         };
-        let text = text.trim();
-        // Recognition reports an utterance with no speech in it as empty, whatever the backend; see `design/speech.md`.
-        record.log_outcome(
-            utterance,
-            if text.is_empty() {
-                "was found to have no speech in it, so nothing was sent,"
-            } else {
-                "was transcribed"
-            },
-        );
+        let log = record.outcome_log(utterance);
+        let outcome = self.take_transcript(state, record, text.trim());
+        log.write(&outcome);
+    }
+
+    /// The utterance `utterance` reached the transcriber's `limit` while it was spoken, and was cut off there: it ends,
+    /// as though its participant had let go, so that what they said up to the limit is sent, with a note that it was
+    /// cut off; its participant is told, and its later audio and end are ignored. See `design/speech.md`.
+    pub(crate) fn transcript_cut(&self, utterance: UtteranceId, limit: Duration) {
+        let mut deferred = Vec::new();
+        {
+            let mut state = self.lock();
+            let state = &mut *state;
+            let Some(record) = state
+                .utterances
+                .get_mut(&utterance)
+                .filter(|record| record.cut.is_none())
+            else {
+                return;
+            };
+            let now = Instant::now();
+            record.cut = Some(limit);
+            record.ended.get_or_insert(now);
+            let (participant, space, client) = (
+                record.participant.clone(),
+                record.space.clone(),
+                record.client.clone(),
+            );
+            let progress = record.progress.filter(|_| record.stops);
+            let stops = record.stops;
+            log::info!(
+                "Utterance {} from participant {} reached the {} s limit while it was spoken, so it was cut off there, and what was said up to it is sent.",
+                utterance.0,
+                record.source,
+                limit.as_secs()
+            );
+            // Still open, unless its end crossed the cut on its way: close it, so that its end and audio, already on
+            // their way, are ignored, and end it, as its participant letting go would.
+            let mut open = false;
+            for connection in state.connections.values_mut() {
+                if let Some(closed) = connection.utterance.take_if(|open| open.id == utterance) {
+                    // An older client, which does not stop recording when told `cut`, stops when told its words
+                    // failed, which it understands, and shows why; the words follow, as for any client.
+                    if !stops {
+                        connection.outbox.message(ServerMessage::TranscriptFailed {
+                            utterance: closed.client.clone(),
+                            error: cut_off_while_recorded(limit),
+                        });
+                    }
+                    connection.failed = Some(closed.client);
+                    open = true;
+                }
+            }
+            if open {
+                state.agent_released(&space, &participant, now);
+                state.released(Some((participant, space)), now);
+                deferred.push(Deferred::End(utterance));
+            }
+            if let Some(connection) =
+                progress.and_then(|connection| state.connections.get(&connection))
+            {
+                connection
+                    .outbox
+                    .message(ServerMessage::TranscriptProgress {
+                        utterance: client,
+                        stage: tomori_protocol::TranscriptStage::Cut,
+                        part: None,
+                    });
+            }
+        }
+        self.run(deferred);
+    }
+
+    /// Do what `text`, the transcript of the utterance `record` describes, says: queue it, answer a question, or rename
+    /// its participant or their space, telling them. Returns what became of it, for the log, which says how many words
+    /// were sent, never what they were.
+    fn take_transcript(
+        &self,
+        mut state: MutexGuard<'_, HubState>,
+        record: UtteranceRecord,
+        text: &str,
+    ) -> String {
         // Words with nothing in them move a following agent nowhere: a move begun for them stops where it is.
         if text.is_empty() {
             state.agent_cancelled(&record.space, &record.participant, Instant::now());
         }
         // Words that say the participant's new name rename them, wherever they are now, and are never queued. Renaming again to the same name, as a repeated finalization does, changes nothing. Words with no speech in them fail below, as any others do.
         if record.naming && !text.is_empty() {
-            match limits::name(spoken_name(text)) {
+            return match limits::name(spoken_name(text)) {
                 Ok(name) => {
                     let mut deferred = Vec::new();
                     let tokens = self.token_store();
@@ -3755,16 +3964,19 @@ impl Hub {
                     );
                     drop(state);
                     self.run(deferred);
+                    "was taken as its participant's new name".to_owned()
                 }
-                Err(error) => state.send(
-                    &record.participant,
-                    ServerMessage::TranscriptFailed {
-                        utterance: record.client,
-                        error,
-                    },
-                ),
-            }
-            return;
+                Err(error) => {
+                    state.send(
+                        &record.participant,
+                        ServerMessage::TranscriptFailed {
+                            utterance: record.client,
+                            error,
+                        },
+                    );
+                    "was not taken as a name, so nothing was sent".to_owned()
+                }
+            };
         }
         // Words that say the space's new title rename the space they were said in, if it is still listed, and are
         // never queued, even in a space whose session has closed. Saying the title it has already changes nothing.
@@ -3792,7 +4004,7 @@ impl Hub {
                 );
                 Ok(title)
             });
-            match renamed {
+            return match renamed {
                 Ok(title) => {
                     state.send(
                         &record.participant,
@@ -3804,16 +4016,19 @@ impl Hub {
                     );
                     drop(state);
                     self.keep();
+                    "was taken as its space's new title".to_owned()
                 }
-                Err(error) => state.send(
-                    &record.participant,
-                    ServerMessage::TranscriptFailed {
-                        utterance: record.client,
-                        error,
-                    },
-                ),
-            }
-            return;
+                Err(error) => {
+                    state.send(
+                        &record.participant,
+                        ServerMessage::TranscriptFailed {
+                            utterance: record.client,
+                            error,
+                        },
+                    );
+                    "was not taken as a title, so nothing was sent".to_owned()
+                }
+            };
         }
         // The key makes a repeated finalization of the same client utterance idempotent: it is acknowledged with the text queued the first time, and nothing is queued again. It begins with the participant's number, which contains no `/`, so that no two participants' utterances share a key whatever their utterance identifiers contain. The key is the entry's identifier, which every client sees, so it never contains the participant's identity; see `design/security.md`.
         let key = format!("{}/{}", record.source, record.client);
@@ -3841,8 +4056,25 @@ impl Hub {
                     finished: true,
                 },
             );
-            return;
+            return "was finalized again, and acknowledged with what was sent before".to_owned();
         }
+        // Words longer than can be queued, or given as an answer, are cut after the last whole word that fits, rather
+        // than lost, and sent with a note that they were cut off, as words cut off at the transcriber's limit are. An
+        // answer's note follows it within its limit. See `design/speech.md`.
+        let (limit, too_long) = if record.answer.is_some() {
+            (limits::SPOKEN_ANSWER_BYTES, CUT_TO_ANSWER)
+        } else {
+            (limits::QUEUED_TEXT_BYTES, CUT_TO_QUEUE)
+        };
+        let (text, note) = if text.len() > limit {
+            (fitted(text, limit), Some(too_long.to_owned()))
+        } else {
+            (text, record.cut.map(cut_off_at))
+        };
+        let text = match &note {
+            Some(note) if record.answer.is_some() => fitted(text, limit - note.len() - 1),
+            _ => text,
+        };
         let failure = if state
             .space(&record.space)
             .is_some_and(|space| space.model.is_closed())
@@ -3850,14 +4082,6 @@ impl Hub {
             Some("The agent session has ended, so nothing was sent.")
         } else if text.is_empty() {
             Some(tomori_protocol::NO_SPEECH)
-        } else if text.len()
-            > if record.answer.is_some() {
-                limits::ANSWER_BYTES
-            } else {
-                limits::QUEUED_TEXT_BYTES
-            }
-        {
-            Some("The recording was too long, so nothing was sent. Please say it in shorter parts.")
         } else if state
             .participants
             .get(&record.participant)
@@ -3882,16 +4106,21 @@ impl Hub {
                     error: error.to_owned(),
                 },
             );
-            return;
+            return if text.is_empty() {
+                "had no speech in it, so nothing was sent".to_owned()
+            } else {
+                format!("was not sent: {error}")
+            };
         }
         // A spoken answer goes to the presented question, never into the queue, where it would wait behind the question it answers. See `design/spaces.md`.
         if let Some(target) = &record.answer {
-            let message = match state.answer(
+            let (message, outcome) = match state.answer(
                 &record.participant,
                 &record.space,
                 &target.question,
                 &target.field,
                 text,
+                note.as_deref(),
             ) {
                 Ok(()) => {
                     let Some(space) = state.space_mut(&record.space) else {
@@ -3901,19 +4130,31 @@ impl Hub {
                         space.answered.pop_front();
                     }
                     space.answered.push_back((key.clone(), text.to_owned()));
-                    ServerMessage::Transcript {
-                        utterance: record.client,
-                        text: text.to_owned(),
-                        finished: true,
+                    if note.is_some() {
+                        state.cut_to_fit(&record);
                     }
+                    (
+                        ServerMessage::Transcript {
+                            utterance: record.client,
+                            text: text.to_owned(),
+                            finished: true,
+                        },
+                        format!("answered a question with {} words", words(text)),
+                    )
                 }
-                Err(error) => ServerMessage::TranscriptFailed {
-                    utterance: record.client,
-                    error: limits::truncate(&error, limits::ERROR_BYTES),
-                },
+                Err(error) => (
+                    ServerMessage::TranscriptFailed {
+                        utterance: record.client,
+                        error: limits::truncate(&error, limits::ERROR_BYTES),
+                    },
+                    "was not taken as an answer, so nothing was sent".to_owned(),
+                ),
             };
             state.send(&record.participant, message);
-            return;
+            return outcome;
+        }
+        if note.is_some() {
+            state.cut_to_fit(&record);
         }
         let speaker = state.participants[&record.participant].name.clone();
         let Some(space) = state.space_mut(&record.space) else {
@@ -3927,6 +4168,10 @@ impl Hub {
             record.attention,
         );
         debug_assert!(queued, "repeats are acknowledged above");
+        // Told after the words, before they can be delivered.
+        if let Some(note) = note {
+            space.model.cut_off(&key, note);
+        }
         // What they pointed at ranks first in the agent's ambient list for their words, and lately, now that the words
         // are the agent's to answer; an utterance cancelled or never transcribed changes nothing.
         let environment = &space.model.environment;
@@ -3963,6 +4208,7 @@ impl Hub {
             drop(state);
             self.keep();
         }
+        format!("was queued with {} words", words(text))
     }
 
     pub(crate) fn transcript_failed(&self, utterance: UtteranceId, error: &str) {
@@ -3978,7 +4224,7 @@ impl Hub {
             let Some(record) = state.utterances.remove(&utterance) else {
                 return;
             };
-            record.log_outcome(utterance, "failed to transcribe");
+            record.log_outcome(utterance, &format!("failed, so nothing was sent: {error}"));
             state.agent_cancelled(&record.space, &record.participant, Instant::now());
             // Recognition can fail while the utterance is still open: close it, so that the client may forget it without cancelling and its next utterance does not fail this one again. The transcriber is still told, as every utterance it began ends with an end or a cancel.
             let mut open = false;

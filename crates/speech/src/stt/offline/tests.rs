@@ -308,31 +308,137 @@ fn a_panic_in_the_detector_falls_back_to_loudness() {
 }
 
 #[test]
-fn an_utterance_longer_than_the_limit_fails_as_it_passes_it() {
+fn an_utterance_reaching_the_limit_is_cut_off_there_and_transcribed() {
     log::set_max_level(log::LevelFilter::Trace);
-    let (recorder, calls) = Recorder::new(|_, _| unreachable!("nothing is decoded"));
-    let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 2, true);
+    let said = crate::test_log::watch("so it was cut off there");
+    let (release, gate) = mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let (recorder, calls) = Recorder::new(move |_, clip| {
+        let _ = gate.lock().unwrap().recv_timeout(WAIT);
+        Ok(format!("{} samples", clip.len()))
+    });
+    let limit = RATE as usize * 2;
+    let mut offline = OfflineRecognition::start(recorder, None, limit, true);
+    // Declared after `offline`, so a failed assertion's unwinding drops it first, letting a held decode go on rather than hanging as `offline` joins the engine's thread.
+    let release = release;
     let (sender, receiver) = mpsc::channel();
     let mut handle = offline.begin(RATE, move |event| {
         let _ = sender.send(event);
     });
-    // Exactly the limit is accepted.
-    handle.push(&vec![1000; RATE as usize * 2]);
+    // Short of the limit, it is still being spoken.
+    handle.push(&vec![1000; limit - 100]);
     assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
-    // One more frame fails it at once, before it ends.
+    // A frame that reaches it is kept up to the limit, and the utterance is cut off there, before it ends.
     handle.push(&vec![1000; RATE as usize / 10]);
     assert_eq!(
-        collect(&receiver),
-        TranscriptEvent::Failed(Error::TooLong(2))
+        receiver.recv_timeout(WAIT).ok(),
+        Some(TranscriptEvent::Progress(Progress::Cut { seconds: 2 }))
     );
+    // Its later audio and its end, while it is transcribed, are ignored.
     handle.push(&vec![1000; RATE as usize / 10]);
     handle.end();
-    assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
-    assert!(calls.lock().unwrap().is_empty());
+    release.send(()).unwrap();
     assert_eq!(
-        Error::TooLong(MAX_UTTERANCE / RATE as usize).to_string(),
-        "the speech was longer than 5 minutes, the most that is transcribed at once"
+        collect(&receiver),
+        TranscriptEvent::Final(format!("{limit} samples"))
     );
+    assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
+    assert_eq!(*calls.lock().unwrap(), vec![limit]);
+    // Logged, at info, though tests running alongside may log more.
+    assert!(
+        said.records()
+            .iter()
+            .all(|(level, _)| *level == log::Level::Info)
+    );
+    assert!(said.seen());
+    assert_eq!(MAX_UTTERANCE, RATE as usize * 600);
+}
+
+#[test]
+fn an_utterance_cut_off_holds_no_more_than_the_limit() {
+    let (mut engine, sender) = engine_of(Fake("words".to_owned()));
+    engine.limit = RATE as usize * 3;
+    let ada = begin(&sender, 1);
+    assert!(engine.turn());
+    pending(&engine.pending).open.insert(1, false);
+    for _ in 0..7 {
+        assert!(engine.apply(Command::Audio {
+            key: 1,
+            samples: vec![1000; RATE as usize / 2],
+            at: Instant::now(),
+        }));
+    }
+    assert_eq!(
+        ada.try_recv().ok(),
+        Some(TranscriptEvent::Progress(Progress::Cut { seconds: 3 }))
+    );
+    // Grown by doubling, but never past the limit.
+    let entry = &engine.active[0];
+    assert_eq!(entry.samples.len(), RATE as usize * 3);
+    assert_eq!(entry.samples.capacity(), RATE as usize * 3);
+    assert_eq!(pending(&engine.pending).open.get(&1), Some(&true));
+    // An end on its way when it was cut off changes nothing.
+    let ready = entry.ready;
+    assert!(engine.apply(Command::End {
+        key: 1,
+        at: Instant::now(),
+        waiting: true,
+    }));
+    assert_eq!(engine.active[0].told, Told::Nothing);
+    assert_eq!(engine.active[0].ready, ready);
+    assert!(engine.turn());
+    assert_eq!(
+        ada.try_recv().ok(),
+        Some(TranscriptEvent::Final("words".to_owned()))
+    );
+    // One whose handle has forgotten it, cancelled with its cancellation on its way, is still cut off, which its server ignores.
+    let bob = begin(&sender, 2);
+    assert!(engine.turn());
+    assert!(engine.apply(Command::Audio {
+        key: 2,
+        samples: vec![1000; RATE as usize * 4],
+        at: Instant::now(),
+    }));
+    assert_eq!(
+        bob.try_recv().ok(),
+        Some(TranscriptEvent::Progress(Progress::Cut { seconds: 3 }))
+    );
+    assert!(!pending(&engine.pending).open.contains_key(&2));
+}
+
+#[test]
+fn at_most_so_many_utterances_are_buffered_at_once() {
+    let said = crate::test_log::watch("utterances are already buffered");
+    let mut offline =
+        OfflineRecognition::holding(Fake("words".to_owned()), None, MAX_UTTERANCE, 2, true);
+    let listen = |offline: &mut OfflineRecognition| {
+        let (sender, receiver) = mpsc::channel();
+        let handle = offline.begin(RATE, move |event| {
+            let _ = sender.send(event);
+        });
+        (handle, receiver)
+    };
+    let (mut ada, ada_heard) = listen(&mut offline);
+    let (bob, _bob_heard) = listen(&mut offline);
+    let (_carol, carol_heard) = listen(&mut offline);
+    assert_eq!(
+        carol_heard.recv_timeout(WAIT).ok(),
+        Some(TranscriptEvent::Failed(Error::Busy(2)))
+    );
+    // Once one has its outcome, another may begin.
+    ada.push(&[1000; 1600]);
+    ada.end();
+    assert_eq!(
+        collect(&ada_heard),
+        TranscriptEvent::Final("words".to_owned())
+    );
+    let (dave, dave_heard) = listen(&mut offline);
+    dave.end();
+    assert_eq!(collect(&dave_heard), TranscriptEvent::Final(String::new()));
+    bob.cancel();
+    assert!(said.seen());
+    // With the limit, the audio buffered at once is bounded: 16 of 10 minutes of 16-bit samples, 307.2 MB.
+    assert_eq!(MAX_OPEN * MAX_UTTERANCE * size_of::<i16>(), 307_200_000);
 }
 
 #[test]
@@ -556,10 +662,18 @@ fn an_utterance_waits_only_behind_one_still_being_transcribed() {
         collect(&waiting),
         TranscriptEvent::Final("words".to_owned())
     );
-    // One that failed as too long, ending after its failure, makes nothing wait.
-    let (mut long, failed) = listen(&mut offline);
+    // One cut off at the limit, ending after it was, makes nothing wait once it has its outcome.
+    let (mut long, cut) = listen(&mut offline);
     long.push(&[1000; RATE as usize * 3]);
-    assert_eq!(collect(&failed), TranscriptEvent::Failed(Error::TooLong(2)));
+    assert_eq!(
+        cut.recv_timeout(WAIT).ok(),
+        Some(TranscriptEvent::Progress(Progress::Cut { seconds: 2 }))
+    );
+    decoding
+        .recv_timeout(WAIT)
+        .expect("the long utterance's decode starts");
+    release.send(()).unwrap();
+    assert_eq!(collect(&cut), TranscriptEvent::Final("words".to_owned()));
     long.end();
     let (mut last, alone) = listen(&mut offline);
     last.push(&[1000; 1600]);
@@ -571,7 +685,7 @@ fn an_utterance_waits_only_behind_one_still_being_transcribed() {
     assert_eq!(
         alone.recv_timeout(WAIT).ok(),
         Some(TranscriptEvent::Final("words".to_owned())),
-        "the last utterance, behind only one that failed, is told nothing before its outcome"
+        "the last utterance, behind only one that was cut off and has its outcome, is told nothing before its outcome"
     );
 }
 
@@ -1150,7 +1264,7 @@ fn decoding_ahead_waits_for_an_end_on_its_way() {
 }
 
 #[test]
-fn an_utterance_passing_the_limit_after_segments_were_decoded_ahead_fails() {
+fn an_utterance_reaching_the_limit_after_segments_were_decoded_ahead_is_cut_off() {
     let (recorder, calls) = Recorder::new(|_, _| Ok("words".to_owned()));
     let mut offline = OfflineRecognition::start(recorder, None, RATE as usize * 40, true);
     let (sender, receiver) = mpsc::channel();
@@ -1162,11 +1276,18 @@ fn an_utterance_passing_the_limit_after_segments_were_decoded_ahead_fails() {
     handle.push(&steady(11));
     assert_eq!(
         receiver.recv_timeout(WAIT).ok(),
-        Some(TranscriptEvent::Failed(Error::TooLong(40)))
+        Some(TranscriptEvent::Progress(Progress::Cut { seconds: 40 }))
+    );
+    // Only the rest, up to the limit, is left to decode: its words follow those decoded ahead.
+    assert_eq!(
+        collect(&receiver),
+        TranscriptEvent::Final("words words".to_owned())
     );
     handle.end();
     assert!(receiver.recv_timeout(Duration::from_millis(200)).is_err());
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.iter().sum::<usize>(), RATE as usize * 40);
 }
 
 /// Transcribes a minute of LibriSpeech, from the clips that come with the Whisper model, with Whisper and the Silero detector, as the offline backend does. Skipped without both models; see [`crate::test_models`].
@@ -1498,6 +1619,7 @@ fn engine_of(recognizer: Fake) -> (OfflineEngine<Fake>, Sender<Command>) {
             recognizer,
             None,
             MAX_UTTERANCE,
+            MAX_OPEN,
             true,
             Pending::default(),
         ),

@@ -35,6 +35,7 @@ fn press(client: &Client, utterance: &str, attention: Vec<Resource>) {
         utterance: utterance.to_owned(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention,

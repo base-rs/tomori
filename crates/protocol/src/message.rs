@@ -533,6 +533,11 @@ pub enum TranscriptStage {
     Transcribing,
     /// It waits for the recognizer, which is transcribing another utterance first.
     Waiting,
+    /// It reached a limit and was cut off there, and what came before is being sent: the server's limit on an utterance's
+    /// length, `Welcome`'s `utterance_limit`, while it was still being spoken, which ends it as though its participant
+    /// had let go, its later audio and end ignored, or the longest transcript that can be queued. Sent as it is cut off,
+    /// even while it is recorded, and before what follows of it. See `design/speech.md`.
+    Cut,
     /// A stage a newer server sends that this build does not know, shown as transcribing.
     #[serde(other)]
     Unknown,
@@ -668,6 +673,14 @@ pub enum ClientMessage {
         /// by older servers, which send none. See `design/speech.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         progress: bool,
+        /// Whether this client stops recording, without cancelling, when told [`TranscriptStage::Cut`] while it
+        /// records, which the server then sends for this utterance on the connection that set `progress`. Absent from
+        /// older clients, which would keep recording: the server tells them instead with
+        /// [`ServerMessage::TranscriptFailed`], which stops their recording, saying that their words were cut off and
+        /// are being sent, and then sends the words as for any client. Ignored by older servers. See
+        /// `design/speech.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cut: bool,
         /// Set when the words say the participant's new display name, so that the server renames them with the transcript rather than queueing it. Sent only to a server whose [`ServerMessage::Welcome`] gives a `name`, as an older server would queue it. See `design/security.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         naming: bool,
@@ -1479,6 +1492,7 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: false,
+            cut: false,
             naming: false,
             titling: false,
             attention,
@@ -1531,6 +1545,7 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: false,
+            cut: false,
             naming: false,
             titling: false,
             attention,
@@ -1657,6 +1672,7 @@ mod tests {
                 utterance: "u".into(),
                 answer: None,
                 progress: false,
+                cut: false,
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
@@ -1671,12 +1687,15 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: true,
+            cut: true,
             naming: false,
             titling: false,
             attention: Vec::new(),
             seen: None,
         };
         assert_eq!(serde_json::to_value(&asking).unwrap()["progress"], true);
+        // Saying it stops recording when told `cut`, which an older client, without the field, does not.
+        assert_eq!(serde_json::to_value(&asking).unwrap()["cut"], true);
 
         // One part needs no count; a part of several says which.
         let received = ServerMessage::TranscriptProgress {
@@ -1705,6 +1724,7 @@ mod tests {
             serde_json::to_value(TranscriptStage::Waiting).unwrap(),
             "waiting"
         );
+        assert_eq!(serde_json::to_value(TranscriptStage::Cut).unwrap(), "cut");
         // A stage from a newer server is read as unknown rather than refusing the message.
         let newer: ServerMessage = serde_json::from_value(serde_json::json!({
             "type": "transcript_progress", "utterance": "u", "stage": "punctuating"
@@ -1752,6 +1772,7 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: false,
+            cut: false,
             naming: false,
             titling: false,
             attention: vec![Resource::card("github://o/r/pull/2")],
@@ -1775,6 +1796,7 @@ mod tests {
                 utterance: "u".into(),
                 answer: None,
                 progress: false,
+                cut: false,
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
@@ -2468,6 +2490,7 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: false,
+            cut: false,
             naming: true,
             titling: false,
             attention: Vec::new(),
@@ -2491,6 +2514,7 @@ mod tests {
                 utterance: "u".into(),
                 answer: None,
                 progress: false,
+                cut: false,
                 naming: false,
                 titling: false,
                 attention: Vec::new(),
@@ -2513,6 +2537,7 @@ mod tests {
             utterance: "u".into(),
             answer: None,
             progress: false,
+            cut: false,
             naming: false,
             titling: true,
             attention: Vec::new(),

@@ -57,6 +57,7 @@ fn oversized_client_strings_are_rejected_without_repeating_them() {
         utterance: "u".repeat(10_000),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -343,35 +344,35 @@ fn requests_whose_identifiers_no_reply_could_name_are_refused_visibly_within_the
     );
 }
 
-/// The error reported for `utterance`.
-fn transcript_failure(client: &TestClient, utterance: &str) -> String {
-    client.wait_for(|message| match message {
-        ServerMessage::TranscriptFailed {
-            utterance: failed,
-            error,
-        } if failed == utterance => Some(error.clone()),
-        _ => None,
-    })
-}
-
 #[test]
 fn queued_input_is_bounded() {
     let server = TestServer::with_backend(tomori_server::fake::FakeBackend::manual());
     let mut ada = server.connect("ada", "Ada");
     ada.create_space("Busy");
 
-    // A transcript longer than the limit is refused rather than queued.
-    ada.say("long", &"a".repeat(5000));
-    let error = transcript_failure(&ada, "long");
-    assert!(error.contains("too long"), "{error}");
+    // A transcript longer than the limit is cut after its last whole word that fits and queued, rather than lost.
+    ada.say("long", &"word ".repeat(4000));
+    let text = ada.wait_for(|message| match message {
+        ServerMessage::Transcript {
+            utterance,
+            text,
+            finished: true,
+        } if utterance == "long" => Some(text.clone()),
+        _ => None,
+    });
+    assert!(
+        text.len() <= 16 * 1024 && text.len() > 16 * 1024 - 5,
+        "{}",
+        text.len()
+    );
+    assert!(text.ends_with(" word"));
 
     // The first entry is delivered and keeps the agent busy; the rest wait, up to the limit.
-    ada.say("u0", "entry 0");
     ada.space(|state| {
         state
             .queue
             .iter()
-            .any(|entry| entry.text == "entry 0" && entry.state == QueueState::Delivered)
+            .any(|entry| entry.text == text && entry.state == QueueState::Delivered)
     });
     for index in 1..=17 {
         ada.say(&format!("u{index}"), &format!("entry {index}"));

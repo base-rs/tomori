@@ -153,6 +153,9 @@ pub const SESSION_PAGE: usize = 8;
 const QUEUE_ROWS: usize = 2;
 
 const LOST: &str = "Connection lost; your words were not sent.";
+/// Said as words are cut off at a limit, the server's on how long an utterance may be or how long a transcript may be
+/// queued, and sent as far as they went. See `design/speech.md`.
+const CUT_OFF: &str = "Cut off at the limit, and sent.";
 
 /// How long after the remembered server is found the headset waits before connecting to it automatically, so that other servers browsing finds at about the same time are known, and one that needs attention can hold the connection back. See `design/arrival.md`.
 pub const AUTOMATIC_SETTLE: Duration = Duration::from_millis(1500);
@@ -1281,6 +1284,32 @@ impl Conversation {
                 stage,
                 part,
             } => {
+                // Words cut off at a limit while still recorded have ended there, as though X had been released: the
+                // microphone stops, without cancelling them, as the server has ended them, and they are sent as far as
+                // they went. See `design/speech.md`.
+                let ours = self.talk.as_ref().map(Talk::utterance) == Some(utterance.as_str());
+                if stage == tomori_protocol::TranscriptStage::Cut
+                    && ours
+                    && let Some(Talk::Recording {
+                        utterance,
+                        heard,
+                        answering,
+                        naming,
+                        ..
+                    }) = self.talk.clone()
+                {
+                    self.actions.push(Action::AbandonUtterance);
+                    self.talk = Some(Talk::Sending {
+                        utterance,
+                        heard,
+                        answering,
+                        received: None,
+                        naming,
+                    });
+                }
+                if stage == tomori_protocol::TranscriptStage::Cut && ours {
+                    self.notice = Some(CUT_OFF.into());
+                }
                 // Only words on their way are being transcribed; an earlier utterance's progress is no longer shown.
                 if let Some(Talk::Sending {
                     utterance: ours,

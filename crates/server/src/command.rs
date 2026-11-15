@@ -115,7 +115,7 @@ const SPEECH: &str = "
   --speech-backend NAME
                        How utterances are transcribed: streaming (default, a transducer that reports
                        words as you speak) or offline (a whole-clip model, more accurate, that reports
-                       the transcript a couple of seconds after you stop, for messages of up to 5
+                       the transcript a couple of seconds after you stop, for messages of up to 10
                        minutes).
   --speech-offline-model NAME
                        The Whisper model the offline backend uses, from

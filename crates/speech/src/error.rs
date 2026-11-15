@@ -14,8 +14,8 @@ pub enum Error {
     Engine(String),
     /// Recognition fell further behind the audio than [`crate::stt::BACKLOG`] allows.
     Behind,
-    /// The utterance was longer than the recognizer transcribes at once: the limit, in seconds.
-    TooLong(usize),
+    /// Recognition already holds as many utterances as it buffers at once, this many, so it takes no more until one of them has its outcome.
+    Busy(usize),
 }
 
 impl Error {
@@ -43,18 +43,10 @@ impl fmt::Display for Error {
                 "speech recognition fell more than {} seconds behind the audio",
                 crate::stt::BACKLOG / crate::stt::RATE as usize
             ),
-            Self::TooLong(seconds) => {
-                let (count, unit) = if seconds % 60 == 0 {
-                    (seconds / 60, "minute")
-                } else {
-                    (*seconds, "second")
-                };
-                let plural = if count == 1 { "" } else { "s" };
-                write!(
-                    formatter,
-                    "the speech was longer than {count} {unit}{plural}, the most that is transcribed at once"
-                )
-            }
+            Self::Busy(count) => write!(
+                formatter,
+                "speech recognition is already taking {count} recordings, the most it holds at once"
+            ),
         }
     }
 }
@@ -88,23 +80,8 @@ mod tests {
                 ),
             ),
             (
-                Error::TooLong(300),
-                "the speech was longer than 5 minutes, the most that is transcribed at once"
-                    .to_owned(),
-            ),
-            (
-                Error::TooLong(60),
-                "the speech was longer than 1 minute, the most that is transcribed at once"
-                    .to_owned(),
-            ),
-            (
-                Error::TooLong(90),
-                "the speech was longer than 90 seconds, the most that is transcribed at once"
-                    .to_owned(),
-            ),
-            (
-                Error::TooLong(1),
-                "the speech was longer than 1 second, the most that is transcribed at once"
+                Error::Busy(16),
+                "speech recognition is already taking 16 recordings, the most it holds at once"
                     .to_owned(),
             ),
         ] {

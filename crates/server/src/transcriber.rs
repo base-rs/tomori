@@ -16,7 +16,7 @@ pub struct UtteranceId(pub u64);
 ///
 /// The server calls these methods in order for each utterance: [`begin`](Self::begin), any number of [`push`](Self::push), then exactly one of [`end`](Self::end) or [`cancel`](Self::cancel). Utterances from different participants interleave. Methods are never called while server locks are held, and must not block on recognition: decode on another thread or task and report through the [`TranscriptSink`] given to `begin`.
 ///
-/// The sink may be called from any thread. After `end`, the implementation reports exactly one [`TranscriptSink::finish`] or [`TranscriptSink::fail`]; nothing is queued for the agent unless `finish` is called with non-empty text. Before that, it may report [`TranscriptSink::progress`], such as that the utterance waits behind another, or which of its parts is being transcribed; the server has already told the participant, as the end arrived, that it is being transcribed. After `cancel`, further reports are ignored.
+/// The sink may be called from any thread. After `end`, the implementation reports exactly one [`TranscriptSink::finish`] or [`TranscriptSink::fail`]; nothing is queued for the agent unless `finish` is called with non-empty text. Before that, it may report [`TranscriptSink::progress`], such as that the utterance waits behind another, or which of its parts is being transcribed; the server has already told the participant, as the end arrived, that it is being transcribed. While the utterance is still being spoken, it may report [`TranscriptSink::cut`], once, that it reached the transcriber's limit and has ended there: the server then calls `end` itself, as though the participant had let go, and the transcriber ignores the audio after the limit. After `cancel`, further reports are ignored.
 pub trait Transcriber: Send + Sync {
     fn begin(&self, utterance: UtteranceId, sink: TranscriptSink);
 
@@ -74,6 +74,13 @@ impl TranscriptSink {
     pub fn progress(&self, stage: TranscriptStage, part: Option<TranscriptPart>) {
         if let Some(hub) = self.hub.upgrade() {
             hub.transcript_progress(self.utterance, stage, part);
+        }
+    }
+
+    /// Report that the utterance reached the transcriber's `limit` while it was still being spoken, and was cut off there: the server ends it, and the transcript that follows is of what was said up to the limit, sent with a note that it was cut off.
+    pub fn cut(&self, limit: std::time::Duration) {
+        if let Some(hub) = self.hub.upgrade() {
+            hub.transcript_cut(self.utterance, limit);
         }
     }
 

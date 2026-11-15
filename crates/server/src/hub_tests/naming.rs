@@ -95,6 +95,7 @@ fn whoever_speaks_renames_their_own_device_and_everyone_sees_it() {
         utterance: "u".to_owned(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),

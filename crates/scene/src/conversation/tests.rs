@@ -4403,6 +4403,57 @@ fn holding_x_records_an_utterance_and_releasing_sends_it() {
 }
 
 #[test]
+fn words_cut_off_at_the_limit_stop_recording_and_are_sent_as_far_as_they_went() {
+    use crate::recording::{Phase, Received};
+    let mut conversation = joined(|_| {});
+    let utterance = press(&mut conversation);
+    conversation.apply(transcript(&utterance, "the plan is", false));
+    let cut = |utterance: &str| {
+        Event::Message(ServerMessage::TranscriptProgress {
+            utterance: utterance.to_owned(),
+            stage: TranscriptStage::Cut,
+            part: None,
+        })
+    };
+    // Another utterance's cut changes nothing.
+    conversation.apply(cut("earlier"));
+    assert!(conversation.recording().is_some());
+    assert_eq!(conversation.notice(), None);
+    // The server has ended it at the limit: the microphone stops without cancelling it, and the card and the pill say
+    // it was cut off and is being sent.
+    conversation.apply(cut(&utterance));
+    assert_eq!(conversation.take_actions(), [Action::AbandonUtterance]);
+    assert_eq!(conversation.recording(), None);
+    assert_eq!(
+        conversation.recording_phase(Instant::now()),
+        Some(Phase::Sending {
+            heard: "the plan is".into(),
+            answering: false,
+            received: Some(Received {
+                stage: TranscriptStage::Cut,
+                part: None,
+            }),
+        })
+    );
+    assert_eq!(conversation.notice(), Some(CUT_OFF));
+    // Letting go of X afterwards does nothing more.
+    conversation.talk(false);
+    assert!(conversation.take_actions().is_empty());
+    conversation.apply(transcript(&utterance, "The plan is.", true));
+    // Sent: the notice stays, until it is replaced or dismissed.
+    assert!(!conversation.text().contains("Transcribing"));
+    assert!(conversation.text().contains(CUT_OFF));
+    // Words cut only once they have ended, to fit the queue, are said to be cut off too.
+    let utterance = press(&mut conversation);
+    conversation.talk(false);
+    conversation.take_actions();
+    conversation.notice = None;
+    conversation.apply(cut(&utterance));
+    assert!(conversation.take_actions().is_empty());
+    assert_eq!(conversation.notice(), Some(CUT_OFF));
+}
+
+#[test]
 fn the_worker_pointed_at_as_x_is_pressed_is_sent_as_the_words_begin() {
     let worker = |id: &str, title: &str| tomori_protocol::Worker {
         id: id.into(),
@@ -6308,10 +6359,10 @@ fn the_recording_indicator_shows_a_failure_until_it_is_dismissed() {
     conversation.take_actions();
     conversation.apply(Event::Message(ServerMessage::TranscriptFailed {
         utterance,
-        error: "Nothing was sent: longer than 5 minutes.".into(),
+        error: "Transcription failed, so nothing was sent.".into(),
     }));
     let failed = Some(Phase::Failed {
-        reason: "Nothing was sent: longer than 5 minutes.".into(),
+        reason: "Transcription failed, so nothing was sent.".into(),
     });
     assert_eq!(conversation.recording_phase(Instant::now()), failed);
     // It is shown for a few seconds, longer than other outcomes, so that why can be read, then fades while the problem stays.

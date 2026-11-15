@@ -274,6 +274,7 @@ fn push_to_talk_shows_partials_then_queues_the_final_transcript() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -492,6 +493,7 @@ fn a_recognizer_failure_fails_the_utterance() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -532,6 +534,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -553,6 +556,7 @@ fn a_recognizer_failure_while_recording_closes_the_utterance() {
         utterance: "u2".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -587,6 +591,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -614,6 +619,7 @@ fn a_crashed_recognizer_fails_the_utterance_instead_of_dropping_it() {
         utterance: "u2".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -640,6 +646,7 @@ fn an_utterance_that_cannot_start_fails_visibly() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -664,6 +671,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
         utterance: "a1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -673,6 +681,7 @@ fn one_participants_recognizer_failure_does_not_fail_another_recording_at_the_sa
         utterance: "b1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -703,6 +712,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -726,6 +736,7 @@ fn a_cancelled_utterance_sends_nothing_and_the_next_is_transcribed() {
         utterance: "u2".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -765,6 +776,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -784,6 +796,7 @@ fn a_lost_frame_fails_a_streaming_utterance() {
         utterance: "u2".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -881,6 +894,7 @@ fn queueing_and_recording_during_a_reply_do_not_cut_off_speech() {
         utterance: "u3".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -1148,6 +1162,7 @@ fn an_offline_utterance_longer_than_the_recognizer_window_is_transcribed_in_part
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -1318,6 +1333,7 @@ fn begin(client: &mut TestClient, id: &str, progress: bool) {
         utterance: id.into(),
         answer: None,
         progress,
+        cut: progress,
         naming: false,
         titling: false,
         attention: Vec::new(),
@@ -1549,54 +1565,44 @@ fn a_streaming_utterance_is_said_to_be_received_then_transcribed_at_once() {
 }
 
 #[test]
-fn an_offline_utterance_longer_than_the_limit_fails_visibly_while_recording() {
+fn an_offline_utterance_reaching_the_limit_is_cut_off_and_sent_as_far_as_it_went() {
     let recognizer = FakeOfflineRecognizer::default();
     let server = offline_server(FakeBackend::manual(), recognizer.clone());
     let mut ada = server.connect("ada", "Ada");
-    ada.create_space("Too long");
-    ada.send(&ClientMessage::UtteranceBegin {
-        utterance: "u1".into(),
-        answer: None,
-        progress: false,
-        naming: false,
-        titling: false,
-        attention: Vec::new(),
-        seen: None,
-    });
-    // One second more than the limit; the failure arrives before the utterance ends.
-    speak_steadily(
-        &mut ada,
-        tomori_speech::stt::MAX_UTTERANCE / RATE as usize + 1,
-    );
-    let error = failure(&mut ada, "u1");
+    ada.create_space("Long");
+    begin(&mut ada, "u1", true);
+    // One second more than the limit: it is cut off at the limit before it ends, and Ada is told so.
+    let limit = tomori_speech::stt::MAX_UTTERANCE / RATE as usize;
+    assert_eq!(limit, 600);
+    speak_steadily(&mut ada, limit + 1);
     assert_eq!(
-        error,
-        "Nothing was sent: the speech was longer than 5 minutes, the most that is transcribed at once. Say it in shorter messages."
+        next_progress(&ada, "u1"),
+        Some((TranscriptStage::Cut, None))
     );
-    // An end already on its way is ignored, and nothing more is decoded, or queued.
-    let decoded = recognizer.clips.lock().unwrap().len();
-    ada.send(&ClientMessage::UtteranceEnd {
-        utterance: "u1".into(),
-        pointed: None,
-    });
+    // Her letting go, already on its way, is ignored rather than refused.
+    end(&mut ada, "u1");
+    // What she said up to the limit is sent, every part of it: 21 of 28 seconds, without a pause to cut at, and the
+    // rest.
+    let (_, outcome) = progress_of(&mut ada, "u1");
+    let said = format!("{}12 seconds.", "28 seconds. ".repeat(21));
+    assert_eq!(outcome, Ok(said.clone()));
+    let clips = recognizer.clips.lock().unwrap().clone();
+    assert_eq!(
+        clips.iter().sum::<usize>(),
+        tomori_speech::stt::MAX_UTTERANCE
+    );
+    // The agent is given it with Tomori's note that it was cut off.
+    let session = server.backend.started()[0].clone();
+    let prompts = eventually(|| Some(session.log().prompts).filter(|prompts| !prompts.is_empty()));
+    assert_eq!(
+        prompts[0].text,
+        format!("Ada: {said} [Cut off at the 10-minute limit]")
+    );
     while let Some(message) = ada.next_message(Duration::from_millis(200)) {
-        match message {
-            ServerMessage::Space { state } => assert!(state.queue.is_empty()),
-            ServerMessage::Error { error, .. } => panic!("{error}"),
-            ServerMessage::Transcript { text, .. } => panic!("transcribed as {text:?}"),
-            _ => {}
+        if let ServerMessage::Error { error, .. } = message {
+            panic!("{error}");
         }
     }
-    // Only whole parts were decoded, while it was spoken, and none after it failed.
-    let clips = recognizer.clips.lock().unwrap().clone();
-    assert_eq!(clips.len(), decoded, "{clips:?}");
-    assert!(
-        clips
-            .iter()
-            .all(|clip| *clip == tomori_speech::stt::MAX_SEGMENT),
-        "{clips:?}"
-    );
-    assert!(server.backend.started()[0].log().prompts.is_empty());
 }
 
 /// Report this participant's engagement, as the headset does when it is put on or taken off.
@@ -2069,6 +2075,7 @@ fn without_recognition_an_ended_utterance_fails_and_a_cancelled_one_is_silent() 
             utterance: utterance.into(),
             answer: None,
             progress: false,
+            cut: false,
             naming: false,
             titling: false,
             attention: Vec::new(),

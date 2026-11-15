@@ -29,7 +29,9 @@ use std::{
 
 use tomori_protocol::AudioFrame;
 
-pub use offline::{MAX_UTTERANCE, OfflineRecognition, OfflineRecognizer, OfflineUtterance};
+pub use offline::{
+    MAX_OPEN, MAX_UTTERANCE, OfflineRecognition, OfflineRecognizer, OfflineUtterance,
+};
 pub use punctuation::{
     CnnBilstmPunctuator, DEFAULT_PUNCTUATION_MODEL, Punctuated, PunctuationConfig, Punctuator,
 };
@@ -105,6 +107,8 @@ pub enum Progress {
     Waiting,
     /// Its part `part`, counted from 1, of the `parts` it is transcribed in, is being transcribed.
     Transcribing { part: usize, parts: usize },
+    /// It reached the most audio an utterance may buffer, `seconds` long, while the participant was still speaking, and was cut off there: it has ended, its later audio and end are ignored, and its transcript, of the audio up to the limit, follows as [`TranscriptEvent::Final`].
+    Cut { seconds: usize },
 }
 
 impl TranscriptEvent {

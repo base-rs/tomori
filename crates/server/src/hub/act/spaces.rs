@@ -158,7 +158,7 @@ impl Hub {
                 self.arrive(state, participant, false);
             }
             ClientMessage::Leave => {
-                state.abandon_utterance(connection, deferred);
+                state.abandon_utterance(connection, "its participant left the space", deferred);
                 // Announce leaving before the lobby listing that leaving produces.
                 outbox.clear_audio();
                 outbox.message(ServerMessage::LEFT);

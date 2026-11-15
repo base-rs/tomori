@@ -3,7 +3,7 @@
 
 //! A [`Transcriber`] that buffers each utterance and decodes it whole, once, with the offline recognizer. See `design/speech.md`.
 //!
-//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so the transcript arrives a couple of seconds after the participant lets go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`tomori_speech::stt::MAX_UTTERANCE`]; each part is decoded as soon as the audio decides where it ends, while the participant is still speaking, and the words of the parts decoded so far are shown to them as a partial transcript, so that only the last part, or at most two, is left once they let go.
+//! The offline recognizer is more accurate than the streaming one, but it cannot stream: it decodes a complete clip, so the transcript arrives a couple of seconds after the participant lets go, instead of almost at once. An utterance longer than its 30 second window is split at its pauses and decoded in parts, up to [`tomori_speech::stt::MAX_UTTERANCE`], where one still being spoken is cut off and what was said up to it sent; each part is decoded as soon as the audio decides where it ends, while the participant is still speaking, and the words of the parts decoded so far are shown to them as a partial transcript, so that only the last part, or at most two, is left once they let go.
 use std::{
     collections::HashMap,
     sync::{Mutex, PoisonError},
@@ -111,17 +111,20 @@ fn report(sink: &TranscriptSink, event: tomori_speech::TranscriptEvent) {
             sink.progress(TranscriptStage::Waiting, None);
         }
         tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part, parts }) => {
-            // A part is worth saying only of several; the counts are bounded by the 5 minute limit.
+            // A part is worth saying only of several; the counts are bounded by the 10 minute limit.
             let part = (parts > 1).then(|| TranscriptPart {
                 number: u32::try_from(part).unwrap_or(u32::MAX),
                 of: u32::try_from(parts).unwrap_or(u32::MAX),
             });
             sink.progress(TranscriptStage::Transcribing, part);
         }
+        tomori_speech::TranscriptEvent::Progress(Progress::Cut { seconds }) => {
+            sink.cut(std::time::Duration::from_secs(seconds as u64));
+        }
         tomori_speech::TranscriptEvent::Final(text) => sink.finish(&text),
         tomori_speech::TranscriptEvent::Failed(Error::Stopped(_)) => sink.fail(STOPPED),
-        tomori_speech::TranscriptEvent::Failed(error @ Error::TooLong(_)) => sink.fail(&format!(
-            "Nothing was sent: {error}. Say it in shorter messages."
+        tomori_speech::TranscriptEvent::Failed(error @ Error::Busy(_)) => sink.fail(&format!(
+            "Nothing was sent: {error}. Please try again in a moment."
         )),
         tomori_speech::TranscriptEvent::Failed(error) => sink.fail(&format!(
             "Transcription failed, so nothing was sent: {error}."
@@ -175,7 +178,8 @@ mod tests {
             tomori_speech::TranscriptEvent::Progress(Progress::Transcribing { part: 2, parts: 3 }),
             tomori_speech::TranscriptEvent::Final("Deploy it.".into()),
             tomori_speech::TranscriptEvent::Failed(Error::Stopped("gone".into())),
-            tomori_speech::TranscriptEvent::Failed(Error::TooLong(600)),
+            tomori_speech::TranscriptEvent::Progress(Progress::Cut { seconds: 600 }),
+            tomori_speech::TranscriptEvent::Failed(Error::Busy(16)),
             tomori_speech::TranscriptEvent::Failed(Error::Engine("bad audio".into())),
         ] {
             report(&sink, event);
@@ -197,6 +201,10 @@ mod tests {
         transcriber.push(UtteranceId(9), &frame);
         transcriber.end(UtteranceId(9));
         transcriber.cancel(UtteranceId(9));
+        // One it began is cancelled, and tells nothing more.
+        transcriber.begin(UtteranceId(1), TranscriptSink::nowhere(UtteranceId(1)));
+        transcriber.push(UtteranceId(1), &frame);
+        transcriber.cancel(UtteranceId(1));
         let stopper = transcriber.stopper();
         stopper.stop();
         assert!(stopper.wait(std::time::Instant::now() + std::time::Duration::from_secs(5)));

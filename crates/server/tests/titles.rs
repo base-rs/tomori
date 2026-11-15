@@ -46,6 +46,7 @@ fn say_title(client: &mut TestClient, utterance: &str, text: &str) {
         utterance: utterance.to_owned(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: true,
         attention: Vec::new(),
