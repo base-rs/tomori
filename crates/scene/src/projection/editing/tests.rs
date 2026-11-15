@@ -1264,7 +1264,13 @@ fn a_wall_carried_turns_with_the_stick_and_squares_up_to_face_the_participant() 
     projector.update(frame_at(&projection, ray, 1.0, now));
     let mut flick = frame_at(&projection, ray, 1.0, now);
     flick.stick = Vec2::new(1.0, 0.0);
-    assert!(projector.update(flick).wall_ticked);
+    projector.update(flick);
+    // Flicked, it turns on a step as the stick is let go, and ticks.
+    assert!(
+        projector
+            .update(frame_at(&projection, ray, 1.0, now))
+            .wall_ticked
+    );
     let mut square = frame_at(&projection, ray, 1.0, now);
     square.straighten = true;
     assert!(projector.update(square).wall_ticked);

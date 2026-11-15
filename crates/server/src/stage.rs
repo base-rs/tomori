@@ -1275,6 +1275,40 @@ impl Stage {
         self.view_within(space, walls, now, &tomori_protocol::Limits::MOST)
     }
 
+    /// What the back of `kept`, a panel shown in `environment`, says besides what Tomori writes of it: what its side says
+    /// of it, for a panel its environment published, and, for an instance the server made, among its outputs, the title
+    /// of the panel it is a copy of, or that panel's id where it is not shown; none for the agent's, nor where that says nothing. See
+    /// `design/panel-backs.md`.
+    fn back(&self, environment: &str, kept: &Kept) -> Option<tomori_protocol::back::Back> {
+        let published = kept.published.as_ref()?;
+        let mut back = published.back.clone().unwrap_or_default();
+        if let Some(of) = &published.of {
+            let title = self
+                .rooms
+                .get(environment)
+                .into_iter()
+                .flat_map(|room| &room.panels)
+                .find(|other| {
+                    other
+                        .published
+                        .as_ref()
+                        .is_some_and(|other| other.id == *of)
+                })
+                .map(|other| other.content.title.clone())
+                .filter(|title| !title.is_empty());
+            back = back
+                .with_line(
+                    tomori_protocol::back::OUTPUTS,
+                    tomori_protocol::back::BackLine::new(
+                        published::COPY_OF,
+                        title.unwrap_or_else(|| of.clone()),
+                    ),
+                )
+                .cleaned();
+        }
+        Some(back).filter(|back| *back != tomori_protocol::back::Back::default())
+    }
+
     /// What one connection is sent of the space `space` in `walls`' environment at `now`, within what it takes,
     /// `limits`: the walls [`walls_within`] keeps and the panels on them, the panels floating there that were left most
     /// recently, as many as its floating panels and one more for each slot its walls have fewer than its slots, and of
@@ -1339,6 +1373,10 @@ impl Stage {
             .map(|kept| {
                 self.held(walls.environment, kept, kept.panel(now), now)
                     .with_context(self.panel_chips(walls.environment, kept))
+                    .with_back(self.back(walls.environment, kept))
+                    .with_updated(Some(
+                        now.saturating_sub(kept.updated.unwrap_or(kept.created)),
+                    ))
             })
             .collect();
         let shown = shown

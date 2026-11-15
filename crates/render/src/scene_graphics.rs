@@ -371,6 +371,7 @@ mod tests {
     mod linked_cursor;
     mod padlock_corner;
     mod padlock_floor;
+    mod panel_back;
     mod people;
     mod timers;
     mod turning;

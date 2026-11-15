@@ -126,6 +126,7 @@ impl Held {
 fn without_ages(mut projection: Projection) -> Projection {
     for panel in &mut projection.panels {
         panel.age = 0;
+        panel.updated = None;
     }
     projection
 }

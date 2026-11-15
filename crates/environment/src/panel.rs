@@ -457,6 +457,7 @@ pub struct Panel {
     depends: Vec<String>,
     window: Option<(i64, i64)>,
     face: Option<Face>,
+    back: Option<crate::Back>,
 }
 
 impl Panel {
@@ -476,6 +477,7 @@ impl Panel {
             depends: Vec::new(),
             window: None,
             face: None,
+            back: None,
         }
     }
 
@@ -523,6 +525,37 @@ impl Panel {
     /// What makes it a face panel, if it is one.
     pub fn face_spec(&self) -> Option<&Face> {
         self.face.as_ref()
+    }
+
+    /// The panel, whose back says what `back` says of how it is configured, in the sections Tomori writes it in, after
+    /// what Tomori writes there: its [`crate::INPUTS`], what it depends on, its [`crate::OUTPUTS`], what it publishes,
+    /// its [`crate::DEFINITION`], what makes it, such as a `Source` line, which the server writes after its
+    /// environment's name, and its query as a code block tagged with its language, and its [`crate::STATUS`], such as a
+    /// `Refresh` line and an `Error` line marked as a warning, or sections of other names, cleaned and bounded as
+    /// [`crate::Back::cleaned`] says, counted among the bytes its side publishes. A copy's origin, `Copy of` among its
+    /// outputs, is the server's to say, and one its side gives is left out. Keep it to how the panel is configured,
+    /// which seldom changes: a change of it changes the panel's version, as a change of its text does, and Tomori says
+    /// itself how long ago it was updated. See `design/panel-backs.md`.
+    ///
+    /// ```
+    /// use tomori_environment::{Back, BackCode, BackLine, Panel, DEFINITION, STATUS};
+    ///
+    /// let back = Back::new()
+    ///     .with_line(DEFINITION, BackLine::new("Source", "Prometheus"))
+    ///     .with_code(DEFINITION, BackCode::new("promql", "sum(rate(requests_total[5m]))"))
+    ///     .with_line(STATUS, BackLine::new("Refresh", "every 15 s"));
+    /// let panel = Panel::text("latency", "Latency", "").with_back(back);
+    /// assert_eq!(panel.back_spec().and_then(|back| back.line(DEFINITION, "Source")), Some("Prometheus"));
+    /// assert_eq!(Panel::text("rota", "Rota", "").back_spec(), None);
+    /// ```
+    pub fn with_back(mut self, back: crate::Back) -> Self {
+        self.back = Some(back);
+        self
+    }
+
+    /// What its back says of it, if its side gave it a back.
+    pub fn back_spec(&self) -> Option<&crate::Back> {
+        self.back.as_ref()
     }
 
     /// The panel, which depends on each of the parameters `parameters`, by their ids, as the side declares them with

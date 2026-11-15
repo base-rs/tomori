@@ -123,6 +123,7 @@ pub(super) fn most_bytes(panel: &Panel) -> usize {
         .map(|column| escaped(&column.title) + 48)
         .sum();
     let diagram = panel.diagram.as_ref().map_or(0, json_size);
+    let back = panel.back.as_ref().map_or(0, json_size);
     // Each chip of its context: its parameter, label and value, and room for its keys and setting.
     let chips: usize = panel
         .context
@@ -137,7 +138,7 @@ pub(super) fn most_bytes(panel: &Panel) -> usize {
                 + 112
         })
         .sum();
-    text + spans + chart + rows + columns + diagram + chips + 768
+    text + spans + chart + rows + columns + diagram + back + chips + 768
 }
 
 /// The most a projection's panels may take together, by [`most_bytes`], for its JSON to be measured to fit it to a
@@ -157,9 +158,10 @@ fn count_measure() {
     MEASURES.with(|measures| measures.set(measures.get() + 1));
 }
 
-/// `projection`, with its code panels and its charts whole where it fits in `budget` bytes of JSON, and otherwise as
-/// many as need be sent short, the least recently put where they are, by `placed`, first, so that the panels most
-/// likely being read are whole: its code panels, as `code::short` shortens them, and then, where every code panel short
+/// `projection`, with its panels' backs, its code panels and its charts whole where it fits in `budget` bytes of JSON,
+/// and otherwise as many as need be sent short, the least recently put where they are, by `placed`, first, so that the
+/// panels most likely being read are whole: its panels without their backs, which are seen only from behind, then its
+/// code panels, as `code::short` shortens them, and then, where every code panel short
 /// is still too long, as only a frame of 1 MiB full of an environment's largest charts is, its chart panels without
 /// their charts, each as the text panel of its summary an older client draws. A projection of every code panel short
 /// and no chart fits in a frame.
@@ -184,7 +186,8 @@ pub(super) fn fit(projection: &mut Projection, placed: &[u64], budget: usize) {
     shorten(projection, placed, total, budget, json_size);
 }
 
-/// Send as many of `projection`'s code panels short, and then of its chart panels without their charts, the least
+/// Send as many of `projection`'s panels without their backs, then of its code panels short, and then of its chart
+/// panels without their charts, the least
 /// recently put where they are, by `placed`, first, as bring it from `total` bytes to within `budget`, each panel's
 /// bytes as `size` finds them. Returns how many bytes it then is.
 fn shorten(
@@ -196,7 +199,11 @@ fn shorten(
 ) -> usize {
     /// Whether a panel is of a kind sent short, and the panel sent so, saying whether that made it shorter.
     type Kind = (fn(&Panel) -> bool, fn(&mut Panel) -> bool);
-    let kinds: [Kind; 2] = [
+    let kinds: [Kind; 3] = [
+        (
+            |panel| panel.back.is_some(),
+            |panel| panel.back.take().is_some(),
+        ),
         (|panel| panel.code.is_some(), code::short),
         (
             |panel| panel.chart.is_some(),
