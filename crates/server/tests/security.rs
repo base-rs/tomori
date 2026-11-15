@@ -238,6 +238,7 @@ fn a_visitor_watches_and_hears_a_space_without_taking_part() {
         utterance: "u1".into(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),

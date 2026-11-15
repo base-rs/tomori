@@ -629,6 +629,7 @@ impl TestClient {
             utterance: utterance.to_owned(),
             answer: None,
             progress: false,
+            cut: false,
             naming: false,
             titling: false,
             attention,

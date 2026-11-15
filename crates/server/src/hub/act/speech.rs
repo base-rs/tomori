@@ -25,6 +25,7 @@ impl Hub {
                 utterance,
                 answer,
                 progress,
+                cut,
                 naming,
                 titling,
                 attention,
@@ -70,7 +71,12 @@ impl Hub {
                     .get_mut(&connection)
                     .and_then(|record| record.utterance.take())
                 {
-                    state.utterances.remove(&open.id);
+                    let _ = state.utterances.remove(&open.id).inspect(|record| {
+                        record.log_outcome(
+                            open.id,
+                            "was abandoned, as a new utterance began before it ended, so nothing was sent",
+                        );
+                    });
                     deferred.push(Deferred::Cancel(open.id));
                     outbox.message(ServerMessage::TranscriptFailed {
                         utterance: open.client,
@@ -150,10 +156,13 @@ impl Hub {
                         seen,
                         origin,
                         progress: progress.then_some(connection),
+                        stops: cut,
                         begun: Instant::now(),
                         ended: None,
                         waiting: None,
                         waited: Duration::ZERO,
+                        audio: Duration::ZERO,
+                        cut: None,
                     },
                 );
                 let record = state
@@ -261,7 +270,7 @@ impl Hub {
                 deferred.push(Deferred::End(open.id));
             }
             ClientMessage::UtteranceCancel { .. } => {
-                state.abandon_utterance(connection, deferred);
+                state.abandon_utterance(connection, "its participant cancelled it", deferred);
             }
             ClientMessage::CancelQueued { entry } => {
                 let Some(space) = in_space(state, participant, space) else {
@@ -343,7 +352,9 @@ impl Hub {
                 let Some(space) = in_space(state, participant, space) else {
                     return;
                 };
-                if let Err(error) = state.answer(participant, &space, &question, &field, &text) {
+                if let Err(error) =
+                    state.answer(participant, &space, &question, &field, &text, None)
+                {
                     state.error(participant, error);
                 }
             }

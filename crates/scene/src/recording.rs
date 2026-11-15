@@ -265,11 +265,17 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
             } else {
                 "Release X to send"
             };
+            // Near the limit, what happens at it: the words are sent as far as they went. See `design/speech.md`.
+            let at_limit = if answering.is_some() {
+                "then answers"
+            } else {
+                "then sends"
+            };
             rows.push(Row::new(match left {
                 Some(left) => cut(
                     &[
-                        Span::new(format!("{} left: ", clock(left, None)), Style::bold(color)),
-                        Span::new("release X", Style::plain(TEXT)),
+                        Span::new(format!("{} left, ", clock(left, None)), Style::bold(color)),
+                        Span::new(at_limit, Style::plain(TEXT)),
                     ],
                     COLUMNS,
                 ),
@@ -289,6 +295,10 @@ pub fn canvas(phase: &Phase, limit: Option<Duration>, pulse: f32) -> Canvas {
                     stage: TranscriptStage::Waiting,
                     ..
                 }) => "Waiting to transcribe".to_owned(),
+                Some(Received {
+                    stage: TranscriptStage::Cut,
+                    ..
+                }) => "Cut off at limit; sending".to_owned(),
                 Some(Received {
                     part: Some(part), ..
                 }) => format!("Transcribing, part {} of {}", part.number, part.of),
@@ -594,7 +604,7 @@ mod tests {
         );
         assert_eq!(warning(Duration::from_secs(400), None), (RED, None));
         let warned = canvas(&recording(272, ""), limit, 0.0);
-        assert!(text(&warned).ends_with("0:28 left: release X"));
+        assert!(text(&warned).ends_with("0:28 left, then sends"));
         assert_eq!(bar(&warned).unwrap().1, AMBER);
     }
 
@@ -637,6 +647,10 @@ mod tests {
                 received(TranscriptStage::Waiting, None),
                 "Waiting to transcribe",
             ),
+            (
+                received(TranscriptStage::Cut, None),
+                "Cut off at limit; sending",
+            ),
             // A stage from a newer server reads as transcribing.
             (received(TranscriptStage::Unknown, None), "Transcribing…"),
         ] {
@@ -644,13 +658,13 @@ mod tests {
             assert_eq!(text(&canvas), format!("{said}\n\"check the build\""));
             assert_eq!(canvas.border, None);
         }
-        // The most parts a 5 minute message is cut into fits the card.
+        // The most parts a 10 minute message is cut into fits the card.
         let longest = canvas(
-            &received(TranscriptStage::Transcribing, part(17, 17)),
+            &received(TranscriptStage::Transcribing, part(34, 34)),
             None,
             0.0,
         );
-        assert_eq!(longest.rows[0].plain(), "Transcribing, part 17 of 17");
+        assert_eq!(longest.rows[0].plain(), "Transcribing, part 34 of 34");
         assert!(longest.rows.iter().all(|row| row.cells.len() <= COLUMNS));
     }
 
@@ -672,6 +686,9 @@ mod tests {
         let shown = text(&canvas(&answering, None, 0.0));
         assert!(shown.starts_with("● ANSWER 0:03\nAnswering: which branch?"));
         assert!(shown.ends_with("Release X to answer"));
+        // Near the limit, the answer is given as far as it went.
+        let near = text(&canvas(&answering, Some(Duration::from_secs(20)), 0.0));
+        assert!(near.ends_with("0:17 left, then answers"), "{near}");
         assert_eq!(
             text(&canvas(
                 &Phase::Sending {
@@ -716,7 +733,7 @@ mod tests {
         );
         let failed = canvas(
             &Phase::Failed {
-                reason: "Nothing was sent: the utterance is longer than 5 minutes. Say it in shorter messages.".into(),
+                reason: "Nothing was sent: speech recognition is already taking 16 recordings, the most it holds at once. Please try again in a moment.".into(),
             },
             None,
             0.0,

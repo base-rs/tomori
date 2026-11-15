@@ -1113,7 +1113,7 @@ fn a_request_settled_while_reconnecting_is_not_presented_again() {
     // Claims and answers wait for the session to be read again.
     assert_eq!(space.claim_approval("waiting", None), Err(RECONNECTING));
     assert_eq!(
-        space.answer("answered", "field", "text"),
+        space.answer("answered", "field", "text", None),
         Err(RECONNECTING.to_owned())
     );
     // Decisions already on their way are accepted during the gap; the
@@ -1688,6 +1688,46 @@ fn brackets_in_the_words_cannot_read_as_a_context_block() {
 }
 
 #[test]
+fn words_cut_off_are_told_with_tomoris_note_after_them() {
+    let mut space = model();
+    space.enqueue("a".into(), 1, "Ada".into(), "and then [Music] we".into());
+    space.cut_off("a", "[Cut off at the 10-minute limit]".into());
+    space.enqueue("w".into(), 1, "Ada".into(), "waiting".into());
+    space.cut_off("w", "[Cut off at the 90-second limit]".into());
+    // Only a waiting entry's words are noted.
+    space.cut_off("missing", "[Cut off at the 10-minute limit]".into());
+    let text = space.next_prompt().unwrap().text;
+    assert_eq!(
+        text,
+        "Ada: and then (Music) we [Cut off at the 10-minute limit]"
+    );
+    // The queue shows the words as they were heard.
+    assert_eq!(space.queue.entries()[0].text, "and then [Music] we");
+    space.apply(Event::Delivered { key: "a".into() });
+    space.apply(Event::Idle);
+    // Words waiting meanwhile keep their own.
+    assert_eq!(
+        space.next_prompt().unwrap().text,
+        "Ada: waiting [Cut off at the 90-second limit]"
+    );
+    space.apply(Event::Delivered { key: "w".into() });
+    space.apply(Event::Idle);
+    // A note goes with its words: one cancelled, or failed as the session closes, takes it.
+    space.enqueue("b".into(), 1, "Ada".into(), "gone".into());
+    space.cut_off("b", "[Cut off at the 10-minute limit]".into());
+    space.cancel("b").unwrap();
+    space.enqueue("c".into(), 1, "Ada".into(), "next".into());
+    assert_eq!(space.next_prompt().unwrap().text, "Ada: next");
+    assert!(space.cut.is_empty());
+    space.apply(Event::Delivered { key: "c".into() });
+    space.apply(Event::Idle);
+    space.enqueue("d".into(), 1, "Ada".into(), "closing".into());
+    space.cut_off("d", "[Cut off at the 10-minute limit]".into());
+    space.apply(Event::Closed { reason: None });
+    assert!(space.cut.is_empty());
+}
+
+#[test]
 fn notes_of_items_ticked_are_kept_for_the_next_words_the_latest_of_each_and_bounded() {
     let mut space = model();
     space.note_tick("panel-1", 2, "Ada ticked item 1".into());
@@ -1715,12 +1755,13 @@ fn notes_of_items_ticked_are_kept_for_the_next_words_the_latest_of_each_and_boun
             Some("[Ada ticked x]".into()),
             Some("[Pointing at y]".into()),
             "[Music] and this?",
+            None,
             true
         ),
         "Cy: [Ada ticked x] [Pointing at y] (Music) and this?"
     );
     assert_eq!(
-        contextual("Cy", Some("[Ada ticked x]".into()), None, "go", false),
+        contextual("Cy", Some("[Ada ticked x]".into()), None, "go", None, false),
         "[Ada ticked x] go"
     );
     assert_eq!(noted(std::iter::empty()), None);
@@ -2272,13 +2313,13 @@ mod rarer {
         let mut space = model();
         space.apply(Event::QuestionAsked(question("q", FieldKind::Unsupported)));
         assert_eq!(
-            space.answer("q", "name", "Ada"),
+            space.answer("q", "name", "Ada", None),
             Err("Complete this question outside Tomori.".to_owned())
         );
         space.apply(Event::QuestionResolved { id: "q".into() });
         space.apply(Event::QuestionAsked(question("r", FieldKind::Text)));
         assert_eq!(
-            space.answer("r", "Other", "Ada"),
+            space.answer("r", "Other", "Ada", None),
             Err("The question changed; read the current field and answer again.".to_owned())
         );
     }
@@ -2287,13 +2328,13 @@ mod rarer {
     fn a_question_being_answered_is_forgotten_once_resolved_or_no_longer_listed() {
         let mut space = model();
         space.apply(Event::QuestionAsked(question("q", FieldKind::Text)));
-        let Ok(AnswerOutcome::Complete(_)) = space.answer("q", "name", "Ada") else {
+        let Ok(AnswerOutcome::Complete(_)) = space.answer("q", "name", "Ada", None) else {
             unreachable!("one field completes the question");
         };
         space.apply(Event::QuestionResolved { id: "q".into() });
         space.answered("q");
         space.apply(Event::QuestionAsked(question("r", FieldKind::Text)));
-        let Ok(AnswerOutcome::Complete(_)) = space.answer("r", "name", "Ada") else {
+        let Ok(AnswerOutcome::Complete(_)) = space.answer("r", "name", "Ada", None) else {
             unreachable!("one field completes the question");
         };
         // Read again without it, it is no longer being answered.

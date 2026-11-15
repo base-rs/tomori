@@ -24,8 +24,14 @@ pub const SESSION_BYTES: usize = 256;
 /// Longest client utterance identifier, in bytes.
 pub const UTTERANCE_BYTES: usize = 128;
 
-/// Longest answer text, in bytes.
+/// Longest answer text a client types, in its `Answer`, in bytes, which keeps a client's frames within what the server
+/// takes from them with room to spare. See `design/security.md`.
 pub const ANSWER_BYTES: usize = 4096;
+
+/// Longest spoken answer, in bytes: as long as a queued transcript, so that an answer spoken for 10 minutes is given
+/// whole. A longer one is cut after its last whole word that fits, with a note, rather than refused. See
+/// `design/speech.md`.
+pub const SPOKEN_ANSWER_BYTES: usize = QUEUED_TEXT_BYTES;
 
 /// Longest question field key named in a snapshot, in bytes. A longer key is named by its position instead; see [`crate::projection::field_name`].
 pub const FIELD_BYTES: usize = 1024;
@@ -42,8 +48,10 @@ pub const MODE_NAME_BYTES: usize = 64;
 /// Longest mode description shared in a snapshot, in bytes. Longer descriptions are cut.
 pub const MODE_DESCRIPTION_BYTES: usize = 256;
 
-/// Longest transcript that can be queued, in bytes. Partial transcripts are cut to this length.
-pub const QUEUED_TEXT_BYTES: usize = 4096;
+/// Longest transcript that can be queued, in bytes: 16 KiB, more than 10 minutes of the fastest speech, about 2,000
+/// words, takes. Partial transcripts are cut to this length, and a longer final one after its last whole word that fits,
+/// sent with a note that it was cut off. See `design/speech.md`.
+pub const QUEUED_TEXT_BYTES: usize = 16 * 1024;
 
 /// The most entries waiting in a space's queue, not counting finished ones.
 pub const QUEUED_ENTRIES: usize = 16;
@@ -56,7 +64,7 @@ pub const ERROR_BYTES: usize = 512;
 
 /// The most bytes of JSON in one space snapshot or lobby listing: a quarter of [`tomori_protocol::MAX_FRAME_BYTES`].
 ///
-/// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries are dropped, then approval and question text, their titles and the space error are cut, and then workers are dropped. What remains is bounded by the input limits above, [`FIELD_BYTES`], the mode limits, the approval option limits and the connection limit, and stays below the frame limit even in the worst case. Agent identifiers for approvals, their options and questions are not cut, because clients name them in their replies; a request whose identifier is longer than [`IDENTIFIER_BYTES`], which no reply could name, is not presented, and neither is such an option.
+/// The oldest messages are dropped first, then the newest message text is cut, then finished queue entries are dropped, then the text of waiting ones is cut, the oldest first, which the agent is still given whole, then approval and question text, their titles and the space error are cut, and then workers are dropped. What remains is bounded by the input limits above, [`FIELD_BYTES`], the mode limits, the approval option limits and the connection limit, and stays below the frame limit even in the worst case. Agent identifiers for approvals, their options and questions are not cut, because clients name them in their replies; a request whose identifier is longer than [`IDENTIFIER_BYTES`], which no reply could name, is not presented, and neither is such an option.
 pub const SNAPSHOT_BUDGET: usize = tomori_protocol::MAX_FRAME_BYTES / 4;
 
 /// Appended to text that was cut to fit.
@@ -197,6 +205,13 @@ pub fn fit_state(state: &mut SpaceState) {
     {
         let entry = state.queue.remove(index);
         size -= removed(&entry, state.queue.len());
+    }
+    // Then the text of waiting ones, oldest first: only what is shown is cut, and the agent is given the words whole.
+    for entry in &mut state.queue {
+        if size <= SNAPSHOT_BUDGET {
+            break;
+        }
+        size -= shrink(&mut entry.text, size - SNAPSHOT_BUDGET);
     }
     // Then text written by the agent, which a malicious or broken agent could make arbitrarily long.
     let mut texts: Vec<&mut String> = Vec::new();
@@ -604,6 +619,32 @@ mod tests {
         assert_eq!(state.messages[0].text, "Done.");
         assert!(state.error.unwrap().ends_with(TRUNCATED));
     }
+    #[test]
+    fn waiting_entries_of_the_longest_transcripts_are_cut_to_fit() {
+        // A full queue of the longest transcripts, of characters that take six bytes each in JSON, the worst there is.
+        let mut state = SpaceState {
+            messages: vec![message(0, "Done.".into())],
+            queue: (0..QUEUED_ENTRIES)
+                .map(|id| tomori_protocol::QueueEntry {
+                    id: format!("q{id}"),
+                    source: 1,
+                    speaker: "Ada".into(),
+                    text: "\u{1}".repeat(QUEUED_TEXT_BYTES),
+                    state: tomori_protocol::QueueState::Queued,
+                })
+                .collect(),
+            ..SpaceState::default()
+        };
+        assert!(json_len(&state) > tomori_protocol::MAX_FRAME_BYTES);
+        fit_state(&mut state);
+        assert!(json_len(&state) <= SNAPSHOT_BUDGET);
+        // Every entry is still shown, the oldest cut first, and the newest whole.
+        assert_eq!(state.queue.len(), QUEUED_ENTRIES);
+        assert!(state.queue[0].text.ends_with(TRUNCATED));
+        assert_eq!(state.queue.last().unwrap().text.len(), QUEUED_TEXT_BYTES);
+        assert_eq!(state.messages[0].text, "Done.");
+    }
+
     #[test]
     fn a_list_emptied_to_fit_leaves_the_snapshot_within_its_budget() {
         let entry = |id: usize| tomori_protocol::QueueEntry {

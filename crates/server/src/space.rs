@@ -173,6 +173,9 @@ pub struct SpaceModel {
     /// so that the agent is told which message they answer if it said more before their words arrived. See
     /// `design/interaction.md`.
     seen: BTreeMap<String, Seen>,
+    /// Tomori's note that each waiting queue entry's words were cut off at a limit, by entry key, told to the agent after
+    /// them, as `[Cut off at the 10-minute limit]`. See `design/speech.md`.
+    cut: BTreeMap<String, String>,
     /// The [`MessageModel::order`] of the message the space saw last.
     last_order: u64,
     /// Where the speaker of the input delivered last stood, and the way they faced, as they began speaking, and when, if
@@ -814,7 +817,9 @@ pub fn attributed(speaker: &str, text: &str, attribution: bool) -> String {
 
 /// The prompt text for `text` said by `speaker`, as [`attributed`] makes it, with `notes`, what participants did since
 /// the words before, and `context`, Tomori's notes of which message they answer and what they attended to, before the
-/// words and after the speaker's name: `Bob: [Ada ticked …] [In reply to …] [Pointing at …] how is this one doing?`.
+/// words and after the speaker's name: `Bob: [Ada ticked …] [In reply to …] [Pointing at …] how is this one doing?`,
+/// and `cut`, Tomori's note that the words were cut off at a limit, after them: `Bob: and then [Cut off at the
+/// 10-minute limit]`.
 /// Square brackets in the words, such as a note of noise Whisper writes among them, as in "[Music] deploy it", are made
 /// parentheses, as its other notes are, so that Tomori's notes are the only bracketed text in a prompt, with or without
 /// them.
@@ -823,10 +828,16 @@ fn contextual(
     notes: Option<String>,
     context: Option<String>,
     text: &str,
+    cut: Option<String>,
     attribution: bool,
 ) -> String {
     let text = text.replace('[', "(").replace(']', ")");
-    let said: Vec<String> = notes.into_iter().chain(context).chain([text]).collect();
+    let said: Vec<String> = notes
+        .into_iter()
+        .chain(context)
+        .chain([text])
+        .chain(cut)
+        .collect();
     attributed(speaker, &said.join(" "), attribution)
 }
 
@@ -921,6 +932,7 @@ impl SpaceModel {
             instructions_error: None,
             attending: BTreeMap::new(),
             origins: BTreeMap::new(),
+            cut: BTreeMap::new(),
             seen: BTreeMap::new(),
             last_order: 0,
             origin: None,
@@ -1782,6 +1794,7 @@ impl SpaceModel {
                 self.attending.clear();
                 self.origins.clear();
                 self.seen.clear();
+                self.cut.clear();
                 // A closed session can no longer receive decisions or answers.
                 self.approvals.clear();
                 self.deciding.clear();
@@ -2017,7 +2030,21 @@ impl SpaceModel {
         self.attending.remove(key);
         self.origins.remove(key);
         self.seen.remove(key);
+        self.cut.remove(key);
         Ok(())
+    }
+
+    /// The waiting entry `key`'s words were cut off at a limit, as `note`, Tomori's note told the agent after them, says.
+    /// See `design/speech.md`.
+    pub fn cut_off(&mut self, key: &str, note: String) {
+        if self
+            .queue
+            .entries()
+            .iter()
+            .any(|entry| entry.id == key && entry.state == QueueState::Queued)
+        {
+            self.cut.insert(key.to_owned(), note);
+        }
     }
 
     /// The speaker of the waiting entry `key`'s head was at `origin`, facing as it faces, as they began speaking, at
@@ -2229,7 +2256,15 @@ impl SpaceModel {
             (Some(events), Some(notes)) => Some(format!("{events} {notes}")),
             (events, notes) => events.or(notes),
         };
-        let text = contextual(&entry.speaker, notes, context, &entry.text, attribution);
+        let cut = self.cut.remove(&key);
+        let text = contextual(
+            &entry.speaker,
+            notes,
+            context,
+            &entry.text,
+            cut,
+            attribution,
+        );
         // What the agent projects in its turn goes onto the wall nearest where they stood, or the Tomori wall.
         self.origin = self.origins.remove(&key);
         // Entries that failed or were dropped without being delivered take their attention with them.
@@ -2244,6 +2279,7 @@ impl SpaceModel {
             .retain(|key, _| waiting.contains(key.as_str()));
         self.origins.retain(|key, _| waiting.contains(key.as_str()));
         self.seen.retain(|key, _| waiting.contains(key.as_str()));
+        self.cut.retain(|key, _| waiting.contains(key.as_str()));
         self.remember_given(delivery_key(&key).to_owned());
         let prompt = Prompt { key, text };
         self.in_flight = Some(prompt.clone());
@@ -2470,12 +2506,15 @@ impl SpaceModel {
         }
     }
 
-    /// Record an answer to the current field. The first answer to a field wins.
+    /// Record an answer to the current field. The first answer to a field wins. A `note`, as that spoken words were cut
+    /// off, follows a text answer, so that the agent knows it stopped mid-thought, and is left out of a choice, which it
+    /// would not match. See `design/speech.md`.
     pub fn answer(
         &mut self,
         question: &str,
         field: &str,
         text: &str,
+        note: Option<&str>,
     ) -> Result<AnswerOutcome, String> {
         if self.reconnecting.is_some() {
             return Err(RECONNECTING.to_owned());
@@ -2491,7 +2530,10 @@ impl SpaceModel {
         let current = projection::current_field(&pending.question, &pending.answers)
             .filter(|current| projection::field_name(&pending.question, current) == field)
             .ok_or("The question changed; read the current field and answer again.")?;
-        let value = projection::answer_value(current, text)?;
+        let value = match (projection::answer_value(current, text)?, note) {
+            (AnswerValue::Text(text), Some(note)) => AnswerValue::Text(format!("{text} {note}")),
+            (value, _) => value,
+        };
         let key = current.key.clone();
         pending.answers.push((key, value));
         if projection::current_field(&pending.question, &pending.answers).is_some() {

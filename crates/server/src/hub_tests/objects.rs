@@ -230,6 +230,7 @@ fn speaking(hub: &Hub, client: &Client, objects: &[&str]) {
         utterance: utterance.clone(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: objects
@@ -253,6 +254,7 @@ fn cancelling(hub: &Hub, client: &Client, objects: &[&str]) {
         utterance: utterance.clone(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: objects

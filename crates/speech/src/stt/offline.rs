@@ -7,7 +7,7 @@
 //!
 //! [`OfflineRecognition`] owns one recognizer on a dedicated thread. Each utterance is driven through an [`OfflineUtterance`]: audio is buffered and resampled to 16 kHz, and the utterance is reported through its sink as exactly one [`TranscriptEvent::Final`] or [`TranscriptEvent::Failed`], once it has ended or as soon as it fails.
 //!
-//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. Each segment's end depends only on the audio up to a little past its limit, so a segment is cut and decoded as soon as that audio has arrived, while the participant is still speaking, exactly where it would be cut once the clip had ended; only the rest is decoded after they stop. The transcript so far is reported, as a [`TranscriptEvent::Partial`] of committed words, after each segment but the last. What Whisper writes for a segment without speech, bracketed notes or a word or two the voice activity detector heard no speech for, is left out, so a clip with no speech in it at all is reported as an empty transcript. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments, and they go before segments of utterances still being spoken, so decoding ahead never holds up an utterance that has ended by more than the segment already being decoded. An utterance longer than [`MAX_UTTERANCE`] fails with [`Error::TooLong`] as soon as it passes the limit.
+//! The recognizer decodes at most [`super::MAX_SEGMENT`] at once, so a longer clip is split at its pauses into segments that fit, which are decoded in order and their transcripts joined; see [`super::segment`]. Each segment's end depends only on the audio up to a little past its limit, so a segment is cut and decoded as soon as that audio has arrived, while the participant is still speaking, exactly where it would be cut once the clip had ended; only the rest is decoded after they stop. The transcript so far is reported, as a [`TranscriptEvent::Partial`] of committed words, after each segment but the last. What Whisper writes for a segment without speech, bracketed notes or a word or two the voice activity detector heard no speech for, is left out, so a clip with no speech in it at all is reported as an empty transcript. Utterances that have ended take turns, a segment at a time, so an utterance that ends while a long one is being decoded waits for at most one of its segments, and they go before segments of utterances still being spoken, so decoding ahead never holds up an utterance that has ended by more than the segment already being decoded. An utterance that reaches [`MAX_UTTERANCE`] while the participant is still speaking is cut off there, as though they had stopped: its sink is told [`Progress::Cut`] at once, its later audio and end are ignored, and its transcript, of the audio up to the limit, follows as for any other. At most [`MAX_OPEN`] utterances are buffered at once, and one begun beyond them fails with [`Error::Busy`], so that the audio buffered is bounded by both.
 //!
 //! Once an utterance has ended, its sink is told when it waits behind another utterance, with [`Progress::Waiting`], and when it is transcribed after waiting, or in more than one segment, with [`Progress::Transcribing`] for each segment, so that the participant can tell recognition working from their words still on their way. An utterance that is transcribed at once, in one piece, is told only its outcome.
 //!
@@ -35,10 +35,13 @@ use crate::{
     },
 };
 
-/// The most audio, in samples at [`RATE`], that one utterance may buffer: 5 minutes, about 10 MB.
+/// The most audio, in samples at [`RATE`], that one utterance may buffer: 10 minutes, 19.2 MB of 16-bit samples, which is all the buffer ever holds, since it grows no further than the limit.
 ///
-/// It bounds the memory each utterance holds, and the time it can keep the recognizer busy. An utterance that would buffer more fails visibly as soon as it does, rather than having its end cut off.
-pub const MAX_UTTERANCE: usize = RATE as usize * 60 * 5;
+/// It bounds the memory each utterance holds, and the time it can keep the recognizer busy: at most 34 segments, each but the last at least 18 seconds, the shortest a cut at a pause in the last 10 seconds before [`super::MAX_SEGMENT`] makes one, most of them decoded while it is spoken. An utterance that reaches it while the participant is still speaking is cut off there, and what was said up to it is transcribed, rather than any of it being lost.
+pub const MAX_UTTERANCE: usize = RATE as usize * 60 * 10;
+
+/// The most utterances buffered at once, being spoken or waiting to be transcribed: with [`MAX_UTTERANCE`], at most 307 MB of audio. One begun beyond them fails at once with [`Error::Busy`].
+pub const MAX_OPEN: usize = 16;
 
 /// Why an utterance fails once recognition has stopped: a panic disabled it.
 const STOPPED_MESSAGE: &str = "speech recognition stopped after an internal error";
@@ -224,6 +227,8 @@ struct OfflineEngine<R: OfflineRecognizer> {
     disabled: bool,
     /// The most samples an utterance may buffer: [`MAX_UTTERANCE`], except in tests.
     limit: usize,
+    /// The most utterances buffered at once: [`MAX_OPEN`], except in tests.
+    open: usize,
     /// Whether segments are decoded while the participant is still speaking: always, except in tests that compare with decoding only once utterances end.
     ahead: bool,
     pending: Pending,
@@ -235,6 +240,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
         recognizer: R,
         voice: Option<Box<dyn VoiceActivity>>,
         limit: usize,
+        open: usize,
         ahead: bool,
         pending: Pending,
     ) -> Self {
@@ -245,6 +251,7 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
             active: VecDeque::new(),
             disabled: false,
             limit,
+            open,
             ahead,
             pending,
         }
@@ -526,6 +533,15 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
                     );
                     return true;
                 }
+                if self.active.len() >= self.open {
+                    log::warn!(
+                        "Utterance {key} was refused: {} utterances are already buffered.",
+                        self.active.len()
+                    );
+                    pending(&self.pending).open.remove(&key);
+                    tell(&sink, TranscriptEvent::Failed(Error::Busy(self.open)));
+                    return true;
+                }
                 self.active.push_back(OfflineEntry {
                     key,
                     sink,
@@ -551,30 +567,45 @@ impl<R: OfflineRecognizer> OfflineEngine<R> {
                 else {
                     return true;
                 };
+                let limit = self.limit;
                 let entry = &mut self.active[index];
-                if entry.samples.len() + samples.len() > self.limit {
-                    // Fail at once, while the participant is still speaking, rather than transcribe the start and drop the rest. Its later audio and end find no utterance.
-                    let entry = self.active.remove(index).expect("index is in range");
-                    log::warn!(
-                        "Utterance {} passed {} seconds of audio, so it failed.",
-                        entry.key,
-                        self.limit / RATE as usize
-                    );
-                    self.conclude(
-                        &entry,
-                        TranscriptEvent::Failed(Error::TooLong(self.limit / RATE as usize)),
-                    );
-                    return true;
+                let room = limit - entry.samples.len();
+                let kept = &samples[..samples.len().min(room)];
+                let wanted = entry.samples.len() + kept.len();
+                if wanted > entry.samples.capacity() {
+                    // Grown by doubling, but never past the limit, so that the buffer holds no more than an utterance may.
+                    let capacity = (entry.samples.capacity() * 2).clamp(wanted, limit);
+                    entry.samples.reserve_exact(capacity - entry.samples.len());
                 }
-                entry.samples.extend(samples);
-                // Due from when its audio arrived, which may have been while another's segment was decoded.
-                if self.ahead && entry.due.is_none() && entry.decided() {
+                entry.samples.extend_from_slice(kept);
+                if entry.samples.len() == limit {
+                    // Cut off at the limit, as though the participant had stopped there, so that what they said up to it is transcribed rather than lost; the rest of its audio, and its end, are ignored.
+                    log::info!(
+                        "Utterance {} reached {} seconds of audio while it was spoken, so it was cut off there.",
+                        entry.key,
+                        limit / RATE as usize
+                    );
+                    entry.ready = Some(entry.last.map_or(at, |last| last.max(at)));
+                    entry.due = None;
+                    let sink = Arc::clone(&entry.sink);
+                    // Ended before its sink is told, so that its handle, which the sink may end, does not end it again.
+                    if let Some(ended) = pending(&self.pending).open.get_mut(&key) {
+                        *ended = true;
+                    }
+                    tell(
+                        &sink,
+                        TranscriptEvent::Progress(Progress::Cut {
+                            seconds: limit / RATE as usize,
+                        }),
+                    );
+                } else if self.ahead && entry.due.is_none() && entry.decided() {
+                    // Due from when its audio arrived, which may have been while another's segment was decoded.
                     entry.due = Some(at);
                 }
             }
-            // An utterance that failed while it was spoken, as too long, has nothing left to end.
+            // An utterance that failed while it was spoken has nothing left to end, and one cut off at the limit has ended already.
             Command::End { key, at, waiting } => {
-                if let Some(entry) = self.find(key) {
+                if let Some(entry) = self.find(key).filter(|entry| entry.ready.is_none()) {
                     // A segment decoded ahead after the participant stopped, while the end was on its way, counts as its last turn.
                     entry.ready = Some(entry.last.map_or(at, |last| last.max(at)));
                     entry.due = None;
@@ -624,11 +655,22 @@ impl OfflineRecognition {
         Self::start(recognizer, Some(Box::new(voice)), MAX_UTTERANCE, true)
     }
 
-    /// Recognize with `recognizer` and `voice`, failing an utterance longer than `limit`, and decoding segments while the participant is still speaking if `ahead`.
+    /// Recognize with `recognizer` and `voice`, cutting an utterance off at `limit`, and decoding segments while the participant is still speaking if `ahead`.
     fn start(
         recognizer: impl OfflineRecognizer + 'static,
         voice: Option<Box<dyn VoiceActivity>>,
         limit: usize,
+        ahead: bool,
+    ) -> Self {
+        Self::holding(recognizer, voice, limit, MAX_OPEN, ahead)
+    }
+
+    /// Recognize as [`Self::start`] does, buffering at most `open` utterances at once.
+    fn holding(
+        recognizer: impl OfflineRecognizer + 'static,
+        voice: Option<Box<dyn VoiceActivity>>,
+        limit: usize,
+        open: usize,
         ahead: bool,
     ) -> Self {
         let (commands, receiver) = mpsc::channel();
@@ -641,7 +683,7 @@ impl OfflineRecognition {
             .spawn(move || {
                 // Dropped last, once the recognizer has been unloaded.
                 let _guard = guard;
-                OfflineEngine::new(receiver, recognizer, voice, limit, ahead, shared).run();
+                OfflineEngine::new(receiver, recognizer, voice, limit, open, ahead, shared).run();
             })
             .expect("spawn the offline recognition thread");
         Self {
@@ -735,9 +777,13 @@ impl OfflineUtterance {
         self.push(&frame.samples);
     }
 
-    /// The participant finished speaking: decode the rest of the buffered clip and deliver the final transcript. If another utterance that has ended is still being transcribed, or another's segment is being decoded while it is spoken, the sink is first told, before this returns, that this one waits.
+    /// The participant finished speaking: decode the rest of the buffered clip and deliver the final transcript; nothing, for one already cut off at the limit. If another utterance that has ended is still being transcribed, or another's segment is being decoded while it is spoken, the sink is first told, before this returns, that this one waits.
     pub fn end(mut self) {
         self.open = false;
+        // One cut off at the limit has ended already, and its sink may be ending it now, as it is told so, so the sink is not taken.
+        if pending(&self.pending).open.get(&self.key) == Some(&true) {
+            return;
+        }
         // The sink is held while the end is sent and the wait told, so that nothing the engine tells of this utterance comes first, and the engine has the end once the wait is told.
         let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
         let waiting = {

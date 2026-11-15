@@ -288,6 +288,7 @@ fn tomori_s_notes_wait_while_someone_speaks_and_a_timer_is_pointed_at() {
         utterance: "u-held".to_owned(),
         answer: None,
         progress: false,
+        cut: false,
         naming: false,
         titling: false,
         attention: Vec::new(),
