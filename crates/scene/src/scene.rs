@@ -2124,11 +2124,12 @@ impl Step {
             .joined_space()
             .map(|(space, _)| space.id.clone());
         // The environment's ambience, too, once its scenery has grown in, carried into the space as it is drawn; and
-        // none outside a space, on the grid or in an environment without one, nor for a watcher.
+        // none outside a space, on the grid or in an environment without one. A watcher's feedback, the spectator's,
+        // plays it only if it hears the ambience; see `design/spectator.md`.
         let ambience = conversation
             .ambience()
             .filter(|(environment, _)| {
-                !self.watching && scenery.reveal.is_none() && scenery.environment == *environment
+                scenery.reveal.is_none() && scenery.environment == *environment
             })
             .zip(space.clone());
         let playing = ambience
@@ -2775,8 +2776,14 @@ impl Step {
                                 .filter(|_| !self.watching && conversation.role().participates()),
                         ),
                 );
-                // A watcher asks nothing, whatever its role: what its client side asks is dropped, its sounds are not
-                // played and its passes are not felt. See `design/spectator.md`.
+                // Its sounds are heard where they are, as the ambience is, by a watcher too, whose feedback plays them
+                // only if it hears the ambience.
+                for (sound, position) in output.sounds {
+                    let position = arrangement.carriage.place(Vec3::from_array(position));
+                    feedback.ambient(sound, position.to_array(), now);
+                }
+                // A watcher asks nothing, whatever its role: what its client side asks is dropped and its passes are
+                // not felt. See `design/spectator.md`.
                 if self.watching {
                     if !output.intents.is_empty() && !self.asked {
                         log::info!(
@@ -2793,10 +2800,6 @@ impl Step {
                             environment.version(),
                             intent,
                         );
-                    }
-                    for (sound, position) in output.sounds {
-                        let position = arrangement.carriage.place(Vec3::from_array(position));
-                        feedback.ambient(sound, position.to_array(), now);
                     }
                     // An object passed from one hand to the other is felt on the hand that took it.
                     for side in output.passed {

@@ -327,6 +327,8 @@ pub struct Feedback {
     haptics: bool,
     /// Whether this client plays cues: not the spectator, whose audience sees no interface.
     muted: bool,
+    /// Whether it plays no ambience nor ambient sounds: not on a client that plays no cues, unless it hears them.
+    ambience_muted: bool,
     last_hover: Option<Instant>,
     /// Each pulse still to come, with its hand and whether its event is essential, so that a change to the setting can drop the rest.
     pulses: Vec<(Instant, Hand, Pulse, bool)>,
@@ -379,10 +381,30 @@ impl Feedback {
         }
     }
 
-    /// Never play cues, as for the spectator. Vibrations are unaffected.
+    /// Never play cues, as for the spectator, nor ambience or ambient sounds, until [`Self::hear_ambience`] says.
+    /// Vibrations are unaffected.
     pub fn mute_sounds(&mut self) {
         self.muted = true;
+        self.hear_ambience(false);
         self.earcons.clear();
+    }
+
+    /// Play the environment's ambience and its ambient sounds, or none, from now on, whether or not it plays cues, as
+    /// the spectator's `--ambience` chooses: the ambience it was last given is handed on again, or none, and the ambient
+    /// sounds waiting are dropped. See `design/spectator.md`.
+    pub fn hear_ambience(&mut self, heard: bool) {
+        if heard == self.ambience_muted {
+            self.ambience_muted = !heard;
+            self.ambience_changed |= self.ambience.is_some();
+        }
+        if !heard {
+            self.ambient.clear();
+        }
+    }
+
+    /// Whether it plays the environment's ambience and its ambient sounds, as [`Self::hear_ambience`] last said.
+    pub fn hears_ambience(&self) -> bool {
+        !self.ambience_muted
     }
 
     /// Something happened at `now`, heard only if `heard`: recording starting while the live microphone is already open is felt and not heard, since the microphone would pick up its cue.
@@ -451,7 +473,7 @@ impl Feedback {
 
     /// An environment made `sound` at `position`, in the scene, at `now`, such as an animal calling. Ambient sounds are
     /// not part of the vocabulary: they mark nothing, so they are heard only with sounds at full, never on a client that
-    /// plays no cues, and at most once in [`AMBIENT_INTERVAL`]. See `design/feedback.md`.
+    /// plays no cues unless it hears the ambience, and at most once in [`AMBIENT_INTERVAL`]. See `design/feedback.md`.
     pub fn ambient(
         &mut self,
         sound: crate::playback::Sound,
@@ -461,7 +483,7 @@ impl Feedback {
         let recent = self
             .last_ambient
             .is_some_and(|last| now.saturating_duration_since(last) < AMBIENT_INTERVAL);
-        if self.muted || self.settings.sounds != Level::Full || recent {
+        if self.ambience_muted || self.settings.sounds != Level::Full || recent {
             return;
         }
         self.last_ambient = Some(now);
@@ -469,27 +491,28 @@ impl Feedback {
     }
 
     /// The participant is in an environment that sounds `ambience`, already in the space's coordinates, or none. Never
-    /// on a client that plays no cues. See `design/spatial-audio.md`.
+    /// handed on from a client that plays no cues, unless it hears the ambience, though kept for when it does. See
+    /// `design/spatial-audio.md`.
     pub fn set_ambience(
         &mut self,
         ambience: Option<std::sync::Arc<crate::playback::ambience::Ambience>>,
     ) {
-        let ambience = ambience.filter(|_| !self.muted);
         let same = match (&self.ambience, &ambience) {
             (Some(was), Some(now)) => std::sync::Arc::ptr_eq(was, now),
             (was, now) => was.is_none() && now.is_none(),
         };
         if !same {
             self.ambience = ambience;
-            self.ambience_changed = true;
+            self.ambience_changed |= !self.ambience_muted;
         }
     }
 
-    /// The ambience to play now, if it changed since it was last taken.
+    /// The ambience to play now, if it changed since it was last taken, or none while it is not heard.
     pub fn take_ambience(
         &mut self,
     ) -> Option<Option<std::sync::Arc<crate::playback::ambience::Ambience>>> {
-        std::mem::take(&mut self.ambience_changed).then(|| self.ambience.clone())
+        std::mem::take(&mut self.ambience_changed)
+            .then(|| self.ambience.clone().filter(|_| !self.ambience_muted))
     }
 
     /// The ambient sounds to play, oldest first, and where each is.
@@ -934,6 +957,18 @@ mod tests {
         muted.mute_sounds();
         muted.ambient(sound(), [0.0; 3], now);
         assert_eq!(muted.take_ambient().count(), 0);
+        // Unless it hears the ambience, as a spectator may, until it stops, which drops those waiting.
+        muted.hear_ambience(true);
+        muted.ambient(sound(), [4.0, 0.0, 0.0], now);
+        assert_eq!(
+            muted.take_ambient().next().map(|(_, at)| at),
+            Some([4.0, 0.0, 0.0])
+        );
+        muted.ambient(sound(), [5.0, 0.0, 0.0], now + AMBIENT_INTERVAL);
+        muted.hear_ambience(false);
+        assert_eq!(muted.take_ambient().count(), 0);
+        muted.ambient(sound(), [6.0, 0.0, 0.0], now + AMBIENT_INTERVAL * 2);
+        assert_eq!(muted.take_ambient().count(), 0);
     }
 
     #[test]
@@ -966,8 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ambience_is_handed_on_once_each_time_it_changes_and_never_to_a_client_that_plays_no_cues()
-     {
+    fn the_ambience_is_handed_on_once_each_time_it_changes_and_only_while_heard() {
         use crate::playback::ambience::{Ambience as Sounds, Bed, Slot};
         use std::sync::Arc;
         let (mut feedback, _) = feedback();
@@ -986,8 +1020,36 @@ mod tests {
         assert!(feedback.take_ambience().unwrap().is_none());
         assert!(feedback.take_ambience().is_none());
         let (mut muted, _) = self::feedback();
+        assert!(muted.hears_ambience());
         muted.mute_sounds();
-        muted.set_ambience(Some(farm));
+        assert!(!muted.hears_ambience());
+        muted.set_ambience(Some(farm.clone()));
+        assert!(muted.take_ambience().is_none());
+        muted.hear_ambience(false);
+        assert!(muted.take_ambience().is_none());
+        // Hearing the ambience, it hands on the one it was last given, and none as it stops, once each.
+        muted.hear_ambience(true);
+        muted.hear_ambience(true);
+        assert!(muted.hears_ambience());
+        let taken = muted.take_ambience().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&taken, &farm));
+        assert!(muted.take_ambience().is_none());
+        muted.hear_ambience(false);
+        assert!(muted.take_ambience().unwrap().is_none());
+        // A change while it is not heard is kept, not handed on, until it is heard again.
+        let other = Arc::new(Sounds::new());
+        muted.set_ambience(Some(other.clone()));
+        assert!(muted.take_ambience().is_none());
+        muted.hear_ambience(true);
+        assert!(Arc::ptr_eq(
+            &muted.take_ambience().unwrap().unwrap(),
+            &other
+        ));
+        // With no ambience, turning it on or off hands nothing on.
+        muted.set_ambience(None);
+        assert!(muted.take_ambience().unwrap().is_none());
+        muted.hear_ambience(false);
+        muted.hear_ambience(true);
         assert!(muted.take_ambience().is_none());
     }
 

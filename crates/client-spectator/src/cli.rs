@@ -12,6 +12,15 @@ pub fn parse_voices(value: &str) -> Result<Hearing> {
         .with_context(|| format!("--voices takes all, agent or none, not {value:?}"))
 }
 
+/// Whether `--ambience` names it on or off, for a command line that takes it, such as `tomori --spectator`'s.
+pub fn parse_ambience(value: &str) -> Result<bool> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => bail!("--ambience takes on or off, not {value:?}"),
+    }
+}
+
 /// Where the spectator's view goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -46,6 +55,7 @@ impl Command {
             follow: None,
             token,
             voices: Hearing::All,
+            ambience: false,
             borderless: false,
         };
         let (mut audio_output, mut mode) = (None, None);
@@ -62,6 +72,7 @@ impl Command {
                 "--space" => options.space = Some(value("a space id")?),
                 "--follow" => options.follow = Some(value("a participant name")?),
                 "--voices" => options.voices = parse_voices(&value("all, agent or none")?)?,
+                "--ambience" => options.ambience = parse_ambience(&value("on or off")?)?,
                 "--audio-output" => audio_output = Some(value("an output's name")?),
                 "--borderless" => options.borderless = true,
                 _ if mode.is_none() => {
@@ -128,7 +139,7 @@ impl Command {
 }
 
 /// What `--help` shows.
-pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--audio-output NAME]
+pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--audio-output NAME]
 
 Renders a live space as a read-only view that follows a participant, for OBS or a call.
 
@@ -144,6 +155,7 @@ Options:
   --space ID           join this space (see `tomori discover --server ADDRESS`).
   --follow NAME        follow this participant by name (default: the first in the space).
   --voices WHICH       play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.
+  --ambience ON|OFF    play the environment's ambience and ambient sounds beneath the voices, as the participant followed hears them (on), or not (off, the default, for a clean capture); A in the window turns it on and off.
   --audio-output NAME  on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.";
 
 #[cfg(test)]
@@ -212,6 +224,7 @@ mod tests {
                 follow: Some("Ada".into()),
                 token: Some("tomori_t".into()),
                 voices: Hearing::All,
+                ambience: false,
                 borderless: false,
             }
         );
@@ -233,6 +246,18 @@ mod tests {
             "--voices takes all, agent or none, not \"some\""
         );
         assert_eq!(error(&["--voices"]), "--voices needs all, agent or none");
+    }
+
+    #[test]
+    fn the_ambience_is_on_or_off_and_off_by_default() {
+        assert!(!parse(&[]).unwrap().options.ambience);
+        assert!(parse(&["--ambience", "on"]).unwrap().options.ambience);
+        assert!(!parse(&["--ambience", "off"]).unwrap().options.ambience);
+        assert_eq!(
+            error(&["--ambience", "loud"]),
+            "--ambience takes on or off, not \"loud\""
+        );
+        assert_eq!(error(&["--ambience"]), "--ambience needs on or off");
     }
 
     #[test]
@@ -313,6 +338,7 @@ mod tests {
             "--pipewire-preview",
             "--audio-output",
             "--voices",
+            "--ambience",
             "--borderless",
         ] {
             assert!(HELP.contains(output), "{output}");

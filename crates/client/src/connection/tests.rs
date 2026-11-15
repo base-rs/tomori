@@ -95,6 +95,28 @@ fn the_speaker_keeps_the_ambience_and_its_level_for_this_player_and_the_next() {
             .as_ref()
             .is_some_and(|kept| Arc::ptr_eq(kept, &farm))
     );
+    // A client that plays no cues, as the spectator, gives its player no ambience until it hears it, then the one its
+    // feedback was last given, and none again as it stops.
+    connection.feedback().mute_sounds();
+    connection.poll(true, &mut session);
+    assert!(connection.speaker.ambience.is_none());
+    assert!(!connection.hears_ambience());
+    connection.feedback().set_ambience(Some(farm.clone()));
+    connection.poll(true, &mut session);
+    assert!(connection.speaker.ambience.is_none());
+    connection.hear_ambience(true);
+    assert!(connection.hears_ambience());
+    connection.poll(true, &mut session);
+    assert!(
+        connection
+            .speaker
+            .ambience
+            .as_ref()
+            .is_some_and(|kept| Arc::ptr_eq(kept, &farm))
+    );
+    connection.hear_ambience(false);
+    connection.poll(true, &mut session);
+    assert!(connection.speaker.ambience.is_none());
 }
 
 #[test]
