@@ -212,9 +212,10 @@ impl Step {
     /// the place a participant joining the space stands: [`Self::update`], the participant's own frame step, with no
     /// input, so that nothing is pointed at, hovered, chosen or carried, and without what [`PERSONAL`] names. As a
     /// watcher, it also holds no rights over walls, whatever its role, so that it draws no handles or padlocks; its
-    /// environment's client side is told no participant, what that asks its server side is dropped, its sounds are
-    /// not played and its passes not felt; and it plays no ambience. A step that has watched stays a watcher. See
-    /// `design/spectator.md`.
+    /// environment's client side is told no participant, what that asks its server side is dropped and its passes are
+    /// not felt; its sounds and the environment's ambience are handed to `feedback`, as a participant's are, which plays
+    /// them only if it hears the ambience, as the spectator's does with its ambience on. A step that has watched stays
+    /// a watcher. See `design/spectator.md`.
     pub fn watch(
         &mut self,
         camera: Mat4,

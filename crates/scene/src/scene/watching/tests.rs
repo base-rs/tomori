@@ -210,7 +210,9 @@ fn a_watcher_draws_what_a_participant_does_but_what_is_theirs_alone() {
     let mut visitor = furnished(ConnectionRole::Visitor);
     let mut watched = furnished(ConnectionRole::Owner);
     let (mut owner_step, mut visitor_step, mut watcher) = (clocked(), clocked(), clocked());
+    // Its feedback plays no cues, as the spectator's.
     let mut watcher_feedback = felt();
+    watcher_feedback.mute_sounds();
     let start = Instant::now();
     let mut compared = 0;
     for index in 1..=480u32 {
@@ -266,6 +268,48 @@ fn a_watcher_draws_what_a_participant_does_but_what_is_theirs_alone() {
             .haptics(start + std::time::Duration::from_secs(7))
             .is_empty()
     );
+}
+
+#[test]
+fn a_watcher_s_feedback_that_hears_the_ambience_plays_it_and_its_client_side_s_sounds_as_a_participant_s()
+ {
+    let mut conversation = furnished(ConnectionRole::Visitor);
+    let (mut participant_step, mut watcher) = (clocked(), clocked());
+    let (mut theirs, mut watched) = (furnished(ConnectionRole::Visitor), felt());
+    let mut participants = felt();
+    // Feedback that plays no cues, as the spectator's, but hears the ambience, as with its ambience on.
+    watched.mute_sounds();
+    watched.hear_ambience(true);
+    let start = Instant::now();
+    let (mut ambience, mut sounds, mut heard) = (None, Vec::new(), Vec::new());
+    for index in 1..=400u32 {
+        let now = start + std::time::Duration::from_secs_f32(FRAME * index as f32);
+        participant_step.update(&participant(), &mut theirs, &mut participants, now, FRAME);
+        watcher.watch(camera(), &mut conversation, &mut watched, now, FRAME);
+        ambience = watched.take_ambience().or(ambience);
+        sounds.extend(watched.take_ambient().map(|(_, position)| position));
+        heard.extend(participants.take_ambient().map(|(_, position)| position));
+    }
+    // The space's ambience, and its client side's sounds, carried into the space where the participant hears them.
+    let ambience = ambience
+        .expect("the ambience is handed on")
+        .expect("an ambience");
+    assert_eq!(ambience.slots().count(), 1);
+    assert!(!sounds.is_empty());
+    assert_eq!(sounds, heard);
+    // Still no cues, and none of its passes felt.
+    assert_eq!(watched.take_earcons().count(), 0);
+    assert!(
+        watched
+            .haptics(start + std::time::Duration::from_secs(7))
+            .is_empty()
+    );
+    // Stopping, the ambience stops and the sounds are no longer queued.
+    watched.hear_ambience(false);
+    assert!(watched.take_ambience().unwrap().is_none());
+    let later = start + std::time::Duration::from_secs(10);
+    watcher.watch(camera(), &mut conversation, &mut watched, later, FRAME);
+    assert_eq!(watched.take_ambient().count(), 0);
 }
 
 #[test]

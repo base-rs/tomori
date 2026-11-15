@@ -63,6 +63,9 @@ pub struct SpectatorOptions {
     pub token: Option<String>,
     /// Whose voices it plays: everyone's, by default, the agent's speech alone, or none. See `design/spectator.md`.
     pub voices: Hearing,
+    /// Whether it plays the environment's ambience and its ambient sounds, as the participant it follows would hear
+    /// them: off, by default, for an audience that hears the conversation alone. See `design/spectator.md`.
+    pub ambience: bool,
     /// Whether its window, or the PipeWire source's preview window, is borderless, for a clean capture into OBS or a
     /// shared screen, rather than a decorated window with the platform's title bar that can be moved, resized and made
     /// full screen. The PipeWire source without a window has no window to be borderless. See `design/spectator.md`.
@@ -70,7 +73,7 @@ pub struct SpectatorOptions {
 }
 
 impl SpectatorOptions {
-    /// No server, space, participant or token, every voice played, and a decorated window.
+    /// No server, space, participant or token, every voice played, no ambience, and a decorated window.
     pub fn new() -> Self {
         Self::default()
     }
@@ -149,8 +152,10 @@ impl Feed {
             playback,
             &mut conversation,
         );
-        // The spectator's audience sees no interface, so it hears no cues; see `design/spectator.md`.
+        // The spectator's audience sees no interface, so it hears no cues, and the ambience only if asked; see
+        // `design/spectator.md`.
         connection.feedback().mute_sounds();
+        connection.hear_ambience(options.ambience);
         connection.hear(options.voices);
 
         // If a space is given, join it directly, as the lobby's accept would.
@@ -213,10 +218,28 @@ impl Feed {
         voices
     }
 
+    /// Whether it plays the environment's ambience and its ambient sounds, as its connection was last told.
+    pub fn ambience(&self) -> bool {
+        self.connection.hears_ambience()
+    }
+
+    /// Play the environment's ambience and its ambient sounds from now on if it did not, or stop them if it did, as the
+    /// window's A key chooses, returning whether it now plays them. See `design/spectator.md`.
+    pub fn toggle_ambience(&mut self) -> bool {
+        let ambience = !self.ambience();
+        self.connection.hear_ambience(ambience);
+        log::info!(
+            "Spectator: ambience {}",
+            if ambience { "on" } else { "off" }
+        );
+        ambience
+    }
+
     /// Draw `sceneries`, as the application that runs the spectator registers them, such as Tomori's own: its `Hello` lists their environments and a space in one is shown in it, as for a participant. The client sides registered with them run as a watcher's, drawing what they show. See `design/environments.md` and `design/spectator.md`.
     pub fn with_sceneries(mut self, sceneries: Sceneries) -> Self {
         self.conversation.set_drawable(sceneries.environments());
         self.conversation.set_client_sides(sceneries.client_sides());
+        self.conversation.set_ambiences(sceneries.ambiences());
         self.conversation.set_faces(sceneries.faces());
         self.conversation.set_over_grid(sceneries.over_grid());
         self.conversation
@@ -407,12 +430,17 @@ mod tests {
 
     /// A spectator drawing `sceneries`, told it has connected as `role`, to be shown a space without a server.
     fn connected(sceneries: Sceneries, role: ConnectionRole) -> Feed {
-        let mut feed = Feed::with_audio(
-            SpectatorOptions::default(),
-            Box::new(Silent),
-            Box::new(Nowhere),
-        )
-        .with_sceneries(sceneries);
+        connected_with(SpectatorOptions::default(), sceneries, role)
+    }
+
+    /// As [`connected`], started with `options`.
+    fn connected_with(
+        options: SpectatorOptions,
+        sceneries: Sceneries,
+        role: ConnectionRole,
+    ) -> Feed {
+        let mut feed = Feed::with_audio(options, Box::new(Silent), Box::new(Nowhere))
+            .with_sceneries(sceneries);
         feed.conversation
             .connect(Choice::new("Test", "127.0.0.1:9", Source::Override));
         feed.conversation
@@ -722,6 +750,99 @@ mod tests {
         // Each is what its connection was told, so that it is what plays.
         demonstrating.next_voices();
         assert_eq!(demonstrating.connection.hearing(), Hearing::Nobody);
+    }
+
+    #[test]
+    fn the_spectator_plays_the_environment_s_ambience_and_sounds_only_with_its_ambience_on() {
+        use tomori_scene::{
+            ambience::{Ambience, Loop, Slot},
+            client_side::{ClientSide, Input, Output, Picked, Sound},
+            test_support::SKY,
+        };
+        /// A client side that makes a sound every frame, as the farmyard's chickens cluck.
+        struct Sounding;
+        impl ClientSide for Sounding {
+            fn pick(&self, _ray: &tomori_scene::pointing::Ray) -> Option<Picked> {
+                None
+            }
+            fn update(&mut self, _input: Input<'_>) -> Output {
+                Output::new().with_sound(Sound::new(vec![0.0; 4], 48_000), [0.0, 1.0, -1.0])
+            }
+        }
+        let sceneries = || {
+            let mut sceneries =
+                tomori_render::scenery::test::Counted::default().sceneries(SKY.id());
+            sceneries.set_ambience(
+                SKY.id(),
+                Ambience::new().with_loop(Loop::at(Slot::missing("waterfall"), [0.0, 2.0, 0.0])),
+            );
+            sceneries.set_client_side(SKY.id(), |_| Box::new(Sounding));
+            sceneries
+        };
+        assert!(
+            Sounding
+                .pick(&tomori_scene::pointing::Ray::new(NEUTRAL, Vec3::NEG_Z).unwrap())
+                .is_none()
+        );
+        assert!(!SpectatorOptions::new().ambience);
+        for on in [false, true] {
+            let options = SpectatorOptions {
+                ambience: on,
+                ..Default::default()
+            };
+            let mut feed = connected_with(options, sceneries(), ConnectionRole::Visitor);
+            assert_eq!(feed.ambience(), on);
+            show(
+                &mut feed,
+                SpaceState {
+                    id: "space".into(),
+                    environment: "sky".into(),
+                    ..Default::default()
+                },
+            );
+            feed.conversation.take_actions();
+            let (mut ambience, mut sounds) = (None, 0);
+            for _ in 0..400 {
+                let listener = feed
+                    .watch(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now())
+                    .frame
+                    .listener;
+                // It hears from the neutral view's camera with nobody to follow, where it sees from.
+                assert_eq!(listener, Pose::from_transform(feed.neutral()));
+                let feedback = feed.connection.feedback();
+                ambience = feedback.take_ambience().or(ambience);
+                sounds += feedback.take_ambient().count();
+                assert_eq!(feedback.take_earcons().count(), 0);
+            }
+            if on {
+                // On, the space's ambience and its client side's sounds reach its connection's player.
+                let ambience = ambience.expect("handed on").expect("an ambience");
+                assert_eq!(ambience.slots().count(), 1);
+                assert!(sounds > 0);
+                // A turns it off: the ambience stops.
+                assert!(!feed.toggle_ambience());
+                assert!(
+                    feed.connection
+                        .feedback()
+                        .take_ambience()
+                        .unwrap()
+                        .is_none()
+                );
+            } else {
+                // Off, by default, nothing of it reaches the player, as before the option.
+                assert!(ambience.is_none());
+                assert_eq!(sounds, 0);
+                // A turns it on, and the space's ambience starts.
+                assert!(feed.toggle_ambience());
+                assert!(
+                    feed.connection
+                        .feedback()
+                        .take_ambience()
+                        .unwrap()
+                        .is_some()
+                );
+            }
+        }
     }
 
     #[test]

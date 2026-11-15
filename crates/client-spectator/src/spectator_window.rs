@@ -170,7 +170,8 @@ impl SpectatorWindow {
 }
 
 impl Contents for SpectatorWindow {
-    /// The spectator's window only follows its feed; V cycles through the voices it plays, and Escape closes it.
+    /// The spectator's window only follows its feed; V cycles through the voices it plays, A turns the ambience on and
+    /// off, and Escape closes it.
     fn input(&mut self, input: Input, surface: &mut dyn Surface) -> Result<Flow> {
         match input {
             Input::Close => return Ok(Flow::Exit),
@@ -192,6 +193,13 @@ impl Contents for SpectatorWindow {
                 repeat: false,
             } => {
                 self.spectator.feed.next_voices();
+            }
+            Input::Key {
+                code: KeyCode::KeyA,
+                pressed: true,
+                repeat: false,
+            } => {
+                self.spectator.feed.toggle_ambience();
             }
             _ => {}
         }
@@ -286,6 +294,13 @@ mod tests {
             // V plays the agent's speech alone, as for a demonstration, and then cycles on.
             input(&mut demo, &mut surface, key(KeyCode::KeyV));
             assert_eq!(demo.spectator.feed.voices(), crate::Hearing::Agent);
+            // A turns the ambience on, and off again, showing nothing.
+            assert!(!demo.spectator.feed.ambience());
+            input(&mut demo, &mut surface, key(KeyCode::KeyA));
+            assert!(demo.spectator.feed.ambience());
+            input(&mut demo, &mut surface, key(KeyCode::KeyA));
+            assert!(!demo.spectator.feed.ambience());
+            assert_eq!(surface.titles, Vec::<String>::new());
             input(
                 &mut demo,
                 &mut surface,

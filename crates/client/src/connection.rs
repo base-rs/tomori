@@ -670,6 +670,17 @@ impl Connection {
         self.hearing
     }
 
+    /// Play the environment's ambience and its ambient sounds, or none, as the spectator chooses, whether or not this
+    /// client plays cues; the player is told at the next poll. See [`feedback::Feedback::hear_ambience`].
+    pub fn hear_ambience(&mut self, heard: bool) {
+        self.feedback.hear_ambience(heard);
+    }
+
+    /// Whether the environment's ambience plays, as [`Self::hear_ambience`] last said, or as this client plays cues.
+    pub fn hears_ambience(&self) -> bool {
+        self.feedback.hears_ambience()
+    }
+
     /// Place the voices, once a frame: `participants` are those in the space this participant is in, by number, and `place` fills the player's scene from the [`Voices`] of the others, with where this participant hears from and where the agent is. See `design/spatial-audio.md`. Without a connection nothing plays, and `place` is not called.
     pub fn listen(
         &mut self,
