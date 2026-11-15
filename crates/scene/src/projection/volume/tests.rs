@@ -263,11 +263,10 @@ fn a_volume_fits_its_slot_and_floats_as_large_as_its_diagram_within_bounds() {
         fit(&panel, &drawn, Fit::Slot(cells)),
         (cells.columns, cells.body)
     );
-    // Floating, 600 by 400 mm and 200 deep, a little wider than 30 columns and 15 rows, grown by a sixth as its front
-    // is seen larger from 1.3 m away, and two rows kept for its labels.
+    // Floating, 600 by 400 mm, a little wider than 30 columns and 15 rows, with room for its margins.
     let (columns, rows) = fit(&panel, &drawn, Fit::Text);
     assert!(
-        (40..=44).contains(&columns) && (21..=24).contains(&rows),
+        (37..=41).contains(&columns) && (19..=21).contains(&rows),
         "{columns} {rows}"
     );
     // Tiny, it grows to the least; huge, it shrinks to the most; never wider than its rows allow.
@@ -276,18 +275,16 @@ fn a_volume_fits_its_slot_and_floats_as_large_as_its_diagram_within_bounds() {
     assert!(columns >= super::super::FIT_COLUMNS.0 && rows <= FIT_ROWS.1);
     drawn.extent = [30_000, 1_000, 1_000];
     assert_eq!(fit(&panel, &drawn, Fit::Text).0, TABLE_COLUMNS);
-    // In a slot, it is no deeper than half its height, and stands in front of its face.
+    // A layout deeper than three tenths of its width is drawn that shallow, and stands in front of its face, in a slot
+    // as floating.
     drawn.extent = [600, 400, 2_000];
-    let slotted = placed(&panel, &drawn, Fit::Slot(cells));
-    let back = slotted.transform_point3(Vec3::new(0.0, 0.0, -1000.0));
-    let front = slotted.transform_point3(Vec3::new(0.0, 0.0, 1000.0));
-    let (_, height) = super::super::sized(cells.columns, cells.body);
-    assert!(
-        back.z >= STAND_OFF - 1e-4 && front.z - back.z <= height / 2.0,
-        "{back} {front}"
-    );
-    let floating = placed(&panel, &drawn, Fit::Text);
-    assert!(floating.transform_point3(Vec3::new(0.0, 0.0, -1000.0)).z >= STAND_OFF - 1e-4);
+    let mesh = Mesh::new(&drawn);
+    assert_eq!(mesh.diagram().extent[2], 180);
+    for fit in [Fit::Slot(cells), Fit::Text] {
+        let placed = placed(&panel, &mesh, fit);
+        let back = placed.transform_point3(mesh.node_at(0) - Vec3::Z * 21.0);
+        assert!(back.z >= STAND_OFF - 1e-4, "{back}");
+    }
     // Its face: dark in a slot, faint floating, its title first.
     let slot = face(&panel, &drawn, Fit::Slot(cells), None);
     let free = face(&panel, &drawn, Fit::Text, Some([1.0; 4]));
@@ -387,7 +384,11 @@ mod projector {
     fn world(projection: &Projection, pose: Pose, point: Vec3) -> Vec3 {
         let panel = &projection.panels[0];
         let model = crate::board::model(&pose).unwrap()
-            * placed(panel, panel.diagram.as_ref().unwrap(), Fit::Text);
+            * placed(
+                panel,
+                &Mesh::new(panel.diagram.as_ref().unwrap()),
+                Fit::Text,
+            );
         model.transform_point3(point)
     }
 
@@ -1169,8 +1170,9 @@ fn hidden(drawn: &Diagram, model: Mat4, viewer: Vec3, sheet: &Sheet) -> bool {
 
 #[test]
 fn every_label_is_in_front_of_the_volume_s_nodes_from_wherever_it_is_seen() {
-    let drawn = dense();
-    let mesh = Mesh::new(&drawn);
+    // As drawn, no deeper than three tenths of its width.
+    let mesh = Mesh::new(&dense());
+    let drawn = mesh.diagram().clone();
     // Its group has a colour, which the legend names rather than a label.
     assert_eq!(mesh.labels(), 30 + EDGE_LABELS);
     let model = Mat4::from_translation(Vec3::new(0.0, 1.4, -1.3))
@@ -1641,12 +1643,11 @@ fn a_legend_of_groups_and_kinds_stands_below_the_diagram_with_a_solid_for_each_k
     let (_, rows) = fit(&panel, &drawn, Fit::Text);
     let (_, bare_rows) = fit(&panel, &bare, Fit::Text);
     assert_eq!(rows, bare_rows + 2 + LEGEND_GAP);
-    // Room kept below the heading for the labels above its highest nodes.
-    assert!(rows >= LABEL_ROOM + 2 + LEGEND_GAP + FIT_ROWS.0);
+    assert!(rows >= 2 + LEGEND_GAP + FIT_ROWS.0);
     // As large, and half its rows higher about the face's middle, as the face grows by them below it.
     let (with, without) = (
-        placed(&panel, &drawn, Fit::Text),
-        placed(&panel, &bare, Fit::Text),
+        placed(&panel, &Mesh::new(&drawn), Fit::Text),
+        placed(&panel, &Mesh::new(&bare), Fit::Text),
     );
     assert_eq!(with.x_axis, without.x_axis);
     let higher = with.w_axis.y - without.w_axis.y;
@@ -1848,4 +1849,167 @@ fn moving_the_largest_diagram_s_nodes_each_frame_costs_far_less_than_a_frame() {
     eprintln!("a frame of 64 nodes and 128 edges pulled about took {each:?}");
     assert!(each < std::time::Duration::from_micros(500), "{each:?}");
     assert_eq!(posed.node_at(9), springs.positions()[9]);
+}
+
+/// The box, in the face's metres, about everything `mesh` draws when it stands on the face of `panel` as `fit` says,
+/// as seen from where it is read, straight in front, as it stands in the middle of the area of the face it is drawn
+/// within, and that area.
+fn fitted(
+    panel: &Panel,
+    mesh: &Mesh,
+    fit: Fit,
+) -> ((glam::Vec2, glam::Vec2), (glam::Vec2, glam::Vec2)) {
+    let (area_low, area_high) = area(panel, mesh.source(), fit);
+    let (scale, _) = mesh.fitting.placement(area_high - area_low, read(fit));
+    let (low, high) = mesh.fitting.projected(scale, read(fit), true);
+    // Its middle, as seen, in the area's.
+    let (middle, half) = ((area_low + area_high) / 2.0, (high - low) / 2.0);
+    ((middle - half, middle + half), (area_low, area_high))
+}
+
+/// A layered diagram of `ranks` ranks of `across` nodes, each rank folded into two rows in depth, labelled, and edges
+/// down from each node to the one below it, laid out as the server lays one out.
+fn layered(ranks: i16, across: i16) -> Diagram {
+    let mut drawn = Diagram::default();
+    for rank in 0..ranks {
+        for column in 0..across {
+            let mut node = Node::new(format!("n{rank}-{column}"), format!("crate-{column}"));
+            node.at = [
+                (column - (across - 1) / 2) * 110,
+                ((ranks - 1) / 2 - rank) * 130,
+                if column % 2 == 0 { -90 } else { 90 },
+            ];
+            node.group = Some(0);
+            drawn.nodes.push(node);
+        }
+    }
+    for index in 0..(ranks - 1) * across {
+        drawn
+            .edges
+            .push(Edge::new(index as u16, (index + across) as u16));
+    }
+    drawn.groups.push(Group::new("g", "Group"));
+    let reach = |count: i16, step: i16| (count * step + 160) as u16;
+    drawn.extent = [reach(across, 110), reach(ranks, 130), 340];
+    drawn
+}
+
+#[test]
+fn a_diagram_fills_its_plate_by_its_limiting_side_but_a_small_margin_clear_of_its_title_and_legend()
+{
+    let panel = |drawn: &Diagram| {
+        Panel::new(
+            "panel-1",
+            "Crates",
+            "",
+            Place::Free {
+                pose: Pose::default(),
+            },
+        )
+        .with_diagram(drawn.clone())
+    };
+    // Tall, as Tomori's crates are; wide; and the dense one, as deep as it is wide.
+    let mut deep = dense();
+    deep.extent[2] = deep.extent[0];
+    for drawn in [layered(7, 5), layered(3, 10), deep] {
+        let panel = panel(&drawn);
+        let mesh = Mesh::new(&drawn);
+        for fit in [Fit::Text, Fit::Slot(super::super::Cells::STANDARD)] {
+            let ((low, high), (area_low, area_high)) = fitted(&panel, &mesh, fit);
+            let (size, area) = (high - low, area_high - area_low);
+            // Its limiting side, whichever its shape binds, as seen from where it is read, its front larger, is at
+            // least 85% of its area's.
+            let limiting = (size.x / area.x).max(size.y / area.y);
+            assert!(limiting >= 0.85, "{fit:?} {size} {area}");
+            assert!(
+                size.x <= area.x + 1e-4 && size.y <= area.y + 1e-4,
+                "{fit:?} {size} {area}"
+            );
+            // Seen in the middle of the area, so within it, below the title and above the legend.
+            assert!(
+                low.x >= area_low.x - 1e-4 && high.y <= area_high.y + 1e-4,
+                "{fit:?}"
+            );
+            let (columns, body) = fit_of(&panel, &drawn, fit);
+            let (_, height) = super::super::sized(columns, body);
+            assert!(area_high.y <= height / 2.0 - (PADDING.1 + 3 * CELL_HEIGHT) as f32 * PIXEL);
+            assert!(
+                area_low.y
+                    >= -height / 2.0
+                        + PADDING.1 as f32 * PIXEL
+                        + (LEGEND_GAP * CELL_HEIGHT) as f32 * PIXEL
+            );
+        }
+    }
+    // A layout deeper than three tenths of its width is drawn that shallow, but its folded ranks are kept apart by
+    // their widest node and a gap.
+    let mut drawn = dense();
+    drawn.extent[2] = drawn.extent[0];
+    let shallow = Mesh::new(&drawn).diagram().extent[2];
+    assert!(
+        shallow < drawn.extent[2]
+            && f32::from(shallow) >= f32::from(drawn.extent[0]) * DEPTH_SHARE - 1.0,
+        "{shallow}"
+    );
+    let close = layered(3, 4);
+    let squeezed = Mesh::new(&close);
+    let depths: Vec<i16> = squeezed
+        .diagram()
+        .nodes
+        .iter()
+        .map(|node| node.at[2])
+        .collect();
+    let apart = depths.iter().max().unwrap() - depths.iter().min().unwrap();
+    assert!(f32::from(apart) >= 60.0 + RANK_GAP_MM - 1.0, "{apart}");
+    // Pulled about, it is drawn as large and where it was.
+    let mesh = Mesh::new(&drawn);
+    let panel = panel(&drawn);
+    let placed = placed(&panel, &mesh, Fit::Text);
+    let mut posed = mesh.posed();
+    let far: Vec<Vec3> = (0..mesh.diagram().nodes.len())
+        .map(|node| mesh.node_at(node) * 3.0)
+        .collect();
+    posed.repose(&far, None);
+    assert_eq!(placed, super::placed(&panel, &posed, Fit::Text));
+    // Its labels, as drawn, are among what it fits: the highest node's above its solids.
+    let (_, solids) = mesh.fitting.projected(0.001, 1.3, false);
+    let (_, labelled) = mesh.fitting.projected(0.001, 1.3, true);
+    assert!(labelled.y > solids.y);
+    // A label wider than its plate at any scale leaves it drawn at half the scale its solids alone fit, the label over
+    // its edges.
+    let mut wide = diagram(&[("a", Shape::Box, [0, 0, 0])], Vec::new());
+    wide.nodes[0].label = "W".repeat(30);
+    let fitting = Mesh::new(&wide).fitting.clone();
+    let tiny = glam::Vec2::splat(0.01);
+    let (scale, _) = fitting.placement(tiny, 1.3);
+    let (low, high) = fitting.projected(scale, 1.3, false);
+    assert!(
+        scale > 1e-6 && (high.x - low.x) <= tiny.x / 2.0 + 1e-4,
+        "{scale}"
+    );
+    let (low, high) = fitting.projected(scale, 1.3, true);
+    assert!(high.x - low.x > tiny.x);
+    // Kept, fitted again to the same area it stands alike; to many, the oldest are forgotten.
+    assert_eq!(
+        fitting.placement(tiny, 1.3),
+        (scale, fitting.placement(tiny, 1.3).1)
+    );
+    for size in 1..12 {
+        fitting.placement(glam::Vec2::splat(size as f32 / 10.0), 1.3);
+    }
+    assert!(fitting.fitted.lock().unwrap().len() <= 8);
+    assert_eq!(
+        Fitting::default().projected(1.0, 1.3, true),
+        (glam::Vec2::ZERO, glam::Vec2::ZERO)
+    );
+    // A floating plate has room for its widest label, a card's detail as wide as it is drawn.
+    let mut card = diagram(&[("a", Shape::Card, [0, 0, 0])], Vec::new());
+    let plain = floating_size(&card).0;
+    card.nodes[0].detail = "What it does".into();
+    assert!(floating_size(&card).0 > plain);
+    assert!(floating_size(&Diagram::default()).0 > 0.0);
+}
+
+fn fit_of(panel: &Panel, diagram: &Diagram, fit: Fit) -> (usize, usize) {
+    super::fit(panel, diagram, fit)
 }

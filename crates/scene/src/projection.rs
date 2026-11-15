@@ -2200,7 +2200,7 @@ impl Projector {
                     .iter()
                     .find(|(panel, ..)| panel.id == pull.panel)
                     .is_some_and(|(panel, model, fit)| {
-                        let model = *model * volume::placed(panel, live.base.source(), *fit);
+                        let model = *model * volume::placed(panel, &live.base, *fit);
                         let at = pull
                             .target(&hands[side], 0.0)
                             .map_or(live.springs.positions()[node], |at| {
@@ -2394,7 +2394,7 @@ impl Projector {
             let node = live
                 .node(&pull.node)
                 .expect("a node pulled is in its diagram");
-            let at = (*model * volume::placed(panel, live.base.source(), *fit))
+            let at = (*model * volume::placed(panel, &live.base, *fit))
                 .transform_point3(live.posed.node_at(node));
             let origin = hands[side].ray.map_or(at, |ray| ray.origin);
             told[side].pointed = Some((panel.id.clone(), origin.distance(at), at));
@@ -2424,7 +2424,7 @@ impl Projector {
             };
             let mut legend = Vec::new();
             volume::legend_icons(panel, mesh, *fit, *model, &mut legend);
-            let model = *model * volume::placed(panel, mesh.source(), *fit);
+            let model = *model * volume::placed(panel, mesh, *fit);
             // A node held alone is focused on while it is, the nodes joined to it lit and the rest dimmed.
             let pulled: Vec<usize> = Side::BOTH
                 .into_iter()
@@ -3192,7 +3192,7 @@ impl Projector {
     fn meet(&self, panel: &Panel, model: Mat4, fit: Fit, ray: &Ray) -> Option<(volume::Met, f32)> {
         // Every volume shown has its mesh, kept as the projection is followed, and no other panel has one.
         let mesh = self.mesh_of(&panel.id)?;
-        mesh.hit(model * volume::placed(panel, mesh.source(), fit), ray)
+        mesh.hit(model * volume::placed(panel, mesh, fit), ray)
     }
 
     /// What the volume `panel` draws: as its nodes are pulled about, while they are, or else as the server laid it out.
@@ -3246,7 +3246,7 @@ impl Projector {
     /// for a panel that is no volume.
     fn volume_model(&self, (panel, model, fit): &Standing) -> Option<(Mat4, &Arc<volume::Mesh>)> {
         let mesh = self.mesh_of(&panel.id)?;
-        Some((*model * volume::placed(panel, mesh.source(), *fit), mesh))
+        Some((*model * volume::placed(panel, mesh, *fit), mesh))
     }
 
     /// Follow each node a hand pulls with it, run each volume's live layout on by `dt`, as seen from `viewer`, and draw
@@ -3284,7 +3284,7 @@ impl Projector {
             let Some(live) = self.springs.get_mut(&panel.id) else {
                 continue;
             };
-            let inverse = (*model * volume::placed(panel, live.base.source(), *fit)).inverse();
+            let inverse = (*model * volume::placed(panel, &live.base, *fit)).inverse();
             for side in Side::BOTH {
                 let Some(pull) = self.pulling[side]
                     .as_mut()

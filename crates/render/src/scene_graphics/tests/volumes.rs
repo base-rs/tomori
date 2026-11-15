@@ -428,17 +428,29 @@ fn tomori_s_crates_read_as_coloured_groups_of_shaped_kinds() {
         Place::Free { pose } => Vec3::from_array(pose.position),
         _ => unreachable!("floating beside Ada, looking at no wall"),
     };
-    // From 1.1 m in front of it, about where a floating diagram is read, and from above and 40° to its side.
+    // Floating, from 1.1 m in front of it, about where a floating diagram is read, and from above and 40° to its side.
     let towards = ((arrival::HOME - volume_at) * Vec3::new(1.0, 0.0, 1.0)).normalize();
     let eyes = [
         volume_at + towards * 1.1,
         volume_at + glam::Quat::from_rotation_y(0.7) * towards * 1.0 + Vec3::Y * 0.4,
     ];
+    // And in the first slot of the wall to Ada's right, from 1.1 m in front of it.
+    let mut slotted = volume.clone();
+    slotted.place = Place::Wall {
+        wall: added.id.clone(),
+        slot: 0,
+    };
+    let wall_at = Vec3::new(2.2, 1.5, -0.8);
     test_gpu::with(|gpu| {
-        let images = rendered(gpu, &volume, &added, &eyes, volume_at, None);
-        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
-        image::imageops::replace(&mut sheet, &images[0], 0, 0);
-        image::imageops::replace(&mut sheet, &images[1], 0, HEIGHT.into());
+        let mut images = rendered(&gpu, &volume, &added, &eyes, volume_at, None);
+        let slot_at = wall_at + Vec3::new(-0.35, 0.25, 0.0);
+        let towards_slot = (arrival::HOME - wall_at).normalize();
+        let eye = slot_at + towards_slot * 1.1;
+        images.extend(rendered(&gpu, &slotted, &added, &[eye], slot_at, None));
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * images.len() as u32);
+        for (index, image) in images.iter().enumerate() {
+            image::imageops::replace(&mut sheet, image, 0, i64::from(HEIGHT) * index as i64);
+        }
         crate::test_support::preview("TOMORI_CRATE_DIAGRAM_PREVIEW", &sheet);
         for image in &images {
             let coloured = image
@@ -456,10 +468,10 @@ fn tomori_s_crates_read_as_coloured_groups_of_shaped_kinds() {
 
 /// What `volume` looks like from each of `eyes`, looking at `at`, standing as the server placed it with `added` the wall
 /// beside it, each a frame of a participant whose eyes are there, so that its labels face and come towards them; and,
-/// where `pulled` names one of its nodes, that node taken with the grip, the hand below and to the right of it, and
-/// pulled 45 cm towards those eyes, the layout let settle about it.
+/// where `pulled` names one of its nodes, that node taken with the grip, the ray on it from just below and to the
+/// right of it, and pulled 45 cm towards those eyes, the layout let settle about it.
 fn rendered(
-    test_gpu::Gpu { device, queue, .. }: test_gpu::Gpu,
+    test_gpu::Gpu { device, queue, .. }: &test_gpu::Gpu,
     volume: &tomori_protocol::Panel,
     added: &Wall,
     eyes: &[Vec3],
@@ -483,9 +495,9 @@ fn rendered(
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
-    let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+    let mut renderer = Renderer::new(device, queue, format, WIDTH, HEIGHT);
     renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
-    let mut panels = Panels::new(&device, &renderer);
+    let mut panels = Panels::new(device, &renderer);
     let lens =
         glam::camera::rh::proj::directx::perspective(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
     let images = eyes
@@ -517,18 +529,20 @@ fn rendered(
                 let index = drawn.mesh.diagram().node(node).expect("a node of it");
                 let at = drawn.model.transform_point3(drawn.mesh.node_at(index));
                 let towards = (*eye - at).normalize();
-                let aside = Vec3::new(0.25, -0.3, 0.0);
+                // Its ray on it from 20 cm away, just below and to the right of it, so that no edge in front of it
+                // takes the ray instead.
+                let aside = Vec3::new(0.03, -0.04, 0.0);
                 let hand = |from: f32| {
                     let origin = at + towards * from + aside;
-                    tomori_scene::pointing::Ray::new(origin, at + towards * (from - 0.3) - origin)
+                    tomori_scene::pointing::Ray::new(origin, at + towards * (from - 0.2) - origin)
                 };
-                senses.ray = hand(0.3);
+                senses.ray = hand(0.2);
                 senses.grip = Some(0.0);
                 senses.pointing = true;
                 step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
                 senses.grip = Some(1.0);
                 step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
-                senses.ray = hand(0.75);
+                senses.ray = hand(0.65);
                 for frame in 1..300 {
                     later = now + std::time::Duration::from_millis(14 * frame);
                     step.update(&senses, &mut conversation, &mut felt(), later, 0.014);
@@ -544,18 +558,18 @@ fn rendered(
                 let moved = drawn.model.transform_point3(drawn.mesh.node_at(index));
                 assert!((moved - expected).length() < 0.01, "{moved} {expected}");
             }
-            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            draw(&mut renderer, device, queue, &mut panels, &frame);
             let (_, left_out) = renderer.volume_counts();
             assert_eq!(left_out, 0);
             renderer.render(
-                &device,
-                &queue,
+                device,
+                queue,
                 std::slice::from_ref(&view),
                 &[lens * glam::camera::rh::view::look_at_mat4(*eye, at, Vec3::Y)],
                 Mat4::IDENTITY,
                 &panels.list(Mat4::IDENTITY),
             );
-            read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+            read_back(device, queue, &texture, (WIDTH, HEIGHT))
         })
         .collect();
     assert!(pollster::block_on(scope.pop()).is_none());
@@ -579,7 +593,7 @@ fn a_node_pulled_towards_its_holder_fans_its_neighbours_either_side() {
         volume_at + glam::Quat::from_rotation_y(0.9) * towards * 1.1 + Vec3::Y * 0.35,
     ];
     test_gpu::with(|gpu| {
-        let images = rendered(gpu, &volume, &added, &eyes, volume_at, Some("scene"));
+        let images = rendered(&gpu, &volume, &added, &eyes, volume_at, Some("scene"));
         let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
         image::imageops::replace(&mut sheet, &images[0], 0, 0);
         image::imageops::replace(&mut sheet, &images[1], 0, HEIGHT.into());
