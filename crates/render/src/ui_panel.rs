@@ -1487,6 +1487,7 @@ mod tests {
     }
 
     mod chart;
+    mod face;
     mod handles;
     mod shapes;
 }

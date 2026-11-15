@@ -378,7 +378,8 @@ pub fn fit(panel: &Panel, fit: Fit) -> (usize, usize) {
     if let Some(diagram) = &panel.diagram {
         return volume::fit(panel, diagram, fit);
     }
-    if panel.chart.is_some() {
+    // A face panel is a chart's size, drawn or shown as its summary alike, so that it is the same size on every client.
+    if panel.chart.is_some() || panel.face.is_some() {
         return chart::fit(fit);
     }
     if let Some(image) = &panel.image {
@@ -401,7 +402,7 @@ fn fitted(panel: &Panel, fit: Fit) -> (usize, usize, Vec<Line>) {
         let (columns, rows) = volume::fit(panel, diagram, fit);
         return (columns, rows, Vec::new());
     }
-    if panel.chart.is_some() {
+    if panel.chart.is_some() || panel.face.is_some() {
         return sized(chart::fit(fit));
     }
     if let Some(image) = &panel.image {
@@ -623,6 +624,22 @@ fn scrolled_face(
         (scroll, list::Marked::default()),
         border,
     )
+}
+
+/// `panel`'s face as `drawer` draws it, a face panel's, sized as `fit` says and framed as [`face`] frames it, nothing of
+/// it marked: as the projector draws it where this client has its drawing, or none where `panel` is not a face panel, or
+/// its drawer panicked or drew past its bounds, which the projector shows as the panel's summary. See
+/// `design/panel-faces.md`.
+pub fn drawn_face(
+    panel: &Panel,
+    drawer: &dyn crate::face::Drawer,
+    (highlighted, newest): (bool, bool),
+    fit: Fit,
+) -> Option<Canvas> {
+    let face = panel.face.as_deref()?;
+    let (columns, body) = self::fit(panel, fit);
+    let drawn = crate::face::draw(panel, face, drawer, (columns, body + 3), (PIXEL, PADDING))?;
+    Some(drawn.marked(None, None, frame(highlighted, newest)))
 }
 
 /// The colour a panel's face is framed in: brightly where it is `highlighted`, pointed at or carried, in blue where it
@@ -1498,6 +1515,9 @@ pub struct Projector {
     paced: bool,
     /// Whether a paced projector draws a panel whose text is too small to resolve as its title alone. See [`PanelLod`].
     lod: PanelLod,
+    /// The face panels' drawings of the environment drawn, by their keys, as the conversation gives them: a face panel
+    /// whose key none has is drawn as its summary. See `design/panel-faces.md`.
+    drawers: Vec<(&'static str, Arc<dyn crate::face::Drawer>)>,
     /// Where among the projection's panels the next frame begins following them, after the last panel this one laid
     /// out in its turn, so that where more panels changed than a frame lays out, each is laid out in turn.
     turn: usize,
@@ -1664,6 +1684,34 @@ impl Projector {
     /// frame, a panel drawn as its title drawn whole again at once.
     pub fn set_lod(&mut self, lod: PanelLod) {
         self.lod = lod;
+    }
+
+    /// Draw each face panel with the drawing `drawers` registers for its key in `environment`, the environment drawn, or
+    /// as its summary where none does: each face panel laid out again where what draws it changes, and nothing done
+    /// where none does, so that it costs a frame no allocation. See `design/panel-faces.md`.
+    pub fn set_drawers(
+        &mut self,
+        environment: crate::environment::Environment,
+        drawers: &crate::face::Drawers,
+    ) {
+        let of = || {
+            drawers
+                .iter()
+                .filter(move |(registered, ..)| *registered == environment)
+                .map(|(_, key, drawer)| (*key, drawer))
+        };
+        let same = of().count() == self.drawers.len()
+            && of()
+                .zip(&self.drawers)
+                .all(|((key, drawer), (kept, held))| key == *kept && Arc::ptr_eq(drawer, held));
+        if same {
+            return;
+        }
+        self.drawers = of().map(|(key, drawer)| (key, drawer.clone())).collect();
+        let drawers = &self.drawers;
+        for faces in self.faces.values_mut() {
+            faces.set_drawer(faces.drawer_of(drawers));
+        }
     }
 
     /// Whether panels too small to read are drawn as their titles. See [`Projector::set_lod`].
@@ -2775,12 +2823,15 @@ impl Projector {
             let took = match self.faces.get_mut(&panel.id) {
                 Some(faces) => {
                     let took = faces.follow(panel, turns > 0, scroll);
+                    // Its face's key may have changed with it, or it become a face panel.
+                    faces.set_drawer(faces.drawer_of(&self.drawers));
                     turns -= usize::from(took);
                     took
                 }
                 None if arrive.contains(&index) => {
-                    self.faces
-                        .insert(panel.id.clone(), faces::Faces::new(panel));
+                    let mut faces = faces::Faces::new(panel);
+                    faces.set_drawer(faces.drawer_of(&self.drawers));
+                    self.faces.insert(panel.id.clone(), faces);
                     true
                 }
                 None => false,

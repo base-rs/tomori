@@ -144,6 +144,7 @@ impl Builder {
         conversation.set_over_grid(self.over_grid());
         conversation.set_locomotion(self.sceneries.locomotion());
         conversation.set_client_sides(self.sceneries.client_sides());
+        conversation.set_faces(self.sceneries.faces());
         conversation.set_ambiences(self.sceneries.ambiences());
         conversation.set_worker_placements(self.sceneries.worker_placements());
         conversation.set_avatars(self.sceneries.avatars());

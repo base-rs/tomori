@@ -217,6 +217,7 @@ impl Feed {
     pub fn with_sceneries(mut self, sceneries: Sceneries) -> Self {
         self.conversation.set_drawable(sceneries.environments());
         self.conversation.set_client_sides(sceneries.client_sides());
+        self.conversation.set_faces(sceneries.faces());
         self.conversation.set_over_grid(sceneries.over_grid());
         self.conversation
             .set_worker_placements(sceneries.worker_placements());

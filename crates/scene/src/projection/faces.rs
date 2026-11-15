@@ -20,6 +20,7 @@ use crate::{
     board,
     canvas::{Canvas, Kind},
     chart::{PlotArea, readout::Readout},
+    face::{Drawer, Drawn},
     transcript::{BRIGHT, Line},
     ui_text::{CELL_HEIGHT, CELL_WIDTH, Row, Style},
 };
@@ -166,6 +167,9 @@ pub(super) struct Faces {
     pub(super) far: bool,
     /// Its far face, as last drawn, kept while it is drawn far at the same size and frame and its title is the same.
     far_face: Option<FarFace>,
+    /// What draws it, for a face panel whose drawing this client has: none for any other panel, or a face panel this
+    /// client draws as its summary. See `design/panel-faces.md`.
+    drawer: Option<Arc<dyn Drawer>>,
 }
 
 /// A far face drawn: the title, size and frame it was drawn with.
@@ -187,6 +191,32 @@ impl Faces {
             anchor: None,
             far: false,
             far_face: None,
+            drawer: None,
+        }
+    }
+
+    /// The drawing among `drawers` that draws it, as the panel was last followed: the one registered for its face's key,
+    /// if it is a face panel.
+    pub(super) fn drawer_of(
+        &self,
+        drawers: &[(&'static str, Arc<dyn Drawer>)],
+    ) -> Option<Arc<dyn Drawer>> {
+        let key = &self.key.0.face.as_ref()?.key;
+        drawers
+            .iter()
+            .find(|(registered, _)| registered == key)
+            .map(|(_, drawer)| drawer.clone())
+    }
+
+    /// Draw it with `drawer`, a face panel's drawing, or as its summary where none: laid out again where that changes.
+    pub(super) fn set_drawer(&mut self, drawer: Option<Arc<dyn Drawer>>) {
+        let same = match (&self.drawer, &drawer) {
+            (Some(was), Some(now)) => Arc::ptr_eq(was, now),
+            (was, now) => was.is_none() && now.is_none(),
+        };
+        if !same {
+            self.drawer = drawer;
+            self.sizes.clear();
         }
     }
 
@@ -284,7 +314,8 @@ impl Faces {
         match self.sizes.iter().position(|layout| layout.fit == fit) {
             Some(index) => self.sizes[..=index].rotate_right(1),
             None => {
-                self.sizes.insert(0, Layout::new(&self.key.0, fit));
+                self.sizes
+                    .insert(0, Layout::new(&self.key.0, fit, self.drawer.clone()));
                 self.sizes.truncate(SIZES);
             }
         }
@@ -378,6 +409,12 @@ pub(super) struct Layout {
     /// Its context's chips as its face lays them out, which the ray finds the chip it meets among without laying them
     /// out again: none for a code, image or volume panel, which draws none.
     chips: super::chips::Laid,
+    /// For a face panel this client draws, its drawer, and its drawing at this size once drawn: none where the drawer
+    /// panicked or drew past its bounds, which shows the panel's summary instead.
+    drawer: Option<Arc<dyn Drawer>>,
+    drawn: Option<Option<Drawn>>,
+    /// Whether it is a face panel's, drawn or shown as its summary, whose summary's lines are never its items.
+    faced: bool,
 }
 
 /// `panel`'s context's chips as its face lays them out on `columns`, beside or below its metadata: a text, list or
@@ -470,8 +507,10 @@ fn counted(layouts: usize, faces: usize) {
 fn counted(_: usize, _: usize) {}
 
 impl Layout {
-    fn new(panel: &Panel, fit: Fit) -> Self {
+    fn new(panel: &Panel, fit: Fit, drawer: Option<Arc<dyn Drawer>>) -> Self {
         count(1, 0);
+        // A face panel this client draws fills its frame with its drawing: nothing of it scrolls, and it has no chips.
+        let drawer = drawer.filter(|_| panel.face.is_some());
         let code = panel
             .code
             .as_ref()
@@ -496,17 +535,25 @@ impl Layout {
                 };
                 (size, layout.most_scroll(fit))
             }
+            None if drawer.is_some() => (sized(cells.0, cells.1), 0),
             None => (sized(cells.0, cells.1), lines.len().saturating_sub(cells.1)),
         };
         Self {
             fit,
             code,
             lines,
-            chips: chips_of(panel, cells.0),
+            chips: if drawer.is_some() {
+                super::chips::Laid::default()
+            } else {
+                chips_of(panel, cells.0)
+            },
             cells,
             size,
             most_scroll,
             face: None,
+            drawer,
+            drawn: None,
+            faced: panel.face.is_some(),
         }
     }
 
@@ -556,12 +603,15 @@ impl Layout {
     /// `panel`'s face drawn from what is laid out here, as [`super::scrolled_face`] draws it, and, a chart's, where its
     /// plot is.
     fn draw(
-        &self,
+        &mut self,
         panel: &Panel,
         (scroll, marked): (usize, Marked),
         border: [f32; 4],
     ) -> (Canvas, Option<PlotArea>) {
         count(0, 1);
+        if let Some(drawn) = self.drawing(panel) {
+            return (drawn.marked(marked.hovered, marked.chosen, border), None);
+        }
         let border = Some(border);
         // A volume's face is its heading and the plate its diagram stands in front of.
         if let Some(diagram) = &panel.diagram {
@@ -580,6 +630,18 @@ impl Layout {
                 None,
             ),
         }
+    }
+
+    /// A face panel's drawing at this size, drawn by its drawer the first time it is asked for and kept: none for a
+    /// panel this client draws no face for, nor where its drawer panicked or drew past its bounds.
+    fn drawing(&mut self, panel: &Panel) -> Option<&Drawn> {
+        let (face, drawer) = (panel.face.as_deref()?, self.drawer.as_deref()?);
+        let cells = (self.cells.0, self.cells.1 + 3);
+        self.drawn
+            .get_or_insert_with(|| {
+                crate::face::draw(panel, face, drawer, cells, (PIXEL, super::PADDING))
+            })
+            .as_ref()
     }
 
     /// The chip of its panel's context where the ray meets its face, at `point`, drawn with `model`, by its parameter: on
@@ -663,6 +725,21 @@ impl Layout {
     fn item(&self, model: glam::Mat4, scroll: usize, point: glam::Vec3) -> Option<u32> {
         if self.code.is_some() {
             return None;
+        }
+        // A face's item is the one whose region the ray meets, by its place among its items, as a list's line is; its
+        // summary, shown where it is not drawn, has none, whatever its lines are.
+        if self.faced {
+            let Some(Some(drawn)) = self.drawn.as_ref().filter(|_| self.drawer.is_some()) else {
+                return None;
+            };
+            let (width, height) = self.size;
+            let local = model.inverse().transform_point3(point);
+            let pixel = drawn.canvas.pixel;
+            let at = (
+                (local.x + width / 2.0) / pixel,
+                (height / 2.0 - local.y) / pixel,
+            );
+            return drawn.item_at(at).and_then(|row| u32::try_from(row).ok());
         }
         item_in(&self.lines, self.cells, model, scroll, point)
     }

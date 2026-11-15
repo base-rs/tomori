@@ -18,6 +18,19 @@ use tomori_protocol::ConnectionRole;
 const FRAME: f32 = 1.0 / 72.0;
 
 #[test]
+fn a_conversation_keeps_the_face_drawings_its_build_registers() {
+    let mut conversation = lobby(ConnectionRole::Owner);
+    assert!(conversation.faces().is_empty());
+    let drawers: crate::face::Drawers = vec![(
+        crate::test_support::SKY,
+        "world-clock",
+        std::sync::Arc::new(crate::face::fixtures::Clock),
+    )];
+    conversation.set_faces(drawers);
+    assert_eq!(conversation.faces().len(), 1);
+}
+
+#[test]
 fn a_home_ring_carried_with_the_room_carries_its_height_with_its_middle() {
     // A ring under a home floating 5.3 m up, carried as a rig standing 0.5 m up and turned a quarter carries it.
     let ring = crate::anchors::HomeRing {

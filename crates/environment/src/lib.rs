@@ -57,9 +57,10 @@ pub use zone::{
 };
 
 pub use panel::{
-    CELL_CHARS, COLUMN_LIMIT, COLUMN_TITLE_CHARS, Column, FIELD_LIMIT, FIELD_NAME_BYTES,
-    FIELD_VALUE_BYTES, FIELDS_BYTES, PANEL_ID_BYTES, PANEL_LIMIT, Panel, ROW_CHARS, ROW_ID_BYTES,
-    ROW_LIMIT, Row, valid_field_name, valid_panel_id, valid_row_id,
+    CELL_CHARS, COLUMN_LIMIT, COLUMN_TITLE_CHARS, Column, FACE_DATA_LIMIT, FACE_KEY_BYTES,
+    FIELD_LIMIT, FIELD_NAME_BYTES, FIELD_VALUE_BYTES, FIELDS_BYTES, Face, PANEL_ID_BYTES,
+    PANEL_LIMIT, Panel, ROW_CHARS, ROW_ID_BYTES, ROW_LIMIT, Row, valid_face_key, valid_field_name,
+    valid_panel_id, valid_row_id,
 };
 /// How a list panel's column aligns its cells, as [`Column::aligned`] takes it.
 pub use tomori_protocol::CellAlign;

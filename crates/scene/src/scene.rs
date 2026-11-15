@@ -1997,6 +1997,8 @@ impl Step {
         // The environment's floors and decks hide a locked wall's padlock beyond them, and stop the ray before what is.
         let surfaces = conversation.surfaces();
         self.projector.set_lod(conversation.panel_lod());
+        self.projector
+            .set_drawers(conversation.environment(), conversation.faces());
         let projecting = Instant::now();
         let projected = self.projector.update(crate::projection::Input {
             projection: conversation.projection().filter(|_| !in_arrival),

@@ -222,6 +222,7 @@ pub struct Sceneries {
     locomotion: Vec<(Environment, Locomotion)>,
     over_grid: Vec<Environment>,
     client_sides: Vec<(Environment, tomori_scene::client_side::Factory)>,
+    faces: tomori_scene::face::Drawers,
     ambiences: Vec<(Environment, Arc<tomori_scene::ambience::Ambience>)>,
     worker_placements: Vec<(Environment, tomori_scene::anchors::Placement)>,
     avatars: Vec<(&'static str, tomori_scene::avatar::Factory, Create)>,
@@ -297,6 +298,26 @@ impl Sceneries {
     /// The client sides registered for each environment, for the conversation.
     pub fn client_sides(&self) -> Vec<(Environment, tomori_scene::client_side::Factory)> {
         self.client_sides.clone()
+    }
+
+    /// Draw each face panel of the environment `id` whose drawing's key is `key`, where this build draws its scenery, with
+    /// `drawer`, in place of any registered before for them: what fills the panel's frame, from the payload its server
+    /// side published. A face panel no drawing is registered for shows its summary. See `design/panel-faces.md`.
+    pub fn set_face(
+        &mut self,
+        id: &'static str,
+        key: &'static str,
+        drawer: impl tomori_scene::face::Drawer + 'static,
+    ) {
+        let environment = Environment::new(id);
+        self.faces
+            .retain(|(declared, declared_key, _)| (*declared, *declared_key) != (environment, key));
+        self.faces.push((environment, key, Arc::new(drawer)));
+    }
+
+    /// The face panels' drawings registered for each environment, by key, for the conversation.
+    pub fn faces(&self) -> tomori_scene::face::Drawers {
+        self.faces.clone()
     }
 
     /// Sound `ambience` beneath the conversation in a space bound to the environment `id`, where this build draws its
@@ -516,6 +537,30 @@ mod tests {
         assert_eq!(registered[0].0.id(), "deck");
         assert_eq!(registered[1].0.id(), "floor");
         assert_eq!(registered[1].1.slots().count(), 1);
+    }
+
+    #[test]
+    fn face_drawings_are_registered_by_identifier_and_key_and_none_by_default() {
+        assert!(Sceneries::default().faces().is_empty());
+        let mut sceneries = Sceneries::empty();
+        sceneries.set_face("deck", "world-clock", tomori_scene::face::fixtures::Clock);
+        sceneries.set_face("deck", "gauge", tomori_scene::face::fixtures::Clock);
+        sceneries.set_face("floor", "world-clock", tomori_scene::face::fixtures::Clock);
+        // Registering an identifier's key again replaces it, at the end.
+        sceneries.set_face("deck", "world-clock", tomori_scene::face::fixtures::Clock);
+        let registered: Vec<(&str, &str)> = sceneries
+            .faces()
+            .iter()
+            .map(|(environment, key, _)| (environment.id(), *key))
+            .collect();
+        assert_eq!(
+            registered,
+            [
+                ("deck", "gauge"),
+                ("floor", "world-clock"),
+                ("deck", "world-clock")
+            ]
+        );
     }
 
     #[test]
