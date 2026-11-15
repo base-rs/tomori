@@ -33,6 +33,10 @@ pub const CAPACITY: usize = 24_000;
 pub struct Sheet {
     pub canvas: Option<std::sync::Arc<Canvas>>,
     pub model: Option<Mat4>,
+    /// Whether it is drawn in front of the walls it is near whatever their depth, as a panel carried or let go, in front of
+    /// its slot and leaning into the wall, is: after them, and compared as though `occlusion::TIE` nearer, rather than among
+    /// the opaque faces drawn first. See `design/rendering.md`.
+    pub ahead: bool,
 }
 
 /// Where the recording indicator and the `LIVE` badge are.
@@ -62,6 +66,7 @@ impl Indicator {
                 Sheet {
                     canvas: Some(std::sync::Arc::new(canvas)),
                     model: Some(recording::facing(position, head, scale)),
+                    ahead: false,
                 }
             }
             _ => {
@@ -79,6 +84,7 @@ impl Indicator {
                 Sheet {
                     canvas: Some(std::sync::Arc::new(recording::badge(pulse))),
                     model: Some(recording::facing(position, head, scale)),
+                    ahead: false,
                 }
             }
             _ => {
@@ -111,6 +117,7 @@ pub fn pill(conversation: &mut Conversation, now: Instant, hidden: bool, pose: M
     Sheet {
         canvas: Some(std::sync::Arc::new(canvas)),
         model: Some(pose * Mat4::from_translation(PILL_OFFSET - Vec3::Y * (height / 2.0))),
+        ahead: false,
     }
 }
 
@@ -401,6 +408,7 @@ impl Wrist {
             Sheet {
                 canvas: Some(std::sync::Arc::new(canvas)),
                 model: self.model,
+                ahead: false,
             },
         )
     }

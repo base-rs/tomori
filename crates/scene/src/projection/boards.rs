@@ -175,7 +175,7 @@ pub(super) fn members_slots(wall: &Wall, walls: &[&Wall]) -> Vec<group::Extent> 
 /// `wall`'s board, standing at `frame`, as one of its group among `walls`, drawn as [`board`] says: a translucent board,
 /// its border where no wall of its group meets it, its slots faintly marked, and its label, where it is its group's
 /// [`labelled`] wall.
-pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
+pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall], filled: &[u32]) -> Vec<Sheet> {
     let scale = wall.scale();
     // In the wall's own font pixels, from its pose, down from its middle.
     let unit = PIXEL * scale;
@@ -192,14 +192,14 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
     let thick = PIXEL * group_scale(wall, walls);
     let mut canvas = Canvas::new(0, PIXEL);
     canvas.padding = (0, 0);
-    canvas.background = [0.0; 4];
-    canvas.shapes.push(rect(
-        own.left,
-        own.top,
-        own.right,
-        own.bottom,
-        [0.01, 0.02, 0.04, 0.5],
-    ));
+    // Its board, opaque, drawn first with the other faces and boards, to the seams halfway to its group's walls.
+    canvas.background = [0.01, 0.02, 0.04, 1.0];
+    canvas.backing = Some([
+        own.left / unit,
+        -own.top / unit,
+        (own.right - own.left) / unit,
+        (own.top - own.bottom) / unit,
+    ]);
     // Its border along each edge, but where a wall of its group meets it.
     let joined = joins(wall, walls);
     for edge in Edge::ALL {
@@ -220,20 +220,27 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
             });
         }
     }
-    // Its slots, where they stand.
-    canvas.shapes.extend(wall.slot_frames().iter().map(|slot| {
-        let ([x, y, _], [width, height]) = (slot.position, slot.size);
-        rect(
-            x - width / 2.0,
-            y + height / 2.0,
-            x + width / 2.0,
-            y - height / 2.0,
-            SLOT,
-        )
-    }));
+    // Its slots, where they stand, but those a panel stands in, whose opaque face covers them.
+    canvas.shapes.extend(
+        wall.slot_frames()
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| !filled.contains(&(*slot as u32)))
+            .map(|(_, slot)| {
+                let ([x, y, _], [width, height]) = (slot.position, slot.size);
+                rect(
+                    x - width / 2.0,
+                    y + height / 2.0,
+                    x + width / 2.0,
+                    y - height / 2.0,
+                    SLOT,
+                )
+            }),
+    );
     let mut sheets = vec![Sheet {
         canvas: Some(std::sync::Arc::new(canvas)),
         model: Some(frame * Mat4::from_scale(Vec3::splat(scale))),
+        ahead: false,
     }];
     // Its group's label, where it is its group's labelled wall, and its own context's chips, after the label or alone.
     let shown = labelled(wall, walls);
@@ -272,6 +279,7 @@ pub(super) fn sheets(wall: &Wall, frame: Mat4, walls: &[&Wall]) -> Vec<Sheet> {
         sheets.push(Sheet {
             canvas: Some(std::sync::Arc::new(label)),
             model: Some(frame * Mat4::from_translation(middle)),
+            ahead: false,
         });
     }
     sheets

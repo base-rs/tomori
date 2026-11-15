@@ -133,7 +133,7 @@ pub(super) fn code_face(panel: &Panel, layout: &CodeLayout, fit: Fit, scroll: us
     let room = columns - GUTTER;
     let mut canvas = Canvas::new(columns, CODE_PIXEL);
     canvas.padding = CODE_PADDING;
-    canvas.background = [0.015, 0.025, 0.045, 0.95];
+    canvas.background = [0.015, 0.025, 0.045, 1.0];
     let mut rows = vec![
         Row::text(&panel.title, Style::bold(BRIGHT), columns),
         Row::text(&about(panel), Style::plain(DIM), columns),

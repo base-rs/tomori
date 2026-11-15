@@ -480,6 +480,7 @@ impl Mesh {
                     Vec3::new(viewer.x, at.y, viewer.z),
                     scale,
                 )),
+                ahead: false,
             });
         }
     }
@@ -520,6 +521,7 @@ impl Mesh {
         Some(Sheet {
             canvas: Some(canvas),
             model: Some(model),
+            ahead: false,
         })
     }
 
@@ -786,7 +788,7 @@ pub(super) fn face(panel: &Panel, diagram: &Diagram, fit: Fit, border: Option<[f
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
     canvas.background = match fit {
-        Fit::Slot(_) => [0.015, 0.025, 0.045, 0.94],
+        Fit::Slot(_) => [0.015, 0.025, 0.045, 1.0],
         Fit::Text => [0.02, 0.035, 0.06, 0.3],
     };
     canvas.border = border;

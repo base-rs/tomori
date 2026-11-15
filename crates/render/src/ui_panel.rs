@@ -13,10 +13,23 @@ pub use tomori_scene::canvas::{Canvas, Vertex};
 const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4, 2 => Float32x2, 3 => Float32];
 
-/// The pipelines every panel is drawn with, in the scene pass: depth tested against the scene without writing depth, and alpha blended, so that panels are translucent and a nearer hand covers them; and then its backing into depth alone.
+/// The pipelines every panel is drawn with, in the scene pass. A panel whose backing is wholly opaque, as a projected
+/// panel's face and a wall's board are, is drawn in two steps: its backing first, opaque, flat and writing depth, before
+/// the scene, so that whatever is behind it is never shaded ([`Panel::draw_face`]); then, in its turn among the
+/// translucent surfaces, the rest of its mesh, its text and shapes, blended over its own backing ([`Panel::draw_over`]).
+/// Any other, translucent by its backing's alpha, is drawn whole in its turn, depth tested against the scene without
+/// writing depth and alpha blended, and then its backing into depth alone, as [`Panel::draw`] does. See
+/// `design/rendering.md`.
 pub struct Pipeline {
     pipeline: wgpu::RenderPipeline,
     occluder: wgpu::RenderPipeline,
+    /// An opaque backing: flat colour, no blending, writing depth.
+    face: wgpu::RenderPipeline,
+    /// What is drawn over an opaque backing: blended, a little nearer than its backing so that it is never lost to it.
+    over: wgpu::RenderPipeline,
+    /// A panel drawn in front of the walls it nears, as one carried is: blended, compared as though
+    /// [`TIE`](crate::occlusion::TIE) nearer, so that leaning into a wall's slot it is still drawn over it.
+    ahead: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -55,43 +68,65 @@ impl Pipeline {
             bind_group_layouts: &[Some(&layout), Some(glyphs)],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("panel pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(VERTICES)],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: crate::glyphs::compilation(format),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: samples,
-                ..Default::default()
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let tie = [("TIE", crate::occlusion::TIE as f64)];
+        let make = |label, kind: Drawing| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(if kind == Drawing::Ahead {
+                        "vs_ahead"
+                    } else {
+                        "vs_main"
+                    }),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: if kind == Drawing::Ahead { &tie } else { &[] },
+                        ..Default::default()
+                    },
+                    buffers: &[Some(VERTICES)],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(if kind == Drawing::Face {
+                        "fs_face"
+                    } else {
+                        "fs_main"
+                    }),
+                    compilation_options: crate::glyphs::compilation(format),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: (kind != Drawing::Face).then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(kind == Drawing::Face),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: Default::default(),
+                    bias: if kind == Drawing::Over {
+                        crate::occlusion::OVER
+                    } else {
+                        Default::default()
+                    },
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: samples,
+                    ..Default::default()
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pipeline = make("panel pipeline", Drawing::Whole);
+        let face = make("panel face", Drawing::Face);
+        let over = make("panel over its face", Drawing::Over);
+        let ahead = make("panel ahead", Drawing::Ahead);
         let occluder = crate::occlusion::occluder(
             device,
             "panel backing occluder",
@@ -104,6 +139,9 @@ impl Pipeline {
         Self {
             pipeline,
             occluder,
+            face,
+            over,
+            ahead,
             layout,
         }
     }
@@ -118,6 +156,21 @@ impl Pipeline {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(1, glyphs, &[]);
     }
+
+    /// Draw opaque backings from here on, with [`Panel::draw_face`], the glyph atlas `glyphs` bound as for every panel.
+    pub fn set_faces(&self, pass: &mut wgpu::RenderPass<'_>, glyphs: &wgpu::BindGroup) {
+        pass.set_pipeline(&self.face);
+        pass.set_bind_group(1, glyphs, &[]);
+    }
+}
+
+/// Which of a [`Pipeline`]'s drawing pipelines one is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Drawing {
+    Whole,
+    Face,
+    Over,
+    Ahead,
 }
 
 const VERTICES: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
@@ -186,6 +239,10 @@ pub struct Panel {
     cut: bool,
     /// Whether the mesh's first quad is a backing opaque enough to hide what is behind it.
     occludes: bool,
+    /// Whether the mesh's first quad is a wholly opaque backing, drawn apart from the rest of the mesh.
+    opaque: bool,
+    /// Whether it is drawn in front of the walls it nears, as a panel carried is, rather than among the opaque faces.
+    ahead: bool,
     /// The image the canvas shows, by hash, which is drawn over it from [`Self::image_quad`] once its texture is ready.
     image: Option<String>,
     /// The image's quad, in the panel's plane, with where in the image each corner is.
@@ -236,6 +293,8 @@ impl Panel {
             complete: false,
             cut: false,
             occludes: false,
+            opaque: false,
+            ahead: false,
             image: None,
             image_quad,
             builds: (0, 0),
@@ -336,6 +395,7 @@ impl Panel {
         self.count = mesh.len() as u32;
         // A canvas's mesh starts with its backing, unless the backing is wholly transparent.
         self.occludes = crate::occlusion::occludes(canvas.background[3]) && mesh.len() >= 6;
+        self.opaque = crate::occlusion::opaque(canvas.background[3]) && mesh.len() >= 6;
         if !mesh.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&mesh));
         }
@@ -431,6 +491,54 @@ impl Panel {
         if self.occludes {
             pass.set_pipeline(&pipeline.occluder);
             pass.draw(0..6, 0..1);
+            pass.set_pipeline(&pipeline.pipeline);
+        }
+    }
+
+    /// Whether its backing is wholly opaque, so that the renderer draws it with [`Self::draw_face`] before the scene and
+    /// the rest with [`Self::draw_over`]; not while it is drawn [ahead](Self::set_ahead).
+    pub fn opaque(&self) -> bool {
+        self.opaque && !self.ahead
+    }
+
+    /// Draw it from now on in front of the walls it nears, whatever their depth, as a panel carried is, or not: in its
+    /// turn, whole, compared as though [`TIE`](crate::occlusion::TIE) nearer, rather than its face first among the opaque
+    /// faces. See `design/rendering.md`.
+    pub fn set_ahead(&mut self, ahead: bool) {
+        self.ahead = ahead;
+    }
+
+    /// Draw its backing for `eye`, if it is wholly opaque, with [`Pipeline::set_faces`] already called on `pass`: flat,
+    /// opaque and writing depth, so that what is behind it and drawn later is never shaded.
+    pub fn draw_face(&self, pass: &mut wgpu::RenderPass<'_>, eye: usize) {
+        if self.opaque() {
+            pass.set_bind_group(0, &self.bindings[eye], &[]);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+    }
+
+    /// Draw for `eye`, in its turn among the translucent surfaces, with [`Pipeline::set`] already called on `pass` with
+    /// `pipeline`, which it is again once drawn: over its opaque backing, drawn already by [`Self::draw_face`], the rest
+    /// of its mesh; drawn [ahead](Self::set_ahead), the whole of it compared as though [`TIE`](crate::occlusion::TIE)
+    /// nearer, then its backing into depth alone; or, translucent, the whole of it, then its backing into depth alone if
+    /// it is opaque enough to hide what is behind it, as [`Self::draw`] does.
+    pub fn draw_over(&self, pass: &mut wgpu::RenderPass<'_>, pipeline: &Pipeline, eye: usize) {
+        if self.ahead {
+            pass.set_pipeline(&pipeline.ahead);
+            self.draw(pass, pipeline, eye);
+            pass.set_pipeline(&pipeline.pipeline);
+            return;
+        }
+        if !self.opaque {
+            self.draw(pass, pipeline, eye);
+            return;
+        }
+        if self.count > 6 {
+            pass.set_pipeline(&pipeline.over);
+            pass.set_bind_group(0, &self.bindings[eye], &[]);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.draw(6..self.count, 0..1);
             pass.set_pipeline(&pipeline.pipeline);
         }
     }
@@ -1147,6 +1255,235 @@ mod tests {
                 "the line between the columns is uneven along its length: {ratio}"
             );
         });
+    }
+
+    /// An opaque panel's face, drawn first, hides a panel behind it drawn after it, its colour never shaded there, while
+    /// its own text, drawn over it later, is never lost to it, face on or tilted far from the eye, at arm's length, 5 m
+    /// and 60 m, through the headset's near and far planes; a translucent canvas is drawn whole in its turn.
+    #[test]
+    fn an_opaque_face_drawn_first_hides_what_is_behind_it_and_keeps_its_own_text() {
+        crate::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.0,
+                1.0,
+                tomori_scene::depth::NEAR,
+                tomori_scene::depth::FAR,
+            );
+            let size = (256, 256);
+            // At each distance, the panel's text as large on the image, and what is behind it as far behind as the depth
+            // buffer tells apart there: a wall's board, 2 mm, within arm's reach to 5 m.
+            for (distance, behind) in [(1.0f32, 0.002f32), (5.0, 0.002), (60.0, 0.5)] {
+                for tilt in [0.0f32, 1.3] {
+                    let view = lens
+                        * Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -distance))
+                        * Mat4::from_rotation_y(tilt)
+                        * Mat4::from_scale(glam::Vec3::splat(distance));
+                    let near = opaque_canvas(&gpu, &pipeline, [0.0, 1.0, 0.0, 1.0], 8, view);
+                    // A magenta panel behind it, within its edges however it is seen.
+                    let far = opaque_canvas(
+                        &gpu,
+                        &pipeline,
+                        [1.0, 0.0, 1.0, 1.0],
+                        6,
+                        view * Mat4::from_translation(glam::Vec3::new(
+                            0.0,
+                            0.0,
+                            -behind / distance,
+                        )),
+                    );
+                    let mut faint = Panel::new(&gpu.device, &pipeline, 1_000);
+                    let mut canvas = Canvas::new(8, 0.01);
+                    canvas.background = [0.0, 0.0, 1.0, 0.5];
+                    canvas
+                        .rows
+                        .push(Row::new(vec![('#', Style::plain([0.0, 0.0, 1.0, 1.0])); 8]));
+                    faint.set(&gpu.queue, &canvas);
+                    faint.prepare(
+                        &gpu.queue,
+                        0,
+                        lens * Mat4::from_translation(glam::Vec3::new(0.0, 0.6, -2.0)),
+                    );
+                    assert!(near.opaque() && far.opaque() && !faint.opaque());
+                    let image = opaque_drawing(
+                        &gpu,
+                        &glyphs,
+                        &pipeline,
+                        &[&far, &near, &faint],
+                        size,
+                        format,
+                    );
+                    let at = format!("{distance} m, {tilt}");
+                    assert_eq!(count(&image, magenta), 0, "{at}: behind shows");
+                    assert!(count(&image, green) > 50, "{at}: the text is lost");
+                    assert!(
+                        count(&image, blue) > 20,
+                        "{at}: the translucent one is missing"
+                    );
+                }
+            }
+        });
+    }
+
+    /// A panel drawn ahead, as one carried is, after a wall's opaque panel it leans 3 cm behind, 2.3 m away, as a panel
+    /// carried into a slot of a curved wall does, is drawn whole over it, face and text; drawn as any other opaque panel,
+    /// it would be hidden there, as the same drawing shows.
+    #[test]
+    fn a_panel_drawn_ahead_is_drawn_over_the_wall_it_leans_behind() {
+        crate::test_gpu::with(|gpu| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let glyphs = crate::glyphs::Glyphs::new(&gpu.device);
+            let pipeline = Pipeline::new(&gpu.device, format, &glyphs, 1);
+            let lens = glam::camera::rh::proj::directx::perspective(
+                1.0,
+                1.0,
+                tomori_scene::depth::NEAR,
+                tomori_scene::depth::FAR,
+            );
+            let view = lens * Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -2.3));
+            let wall = opaque_canvas(&gpu, &pipeline, [1.0, 0.0, 1.0, 1.0], 8, view);
+            for ahead in [true, false] {
+                let mut carried = opaque_canvas(
+                    &gpu,
+                    &pipeline,
+                    [0.0, 1.0, 0.0, 1.0],
+                    6,
+                    view * Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -0.03)),
+                );
+                carried.set_ahead(ahead);
+                assert_eq!(carried.opaque(), !ahead);
+                // In the frame step's order, the wall and then the panel carried before it.
+                let image = opaque_drawing(
+                    &gpu,
+                    &glyphs,
+                    &pipeline,
+                    &[&wall, &carried],
+                    (256, 256),
+                    format,
+                );
+                let green = count(&image, green);
+                if ahead {
+                    assert!(green > 50, "the carried panel's text is hidden");
+                    // Its face covers the wall's text and colour wherever it is.
+                    let covered = (104..152)
+                        .flat_map(|x| (122..134).map(move |y| (x, y)))
+                        .all(|(x, y)| !magenta(image.get_pixel(x, y)));
+                    assert!(covered, "the wall shows over the carried panel");
+                } else {
+                    assert_eq!(green, 0);
+                }
+            }
+        });
+    }
+
+    /// An opaque panel of `columns` cells of `#` in `text` on a black face, a font pixel a centimetre, prepared for the
+    /// first eye through `view`.
+    fn opaque_canvas(
+        gpu: &crate::test_gpu::Gpu,
+        pipeline: &Pipeline,
+        text: [f32; 4],
+        columns: usize,
+        view: Mat4,
+    ) -> Panel {
+        let mut canvas = Canvas::new(columns, 0.01);
+        canvas.background = [0.0, 0.0, 0.0, 1.0];
+        canvas
+            .rows
+            .push(Row::new(vec![('#', Style::plain(text)); columns]));
+        let mut panel = Panel::new(&gpu.device, pipeline, 1_000);
+        panel.set(&gpu.queue, &canvas);
+        panel.prepare(&gpu.queue, 0, view);
+        panel
+    }
+
+    fn count(image: &image::RgbaImage, test: fn(&image::Rgba<u8>) -> bool) -> usize {
+        image.pixels().filter(|pixel| test(pixel)).count()
+    }
+
+    fn magenta(pixel: &image::Rgba<u8>) -> bool {
+        (pixel.0[0] > 60) & (pixel.0[2] > 60) & (pixel.0[1] < 40)
+    }
+
+    fn green(pixel: &image::Rgba<u8>) -> bool {
+        (pixel.0[1] > 120) & (pixel.0[0] < 60)
+    }
+
+    fn blue(pixel: &image::Rgba<u8>) -> bool {
+        (pixel.0[2] > 60) & (pixel.0[0] < 40)
+    }
+
+    /// `panels`, in the frame step's order, drawn as the renderer draws them: each opaque face first, nearest first, the
+    /// order reversed, then each over it, in order.
+    fn opaque_drawing(
+        gpu: &crate::test_gpu::Gpu,
+        glyphs: &crate::glyphs::Glyphs,
+        pipeline: &Pipeline,
+        panels: &[&Panel],
+        (width, height): (u32, u32),
+        format: wgpu::TextureFormat,
+    ) -> image::RgbaImage {
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let target = |format, usage| {
+            gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("opaque drawing"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let texture = target(
+            format,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
+        let depth = target(
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+        );
+        glyphs.sync(&gpu.device, &gpu.queue);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("opaque drawing"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &texture.create_view(&Default::default()),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth.create_view(&Default::default()),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pipeline.set_faces(&mut pass, &glyphs.binding());
+            for panel in panels.iter().rev() {
+                panel.draw_face(&mut pass, 0);
+            }
+            pipeline.set(&mut pass, &glyphs.binding());
+            for panel in panels {
+                panel.draw_over(&mut pass, pipeline, 0);
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+        crate::test_support::read_back(&gpu.device, &gpu.queue, &texture, (width, height))
     }
 
     mod chart;

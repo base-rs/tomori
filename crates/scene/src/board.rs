@@ -504,6 +504,7 @@ impl Board {
         output.sheets.push(Sheet {
             canvas: Some(tray),
             model: Some(frame),
+            ahead: false,
         });
         // Panels blend over what is drawn before them, and write depth only once drawn, so the cards are drawn farthest
         // from the viewer first, and a nearer card covers one behind it; the inbox, behind all of its own, comes first.
@@ -530,6 +531,7 @@ impl Board {
             Sheet {
                 canvas: Some(canvas),
                 model: Some(*model),
+                ahead: false,
             }
         }));
         output

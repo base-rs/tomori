@@ -118,7 +118,7 @@ pub(super) fn face(
     let (columns, body) = self::fit(fit);
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
-    canvas.background = [0.02, 0.035, 0.06, 0.94];
+    canvas.background = [0.02, 0.035, 0.06, 1.0];
     canvas.border = border;
     let about = metadata(chart);
     // Its context's chips, where it has any, before its status and unit or on a row of their own.

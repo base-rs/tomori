@@ -77,6 +77,28 @@ fn fs_main(in: Output) -> @location(0) vec4<f32> {
     let color = hazed(in.color.rgb, camera.haze, distance(in.world, camera.eye));
     return vec4<f32>(color, in.color.a * opacity(coverage(in.uv, in.weight), in.color.rgb));
 }
+// A wholly opaque backing, drawn before the scene: its colour, hazed, flat, with no atlas to sample, since a backing is the atlas's solid block, wholly inside.
+@fragment
+fn fs_face(in: Output) -> @location(0) vec4<f32> {
+    return vec4<f32>(hazed(in.color.rgb, camera.haze, distance(in.world, camera.eye)), 1.0);
+}
+// A panel drawn in front of the walls it nears, as one carried is, compared as though `TIE` nearer, so that leaning into a wall's slot it is still drawn over it.
+@vertex
+fn vs_ahead(
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) weight: f32,
+) -> Output {
+    var out: Output;
+    let at = camera.transform * vec4<f32>(position, 0.0, 1.0);
+    out.position = vec4<f32>(at.xy, max(at.z - TIE * at.w, 0.0), at.w);
+    out.world = (camera.model * vec4<f32>(position, 0.0, 1.0)).xyz;
+    out.color = color;
+    out.uv = uv;
+    out.weight = weight;
+    return out;
+}
 // How far back a backing's depth is written, in the depth buffer's units, so that a surface drawn later just behind it, as near as a panel carried over a wall's slot, is still drawn over it. Set from `occlusion::TIE`.
 override TIE: f32 = 0.0;
 // How opaque a fragment of a backing must be to write its depth, from 0 to 1: a rounded corner's outside, a glyph's or shape's margin, or an antialiased edge more transparent than this writes none, so that what is drawn later behind it still shows through it. Set from `occlusion::OCCLUDING`.

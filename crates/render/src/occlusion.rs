@@ -3,7 +3,11 @@
 
 //! What is nearer the eye is drawn in front, whatever order it is drawn in: see `design/rendering.md`.
 //!
-//! Panels, labels and signs are translucent, so they are drawn with the depth test and without writing depth, each blended
+//! A panel's face and a wall's board are [`opaque`]: their backings are drawn first, before the scene, writing depth, so
+//! that what is behind them is never shaded, and the rest of each, its text and shapes, later, blended over it, compared
+//! a little nearer, by [`OVER`], so that its own backing never hides it.
+//!
+//! Labels, signs and any panel whose canvas asks for a translucent backing are translucent, so they are drawn with the depth test and without writing depth, each blended
 //! over what is behind it. On its own, that leaves which of two of them is in front to the order they are drawn in. So
 //! once a surface is drawn, the backing behind its text, where it is opaque enough to hide what is behind it, is drawn
 //! again into depth alone, with an [`occluder`] pipeline, fragment by fragment, only where it is itself opaque enough,
@@ -11,7 +15,7 @@
 //! scene's opaque bodies hide it, and whatever is drawn after it and in front of it still covers it. Its depth is written
 //! a little behind it, by [`TIE`], so that between surfaces about as far away as each other, such as a panel carried over
 //! a wall's slot and the panel in that slot, the order the frame step draws them in still decides. A surface too faint
-//! to hide what is behind it, such as a wall's translucent board, a slot's outline or a fading label, writes no depth, so
+//! to hide what is behind it, such as a slot's outline or a fading label, writes no depth, so
 //! that nothing vanishes behind what can barely be seen. Arrival's labels, the hand menu's in a space, are drawn last,
 //! so nothing after them needs their depth, and they write none.
 
@@ -31,6 +35,24 @@ pub const TIE: f32 = 1e-3;
 pub fn occludes(alpha: f32) -> bool {
     alpha >= OCCLUDING
 }
+
+/// Whether a backing of `alpha` is wholly opaque, and so drawn before the scene, writing its depth, as a projected
+/// panel's face and a wall's board are; any less is translucent, by the canvas's own choice.
+pub fn opaque(alpha: f32) -> bool {
+    alpha >= 1.0
+}
+
+/// How much nearer than they are what is drawn over an opaque backing, in its own plane, is compared, its text, shapes
+/// and image: a few of the depth buffer's least steps, so that rounding never loses a sample of them to their own
+/// backing. A 32-bit float depth is nearly 1 beyond arm's length, where its steps are even, so a few of them are as much
+/// a margin at 60 m as at 1 m, which `ui_panel`'s tests check; and a surface a couple of millimetres behind the backing,
+/// as a wall's board is behind its panels, stays behind it as far as depth can tell them apart, seen however obliquely,
+/// where a bias by the plane's slope would pull it through.
+pub const OVER: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -8,
+    slope_scale: 0.0,
+    clamp: 0.0,
+};
 
 /// A pipeline that draws `vertex`'s triangles into depth alone, [`TIE`] behind where they are, depth tested, with no
 /// colour, within a pass of `format` and `samples`: the backings of surfaces already drawn, only where each fragment is
@@ -127,9 +149,14 @@ mod tests {
         for alpha in [1.0, 0.95, 0.88, 0.82, OCCLUDING] {
             assert!(occludes(alpha), "{alpha}");
         }
-        // A wall's board, a curved wall's slots, a slot's outline and a label fading out do not.
+        // A curved wall's label, a slot's outline and a label fading out do not.
         for alpha in [0.5, 0.45, 0.16, 0.0] {
             assert!(!occludes(alpha), "{alpha}");
+        }
+        // Only a wholly opaque backing, a panel's face's or a wall's board's, is drawn before the scene.
+        assert!(opaque(1.0));
+        for alpha in [0.99, 0.88, 0.5, 0.0] {
+            assert!(!opaque(alpha), "{alpha}");
         }
     }
 

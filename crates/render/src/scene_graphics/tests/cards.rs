@@ -24,6 +24,7 @@ fn sheets(faces: &[Arc<Canvas>]) -> Vec<Sheet> {
         .map(|(index, face)| Sheet {
             canvas: Some(face.clone()),
             model: Some(Mat4::from_translation(Vec3::X * index as f32)),
+            ahead: false,
         })
         .collect()
 }
@@ -161,6 +162,7 @@ fn cards_no_longer_drawn_are_freed_beyond_a_few_spare() {
         let unplaced = [Sheet {
             canvas: Some(face("unplaced")),
             model: None,
+            ahead: false,
         }];
         panels.set_cards(&device, &queue, &renderer, &unplaced);
         assert!(panels.list(Mat4::IDENTITY).is_empty());

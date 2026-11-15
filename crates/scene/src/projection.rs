@@ -649,7 +649,7 @@ fn text_face(
 ) -> Canvas {
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = PADDING;
-    canvas.background = [0.02, 0.035, 0.06, 0.94];
+    canvas.background = [0.02, 0.035, 0.06, 1.0];
     canvas.border = border;
     let total = lines.len();
     let scroll = scroll.min(total.saturating_sub(body_count));
@@ -730,14 +730,14 @@ fn wall_border(wall: &Wall) -> [f32; 4] {
     }
 }
 
-/// A flat wall's own face, at scale 1: a translucent board labelled with whose it is, its slots, of its grid, faintly
+/// A flat wall's own face, at scale 1: an opaque board labelled with whose it is, its slots, of its grid, faintly
 /// marked, laid out as `tomori_protocol::wall` lays them out.
-fn wall_face(wall: &Wall) -> Canvas {
+fn wall_face(wall: &Wall, filled: &[u32]) -> Canvas {
     let grid = wall.grid();
     let (columns, rows) = wall.board_cells();
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = WALL_PADDING;
-    canvas.background = [0.01, 0.02, 0.04, 0.5];
+    canvas.background = [0.01, 0.02, 0.04, 1.0];
     let (label, color) = wall_label(wall);
     let border = wall_border(wall);
     canvas.border = Some(border);
@@ -763,16 +763,22 @@ fn wall_face(wall: &Wall) -> Canvas {
     canvas.rows = vec![Row::new(cells)];
     canvas.rows.resize(rows, Row::default());
     canvas.shapes = chips.shapes;
-    canvas.shapes.extend((0..grid.slots()).map(|slot| {
-        let (left, top, width, height) = wall.slot_rect(slot);
-        Shape::rect(
-            left - WALL_PADDING.0 as f32,
-            top - WALL_PADDING.1 as f32,
-            width,
-            height,
-            SLOT,
-        )
-    }));
+    // Its slots, but those a panel stands in, whose opaque face covers them, so that the mark never shows through it
+    // however far away, nor costs a draw.
+    canvas.shapes.extend(
+        (0..grid.slots())
+            .filter(|slot| !filled.contains(slot))
+            .map(|slot| {
+                let (left, top, width, height) = wall.slot_rect(slot);
+                Shape::rect(
+                    left - WALL_PADDING.0 as f32,
+                    top - WALL_PADDING.1 as f32,
+                    width,
+                    height,
+                    SLOT,
+                )
+            }),
+    );
     canvas
 }
 
@@ -780,7 +786,7 @@ fn wall_face(wall: &Wall) -> Canvas {
 fn slot_board(border: [f32; 4], cells: Cells) -> Canvas {
     let mut canvas = Canvas::new(cells.columns, PIXEL);
     canvas.padding = PADDING;
-    canvas.background = [0.01, 0.02, 0.04, 0.45];
+    canvas.background = [0.01, 0.02, 0.04, 1.0];
     canvas.border = Some(border);
     canvas.rows = vec![Row::default(); cells.body + 3];
     canvas
@@ -1202,6 +1208,7 @@ fn corner_marks(mark: &Arc<Canvas>, model: Mat4, corners: [Vec3; 4]) -> Vec<Shee
                     ))
                     * Mat4::from_scale(Vec3::splat(size / pixels as f32)),
             ),
+            ahead: false,
         })
         .collect()
 }
@@ -1274,6 +1281,7 @@ fn readout_above(mut canvas: Canvas, model: Mat4, height: f32, viewer: Vec3) -> 
     Sheet {
         model: Some(facing(above, viewer, 1.0)),
         canvas: Some(crate::frame_timing::drawn(canvas)),
+        ahead: false,
     }
 }
 
@@ -2248,6 +2256,7 @@ impl Projector {
             let sheet = Sheet {
                 canvas: Some(canvas.2.clone()),
                 model: Some(model * Mat4::from_translation(Vec3::Z * READOUT_LIFT)),
+                ahead: false,
             };
             self.readout = Some(canvas);
             sheet
@@ -2418,6 +2427,7 @@ impl Projector {
         let sheet = |face: &Arc<Canvas>, model: Mat4| Sheet {
             canvas: Some(face.clone()),
             model: Some(model),
+            ahead: false,
         };
         // A panel drawn in a wall's slot belongs to that wall's group, unless it is carried or was let go.
         let moved: Vec<String> = Side::BOTH
@@ -2446,24 +2456,42 @@ impl Projector {
             .map(|(wall, frame)| {
                 // A flat wall is one board, drawn edge by edge in a group; a curved one, a board for each slot, and its
                 // label below their middle, once for a group. Each is the face drawn before while what it is drawn
-                // from is the same.
+                // from is the same. The slots its panels stand in, whose marks their opaque faces cover, are left
+                // unmarked.
+                let mut filled: Vec<u32> = standing
+                    .iter()
+                    .filter_map(|(panel, ..)| match &panel.place {
+                        Place::Wall { wall: on, slot }
+                            if *on == wall.id && !moved.contains(&panel.id) =>
+                        {
+                            Some(*slot)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                filled.sort_unstable();
+                filled.dedup();
+                filled.clear();
                 let mut sheets = match arc(wall) {
                     None if wall.group.is_some() => self
                         .walls
-                        .group(wall, &drawn)
+                        .group(wall, &drawn, &filled)
                         .iter()
                         .map(|(face, model)| sheet(face, *frame * *model))
                         .collect(),
                     None => vec![sheet(
-                        &self.walls.board(wall),
+                        &self.walls.board(wall, &filled),
                         *frame * Mat4::from_scale(Vec3::splat(wall.scale())),
                     )],
                     Some(_) => {
                         let (_, height) = wall.size();
                         let board = self.walls.slot(wall);
+                        // No board behind a slot a panel stands in, whose opaque face covers it.
                         let mut boards: Vec<Sheet> = slot_frames(wall, *frame)
                             .into_iter()
-                            .map(|model| sheet(&board, model))
+                            .enumerate()
+                            .filter(|(slot, _)| !filled.contains(&(*slot as u32)))
+                            .map(|(_, model)| sheet(&board, model))
                             .collect();
                         // Below its rows, since the status pill stands just above the Tomori wall from home.
                         if boards::labelled(wall, &drawn) {
@@ -2507,10 +2535,15 @@ impl Projector {
                 .iter()
                 .zip(faces)
                 .filter(|((panel, ..), _)| in_layout(panel, moved).is_none())
-                .map(|((_, model, _), face)| {
+                .map(|((panel, model, _), face)| {
+                    // A panel carried, or let go and not yet confirmed, is drawn in front of the wall it nears.
+                    let ahead = moved.contains(&panel.id);
                     (
                         model.w_axis.truncate().distance(viewer),
-                        vec![sheet(face, *model)],
+                        vec![Sheet {
+                            ahead,
+                            ..sheet(face, *model)
+                        }],
                     )
                 }),
         );
@@ -2869,6 +2902,7 @@ impl Projector {
             sheets.push(Sheet {
                 canvas: Some(drawn.2.clone()),
                 model: Some(*model * Mat4::from_translation(Vec3::Z * READOUT_LIFT)),
+                ahead: false,
             });
             self.linked.insert(panel.id.clone(), drawn);
         }

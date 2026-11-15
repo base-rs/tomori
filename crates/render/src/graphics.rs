@@ -1303,6 +1303,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // Opaque panels' faces and walls' boards first, each writing its depth, so that the GPU never shades the scene
+            // they hide. In the frame step's order, farthest first, each wall's board before its panels, so that where
+            // the depth buffer cannot tell a panel from the board 2 mm behind it, far away, the panel, drawn later, is
+            // kept; what one face hides of another costs a flat colour.
+            let mut faces = false;
+            for (index, (shown, _)) in panels.iter().enumerate() {
+                if visible[index] && shown.opaque() {
+                    if !faces {
+                        self.panels.set_faces(&mut pass, &glyphs);
+                        faces = true;
+                    }
+                    shown.draw_face(&mut pass, eye);
+                }
+            }
             for scenery in self.scenery().into_iter().chain(self.avatar()) {
                 scenery.draw(&mut pass, eye);
             }
@@ -1320,12 +1334,13 @@ impl Renderer {
                 scenery.draw_translucent(&mut pass, eye);
             }
             self.profiler.mark(&mut pass, profiled, eye, 2);
-            // Workers' signs and the space's panels are translucent, so they are drawn after the opaque scene, against its
-            // depth, back to front from this eye: each in the order it keeps among its own, the signs' by where they
-            // overlap and the panels' as the frame step gave them, farthest first, and between the two whichever is
-            // farther, so that a translucent wall's board behind a sign is drawn before it and shows about its rounded
-            // corners. Each opaque enough to hide what is behind it then writes its backing's depth where it is itself
-            // opaque enough, so that what is behind it is hidden though drawn after it.
+            // Workers' signs, the text and shapes over the opaque faces and the translucent panels are blended, so they
+            // are drawn after the opaque scene, against its depth, back to front from this eye: each in the order it
+            // keeps among its own, the signs' by where they overlap and the panels' as the frame step gave them,
+            // farthest first, and between the two whichever is farther, so that a translucent surface behind a sign is
+            // drawn before it and shows about its rounded corners. Each translucent one opaque enough to hide what is
+            // behind it then writes its backing's depth where it is itself opaque enough, so that what is behind it is
+            // hidden though drawn after it.
             let signs = self.workspace.order(scene_to_clip);
             let ahead = |model: &Mat4| (matrices[eye] * *model).w_axis.w;
             let (mut sign, mut panel) = (0, 0);
@@ -1356,7 +1371,7 @@ impl Renderer {
                     drawing_panels = true;
                 }
                 let (shown, _) = panels[panel];
-                shown.draw(&mut pass, &self.panels, eye);
+                shown.draw_over(&mut pass, &self.panels, eye);
                 // An image panel's image, over its face, before the panels in front of it.
                 if self.images.draw(&mut pass, shown, eye) {
                     self.panels.set(&mut pass, &glyphs);

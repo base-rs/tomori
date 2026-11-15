@@ -26,6 +26,8 @@ type Kept<K, T = Arc<Canvas>> = Option<(K, T)>;
 struct Group {
     wall: Wall,
     members: Vec<(Wall, Mat4)>,
+    /// The slots of the wall's own that panels stand in, which its board marks no slot behind.
+    filled: Vec<u32>,
 }
 
 /// How near two walls of a group must stand from each other as they stood, in metres and as a rotation's components,
@@ -36,7 +38,7 @@ const SAME: f32 = 1e-4;
 #[derive(Clone, Debug, Default)]
 struct Faces {
     /// A flat wall's board, by the wall as laid out, wherever it stands.
-    board: Kept<Wall>,
+    board: Kept<(Wall, Vec<u32>)>,
     /// A curved wall's slot board, by its frame's colour and its slots' cells.
     slot: Kept<([f32; 4], Cells)>,
     /// A curved wall's label, by its kind, name and context's chips.
@@ -110,12 +112,13 @@ impl WallFaces {
     }
 
     /// A flat wall's own board, as [`wall_face`] draws it.
-    pub(super) fn board(&mut self, wall: &Wall) -> Arc<Canvas> {
+    /// `filled`, the slots panels stand in, in order, are marked on no board, as a panel's opaque face covers them.
+    pub(super) fn board(&mut self, wall: &Wall, filled: &[u32]) -> Arc<Canvas> {
         kept(
             &mut self.of(wall).board,
-            |kept| laid_out(kept, wall),
-            || wall.clone(),
-            |wall| drawn(wall_face(wall)),
+            |(kept, marked)| laid_out(kept, wall) && marked == filled,
+            || (wall.clone(), filled.to_vec()),
+            |(wall, filled)| drawn(wall_face(wall, filled)),
         )
     }
 
@@ -145,12 +148,18 @@ impl WallFaces {
     /// A flat wall's board and label as one of its group among `walls`, as [`boards::sheets`] draws them, each with
     /// where it stands from the wall's frame: kept as the group is carried, its walls standing as they stood from each
     /// other.
-    pub(super) fn group(&mut self, wall: &Wall, walls: &[&Wall]) -> Vec<(Arc<Canvas>, Mat4)> {
+    pub(super) fn group(
+        &mut self,
+        wall: &Wall,
+        walls: &[&Wall],
+        filled: &[u32],
+    ) -> Vec<(Arc<Canvas>, Mat4)> {
         let members = boards::members(wall, walls);
         kept(
             &mut self.of(wall).group,
             |kept| {
                 laid_out(&mut kept.wall, wall)
+                    && kept.filled == filled
                     && kept.members.len() == members.len()
                     && kept
                         .members
@@ -167,9 +176,10 @@ impl WallFaces {
                     .iter()
                     .map(|other| ((*other).clone(), relative(&wall.pose, &other.pose)))
                     .collect(),
+                filled: filled.to_vec(),
             },
             |_| {
-                let sheets = boards::sheets(wall, Mat4::IDENTITY, walls);
+                let sheets = boards::sheets(wall, Mat4::IDENTITY, walls, filled);
                 crate::frame_timing::faces(sheets.len());
                 sheets
                     .into_iter()

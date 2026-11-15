@@ -36,7 +36,7 @@ fn near(a: f32, b: f32) -> bool {
 /// The quads of `wall`'s board drawn in `colour`, in metres from its pose, as left, top, right and bottom.
 fn quads(wall: &Wall, walls: &[&Wall], colour: [f32; 4]) -> Vec<[f32; 4]> {
     let unit = PIXEL * wall.scale();
-    let sheets = sheets(wall, Mat4::IDENTITY, walls);
+    let sheets = sheets(wall, Mat4::IDENTITY, walls, &[]);
     sheets[0]
         .canvas
         .as_deref()
@@ -105,9 +105,9 @@ fn a_group_s_boards_meet_at_the_seam_their_outer_edges_even_and_borders_only_whe
     assert_eq!(quads(&two, &walls, SLOT).len(), 4);
     assert_eq!(quads(&big, &walls, SLOT).len(), 1);
     assert!(labelled(&two, &walls) && !labelled(&big, &walls));
-    assert_eq!(sheets(&two, Mat4::IDENTITY, &walls).len(), 2);
-    assert_eq!(sheets(&big, Mat4::IDENTITY, &walls).len(), 1);
-    let label = sheets(&two, Mat4::IDENTITY, &walls)[1].clone();
+    assert_eq!(sheets(&two, Mat4::IDENTITY, &walls, &[]).len(), 2);
+    assert_eq!(sheets(&big, Mat4::IDENTITY, &walls, &[]).len(), 1);
+    let label = sheets(&two, Mat4::IDENTITY, &walls, &[])[1].clone();
     assert_eq!(label.canvas.unwrap().plain(), "WALL");
     // A wall the server says is joined to one that no longer stands beside it, as one carried away, draws its edge.
     let mut away = big.clone();
@@ -174,7 +174,7 @@ fn a_wall_of_a_group_shows_its_own_context_s_chips_after_its_label_or_alone() {
     );
     let walls = [&two, &big];
     let text = |wall: &Wall| -> Vec<String> {
-        sheets(wall, Mat4::IDENTITY, &walls)[1..]
+        sheets(wall, Mat4::IDENTITY, &walls, &[])[1..]
             .iter()
             .map(|sheet| sheet.canvas.as_deref().unwrap().rows[0].plain())
             .collect()
@@ -182,12 +182,12 @@ fn a_wall_of_a_group_shows_its_own_context_s_chips_after_its_label_or_alone() {
     // The labelled wall, its label and then its chips; the other, its chips alone, each on its own backing.
     assert_eq!(text(&two), ["WALL   Region EU-WEST1 "]);
     assert_eq!(text(&big), [" Region AP-SOUTH1 "]);
-    let label = sheets(&big, Mat4::IDENTITY, &walls);
+    let label = sheets(&big, Mat4::IDENTITY, &walls, &[]);
     // A fixed chip, filled and outlined.
     assert_eq!(label[1].canvas.as_deref().unwrap().shapes.len(), 2);
     // Without a context, the other draws nothing more.
     let (two, big) = pair();
-    assert_eq!(sheets(&big, Mat4::IDENTITY, &[&two, &big]).len(), 1);
+    assert_eq!(sheets(&big, Mat4::IDENTITY, &[&two, &big], &[]).len(), 1);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn a_wall_of_a_group_s_chips_stand_within_its_board() {
     let two = two.with_context(vec![long("a"), long("b"), long("c")]);
     let walls = [&two, &big];
     let own = board(&two, &walls);
-    let label = sheets(&two, Mat4::IDENTITY, &walls)[1].clone();
+    let label = sheets(&two, Mat4::IDENTITY, &walls, &[])[1].clone();
     let canvas = label.canvas.as_deref().unwrap();
     let pixel = PIXEL * group_scale(&two, &walls);
     let left = own.left + (LABEL_INDENT + WALL_PADDING.0) as f32 * pixel;

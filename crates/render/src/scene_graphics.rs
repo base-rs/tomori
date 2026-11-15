@@ -135,14 +135,17 @@ impl Panels {
         self.frame += 1;
         let frame = self.frame;
         let drawn = std::mem::take(&mut self.drawn);
-        let sheets: Vec<(&Arc<tomori_scene::canvas::Canvas>, Mat4)> = sheets
+        let sheets: Vec<(&Arc<tomori_scene::canvas::Canvas>, Mat4, bool)> = sheets
             .into_iter()
-            .filter_map(|sheet| sheet.canvas.as_ref().zip(sheet.model))
+            .filter_map(|sheet| {
+                let (canvas, model) = sheet.canvas.as_ref().zip(sheet.model)?;
+                Some((canvas, model, sheet.ahead))
+            })
             .collect();
         // Faces kept, first, so that nothing else takes their cards.
         let mut chosen: Vec<Option<usize>> = sheets
             .iter()
-            .map(|(canvas, _)| {
+            .map(|(canvas, ..)| {
                 let card = self
                     .faces
                     .get(&address(canvas))?
@@ -155,7 +158,7 @@ impl Panels {
                 Some(card)
             })
             .collect();
-        for (place, (canvas, _)) in sheets.iter().enumerate() {
+        for (place, (canvas, ..)) in sheets.iter().enumerate() {
             if chosen[place].is_some() {
                 continue;
             }
@@ -186,7 +189,11 @@ impl Panels {
         self.drawn = chosen
             .into_iter()
             .zip(&sheets)
-            .map(|(card, (_, model))| (card.expect("each sheet has a card"), *model))
+            .map(|(card, (_, model, ahead))| {
+                let card = card.expect("each sheet has a card");
+                self.cards[card].panel.set_ahead(*ahead);
+                (card, *model)
+            })
             .collect();
         let uploads = Uploads::since(before, self.cards.iter().map(|card| &card.panel));
         self.spare();
@@ -4052,8 +4059,10 @@ mod tests {
                     .each_ref()
                     .map(|texture| read_back(&device, &queue, texture, (WIDTH, HEIGHT)))
             };
-            // Of the pixels where `near` and `far` each draw over the `bare` scene without the other, differently, how many
-            // look like `near`, which should cover `far`, and how many like `far`, where both draw.
+            // Of the pixels where `near` and `far` each draw over the `bare` scene without the other, differently, and
+            // nothing of the bare scene is behind them, how many look like `near`, which should cover `far`, and how many
+            // like `far`, where both draw. Where the scene shows behind a translucent `near`, as a cube behind the menu's
+            // label, an opaque `far` between them hides it, so that the pixel shows neither alone.
             let covering = |bare: &image::RgbaImage,
                             near: &image::RgbaImage,
                             far: &image::RgbaImage,
@@ -4065,14 +4074,16 @@ mod tests {
                         .sum::<i32>()
                 };
                 let (mut nearer, mut farther) = (0, 0);
+                let sky = *bare.get_pixel(0, 0);
                 for (((bare, near), far), both) in bare
                     .pixels()
                     .zip(near.pixels())
                     .zip(far.pixels())
                     .zip(both.pixels())
                 {
-                    // Both draw here, and differently.
-                    if distance(bare, near) > 60
+                    // Both draw here, and differently, over nothing but the sky.
+                    if distance(bare, &sky) <= 6
+                        && distance(bare, near) > 60
                         && distance(bare, far) > 60
                         && distance(near, far) > 60
                     {
@@ -4659,6 +4670,124 @@ mod tests {
     /// Set `TOMORI_BIG_WALL_PREVIEW` to a PNG path to save what this renders: a standard wall 3 m away, a wall five times
     /// as large 15 m away, which looks the same, its text as large to the eye, and a standard wall 15 m away, too small
     /// to read, each with the same panels, from home.
+    /// A wall's slot is marked on its board only where no panel stands, so that seen from 15, 30 and 60 m through the
+    /// headset's near and far planes, where 2 mm is a step or two of the depth buffer, the mark never shows through the
+    /// panel's opaque face in front of it: nothing in the middle of the panel is darker than its face.
+    #[test]
+    fn a_slot_s_mark_never_shows_through_the_panel_standing_in_it_however_far() {
+        const WIDTH: u32 = 640;
+        const HEIGHT: u32 = 480;
+        use tomori_protocol::{Panel, Place, Wall, WallKind};
+        let ahead = Vec3::new(1.0, 0.0, -1.0).normalize();
+        let panel = Panel::new(
+            "panel-0",
+            "Build",
+            "Twelve today.",
+            Place::Wall {
+                wall: "wall-1".into(),
+                slot: 0,
+            },
+        );
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+            let (texture, view) = eye(&device, "slot mark test eye", (WIDTH, HEIGHT));
+            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+            let mut drawn_panels = Panels::new(&device, &renderer);
+            let head = Mat4::from_translation(arrival::HOME);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(arrival::HOME),
+                space_head: head,
+                trigger: Some(0.0),
+                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                ..Default::default()
+            };
+            for distance in [15.0f32, 30.0, 60.0] {
+                // One slot, at the standard scale, so that its mark is 2 mm behind its panel, and a lens as narrow as
+                // shows it as large however far.
+                let wall = Wall::new(
+                    "wall-1",
+                    WallKind::Added,
+                    tomori_protocol::Pose::upright_facing(
+                        (arrival::HOME + ahead * distance).to_array(),
+                        arrival::HOME.to_array(),
+                    ),
+                )
+                .with_grid(tomori_protocol::Grid::new(1, 1).unwrap());
+                let mut conversation = joined();
+                show_projection(&mut conversation, vec![wall], vec![panel.clone()]);
+                let mut step = Step::default();
+                let frame = step.update(
+                    &senses,
+                    &mut conversation,
+                    &mut felt(),
+                    Instant::now(),
+                    0.01,
+                );
+                draw(&mut renderer, &device, &queue, &mut drawn_panels, &frame);
+                let lens = glam::camera::rh::proj::directx::perspective(
+                    2.0 * (1.0 / distance).atan(),
+                    WIDTH as f32 / HEIGHT as f32,
+                    tomori_scene::depth::NEAR,
+                    tomori_scene::depth::FAR,
+                );
+                let matrix = lens
+                    * glam::camera::rh::view::look_at_mat4(
+                        arrival::HOME,
+                        arrival::HOME + ahead,
+                        Vec3::Y,
+                    );
+                renderer.render(
+                    &device,
+                    &queue,
+                    std::slice::from_ref(&view),
+                    &[matrix],
+                    Mat4::IDENTITY,
+                    &drawn_panels.list(Mat4::IDENTITY),
+                );
+                let image = read_back(&device, &queue, &texture, (WIDTH, HEIGHT));
+                // The panel's middle on the image, the face's colour there, and how many pixels about it are darker.
+                let sheet = frame
+                    .projection
+                    .iter()
+                    .find(|sheet| {
+                        sheet.canvas.as_deref().is_some_and(|canvas| {
+                            matches!(canvas.kind, tomori_scene::canvas::Kind::PanelFace)
+                        })
+                    })
+                    .expect("the panel stands");
+                let model = sheet.model.unwrap();
+                let (_, height) = sheet.canvas.as_deref().unwrap().size();
+                let on_image = |local: Vec3| {
+                    let at = matrix.project_point3(model.transform_point3(local));
+                    (
+                        ((at.x + 1.0) / 2.0 * WIDTH as f32) as u32,
+                        ((1.0 - at.y) / 2.0 * HEIGHT as f32) as u32,
+                    )
+                };
+                let sum = |(x, y): (u32, u32)| {
+                    image.get_pixel(x, y).0[..3]
+                        .iter()
+                        .map(|c| u32::from(*c))
+                        .sum::<u32>()
+                };
+                // The panel's face, in its middle, against its wall's darker board 2 cm above it, as hazed as it.
+                let (x, y) = on_image(Vec3::ZERO);
+                let face = sum((x, y));
+                let board = sum(on_image(Vec3::Y * (height / 2.0 + 0.02)));
+                assert!(face > board + 8, "{distance} m: face {face}, board {board}");
+                let darker = (x - 12..x + 12)
+                    .flat_map(|x| (y - 8..y + 8).map(move |y| (x, y)))
+                    .filter(|at| sum(*at) < (face + board) / 2)
+                    .count();
+                assert_eq!(darker, 0, "{distance} m: the wall shows through the panel");
+            }
+        });
+    }
+
     #[test]
     fn a_big_wall_far_away_reads_as_a_standard_wall_does_near() {
         const WIDTH: u32 = 960;
