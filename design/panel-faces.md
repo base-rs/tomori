@@ -1,139 +1,240 @@
 # Panel Faces
 
-**PROPOSED, not built.** This proposes how an environment gives a panel it publishes a look and controls of its own, a **face** its client crate draws, while the panel stays Tomori's: its frame, its slot on a wall, carrying, resizing, dismissal and the projection. Nothing below is a requirement until the maintainer accepts it, increment by increment, as `responders.md` and `panel-actions.md` were.
+**PROPOSED, not built.** This proposes **face panels**: panels an environment's server side publishes like any other, but whose inside its client crate draws, with Tomori's shapes and text and, where those are not enough, its own shaders. Tomori keeps everything else: the frame and title, the wall slot, carrying, resizing, pinning, copying, dismissal, the level of detail, the projection and the limits. Nothing below is a requirement until the maintainer accepts it, phase by phase, as was done for `responders.md` and `panel-actions.md`.
 
 ## Requirement
 
-None yet. Every statement under **Proposal** is direction, written as it would be required once accepted; the sections **What exists today** describe the code as it is at `8585f66`.
+None yet. Everything under **Proposal** is direction, written as it would read once required. **What exists today** describes `origin/main` at `916c45ca` (#531).
 
 ## Status
 
-Asked for in November 2026 by the maintainer, in the headset, of a downstream environment, Observe, whose own 3D panels, an attention list with a scrolling highlight, an inspector with bars and toggles and a paged system wall, were moved onto Tomori's walls as published panels and lost their look and their controls: "With regards to these walls, how do we make them more dynamic? … I understand the panel is a totally different implementation. But is there some way in which the application can subclass panels and have more complex rendering behaviour or something?" The direction the maintainer approved: Tomori keeps owning the panel's frame, its wall slot, grabbing, moving, resizing, dismissal and the projection; the environment's client side draws what is inside the panel and is told where the ray points within it; the agent reads only what the environment describes in text, so each such panel needs a text fallback, which clients without the environment's client code show. Richer built-in list rows, tones, value bars, a hover and a highlight bar (`panel-actions.md`, increment 4), are being built beside this; this proposal is for what built-ins cannot cover.
+The maintainer first asked in November 2026, in the headset, of Observe, a downstream environment whose own 3D panels had lost their look when they moved onto Tomori's walls: "is there some way in which the application can subclass panels and have more complex rendering behaviour or something?" The approved direction: Tomori owns the panel; the environment's client side draws what is inside it and is told where the ray points within it; each such panel has a text fallback for the agent and for clients without the code. The first draft of this document (#306, at `8585f66`) answered with faces over list rows, drawn only in Tomori's shapes.
+
+The proposal was parked while rendering was reworked, and is revised here against what has landed since: 128 panels and 64 walls (#494); panels drawn as their titles when too small to read (#506); opaque faces drawn first with depth writes (#530); back faces culled (#531); the rule that no shader passes a uniform struct by value (#521, #525); eyes at 2.0× with 2× MSAA on the Quest 3 (#527); charts of 8 series (#511, #517); richer list rows (tones, values, columns, keys); the panel context model with chips, instances, pinning and freezing (#393 to #485); a spectator that runs client sides and draws panels; and two open proposals, refresh policies (#509) and compositor layers, parked (#529).
+
+**The motivating example**, in the maintainer's words: Observe's **world clocks**. These are three 24-hour dials, lit by day and dark by night, each showing its area's traffic and trend. Today they are scenery, not panels, so adding a clock means writing code. As face panels they could be placed on walls, carried, copied (a clock per region), given context (a region parameter), pinned, and counted within the panel limits like any panel.
 
 ## Recommendation
 
-**A face is a presentation of a list panel's rows, drawn by the environment's client crate as a 2D drawing in Tomori's own shapes and text, and never a second source of data.** The server side publishes a list panel exactly as today, `Panel::list(id, title, rows)`, and names a face, `with_face(Face::new("attention"))`. The body the server writes from the rows stays the fallback, what the agent reads and what every client without the drawer shows. A client whose build registered a drawer for that key draws the face instead: a pure function from the panel as published to shapes, text and **regions**, each region one of the panel's rows. Pointing at a region is pointing at that row, and choosing it is choosing that row, by the messages and rungs rows already have. So the face adds a look, and no new input path, intent, forgery surface or thing the agent cannot read.
+**Add a fourth kind of published panel, `Panel::face`. It carries a key naming a drawing the environment's client crate registers, a small typed payload (bounded and versioned like a chart's live data), a text summary the server keeps as its body, and optionally rows as its pointable items.** The drawing has two tiers, both registered under the key:
 
-Of the three ways to draw, this is (b) below in the form the code already has, a `Canvas` display list rather than a texture, fed by (c)'s declarative data. Arbitrary 3D inside a panel, (a), is not recommended.
+1. **A canvas drawing**, required. It is a pure function in `tomori-scene`, without the GPU: the payload in, Tomori's `Shape`s, text and labels out, plus regions naming the items. It is meshed and kept like a chart's face, so its text is the atlas's and stays sharp. It is what tests check, and what every client that has the crate draws, the spectator included.
+2. **A GPU layer**, optional. It is the environment's own pipeline, which renders into a texture Tomori allocates for the face, sized to how large the face appears, and renders again only when the payload, the size or the drawer's declared next change says so. Tomori draws that texture as the face's opaque backing, first in each eye with depth writes as #530 draws every face, and draws the canvas drawing's text over it. Clipping, curved walls, carrying and depth then come for free. The environment's shaders run only offscreen, never in Tomori's eye pass.
 
-| Increment | What | What it gives Observe |
+The fallback is always Tomori's: the title, then the summary as a text panel. This is what a client without the crate draws, and every client draws the title alone at a distance where it could not be read.
+
+Pointing, choosing and inspecting reuse rows (`panel-actions.md`): a region is a row, so a press reaches the side as the server-made `Intent::choice`. No new intent path is added. A per-participant **cursor** overlay, like a chart's readout, lets a face show what is under the ray without being rendered again.
+
+**For the clocks, tier 1 is enough.** A 24-hour ring is 24 `Shape::Quad` arcs, the needle a `Shape::Stroke`, the trend `Shape::Bar`s. The large figures need one addition: labels at 2 to 4 times the font pixel. So the clocks could move onto a wall with phase 1 alone. The GPU layer is phase 3, for faces that need gradients, glows or many thousands of primitives.
+
+| Phase | What | What it gives Observe |
 | --- | --- | --- |
-| 0, in progress elsewhere | Built-in richer rows: tones, value bars, hover and highlight bars | The attention list's highlight and bars on every client, without any client code |
-| 1 | Faces over list panels: drawn, bounded, contained; regions pointed at and chosen as rows; hover outlined by Tomori | The attention list's own layout and look, choosing a row to open it in the inspector; the inspector's bars, and its toggles as choosable rows drawn as switches; the system wall's pager as choosable rows, shared by the space |
-| 2 | Each participant's scroll of a face, by rows or pages, with Tomori's scroll bar and `Stick ↕  scroll` | The highlight kept in view as the list scrolls; paging the system wall for oneself |
-| 3 | The client side told the row pointed at; a region that takes the right stick | The pod of the row pointed at lit on the globe; a value adjusted with the stick |
-| Later | Animation; faces on text and chart panels; the spectator | Each the maintainer's call |
+| 1 | `Panel::face`: the key, payload and summary; the canvas drawing, kept and paced; the title and summary as fallbacks; scaled labels; regions as rows, with Tomori's hover outline; cursors; the agent told the summary and the item | World clocks on a wall of their own: carried, resized, pinned, copied by area, drawn by the spectator, counted in the 128; the attention list's own look |
+| 2 | Face payloads as live data, under the refresh policies (#509); a drawer's declared next change, such as each minute; a glance level of detail | Clocks that tick each minute with no server traffic, and traffic updated each minute without changing the panel's version |
+| 3 | The GPU layer: the environment's pipeline into a cached texture, within budgets of time and memory | Dials with a lit gradient of day and night; dense heat maps |
+| Later | Faces that animate at a few frames a second; faces on text and chart panels; the client side told the item pointed at | Each the maintainer's call |
 
-Where increment 0's rows are enough, an environment should use them and no face: they work on every client, need no code, and are legible and agent-readable by construction. A face is for layout the vocabulary cannot say: columns and badges, a sparkline in each row, gauges, a heat map, a topology.
+Richer list rows (tones, values, columns) remain the first choice where they are enough: they need no client code and are readable everywhere.
 
 ## What exists today
 
-- **A panel's face is already a 2D drawing, not a texture.** `tomori_scene::projection::face` returns a `tomori_scene::canvas::Canvas`: rows of `ui_text` cells, `Shape`s (`Rule`, `Rect`, `Bar`, `Fill`, `Disc`, `Ring`, `Check`, `Quad`, `Stroke`, `Dot`) and `Label`s placed in font pixels, which `Canvas::mesh` turns into quads of the shared glyph atlas, with no GPU. `projection::faces` lays each face out once and keeps it, the renderer keeps its mesh in a buffer of `CARD_CAPACITY`, 12,000 vertices, and a paced projector lays out at most two changed panels a frame (`faces::LAYOUTS`) and eight arriving (`faces::ARRIVALS`) (`rendering.md`). A curved wall's slots are each flat, so its curve is in the panels' models, never in a face.
-- **The chart panel is a custom face Tomori draws.** `projection::chart::face` puts Tomori's title, status row and rule over a `chart::Drawing`, shapes and labels in an `Area`; its body is a text summary for a client that cannot draw it (`projection.md`). A face generalises this: the drawing comes from the environment's crate.
-- **An environment's client side draws in 3D.** Its `ClientSide::update` returns a `Drawn` that its `Scenery::animate` reads, and the scenery draws with its own pipelines in `draw` and `draw_translucent`, the latter after the scene and before the panels, building text from the `Target`'s `SharedGlyphs`. It is told `Input::pointed`, `Input::select` and `Input::scroll` for what its `pick` returns as `Picked`, `selectable()` or `handles(Actions::SCROLL)`, only after every rung of Tomori's (`environments.md`, `responders.md`).
-- **The ray takes a panel before the client side**, so a client side cannot pick anything on a panel (`interaction.md`). The projector finds the panel pointed at and where (`projection::Output::pointed`), and `item_in` turns that point into a body line through the panel's model.
-- **Rows already have identity, pointing, inspection and choice.** `Row::new(id, text)`, `with_reference`, `choosable`, `Panel::highlighting`; the projection's `Panel::rows` of `ListRow`; `Resource::panel_row`; `ClientMessage::ChoosePanelRow`; `Intent::choice` and `Chosen`; `precedence::Trigger::Row` and the row's place in A's order; `panels` and `inspect` for the agent (`panel-actions.md`).
-- **The spectator runs no client side** (`environments.md`), and, as far as reading `tomori-client-spectator` shows, draws no projected panels at all: it never applies the frame step's sheets. See Open questions.
+- **A face is a canvas.** `tomori_scene::projection::face` returns a `tomori_scene::canvas::Canvas`: rows of cells, `Shape`s (`Rule`, `Rect`, `Bar`, `Fill`, `Disc`, `Ring`, `Check`, `Quad`, `Stroke`, `Dot`), `Label`s placed in font pixels, an optional `CanvasImage` drawn from a texture, and a `Kind` such as `PanelFace`. `projection::faces` lays each face out once for its version and size, and the renderer keeps its mesh in a GPU buffer. A paced projector lays out at most two changed panels a frame (`faces::LAYOUTS`) and eight arriving (`faces::ARRIVALS`), the nearest first (`rendering.md`).
+- **Faces are opaque and drawn first.** A canvas whose backing is wholly opaque (`occlusion::opaque`) has that backing drawn first in each eye, flat, unblended and writing depth (`ui_panel::Panel::draw_face`). Its text, shapes, frame and image are drawn later, blended, a few depth steps nearer (`occlusion::OVER`, `Panel::draw_over`). A panel carried (`Sheet::ahead`) is drawn whole in its turn, compared as though `occlusion::TIE` nearer. A wall marks only empty slots. A canvas an environment draws itself with `Panel::draw` is translucent (`rendering.md`, **How**).
+- **Far faces are titles.** A face in a slot whose row of text subtends under 0.09° (`faces::FAR`) is drawn as its title alone, 3 times as large (`FAR_SCALE`), without laying anything out, until it subtends 0.108° again (`NEAR`). Up to two faces a frame come back to full, the nearest first (`NEARING`). `PanelLod` turns this off. While a face is a title, nothing of it is pointed at.
+- **A chart is the nearest precedent.** `projection::chart::face` places Tomori's title, status row and rule over a `chart::Drawing` of shapes and labels. Its body is a summary for a client that cannot draw it. Its points are live data, versioned by `data_seq` apart from its version and sent as `chart_append` or `chart_replace` patches, so they never refuse an edit (`projection.md`). Its readout follows the ray for one participant, unsent.
+- **Images are textures.** `panel_images` keeps decoded images within `TEXTURE_BYTES`, 128 MiB, mipmapped and sampled trilinearly, and evicts the least recently shown first. A canvas's `CanvasImage` is drawn over the canvas.
+- **An environment's scenery draws in 3D** with its own pipelines: `Scenery::submit`, `cull`, `draw` (opaque, nearest first) and `draw_translucent` (before the panels). It builds text from `Target`'s `SharedGlyphs`. Its shaders must follow **No shader passes a struct or an array of a uniform by value**; `tomori_render::test_gpu::validate_wgsl`, behind `test-gpu`, checks a shader in an environment's own tests.
+- **Rows** carry an id, text, a reference, `choosable`, a tone, a value, cells and a key. On the wire, `ListRow` carries `highlighted`, `tone`, `value`, `cells` and the key's revision. The rest, pointing by row id (`Resource::panel_row`), `ChoosePanelRow`, `Intent::choice`, `precedence::Trigger::Row`, A's row rung, `panels` and `inspect`, is in `panel-actions.md`.
+- **Context and instances.** A side declares up to 3 parameters (`CONTEXT_PARAMETERS`) of up to 16 choices (`CONTEXT_CHOICES`). A panel `depends_on` them. Walls and panels hold settings, shown as chips. A copy in another context is an **instance** under a server-minted `~` id, at most 8 an environment (`stage::context::INSTANCES`), counted in the 128. The side is told `Intent::context()` and publishes the instance. Pulling a dependent panel off its wall pins a copy (`panel-context.md`).
+- **The spectator** runs the client side registered for its environment and draws what the space projects, through the same panel buffers (`spectator.md`).
+- **The Quest 3** draws each eye at 3,360 × 3,520 with 2 samples. In Observe's busy view, the panels' faces and walls' boards cost about 0.61 ms of a 10.75 ms eye time (the compositor-layers proposal, #529).
 
 ## Proposal
 
-### The model
+### The API
 
-- **Published as a list, with a face named.** `tomori_environment::Panel::with_face(Face)` on a list panel; `Face::new(key)`, the key 1 to 32 ASCII letters, digits, `-` and `_` (`valid_face_key`), as a panel's id, and optionally `Face::with_state(json)`, at most 4 KiB of JSON (`FACE_STATE_LIMIT`, as an event's), for what the drawing needs that is not a row: which columns to show, a sparkline's points. Everything else is unchanged: its id, title, rows, highlight, references, wall and slot, its place among the environment's 32, its rates and its resting. The server still writes the body from the rows, and refuses a face on a panel that is not a list, a key it does not take, and a state too large or not JSON, saying why.
-- **On the wire.** A projection's `Panel` gains `face`, a `tomori_protocol::Face` of the key and the state, part of what the panel's version covers, sent only to a client whose `Hello` sets `faces` and lists the environment at the version the space is in. An older client is never sent it and draws the body.
-- **Drawn by a registered drawer.** An environment's client crate registers, beside its scenery and client side, `Sceneries::set_face(ID, "attention", drawer)`, a `tomori_scene::face::Drawer`: `fn draw(&self, input: &face::Input) -> face::Drawing`. It is in `tomori-scene`, free of GPU code, so every client that draws panels can run it.
-- **What it is given**, `face::Input`: the panel's title; its rows, each with its id, its text as the server cleaned it, whether it is choosable and highlighted, and its tone and value as increment 0 sends them; the face's state; and its area, the columns and rows of cells below Tomori's title, metadata and rule, in font pixels, at the size the panel is drawn (`Fit`). Nothing else: no clock, no ray, no buttons, no environment state.
-- **What it returns**, `face::Drawing`: `ui_text::Row`s on the cell grid, `Shape`s and `Label`s in font pixels from its area's top-left, as `chart::Drawing` has, and `face::Region`s, each a rectangle and the id of one of the panel's rows, at most one a row.
-- **Kept, not redrawn.** `projection::faces` keeps the drawing as it keeps any face, by the panel's version and size. The drawer runs when the server changes the panel, in its turn among `faces::LAYOUTS`' two a frame, and when the panel is sized anew; a frame that changes nothing calls no drawer and allocates nothing.
-- **Why the panel alone, and not the environment's shared state.** A drawer could read the state `Space::share` keeps instead. It would then draw from two sources that arrive apart, the projection's patch and the state channel, so a face could show what its fallback does not; it would need the stateful `ClientSide`, which only the joined participant's device has; and it could not be kept by the panel's version. One publish carries the rows, the body and the state together.
+**Published.** `tomori_environment::Panel::face(id, title, Face)`, where:
 
-### The alternatives, compared
+- `Face::new(key)`: the key is 1 to 32 ASCII letters, digits, `-` and `_` (`valid_face_key`), as a panel id is, naming the drawing within the environment.
+- `Face::with_data(json)`: the payload, at most 4 KiB of JSON (`FACE_DATA_LIMIT`, as an event's `EVENT_LIMIT`), the environment's own format.
+- `Face::with_summary(text)`: what the server writes as the body, cleaned and bounded as any body (30 lines, 1,200 characters).
+- `Face::with_items(rows)`: optionally, up to 30 `Row`s (`ROW_LIMIT`) as its pointable items, with ids, references, `choosable`, tones and keys as a list's rows have, but **not** written into the body. The summary says what matters about them.
 
-|  | (a) The scenery draws in 3D in the panel's rectangle | (b) A 2D texture mapped onto the panel | (b′) A 2D drawing in `Canvas` shapes and text, **recommended** | (c) A declarative vocabulary Tomori draws |
-| --- | --- | --- | --- | --- |
-| Clipping | Not guaranteed. A scissor is screen-aligned and differs for each eye; the eyes' depth is `Depth32Float`, without a stencil; clip planes are an optional GPU feature; else the environment's shader is trusted to discard | Free | By construction: what leaves the area is left out | Free |
-| Depth and order | `draw_translucent` runs before the panels, so a face would lie under its panel's 94% backing; needs a new hook for each panel, in each eye, and its own depth writes (`rendering.md`) | Free, as an image panel's quad | Free: the panel's own mesh, one draw | Free |
-| Curved walls | Each slot's model handed to the scenery every frame | Free | Free | Free |
-| Text | The environment's own, at any size | Blurred: pixels, not distance fields; needs mipmaps and anisotropy, as `panel_images` | The atlas's, sharp, at the panel's one size | The same |
-| Cost | Pipelines and draws of its own, for each face, each eye | About 2.5 MiB for a 1024 by 640 face, 3.3 MiB with mipmaps, 32 of them most of `panel_images::TEXTURE_BYTES`' 128 MiB; an upload at each change; and Tomori has no 2D rasteriser, so the environment brings one | A chart's: about 0.2 to 1.3 ms to lay out and mesh on a desktop, once for each change (`rendering.md`); no texture | The least |
-| Legibility checked | No | No: Tomori sees pixels | Yes: text has no size to choose | Yes |
-| Tested without a GPU | No | Partly | Yes | Yes |
-| Clients without the code | Fallback | Fallback | Fallback | Every client, where the vocabulary is drawn; the body elsewhere |
-| What it can show | Anything | Any image | Anything the shapes draw: lines, bars, boxes, dots, areas, text | What the vocabulary names |
+Everything else a published panel has applies unchanged: `on_wall`, `with_reference`, `depends_on`, `for_window`, the 128, rates, resting, instances and pinning. `Panel::list(…).with_face(Face)` is the special case of a face drawn from a list's rows, its body the list as today. The server refuses, saying why, a key it does not take, a payload too large or not JSON, and a face on a chart or text panel.
 
-(c) beats custom drawing whenever it can say what is wanted, which is why it comes first and why (b′) takes its data from it: rows, tones, values, toggles and pagers stay declarative, on every client and readable to the agent, and only the drawing is the environment's. Tomori's own list face could become the default drawer, so that both share regions, hover and scrolling; that is left to whoever builds increment 0.
+**On the wire.** A projection's `Panel` gains `face: Option<tomori_protocol::Face>`, the key and the payload. Items travel as `rows`, as a list's do. A client gets `face` only if its `Hello` sets `faces` and it presents the environment at the space's version. Any other client is sent the panel as a text panel of the summary, as a chart is to a client that knows no charts.
 
-### Input
+**Registered.** An environment's client crate registers, beside its scenery and client side: `Sceneries::set_face(ID, key, drawer)`, where `drawer` is a `tomori_scene::face::Drawer`; and, for phase 3, `Sceneries::set_face_layer(ID, key, create)`, where `create` makes a `tomori_render::face::Layer` for the renderer's `Target`. A client draws a face only where both its build has the key and it presents the environment at the version the space is in, the rule client sides follow already. The key's meaning and the payload's format are agreed by the environment's protocol version (`environments.md`).
 
-- **The panel takes the ray, as any panel.** The projector finds the point where the ray meets the panel and carries it through the panel's model into the face's area, as `item_in` does for a body line. The first region containing it names its row, which becomes the row pointed at, `Conversation::pointed_row`, exactly as a list's line under the ray does today. Off every region, the panel alone is pointed at.
-- **Select is the row's.** A region whose row the server marked choosable is a choosable row pointed at: the trigger takes it at `precedence::Trigger::Row`, after the hand menu, the transcript and a wall carried, and A at the row's place in the conversation's meanings, `precedence::A::Conversation`, after everything that decides and before a teleport pad, with `Answer the request before choosing.` while a request waits. Neither order changes, and no rung is added. The drawer cannot make a row choosable: the server checks its own copy.
-- **Hover is Tomori's.** Tomori outlines the region under the ray in its highlight colour, by rewriting vertices in the mesh kept, as a frame is recoloured (`Canvas::frame_mesh`), so that hovering calls no drawer, looks the same on every face, and cannot be hidden by one: the participant always sees what a press would choose. The ray's label ends `A  choose`, then `✓  chosen`, as for any row.
-- **Scroll** (increment 2). A face with more rows than it shows scrolls for each participant, at `precedence::Right::Scroll`, as a panel does: the drawer is given the first row to show and says how many it showed, and Tomori draws the scroll bar and the label's hint. A region that itself takes the stick (increment 3) would be a rung between `Transcript` and `Scroll`, latched as every push is.
-- **What stays Tomori's.** The grip pulls the panel off and carries it, the right stick and its click move a panel carried, B throws it away, holding B leaves; the frame, the title, metadata and rule, the scroll bar and the ray's label are drawn by Tomori; a wall's board, bar and handles are untouched. A face is never told a button, a stick or the ray, so it has nothing to capture them with.
-- **Hands, the desktop, visitors.** Hand tracking points and hovers; it chooses nothing until a pinch is the trigger (`environments.md`). In the desktop window the mouse points, the left button and Enter choose, the wheel and the paging keys scroll; the console prints the body. A visitor sees faces and points at rows, and chooses nothing.
+**The drawer** is given `face::Input` and returns `face::Drawing`:
 
-### Actions reach the environment's server side
+```rust
+pub trait Drawer: Send + Sync {
+    /// What the face shows, in font pixels from its area's top left: shapes, rows, labels, and regions naming items.
+    fn draw(&self, input: &Input<'_>) -> Drawing;
+    /// What to show over it where the ray is, for this participant alone: a few shapes and labels. None by default.
+    fn cursor(&self, _input: &Input<'_>, _at: Vec2) -> Option<Overlay> { None }
+}
 
-By the server-made intent rows already have, `Intent::choice`, whose `Chosen` names the side's own panel, the row and whether the participant saw the current version, and not by the client side's `EnvironmentIntent`. A client-side intent's payload is whatever a client wrote, so a side must treat it as forgeable; a choice is attested by the server, which takes it only from a participant, for a row its own copy marks choosable, on a panel its environment publishes now, within the participant's allowance of 8 at once and 4 a second (`panel-actions.md`). It also works from a client that has no drawer, on the fallback list, so a toggle chosen on an older headset and one chosen on a face are the same choice. A toggle is a choosable row whose side flips it and publishes again; a pager is two. The client side's intents remain for what its own 3D objects need.
+#[non_exhaustive]
+pub struct Input<'a> {
+    pub title: &'a str,
+    pub data: &'a serde_json::Value,      // the payload, parsed once
+    pub items: &'a [ListRow],             // ids, choosable, highlighted, tone, value, cells
+    pub context: &'a [ContextChip],       // its effective settings, as its chips show them
+    pub area: Area,                       // columns and rows of cells below Tomori's header, in font pixels
+    pub scale: f32,                       // its wall's text scale, for a big wall
+    pub detail: Detail,                   // Full, or Glance (phase 2)
+    pub now: SystemTime,                  // the client's clock, for a face that shows time
+}
 
-A side's changes to one panel are held to about one a second (`environments.md`), so a switch drawn from the server's state may lag the press; the label's `✓  chosen` is the immediate answer. Whether a choice should allow its panel one prompt update is an open question.
+#[non_exhaustive]
+pub struct Drawing {
+    pub rows: Vec<ui_text::Row>,
+    pub shapes: Vec<Shape>,
+    pub labels: Vec<Label>,           // gains a scale of 1 to 4: large figures, headline numbers
+    pub regions: Vec<Region>,         // a rectangle and an item's id, at most one an item
+    pub next_change: Option<SystemTime>, // when the drawing changes from time alone (phase 2)
+}
+```
+
+`Area` is the rectangle of the face below Tomori's title, metadata or chips, and rule, at the size the panel is drawn (`Fit`): the "panel's rect" in the units every face is laid out in. The drawer is given nothing else: no ray, no buttons, no environment state, no GPU.
+
+**The GPU layer** (phase 3) is a `tomori_render::face::Layer`:
+
+```rust
+pub trait Layer: Send {
+    /// Encode the face into `target`, a texture Tomori owns, cleared to the panel's plate; `input` is the drawer's.
+    fn render(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder,
+              target: &FaceTarget<'_>, input: &face::Input<'_>);
+}
+```
+
+`FaceTarget` gives the view, its size in pixels, its format (`Rgba8UnormSrgb`), an optional depth view of its own, the sample count (1 or 4) and the mapping from font pixels to its pixels, so that the layer lines up with the canvas drawn over it. The layer makes its pipelines once, as it is created at startup or on entering the environment, never in a frame. Its WGSL must pass `validate_wgsl` in the environment's tests, which enforces the uniform rule, and it shares the haze functions only if it wants them (a face is hazed as its panel is, by Tomori, after). It never sees the eyes, their cameras or Tomori's passes.
+
+**How it is drawn.** Phases 1 and 2: the canvas drawing becomes the face's canvas, under Tomori's header and frame, with an opaque backing. It is drawn exactly as every face is: the backing first and writing depth, its text and shapes over it at `occlusion::OVER`, culled as panels are, carried with `Sheet::ahead`. Phase 3: the layer's texture **is** the backing. It is drawn in the opaque-first pass as a textured, unblended quad writing depth, in place of the flat colour (`Panel::draw_face` sampling instead of filling), so the GPU still rejects what lies behind the face before shading it. The canvas drawing's text and shapes are then drawn over it, as text is over any backing. A face is **opaque by default and only opaque** in this proposal: a translucent face would give up #530's early depth rejection and need sorting.
+
+**Level of detail.** At `faces::FAR`, the face is its title and neither tier runs, and its texture is let go after a while. Phase 2 adds `Detail::Glance` between `FAR` and three times it, which a drawer may use to draw less: a clock's ring and time without its trend and words. Tomori owns the thresholds and their hysteresis, the same for every face. With `PanelLod` off, every face is drawn full.
+
+### Data flow
+
+- **The payload is part of the panel**, not the environment's shared state (`Space::share`). One publish carries the title, the summary, the items and the payload together, so the face and its fallback cannot disagree on what arrived. A face is kept by the panel's version and size, as any face is. A drawer works on the spectator, which reads the panel but not everything a client side reads. And one panel's data can differ from another's, which an instance needs.
+- **Typed, by the environment's common crate.** The payload is JSON on the wire, as state and events are. The common crate gives a type, `serde` both ways, with a test that its largest value fits `FACE_DATA_LIMIT`. Tomori parses it once per version, never per frame, and hands the drawer the `serde_json::Value`, which the crate reads into its type, in the face's cache, not per draw.
+- **Updates** (phase 2). The payload and the summary are the face's **live data**, as a chart's points are: a change of them alone takes a new `data_seq`, not a new version, so it never refuses a participant's or the agent's edit, and it reaches a client applying patches as `face_replace`, the payload and summary whole, about the payload's size. The title, items, key and placement are the version. Changes are held to the same pacing as every published panel (about one a second per panel), counted in the space's bytes.
+- **Time** is the client's. A drawer that shows time, as a clock does, reads `Input::now` and says `next_change` (the next minute), and Tomori draws it again then, at most once a second a face, in its turn among `faces::LAYOUTS`. No server traffic is needed for the hands to move. The summary, which the agent reads, says the time at the side's last publish; the side publishes again as its own data changes.
+- **Refresh policies (#509).** A face panel takes a refresh policy like any published panel: `live`, `every N min`, `on view` or `manual`. Under a policy that is not live, the server holds its live data until a refresh. A clock that ticks by `next_change` and whose traffic is refreshed every minute is `every 1 min` and does not count in the proposal's 32 live panels. A face's chip strip shows the `↻` chip as any panel's.
+- **Context.** A face panel that `depends_on(["area"])` is told its binding in `Intent::context()` like any panel, and its side publishes the payload for that context. The drawer is also given its effective settings (`Input::context`), so it may print the area or window without the side repeating it in the payload.
+
+### Interaction
+
+- **The panel takes the ray**, as any panel: the frame, the title, the grip (carry), the right stick and its click while carried, B (throw away), holding B (leave), the wall's board and handles are all Tomori's, unchanged. The projector carries the point the ray meets through the panel's model into the face's area, as `item_in` does for a body line.
+- **Items are rows.** The first `Region` containing the point names an item, which becomes the row pointed at (`Conversation::pointed_row`): `Resource::panel_row` names it by its id, the server describes it from its own copy, a choosable item is chosen by the trigger at `precedence::Trigger::Row` and by A at the row's place among the conversation's meanings, `ChoosePanelRow` carries it with its key's revision, and the side is handed `Intent::choice`. No rung or message is added. A face cannot make an item choosable: the server checks its own copy.
+- **Hover** is Tomori's. Tomori outlines the region under the ray in its highlight colour by rewriting vertices of the kept mesh, as a frame's colour is recoloured (`Canvas::frame_mesh`), so hovering calls no drawer, renders no texture and cannot be hidden. The ray's label ends `A  choose` and then `✓  chosen`, as for any row.
+- **Cursors.** Pointing at a face whose drawer has `cursor` shows, for that participant alone and unsent, an overlay of at most 64 shapes and 4 labels over the face, as a chart's readout is drawn. The drawer is asked again only as the point moves a font pixel. A clock's cursor might show, at the hour pointed at on its ring, that hour in that city and in the participant's own zone. While a cursor shows, the ray's label does not.
+- **Pressing X while pointing** tells the server what the participant points at. On an item, it is the row, as now. Elsewhere on a face, it is the panel, with the point across and down in ten-thousandths, `{"kind": "panel", "panel": "panel-3", "at": [6000, 2500]}`, which the server cannot read itself but hands, with the reference, to the side's inspector when the agent inspects (below).
+- **Hands, the desktop, the spectator, visitors.** Hand tracking points and hovers, and chooses only once a pinch is the trigger. In the desktop window the mouse points and the left button and Enter choose. The spectator points at nothing, so it shows no hover or cursor. A visitor points and chooses nothing.
 
 ### The agent
 
-- **The fallback is the source, so it cannot drift.** The face has no data but the panel: the rows the server wrote the body from. What a participant points at on a face is a row, described from the server's own copy by its number, its id and its text, with its reference to `inspect`, as today. `panels` gives the rows as today and, new, the face's key and its state, cleaned as an inspection's strings are, so the agent knows a custom presentation is shown and can read everything it was drawn from.
-- **What can still go wrong** is an environment putting a fact only in the state, or a drawer that ignores its rows. Both are the operator's code. The state is small and visible to the agent; and `tomori-scene` gives a test helper, `face::test_support::covers`, that draws a face and fails unless every row that fits has a region and its text is among what is drawn.
+- **The summary is what the agent reads**, as a chart's is. Pointing at a face panel, the note before the participant's words gives its title, its environment, its id and its summary's first line, cut to 200 characters (`DESCRIPTION_LIMIT`), as an object's description is. `panels` gives its key, its summary, its items as a list's rows are given (`id`, `inspect_id`, `highlighted`, `choosable`), its context and its refresh. `inspect` on the panel's reference asks the side's inspector, as now, and passes the point last pointed at, if any.
+- **Keeping it truthful is the common crate's job.** Tomori cannot read a payload. The recommended pattern, which the phase 1 example and test helper follow: the common crate gives `fn summary(&Data) -> String` beside the type, the server side writes the body with it, and a test in the common crate checks that each figure the drawer shows appears in the summary. `face::test_support::covers` checks that every item has a region and that every item's text appears in the drawing.
+- **The fallback is always there.** A face never replaces the summary: the agent, older clients and builds without the crate all read the same text.
 
-### Clients without the drawer
+### Fallbacks
 
-A client draws a face only where its build registered a drawer for the key in that environment and it presents the environment at the version the space is in, the rule a client side already follows; otherwise it draws the body. A key's meaning and its state's format are the environment's own, agreed by the environment's protocol version: a change an older drawer cannot ignore raises it (`environments.md`). `Hello`'s `faces` only spares a client bytes it would not draw. No environment's version and no existing client changes for a panel without a face.
+| Client | Draws |
+| --- | --- |
+| Has the key, at the space's version | The face, tier 1, and tier 3 where registered |
+| Has the crate but not tier 3's layer, or the layer failed | Tier 1 alone, on a flat backing |
+| Has no drawer for the key, or an older environment version | The title and the summary as a text panel; items not drawn; pointing describes the panel |
+| An older client, without `faces` | Sent the panel as a text panel of the summary |
+| Any client, at `faces::FAR` | The title alone, 3 times as large |
+| The spectator | As a participant's client with the same sceneries; no hover or cursor |
 
-### Limits and safety
+### Limits and cost
 
-- **Bounded in.** The key and the 4 KiB of state, counted in the space's change budget with the panel.
-- **Bounded out.** A drawing has at most 1,024 shapes, 1,024 cells of text and 30 regions, every coordinate finite, and with Tomori's header must mesh within `CARD_CAPACITY`. A shape, label or region not wholly inside the area is left out whole. A drawing past a count or the capacity is refused whole and the body shown, the client saying so once in its log for that key.
-- **Legible.** Text is cells and labels at the panel's font pixel, 1.9 mm on a standard wall and scaled with it (`projection.md`); a drawer has no smaller size to choose.
-- **Contained.** A drawer that panics is caught, as an avatar and a worker placement are (`avatars.md`, `environments.md`), never called again while the client runs, and its panels show the body, with one warning. A drawer cannot be interrupted, so one that is slow costs its frame: the client logs a draw longer than 4 ms, and drops a drawer after three.
-- **What an environment cannot do.** Draw outside its area, over the frame, the title or another panel; draw over anything of Tomori's, since the face is in its panel's mesh at its panel's depth; put a face on the Tomori wall or another environment's, where it publishes nothing; take a control from Tomori; or make a press mean anything but the choice of a row it published. It can draw something that looks like a button, as a text panel can write `[Approve]`: Tomori never asks for a decision on a wall panel, a request takes A before any row, and the title row and the ray's label, which Tomori draws, say whose panel it is.
+- **Bounded in.** A key, 4 KiB of payload, the summary as any body, at most 30 items, all counted in the space's bytes with the panel. A face panel is one of the 128 and, under #509, one of the 32 live ones while live.
+- **Bounded out (tier 1).** At most 1,024 shapes, 1,024 cells of text and labels, 30 regions, every number finite, meshed with Tomori's header within the most a panel's buffer grows to (`scene_graphics::CARD_MOST`). What lies outside the area is left out whole. A drawing past a bound is refused whole and the summary shown, logged once for the key.
+- **Draw time.** A drawer runs only when its panel's version, data, size, detail or `next_change` says so, in its turn among `faces::LAYOUTS` two a frame and `ARRIVALS` eight. A chart's face takes 0.2 to 1.3 ms to lay out and mesh on a desktop and several times that on a headset (`rendering.md`), so a face is held to a chart's cost: 1 ms on a desktop for the largest drawing. Tomori logs any draw over 4 ms on the headset and drops a drawer after three such draws, showing the summary. A frame that changes nothing calls no drawer and allocates nothing.
+- **Legible.** Text is the atlas's, at the panel's font pixel (1.9 mm on a standard wall, scaled with its wall), or at 2 to 4 times that for a scaled label. A drawer has no smaller size, and a layer's own text, rasterised into its texture, is discouraged in favour of the canvas drawing's.
+- **GPU cost in the eyes** (all tiers). A face covers the same pixels as the flat backing it replaces. Tier 1 adds its shapes to a mesh drawn in the panel's one draw, as charts do today; at 2.0× with 2×, the panels' share measured in Observe's busy view was 0.61 ms of 10.75 ms, and a dozen faces of a chart's density should stay within the same order. Tier 3 turns a flat backing into a trilinear texture sample per pixel, one more draw a face, at 3,360 × 3,520 with 2 samples; it is to be measured with the `GPU over` line, as #529 measured panels.
+- **GPU cost offscreen (tier 3), cached.** A layer renders only when tier 1 would draw again, and at most one layer a frame, the nearest first. Its texture is sized to the face's angular size, in steps of 256, 512 and 1,024 pixels along its longer side, chosen with hysteresis: a standard slot read from 3 m spans about 11°, some 290 of the display's pixels, so 512; carried at arm's length, 1,024. A 1,024 × 640 texture is 2.5 MiB, 3.3 MiB with mipmaps. All face textures together are held to 48 MiB (`FACE_TEXTURE_BYTES`), within the device memory the eyes leave (`rendering.md`), evicting the least recently drawn, and a texture is let go once its face is a title for 900 frames. Each layer's pass is timed by the GPU profiler, as a part of its own (`faces`), and a layer whose pass takes over 2 ms three times is dropped for the session, its face drawn by tier 1.
+- **Caching tier 1 in a texture**, too, was considered. It would save little: a kept mesh costs no CPU and a few thousand vertices of GPU, and a texture would blur its text and cost memory. It is not proposed.
+- **What an environment cannot do.** Draw outside its face: tier 1 is cut to its area, and tier 3 draws only into its own texture. Draw over Tomori's frame, header, chips, hover, cursor label or anything else of Tomori's, which is drawn over or beside it. Take a control: a face is told no button, stick or ray. Make a press mean anything but the choice of an item it published, which the server checks. Draw something that looks like an approval: Tomori asks for no decision on a wall panel, a request takes A before any row, and the title row, which Tomori draws, says whose panel it is. A drawer or layer that panics is caught, never called again in that client, and its faces fall back, with one warning, as avatars and worker placements are (`avatars.md`, `environments.md`).
+- **The one risk not contained.** A layer whose pipeline the driver refuses can lose the device for everything, as #414 did. This is why layers make their pipelines at startup, inside an error scope, and why their shaders must pass `validate_wgsl` in the environment's tests. A pipeline that fails there disables the layer before any frame.
 
-### Testing
+### Worked example: Observe's world clocks
 
-A drawer is a pure function, so an environment tests it in its own crate with no GPU and no server: build a `face::Input` from a fixture panel, compare the `Drawing`, and check `covers`. `tomori-scene` tests the face through `projection::faces` with the count of layouts it already keeps: nothing drawn across frames that change nothing, one draw for a new version, the body for an unknown key, a refused drawing and a panic. A property test draws each fixture at every slot shape, floating, and from 0 to 30 rows, and checks the bounds. `tomori-render`'s `ui_panel::tests` draw a fixture face on lavapipe, flat, on a curved wall's slots and 4 m away, with a PNG preview, as charts are.
+**Today.** `clocks.rs` in Observe's client crate makes each clock from `Block`s, instanced boxes drawn by the scenery's blocks pipeline (the plate, its rim, 24 hour arcs coloured by `hour_colour`, 4 ticks, a needle standing proud and 30 trend bars), and `Label`s for the area, the time (8.6 cm figures), the zone and daylight, the traffic and its detail. They stand at `Placement::OVER_GLOBE`, picked by hit plates (`clocks::pick`). The server side shares `Clocks` with each snapshot, a few hundred bytes. The client derives each `Face` from it and its own clock, again each minute (`ClockView`). The server describes each clock as an object (`clock/europe`) with `describe_clock`, inspected by the same reference. They are scenery because the side then published 31 of the 32 panels it could, and a chart's title is too small to read a time across the room.
 
-### Increment 1, and its size
+**As face panels**, phase 1:
 
-`tomori-environment`'s `Face` and `Panel::with_face`; `tomori-protocol`'s `Panel::face` and `Hello`'s `faces`; the server's `stage/published.rs` keeping and checking it, and `hub/agent_panels.rs`; `tomori-scene`'s new `face` module, `projection::faces` drawing through it, the row found by region, and the hover outline; `Sceneries::set_face` and the headset builder; and a fixture face in the tests' queue environment. About the size of choosing a row (#298, some 2,200 lines with tests over 33 files): most of it tests, since the paths for pointing, choosing and the agent are already there.
+- **Common crate.** `clocks::FaceData { area, minute, step, per_minute, reporting, regions, trend }`, the per-area part of `Clock`, read back within 600 bytes as it is tested today. `describe_clock` moves here, as `clocks::summary(&FaceData, now) -> String`, so that the server's summary and the drawer use one source.
+- **Server side.** It declares a context parameter `area` (Americas, Europe, Asia-Pacific). It publishes one panel per area, `Panel::face("clock-europe", "Europe · 13:00", Face::new("world-clock").with_data(…).with_summary(summary(…))).depends_on(["area"]).with_reference("clock/europe")`, on a new declared wall, `Clocks`, three portrait slots over the globe where the band stands (an environment declares its walls' slot shape, curve and name, #296). The title carries the local time, so that the far level of detail still reads `Europe · 13:00`. This costs 3 title updates a minute, within the per-panel pace. Its inspector answers `clock/europe` as now (`inspected_clock`). The three clocks leave `Space::describe`'s objects, which frees 3 of its 32 for pods.
+- **Client crate.** `blocks()` and `labels()` become one `Drawer::draw` in the face's area, in font pixels: the plate is the panel's backing; the ring is 24 `Shape::Quad` arcs, each a little short of its hour; the ticks are `Shape::Rule`s; the needle is a `Shape::Stroke` (flat now, no longer standing 12 mm proud); the trend is `Shape::Bar`s on one scale, a gap a stub in `colour::GAP`, muted when stale; the time is a `Label` at 4 times the font pixel in `time_ink`, the zone and daylight, traffic and detail at 1 or 2 times. `next_change` is the next minute. `cursor` shows the hour pointed at on the ring in the area's city and in UTC. `clocks::pick`, `Placement`, the clocks' `Block`s and their box in `Environment::with_solids` go: Tomori picks panels, and walls are kept clear by Tomori already.
+- **Tests.** The `clocks/tests.rs` checks of the ring, needle, trend and words move onto `Drawing` with no GPU. The `clocks.png` renders become a face drawn on a wall in the existing scenery tests. `covers` checks the summary against what is drawn.
+
+**What Observe gains.** The clocks are carried, resized, put on any wall, pinned and thrown away by anyone, like any panel. **More clocks without code**: `copy_panel` with `area` set, or a participant pulling one off (which pins a copy), makes another clock as an instance, up to 8. The side may publish one for every production region, within the 128, without a new pipeline or placement. The spectator draws them. Clients without Observe's crate show `Europe · 13:00` and the summary. The agent reads exactly what it read before.
+
+**What Observe gives up.** The ring's relief and the needle standing proud: a face is flat. Phase 3's layer could shade a relief, or the slight depth could be dropped. The band's exact placement and spacing become a wall's slots.
+
+**A clock per region, not per area.** `CONTEXT_CHOICES` is 16 and `INSTANCES` is 8, while Observe has up to 24 production regions. Per-region clocks would be published by the side, as panels of their own, rather than copied by context: see Open questions.
+
+### Phasing
+
+1. **Face panels, tier 1.** `tomori-environment`'s `Face`, `Panel::face` and `with_face`; `tomori-protocol`'s `Panel::face` and `Hello::faces`; `tomori-server`'s `stage/published.rs` keeping and checking it, the body from the summary, and `hub/agent_panels.rs`; `tomori-scene`'s `face` module (`Drawer`, `Input`, `Drawing`, `Region`, `Overlay`, `test_support`), `projection::faces` drawing through it, regions as rows, hover outlines, cursors; `Label`'s scale; `Sceneries::set_face`. A fixture face in the tests' queue environment. This is roughly the size of choosing a row (#298, about 2,200 lines over 33 files), most of it tests.
+2. **Live faces.** `data_seq` and a `face_replace` patch op; `next_change`; `Detail::Glance`; the refresh policies of #509, once those are accepted.
+3. **GPU layers.** `tomori-render`'s `face::Layer`, `FaceTarget`, the texture cache, the textured opaque backing in `Panel::draw_face`, the profiler's `faces` part, the time and memory budgets. To be measured on a Quest 3 at 2.0× with 2× before its numbers are fixed.
+4. **Later**, each the maintainer's call: faces animated at up to 10 frames a second into their texture; faces on text and chart panels; the client side told the item pointed at; a region taking the right stick.
+
+### Risks
+
+- **Device loss from an environment's shader** (phase 3), contained only by tests and startup creation; see Limits.
+- **The summary drifting from the face.** Tomori can check items, not payloads; the common-crate pattern mitigates this but cannot enforce it.
+- **Draw cost on a crowded wall.** 128 faces at a chart's density, arriving together, ripple in over a fraction of a second as charts do; the far level of detail keeps distant ones free. Phase 1 must measure it with `panel_frames`.
+- **A second way to draw environment content.** Faces and scenery overlap; the rule is that what should be placed, carried, copied or counted as a panel is a face, and what belongs to the room is scenery.
 
 ### Rejected
 
-- **Arbitrary 3D inside a panel**, (a): no guaranteed clipping, a draw order the renderer would have to open for each panel and eye, nothing a client without the scenery, a test or the agent can see. An environment that needs 3D has its scenery and its `pick`; a globe is not a panel.
-- **HTML or a webview.** Panels are text and never HTML (`security.md`); a webview is a browser on the headset, drawn to a texture or a compositor layer, against one composition layer (`rendering.md`).
-- **A texture the environment rasterises**, (b): blurred text, memory, a rasteriser to bring. Set aside, not forever: a heat map that is truly pixels could become an image in a face's area.
-- **Drawers sent by the server**, as a script or WebAssembly, so that every client has them: a sandboxed interpreter on the headset for what compiled-in code already does, when environments are compiled into clients by design (`environments.md`).
-- **The drawer reading the environment's shared state**, and **regions selected through client-side intents**: see The model and Actions.
+- **Drawing in Tomori's eye pass inside the panel's rectangle**, with the environment's pipelines each frame. A scissor is screen-aligned and differs per eye; the depth buffer is `Depth32Float` without stencil; clip planes are optional; and #530's opaque-first order and the text depth bias would have to be opened to each environment, per panel and per eye, at 3,360 × 3,520 with 2 samples. A texture gives all of that for free, at the cost of rendering only when the face changes.
+- **Caching every face in a texture**, including tier 1: blurred text and memory, for little saved.
+- **Quad layers per face**: parked with all panels in #529, and contrary to **One composition layer**.
+- **HTML or a webview**: panels are never HTML (`security.md`), and a browser on the headset is out of proportion.
+- **Drawers sent by the server**, as scripts or WebAssembly: environments are compiled into clients by design (`environments.md`).
+- **The drawer reading the environment's shared state**: two sources arriving apart, unusable by instances and the spectator.
+- **Regions acting through the client side's own intents**: forgeable; rows' server-made choices already exist.
 
 ## Rationale
 
-The maintainer asked for panels an application can "subclass" for richer rendering. In AppKit a subclass overrides drawing and inherits the window's frame and event routing; here the panel is the window, and the face overrides only `draw`. Reading the code showed that Tomori already has the drawing surface a subclass needs: every face is a `Canvas`, and the chart panel is a custom face in all but who writes it. Reusing it keeps one pipeline, one draw a panel, sharp text and the kept meshes of #286 and #299, where a texture or a scenery's draw would give each up.
+The maintainer asked for panels an application can "subclass". In AppKit a subclass overrides `draw` and inherits the window and its event routing. Here the panel is the window, and the face overrides drawing alone. Tomori already has the surface for it: every face is a canvas, and a chart is a custom face in all but who writes it. Tier 1 reuses that surface, so faces are sharp, cheap, kept, and testable without a GPU.
 
-Making regions rows, rather than targets of the face's own, is what keeps the costs the maintainer was told of small. The agent reads the same rows the face draws; a client without the drawer shows them as a list and can still choose them; and a press reaches the side as the attested choice of #298, in an order that took several reviews to settle and that this leaves alone.
+The motivating clocks need almost nothing beyond it. Their value is in becoming panels, so they can be placed, copied with context, pinned and counted, rather than in new rendering. Tier 3 answers the request for an environment's own shaders while keeping them where they cannot break Tomori's order: offscreen, into a texture that becomes the face's opaque backing as #530 already draws every backing.
+
+Making items rows, rather than targets of the face's own, keeps the costs the maintainer was told of small. The agent reads what the server holds, clients without the drawer still list and choose the items, and every press reaches the side as #298's attested choice, in orders that took many reviews to settle and that this leaves alone.
 
 ## Scope
 
-Would cover `tomori-environment`, `tomori-protocol`'s `Panel` and `Hello`, `tomori-server`'s `stage/published.rs` and `hub/agent_panels.rs`, `tomori-scene`'s `face`, `projection` and `projection::faces`, `tomori-render`'s `Sceneries`, and the builders; with the text of `environments.md`, `projection.md`, `panel-actions.md`, `rendering.md`, `builders.md`, `mcp.md` and `security.md`. The renderer's pipelines and shaders, `precedence`, the server's handling of choices and the spectator are untouched by increment 1.
+This would cover `tomori-environment`'s panel and limits, `tomori-protocol`'s `Panel`, `Hello` and patch ops, `tomori-server`'s `stage/published.rs`, `hub/agent_panels.rs` and pointing descriptions, `tomori-scene`'s `face`, `canvas` (`Label`'s scale), `projection` and `projection::faces`, `tomori-render`'s `Sceneries`, `ui_panel` and, in phase 3, `face` and the profiler, and the builders. It would change the text of `environments.md`, `projection.md`, `panel-actions.md`, `panel-context.md`, `rendering.md`, `builders.md`, `mcp.md`, `spectator.md` and `security.md`. Phase 1 leaves `precedence`, the server's handling of choices and the renderer's pipelines untouched.
 
 ## Validation
 
-For this proposal: check each statement under What exists today against the code it names. For an increment, once accepted: the tests under Testing, complete region coverage (`testing.md`), and on the headset, in a space whose environment publishes a face, that it is legible from where its wall is read, flat and on a curved wall, that the region under the ray is outlined and chosen with the trigger and A, that the panel is carried, resized and thrown away as any other, and that a headset without the environment's client crate shows the list.
+For this proposal: check each statement under What exists today against the code it names. For each phase, once accepted:
+
+- a drawer tested offscreen and deterministically, from a fixture `Input` to a `Drawing` compared whole, at every slot shape, floating, carried, at `Glance`, and from 0 to 30 items, against the bounds, with `covers`;
+- `projection::faces`' counts: nothing drawn across frames that change nothing, one draw for a new version, data seq or `next_change`, the summary for an unknown key, a refused drawing, a panic;
+- `tomori-render`'s `ui_panel::tests` drawing a fixture face on lavapipe, flat, on a curved wall's slots and 4 m away, with a PNG preview, as charts are; and for phase 3 a fixture layer whose texture lines up with its canvas within a font pixel, drawn opaque first, hidden behind a nearer panel and drawn over the wall behind it;
+- complete region coverage (`testing.md`);
+- on a Quest 3: Observe's clocks legible on their wall from the bridge; carried, copied by area and pinned; the needle moving each minute; the title reading far away; and the frame log's CPU and GPU lines with and without a wall of faces.
 
 ## Open questions
 
-- Whether a face draws below Tomori's title, metadata and rule, as proposed and as a chart does, or the whole inside of the frame, which Observe's look may want and which gives up the one row that always says whose panel it is.
-- Whether the state is wanted at all, or every fact should be a field of a row; and whether it is live data, as a chart's points are, changing no version.
-- Whether paging is each participant's, as scrolling is, the space's, as a pager's choosable rows make it, or both; and whether a face follows its highlighted row until the participant scrolls.
-- Whether a choice should allow its panel one update at once, so that a toggle answers within a frame or two rather than a second.
-- Whether faces may animate, by a clock given to the drawer at a few times a second, as a pulsing alert would need, or stay still between changes.
-- Whether text and chart panels take faces, which would have no regions, and whether Tomori's own list face becomes the default drawer.
-- Whether the client side is told the row pointed at, and a region may take the stick (increment 3), and by what server-made intent an adjustment reaches the side.
-- Whether a drawer's colours are free or the chart's palette, and whether a label may be drawn at twice or three times the size, for a headline number.
-- The spectator: whether it should draw projected panels, which it appears not to, and then faces, whose drawers it could run from the sceneries it is given.
-- The bounds' numbers, 4 KiB, 1,024 shapes and cells, and 4 ms, each to be measured on the headset by the increment that builds it.
+- Should a face be drawn below Tomori's title, metadata or chips, and rule, as proposed and as a chart is, or fill the whole frame, which a clock's look might prefer but which gives up the row that always says whose panel it is?
+- Should per-region clocks be copies? That would need more than 8 instances (`INSTANCES`) and more than 16 choices (`CONTEXT_CHOICES`) for face panels, or an environment action, "add a clock for Iowa", by which the side publishes one.
+- Should the payload be live data from phase 1, rather than waiting for phase 2?
+- Are scaled labels of 2 to 4 times enough, or should a face set any size above the font pixel, for a single huge figure?
+- Should faces animate (phase 4), and at what rate: a pulsing alert, a needle sweeping seconds?
+- Should faces be translucent where an environment asks, giving up early depth rejection for a face that floats over the room?
+- Is the agent told the point pointed at on a face outside an item, through the side's inspector as proposed, or not at all?
+- Should a drawer's colours be free, or Tomori's palette and tones, so that every environment's faces read alike?
+- What are the right budgets (4 KiB, 1,024 shapes and cells, 4 ms and 2 ms, 48 MiB, one layer a frame)? Each phase should measure them on the headset.
+- Should the client side be told the item pointed at, to light the matching pod on the globe as a clock's area is pointed at?
