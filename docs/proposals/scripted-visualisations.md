@@ -469,7 +469,7 @@ An environment's published panel gets one through `Panel::with_back(Back)`: rows
 - **Walking round:** a floating panel's back is drawn on its reverse face. Its chip may also offer "walk round", moving the participant behind it by the existing locomotion where the scenery allows.
 - **The agent's `flip_panel`** flips a panel for everyone while explaining it.
 
-A participant's flip is **private**, as the trigger's focus is; the agent's is shared until someone flips it back.
+**Decided by the maintainer, November 2026: flips are private by default, with a way to flip for everyone.** A participant's flip shows the back to them alone, as the trigger's focus is private. To show others, the ⟲ chip has a second action, **flip for everyone** (holding the chip, or its menu), and the agent's `flip_panel` flips for everyone when someone asks; a shared flip is announced on the status wall and lasts until anyone flips the panel back for everyone. A private flip and a shared one combine: anyone may still flip a panel back to its front for themselves.
 
 ### Wiring and cables
 
@@ -510,8 +510,8 @@ Each phase ends with something the maintainer uses in the headset, in Observe's 
 
 - **`tomori-environment`:** `Back` (rows, links, actions) and `Panel::with_back`.
 - **`tomori-protocol`:** `Panel::back`, `Hello::backs`, `ClientMessage::FlipPanel`.
-- **`tomori-server`** (about 2 days): keeping and bounding backs (30 rows, as a list's); an automatic back for every panel (identity, origin, age, version, and its context bindings read-only); `flip_panel`; `panels` and `inspect` listing backs.
-- **`tomori-scene`** (about 3 days): the back's canvas from rows; the ⟲ chip; the flip animation; the reverse face of a floating panel; the wrist roll while carrying; whether a flip is private or shared, per the maintainer's decision (question 7).
+- **`tomori-server`** (about 2 days): keeping and bounding backs (30 rows, as a list's); an automatic back for every panel (identity, origin, age, version, and its context bindings read-only); the shared flip state of each panel and its announcement; `flip_panel`, for everyone, used when someone asks; `panels` and `inspect` listing backs.
+- **`tomori-scene`** (about 3 days): the back's canvas from rows; the ⟲ chip with its two actions, flip for me (the default) and flip for everyone; the flip animation; the reverse face of a floating panel; the wrist roll while carrying (private). Flips are **private by default, with a way to flip for everyone**, as the maintainer decided (question 7): a private flip is client-only view state and sends nothing; a shared flip is a `ClientMessage::FlipPanel { shared: true }` or the agent's `flip_panel`, kept by the server and sent to everyone.
 - **Observe** (`environment-observe-server`, `environment-observe`; about 1 day): its agent charts publish a back with the source's name, each series' label and full PromQL, window and step, refresh cadence, when last read and how long it took, series kept of how many, whether partial; actions Refresh, Freeze and Clear.
 - **Judged by:** on the bridge, the maintainer flips one of a terminal's charts and knows what it queries, over what window and how fresh it is, without asking; flipping back is as easy; the walls stay readable.
 
@@ -631,7 +631,7 @@ The boundary to define with phase 2, once the interface is known: who may create
 4. **Channels' names and reach.** Proposed: Tomori's built-ins unprefixed (`time`, `cursor.time`, `selection`), an environment's its own (`region`, `hovered_pod`), all within one space. Should a channel ever cross spaces, such as one incident window followed by several spaces?
 5. **Who turns on everyone's cursors?** Proposed: a subscriber's choice (`Show::Everyone`), set per panel by a chip or the agent. Should it instead be the publisher's consent, so a participant chooses whether their pointer is shown to others?
 6. **Implicit by name, or explicit links only?** Proposed: panels follow a channel by name through the scopes, as context does today, with explicit links for the exceptions. Explicit-only would make every cable deliberate, at the cost of wiring every panel.
-7. **Private or shared flip?** Proposed: a participant's private, the agent's shared.
+7. **Private or shared flip?** **Decided:** private by default, with a way to flip for everyone (the chip's second action, or the agent's `flip_panel` on request).
 8. **Grants:** should Observe's Prometheus source be granted to every space by default, as proposed, or only to spaces an owner names?
 9. **Does Observe's `chart` action become a visualisation kind** in phase 1 (a good third example), or stay as it is?
 10. **Reports' share links:** frozen-only and 7 days by default? Owners only, or collaborators too?
@@ -646,7 +646,7 @@ A new `design/visualisations.md` (the trait, kinds, context, wakes, events, sche
 
 ## Decisions for the maintainer
 
-1. **Private or shared panel flips** (question 7): needed to approve phase 1(a). Recommended: a participant's flip is private, the agent's shared.
+1. **Private or shared panel flips** (question 7): **decided** by the maintainer, November 2026: private by default, with a way to flip for everyone when showing others (the ⟲ chip's "flip for everyone", or the agent's `flip_panel` on request). Phase 1(a) is scoped accordingly.
 2. **Prometheus access by default** (question 8, section 10): every space, opt-in spaces, or owner-approved. Recommended: opt-in by default in Tomori's builder; Observe configures every space for its own deployment.
 3. **Whether the context migration happens in phase 1.** Recommended: **no**; phase 1 uses the adapter bridge, and the migration is phase 3, about 15 days.
 4. **The core's name and home:** `tomori-visual-core` in the workspace now, extraction-ready, moving to `base-rs/visual` as `base-visual` once it settles?
