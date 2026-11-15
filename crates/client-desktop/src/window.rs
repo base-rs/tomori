@@ -89,6 +89,21 @@ pub fn preferred_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::Texture
     formats.iter().copied().find(|format| format.is_srgb())
 }
 
+/// Whether a window's content should now be made to extend under its title bar, or stop, given whether it is full screen and whether it extends under it already: `Some` of what it should be when that changes, or `None` when it is right.
+///
+/// On macOS, a full screen window whose content does not extend under its title bar is resized each time the menu bar and title bar slide down over it, in every frame of the slide, and flickers; extending under them while full screen keeps its size, with the title bar over it, as `design/desktop.md` says. A window that is not full screen keeps its content below its title bar.
+pub fn full_size_content(fullscreen: bool, full_size: bool) -> Option<bool> {
+    (fullscreen != full_size).then_some(fullscreen)
+}
+
+/// The resize to give a window's contents, now that the window's inner size is `size`, having last given them `given`, both in physical pixels: `None` when they have it already. The window gives its size before it draws and when it changes its own style, as well as when the window system reports it, so that no frame is drawn at a size the window no longer has, and the report that follows, of a size already given, resizes nothing again.
+pub fn resize(given: (u32, u32), size: (u32, u32)) -> Option<Input> {
+    (given != size).then_some(Input::Resized {
+        width: size.0,
+        height: size.1,
+    })
+}
+
 /// The window, as its contents draw into it.
 pub trait Surface {
     /// The next image to draw into, or `None` when there is nothing to draw into this time, such as when the surface had to be configured again.
@@ -134,6 +149,33 @@ mod tests {
             Some(Bgra8UnormSrgb)
         );
         assert_eq!(preferred_format(&[Bgra8Unorm]), None);
+    }
+
+    #[test]
+    fn a_window_extends_under_its_title_bar_only_while_full_screen() {
+        assert_eq!(full_size_content(true, false), Some(true));
+        assert_eq!(full_size_content(true, true), None);
+        assert_eq!(full_size_content(false, true), Some(false));
+        assert_eq!(full_size_content(false, false), None);
+    }
+
+    #[test]
+    fn contents_are_resized_once_for_each_new_size() {
+        assert_eq!(
+            resize((3024, 1898), (3024, 1964)),
+            Some(Input::Resized {
+                width: 3024,
+                height: 1964
+            })
+        );
+        assert_eq!(resize((3024, 1964), (3024, 1964)), None);
+        assert_eq!(
+            resize((3024, 1964), (0, 0)),
+            Some(Input::Resized {
+                width: 0,
+                height: 0
+            })
+        );
     }
 }
 
