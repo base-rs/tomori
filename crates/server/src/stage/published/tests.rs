@@ -1750,6 +1750,9 @@ fn a_live_chart_s_next_point_is_appended_apart_from_its_version() {
     assert_eq!((values.len(), values[0].len(), *from, *seq), (1, 1, 1, 2));
     let mut applied = before.clone();
     live.apply(&mut applied).unwrap();
+    // How long ago it was updated is counted on by the client from the op, as its age is, never sent in it.
+    assert_eq!(applied.panels[0].updated, Some(10));
+    applied.panels[0].updated = after.panels[0].updated;
     assert_eq!(applied, after);
     // An older client is sent the panel whole, as before.
     let older = tomori_protocol::ProjectionPatch::between(&before, &after);
@@ -2451,7 +2454,7 @@ fn the_largest_table_is_within_its_bound_and_what_a_projection_counts_for_it() {
     let bytes = serde_json::to_vec(&panel.rows).unwrap().len();
     assert!(bytes <= 8 * 1024, "{bytes} bytes");
     let whole = crate::stage::json_size(&panel);
-    let counted = crate::stage::frames::most_bytes(&panel);
+    let counted = super::super::frames::most_bytes(&panel);
     assert!(whole <= counted, "{whole} bytes, counted {counted}");
 }
 
@@ -2844,4 +2847,149 @@ fn a_face_is_refused_for_a_key_it_does_not_take_or_a_payload_that_is_not_json_wi
     .unwrap();
     // Its payload counts towards the bytes its side publishes.
     assert!(publishing.bytes() > tomori_environment::FACE_DATA_LIMIT);
+}
+
+#[test]
+fn a_published_panel_s_back_is_cleaned_named_for_its_environment_and_part_of_its_version() {
+    use tomori_environment::{Back, BackCode, BackLine, DEFINITION, INPUTS, OUTPUTS, STATUS};
+    let walls = yard();
+    let mut stage = Stage::default();
+    let back = |query: &str| {
+        Back::new()
+            .with_line(DEFINITION, BackLine::new("Source", "Prometheus\n"))
+            .with_code(DEFINITION, BackCode::new("promql", query))
+            .with_line(STATUS, BackLine::new("Refresh", "every 15 s"))
+            .with_line(OUTPUTS, BackLine::new("Copy of", "forged"))
+            .with_line(INPUTS, BackLine::new("Scope", "us-east1"))
+    };
+    let latency = |query: &str| {
+        publishing(Panel::chart("latency", "Latency", pressure(1.0)).with_back(back(query)))
+            .of_environment("Yard")
+    };
+    // Its side's source is written after its environment's name, cleaned, and its origin is the server's to say.
+    let sent = latency("rate(x[5m])");
+    assert_eq!(
+        sent.back,
+        Some(
+            Back::new()
+                .with_line(DEFINITION, BackLine::new("Source", "Yard · Prometheus"))
+                .with_code(DEFINITION, BackCode::new("promql", "rate(x[5m])"))
+                .with_line(STATUS, BackLine::new("Refresh", "every 15 s"))
+                .with_line(INPUTS, BackLine::new("Scope", "us-east1"))
+        )
+    );
+    // Counted among the bytes its side publishes.
+    let bare = publishing(Panel::chart("latency", "Latency", pressure(1.0)));
+    assert!(sent.bytes() > bare.bytes() + "Yard · Prometheus".len());
+    // A panel whose side gave no back is named for its environment alone; the agent's panels say nothing more.
+    assert_eq!(
+        bare.of_environment("Yard").back,
+        Some(Back::new().with_line(DEFINITION, BackLine::new("Source", "Yard")))
+    );
+    // A side that names no source among its definition's lines has its environment's name first among them.
+    let unnamed = publishing(
+        Panel::chart("latency", "Latency", pressure(1.0))
+            .with_back(Back::new().with_line(DEFINITION, BackLine::new("Step", "15 s"))),
+    )
+    .of_environment("Yard");
+    let definition = &unnamed.back.unwrap().sections[0].lines;
+    assert_eq!(
+        (definition[0].key.as_str(), definition[0].value.as_str()),
+        ("Source", "Yard")
+    );
+    stage.publish(&walls, sent, 100).unwrap();
+    stage.project(
+        &walls,
+        crate::stage::Content::parse("title: Notes\n---\nHello").unwrap(),
+        None,
+        100,
+    );
+    let view = stage.view("s", &walls, 160);
+    let shown = view
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Latency")
+        .unwrap();
+    assert_eq!(
+        shown
+            .back
+            .as_ref()
+            .and_then(|back| back.line(DEFINITION, "Source")),
+        Some("Yard · Prometheus")
+    );
+    assert_eq!(shown.updated, Some(60));
+    let notes = view
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Notes")
+        .unwrap();
+    assert_eq!((notes.back.as_ref(), notes.updated), (None, Some(60)));
+    // The same again changes nothing; another query is an update, of a new version.
+    let mut versions = crate::versions::Versions::default();
+    let revision = std::cell::Cell::new(1);
+    let mut before = stage.view("s", &walls, 200);
+    versions.stamp(&mut before, &revision);
+    assert_eq!(
+        stage.publish(&walls, latency("rate(x[5m])"), 200),
+        Ok(Change::Unchanged)
+    );
+    assert_eq!(
+        stage.publish(&walls, latency("rate(y[5m])"), 300),
+        Ok(Change::Updated)
+    );
+    let mut after = stage.view("s", &walls, 300);
+    versions.stamp(&mut after, &revision);
+    let version = |projection: &tomori_protocol::Projection| {
+        projection
+            .panels
+            .iter()
+            .find(|panel| panel.title == "Latency")
+            .map(|panel| (panel.version, panel.updated))
+            .unwrap()
+    };
+    assert_ne!(version(&before).0, version(&after).0);
+    assert_eq!(version(&after).1, Some(0));
+}
+
+#[test]
+fn a_projection_that_does_not_fit_in_a_frame_sends_its_panels_backs_first_and_keeps_its_charts() {
+    use tomori_environment::{Back, BackCode, DEFINITION};
+    let walls = yard();
+    let mut stage = Stage::default();
+    for index in 0..3 {
+        let panel = Panel::chart(
+            format!("chart-{index}"),
+            format!("Chart {index}"),
+            pressure(1.0),
+        )
+        .with_back(Back::new().with_code(DEFINITION, BackCode::new("promql", "x".repeat(200))));
+        stage
+            .publish(&walls, publishing(panel).of_environment("Yard"), 0)
+            .unwrap();
+    }
+    let whole = stage.view("s", &walls, 0);
+    let size = |projection: &tomori_protocol::Projection| crate::stage::json_size(projection);
+    let placed: Vec<u64> = (0..whole.panels.len() as u64).collect();
+    let kept = |projection: &tomori_protocol::Projection| -> Vec<(bool, bool)> {
+        projection
+            .panels
+            .iter()
+            .map(|panel| (panel.back.is_some(), panel.chart.is_some()))
+            .collect()
+    };
+    // With room for all but a little, the back of the one put where it is longest ago goes, its chart kept.
+    let mut fitted = whole.clone();
+    crate::stage::fit(&mut fitted, &placed, size(&whole) - 1);
+    assert_eq!(kept(&fitted), [(false, true), (true, true), (true, true)]);
+    // With room for none, every back goes before any chart, and then every chart.
+    let mut fitted = whole.clone();
+    crate::stage::fit(&mut fitted, &placed, 0);
+    assert_eq!(kept(&fitted), [(false, false); 3]);
+    // A panel's bound counts its back.
+    let mut bare = whole.panels[0].clone();
+    bare.back = None;
+    assert!(
+        super::super::frames::most_bytes(&whole.panels[0])
+            >= super::super::frames::most_bytes(&bare) + 200
+    );
 }

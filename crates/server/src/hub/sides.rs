@@ -222,7 +222,14 @@ impl Hub {
         panel: tomori_environment::Panel,
         now: Instant,
     ) -> tomori_environment::Result<()> {
-        let publishing = crate::stage::Publishing::new(panel)?;
+        // Named for its environment, by its id where it is no longer offered.
+        let label = self
+            .environments()
+            .get(&outlet.environment)
+            .map_or(outlet.environment.clone(), |environment| {
+                environment.label().to_owned()
+            });
+        let publishing = crate::stage::Publishing::new(panel)?.of_environment(&label);
         let added = {
             let mut state = self.lock();
             Self::running(&state, outlet)?;

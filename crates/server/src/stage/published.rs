@@ -82,7 +82,17 @@ pub(super) struct Published {
     /// When it was published, in milliseconds since the Unix epoch: the instant a live chart's last point stands for.
     #[serde(default)]
     pub(super) at_ms: i64,
+    /// What its side says of it on its back, cleaned, its source after its environment's name. See
+    /// `design/panel-backs.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) back: Option<tomori_protocol::back::Back>,
 }
+
+/// The key of a back's line naming where a panel comes from, among its definition's.
+pub(crate) const SOURCE: &str = "Source";
+
+/// The key of a back's line naming the panel a copy is of, among its outputs', which only the server writes.
+pub(crate) const COPY_OF: &str = "Copy of";
 
 /// Why a row of an instance its side has not published yet is not chosen: what it shows is its panel's, not its own.
 pub const COPYING: &str =
@@ -550,6 +560,7 @@ pub struct Publishing {
     depends: Vec<String>,
     window: Option<(i64, i64)>,
     at_ms: i64,
+    back: Option<tomori_protocol::back::Back>,
 }
 
 impl Publishing {
@@ -558,6 +569,18 @@ impl Publishing {
     /// that [`tomori_environment::valid_reference`] refuses is left out, as an object's is.
     pub fn new(panel: tomori_environment::Panel) -> Result<Self, String> {
         let face = panel.face_spec().map(face).transpose()?;
+        // Its origin is the server's to say, of an instance it made, never its side's.
+        let back = panel.back_spec().map(|back| {
+            let mut back = back.clone().cleaned();
+            if let Some(outputs) = back
+                .sections
+                .iter_mut()
+                .find(|section| section.name == tomori_protocol::back::OUTPUTS)
+            {
+                outputs.lines.retain(|line| line.key != COPY_OF);
+            }
+            back.cleaned()
+        });
         let listed = panel.rows().map(<[_]>::to_vec);
         let highlighted = panel.highlighted().map(str::to_owned);
         let declared = panel.columns().to_vec();
@@ -639,15 +662,33 @@ impl Publishing {
             depends,
             window,
             at_ms: now_ms(),
+            back,
         };
         Ok(publishing)
     }
 
-    /// How many bytes of JSON its content, chart and face take.
+    /// It, the `Source` line of its back's definition written after `environment`'s name, as `Observe · Prometheus`, or,
+    /// where its side gave no back or names no source, that name alone, first in its definition, so that every panel an
+    /// environment publishes says whose it is.
+    pub fn of_environment(mut self, environment: &str) -> Self {
+        use tomori_protocol::back::{BackLine, DEFINITION};
+        let back = self.back.get_or_insert_default();
+        let name = tomori_protocol::text::one_line(environment, 64);
+        let definition = back.section_mut(DEFINITION);
+        match definition.lines.iter_mut().find(|line| line.key == SOURCE) {
+            Some(source) => source.value = format!("{name} · {}", source.value),
+            None => definition.lines.insert(0, BackLine::new(SOURCE, name)),
+        }
+        *back = std::mem::take(back).cleaned();
+        self
+    }
+
+    /// How many bytes of JSON its content, chart, face and back take.
     pub fn bytes(&self) -> usize {
         super::json_size(&self.content)
             + self.chart.as_ref().map_or(0, super::json_size)
             + self.face.as_ref().map_or(0, super::json_size)
+            + self.back.as_ref().map_or(0, super::json_size)
     }
 
     /// The environment's id for it.
@@ -901,6 +942,7 @@ impl Stage {
             depends,
             window,
             at_ms,
+            back,
         } = publishing;
         let earlier = self
             .kept_published(walls.environment, &id)
@@ -925,6 +967,7 @@ impl Stage {
             window,
             waited: None,
             at_ms,
+            back,
         };
         if let Some(kept) = room.panels.iter_mut().find(|kept| {
             kept.published
@@ -1042,6 +1085,7 @@ impl Stage {
                         && published.columns == publishing.columns
                         && published.depends == publishing.depends
                         && published.window == publishing.window
+                        && published.back == publishing.back
                 }) && kept.content == publishing.content
             })
     }

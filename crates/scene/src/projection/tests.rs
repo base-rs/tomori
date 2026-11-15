@@ -1719,8 +1719,8 @@ fn a_panel_carried_stays_in_the_hand_while_a_teleport_is_aimed() {
 }
 
 #[test]
-fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let_go_so() {
-    use crate::manipulation::{FARTHEST, NEAREST, RATE, YAW_STEP};
+fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_and_it_is_let_go_so() {
+    use crate::manipulation::{FARTHEST, NEAREST, RATE, TURN_RATE, YAW_STEP};
     let shown = projection(vec![panel("a", on(TOMORI_WALL, 0))]);
     let now = Instant::now();
     let ray = at(slot_centre(&shown, 0));
@@ -1762,7 +1762,7 @@ fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let
     let output = projector.update(stick(Vec2::Y, 10.0));
     assert!((carried_at(&output) - ray.unwrap().at(FARTHEST)).length() < 1e-3);
     projector.update(stick(Vec2::ZERO, 0.0));
-    // A flick right turns it a snap clockwise, seen from above, once, and says so.
+    // A flick right turns it on a step clockwise, seen from above, once, and says so as it is let go.
     let facing_of = |output: &Output| {
         let model = output
             .sheets
@@ -1781,16 +1781,20 @@ fn the_right_stick_pushes_pulls_and_turns_a_panel_carried_in_snaps_and_it_is_let
         model.z_axis.truncate()
     };
     let square = facing_of(&projector.update(stick(Vec2::ZERO, 0.0)));
-    let output = projector.update(stick(Vec2::X, 0.1));
+    assert!(!projector.update(stick(Vec2::X, 0.1)).turned);
+    let output = projector.update(stick(Vec2::ZERO, 0.0));
     assert!(output.turned);
     let turned = facing_of(&output);
     assert!((square.angle_between(turned) - YAW_STEP).abs() < 1e-4);
     assert!(square.cross(turned).y < 0.0, "clockwise");
     assert!(turned.y.abs() < 1e-5, "upright");
-    assert!(!projector.update(stick(Vec2::X, 0.1)).turned);
-    projector.update(stick(Vec2::ZERO, 0.0));
-    assert!(projector.update(stick(Vec2::X, 0.1)).turned);
-    projector.update(stick(Vec2::ZERO, 0.0));
+    // Held, it turns on continuously, a quarter turn a second, ticking at each step it passes.
+    assert!(projector.update(stick(Vec2::X, 0.5)).turned);
+    let output = projector.update(stick(Vec2::ZERO, 0.0));
+    assert!(!output.turned);
+    let facing = facing_of(&output);
+    assert!((square.angle_between(facing) - YAW_STEP - TURN_RATE / 2.0).abs() < 1e-3);
+    assert!(square.cross(facing).y < 0.0, "clockwise");
     // A click turns it back square, once; square already, it says nothing.
     let click = Input {
         straighten: true,
@@ -3410,4 +3414,5 @@ fn a_curved_group_drawn_shows_its_label_once_below_its_bottom_left_wall() {
     assert_eq!(labels, 1);
 }
 
+mod backs;
 mod both_hands;

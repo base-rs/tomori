@@ -248,7 +248,29 @@ fn listed(
     described
 }
 
-/// `panel`, as `panels` describes the one panel the agent names: what [`summarized`] says of it, and what it shows,
+/// What `panel`'s back says, as a participant sees it walking behind it or turning it round, in `projection`, what it
+/// shows updated `updated` seconds ago: its sections, its inputs, outputs, definition and status and any other its
+/// environment gave, each with its lines, a key, a value and whether it warns, the context's values as the agent is told
+/// them, and its code block, such as its query, with its language. See `design/panel-backs.md`.
+fn back(projection: &Projection, panel: &Panel, updated: Option<u64>) -> Value {
+    let linked = tomori_protocol::back::linked(&projection.panels, panel);
+    let value =
+        |chip: &tomori_protocol::context::ContextChip| super::agent_context::spoken(&chip.value);
+    let described = tomori_protocol::back::describe(
+        panel,
+        &tomori_protocol::back::About {
+            updated,
+            linked: &linked,
+            value: &value,
+        },
+    );
+    // Each section as it is sent to clients: its name, its lines, each a key, a value and whether it warns, and its code
+    // block, its language and text.
+    json!(described.sections)
+}
+
+/// `panel`, as `panels` describes the one panel the agent names: what [`summarized`] says of it, what its back says,
+/// and what it shows,
 /// once: an environment's list its rows, each with its id, the id the agent may inspect it by, whether it is
 /// highlighted, its tone, in a word, its value against its limit, from 0 to 1, or null, and its text, and, of a list
 /// laid out as a table, its columns, each with its title, alignment and whether its rows' values are drawn under it,
@@ -263,6 +285,7 @@ fn detailed(
     keys: Option<usize>,
 ) -> Value {
     let mut described = summarized(projection, panel, updated, published);
+    described["back"] = back(projection, panel, panel.updated.or(updated));
     let columns = &panel.columns;
     let mut cut = false;
     match rows {

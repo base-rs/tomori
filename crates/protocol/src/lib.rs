@@ -8,6 +8,7 @@
 //! ([`ClientMessage`] and [`ServerMessage`]) and binary [`AudioFrame`]s. See
 //! `design/server.md`.
 mod audio;
+pub mod back;
 mod cards;
 mod channel;
 pub mod chart;

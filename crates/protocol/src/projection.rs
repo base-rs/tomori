@@ -751,6 +751,19 @@ pub struct Panel {
     /// of its version. See `design/panel-faces.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub face: Option<Box<Face>>,
+    /// What its environment says of it on its back, for a panel its environment's server side published: its source,
+    /// refresh, error, origin, lines of its own and query, which a client draws on the panel's physical back with what
+    /// Tomori writes of it ([`crate::back::describe`]). Part of its version. An older client ignores it, and draws the
+    /// front mirrored from behind. See `design/panel-backs.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back: Option<Box<crate::back::Back>>,
+    /// How long ago what it shows last changed, its live data included, in seconds, when the server sent it, as [`age`]
+    /// is how long ago it was projected: counted on by a client from then, and from each change of its version or data
+    /// seq after, for its back's `Updated` line. Not part of its version. Absent from older servers.
+    ///
+    /// [`age`]: Panel::age
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<u64>,
 }
 
 /// The longest key of a face panel's drawing ([`Face::key`]), in bytes, as a panel's id.
@@ -1038,7 +1051,21 @@ impl Panel {
             size: None,
             context: Vec::new(),
             face: None,
+            back: None,
+            updated: None,
         }
+    }
+
+    /// The panel, its back saying what `back` says, or nothing more than Tomori writes with `None`.
+    pub fn with_back(mut self, back: Option<crate::back::Back>) -> Self {
+        self.back = back.map(Box::new);
+        self
+    }
+
+    /// The panel, what it shows last changed `updated` seconds ago, if that is known.
+    pub fn with_updated(mut self, updated: Option<u64>) -> Self {
+        self.updated = updated;
+        self
     }
 
     /// The panel, floating `size` times as large as its own size, within [`FLOAT_SIZES`], or at its own size for
@@ -1140,6 +1167,8 @@ impl Panel {
             size,
             context,
             face,
+            back,
+            updated: _,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -1159,6 +1188,7 @@ impl Panel {
             && *size == other.size
             && *context == other.context
             && *face == other.face
+            && *back == other.back
             && charts
     }
 

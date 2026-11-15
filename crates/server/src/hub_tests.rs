@@ -9480,3 +9480,144 @@ fn a_side_s_states_and_events_beyond_its_rate_are_refused() {
     assert!((burst..=burst + 1).contains(&taken), "{taken}");
     assert!(refused.contains("faster"), "{refused}");
 }
+
+#[test]
+fn a_side_s_back_reaches_clients_named_for_its_environment_and_the_agent_reads_it_whole() {
+    use tomori_environment::chart::{Chart, Colour, Series, SeriesStyle, TimeAxis};
+    use tomori_environment::{Back, BackCode, BackLine, DEFINITION, INPUTS, STATUS};
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls([upright([3.0, 1.4, -4.0])])
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serve_tools(tomori_backend::ToolServer::new(
+        "tomori",
+        "http://127.0.0.1:1/mcp",
+    ));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = SpaceOutlet {
+        hub: Arc::downgrade(&hub),
+        space: id.clone(),
+        binding: hub.server_sides.binding(&id).unwrap(),
+        environment: "yard".to_owned(),
+        version: 1,
+    };
+    let ada = Client::projecting(&hub, Access::open(), "ada");
+    ada.join(&id);
+    let start = Instant::now();
+    let chart = |title: &str| {
+        let chart = Chart::new(3)
+            .with_time(TimeAxis::Live { step_ms: 5_000 })
+            .with_series(Series::new(
+                "p99",
+                Colour::Teal,
+                SeriesStyle::Line,
+                vec![Some(1.0); 3],
+            ));
+        tomori_environment::Panel::chart(title.to_lowercase(), title, chart)
+    };
+    let latency = chart("Latency").with_back(
+        Back::new()
+            .with_line(DEFINITION, BackLine::new("Source", "Prometheus"))
+            .with_code(
+                DEFINITION,
+                BackCode::new("promql", "histogram_quantile(0.99, rate(x[5m]))"),
+            )
+            .with_line(STATUS, BackLine::new("Refresh", "every 15 s"))
+            .with_line(INPUTS, BackLine::new("Scope", "us-east1")),
+    );
+    hub.channel_publish_at(&outlet, latency, start).unwrap();
+    hub.channel_publish_at(&outlet, chart("Errors"), start)
+        .unwrap();
+    hub.flush_publishes(start);
+    let shown = ada.projection();
+    let sent = shown
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Latency")
+        .unwrap();
+    let back = sent.back.as_deref().unwrap();
+    assert_eq!(back.line(DEFINITION, "Source"), Some("Yard · Prometheus"));
+    assert_eq!(
+        back.section(DEFINITION)
+            .unwrap()
+            .code
+            .as_ref()
+            .unwrap()
+            .language,
+        "promql"
+    );
+    assert!(sent.updated.is_some());
+    // A panel its side gave no back is named for its environment alone.
+    let errors = shown
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Errors")
+        .unwrap();
+    assert_eq!(
+        errors
+            .back
+            .as_deref()
+            .and_then(|back| back.line(DEFINITION, "Source")),
+        Some("Yard")
+    );
+    // The agent reads what its back says, as a participant sees it, in its sections, with its query.
+    let read = hub.tool_panels("session", Some("Latency"), 0).unwrap();
+    let back = read["panels"][0]["back"].as_array().unwrap().clone();
+    let section = |name: &str| -> Vec<String> {
+        back.iter()
+            .find(|section| section["name"] == name)
+            .map(|section| {
+                section["lines"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|line| {
+                        format!(
+                            "{}: {}",
+                            line["key"].as_str().unwrap(),
+                            line["value"].as_str().unwrap()
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let names: Vec<&str> = back
+        .iter()
+        .map(|section| section["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["inputs", "outputs", "definition", "status"]);
+    // A chart depends on time: its chip, and where its value comes from, before its side's own inputs.
+    let inputs = section("inputs");
+    assert!(
+        inputs[0].starts_with("Time: ") && inputs[0].ends_with(" · following the space"),
+        "{inputs:?}"
+    );
+    assert_eq!(inputs[1], "Scope: us-east1");
+    assert_eq!(section("outputs"), ["Linked: time cursor with Errors"]);
+    assert_eq!(
+        section("definition"),
+        [
+            "Shows: Chart of 1 series",
+            "Points: every 5 s",
+            "Source: Yard · Prometheus"
+        ]
+    );
+    let status = section("status");
+    assert!(status[0].starts_with("Updated: "), "{status:?}");
+    assert_eq!(status[1], "Refresh: every 15 s");
+    assert_eq!(
+        back[2]["code"],
+        serde_json::json!({"language": "promql", "text": "histogram_quantile(0.99, rate(x[5m]))"})
+    );
+    let read = hub.tool_panels("session", Some("Errors"), 0).unwrap();
+    let back = read["panels"][0]["back"].as_array().unwrap();
+    assert!(back.iter().all(|section| section.get("code").is_none()));
+}

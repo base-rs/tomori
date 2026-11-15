@@ -4249,8 +4249,8 @@ fn a_panel_carried_takes_the_right_stick_and_its_click_from_the_transcript_and_r
     let buttons = |step: &mut Step, conversation: &mut Conversation, buttons: Buttons| {
         step.buttons(&buttons, true, conversation, &mut felt(), now);
     };
-    // A flick of the right stick turns the panel a snap, with a tick, and moves neither the transcript's focus nor the
-    // cards; the left stick turns the participant in the same frame.
+    // A flick of the right stick turns the panel on a step as it is let go, with a tick, and moves neither the
+    // transcript's focus nor the cards; the left stick turns the participant in the same frame.
     let focus = conversation.wrist_focus().cloned();
     let square = carried(&step.update(&senses, &mut conversation, &mut feedback, now, FRAME));
     buttons(
@@ -4261,6 +4261,8 @@ fn a_panel_carried_takes_the_right_stick_and_its_click_from_the_transcript_and_r
             buttons.left_stick = Vec2::NEG_X;
         }),
     );
+    step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
+    buttons(&mut step, &mut conversation, press(|_| {}));
     felt_on(&mut feedback, Side::Right, now);
     let frame = step.update(&senses, &mut conversation, &mut feedback, now, FRAME);
     let turned = carried(&frame);

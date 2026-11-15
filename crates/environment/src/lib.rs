@@ -64,6 +64,10 @@ pub use panel::{
 };
 /// How a list panel's column aligns its cells, as [`Column::aligned`] takes it.
 pub use tomori_protocol::CellAlign;
+/// What a published panel's back says of how it is configured, as [`Panel::with_back`] takes it.
+pub use tomori_protocol::back::{
+    Back, BackCode, BackLine, BackSection, DEFINITION, INPUTS, OUTPUTS, STATUS,
+};
 /// A chart panel's native chart, as [`Panel::chart`] takes it.
 pub use tomori_protocol::chart;
 /// A cluster anchor, as [`Space::place_anchor`] takes it.

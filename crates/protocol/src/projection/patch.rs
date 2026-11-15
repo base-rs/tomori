@@ -454,6 +454,8 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         size,
         context,
         face,
+        back,
+        updated: _,
     } = a;
     *id == b.id
         && *title == b.title
@@ -471,6 +473,7 @@ fn same_content(a: &Panel, b: &Panel) -> bool {
         && *size == b.size
         && *context == b.context
         && *face == b.face
+        && *back == b.back
 }
 
 /// The data op that makes `was`'s live data `now`'s, two chart panels of the same structure: an append, where every

@@ -877,6 +877,23 @@ fn a_panel_copied_with_a_context_is_an_instance_its_side_is_told_of_and_publishe
     );
     assert_eq!(stage.instance_of("console", &copy), Some("latency"));
     assert_eq!(stage.instance_of("console", &latency), None);
+    // Its back names the panel it is a copy of, by its title, and the panel itself names none.
+    assert_eq!(
+        copied
+            .back
+            .as_ref()
+            .and_then(|back| back.line(tomori_protocol::back::OUTPUTS, "Copy of")),
+        Some("Latency")
+    );
+    assert_eq!(
+        shown
+            .panel(&latency)
+            .unwrap()
+            .back
+            .as_ref()
+            .and_then(|back| back.line(tomori_protocol::back::OUTPUTS, "Copy of")),
+        None
+    );
     // Its side is told of it, as an instance of its panel, bound as it is.
     let contexts = stage.contexts("console");
     assert_eq!(contexts[&instance].of(), Some("latency"));
@@ -1448,6 +1465,16 @@ fn a_copy_whose_panel_is_withdrawn_says_so_and_is_taken_away_later() {
     assert_eq!(
         title(&stage, &copy),
         Some(format!("Latency · EU{WITHDRAWN}"))
+    );
+    // Its panel no longer shown, its back names it by its environment's id for it.
+    assert_eq!(
+        stage
+            .view("s", &walls, 0)
+            .panel(&copy)
+            .and_then(|panel| panel.back.as_ref())
+            .and_then(|back| back.line(tomori_protocol::back::OUTPUTS, "Copy of"))
+            .map(str::to_owned),
+        Some("latency".to_owned())
     );
     assert!(!stage.contexts("console").contains_key(&instance));
     let later = Publishing::new(

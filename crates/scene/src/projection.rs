@@ -3,7 +3,7 @@
 
 //! What is projected in a space: its walls and the text and code panels on them or floating, as the server sends them; where
 //! each stands; which panel the ray points at, and the label that names it; and pulling a panel off with the grip,
-//! carrying it along the ray, pushed further or pulled closer and turned in snaps with the right stick, and letting it
+//! carrying it along the ray, pushed further or pulled closer and turned with the right stick, and letting it
 //! go, where it floats, or, near a wall, snaps back into that wall's layout. See `design/projection.md`.
 //!
 //! Where panels are is the space's, shared by everyone in it, so a panel let go is sent to the server, and shown where
@@ -1544,6 +1544,10 @@ pub struct Projector {
     /// by its panel; and the node each hand pulls. See `design/diagrams.md`.
     springs: HashMap<String, Live>,
     pulling: Hands<Option<Pull>>,
+    /// When what each panel shows last changed, and each panel's back as last drawn, kept while it says the same. See
+    /// `design/panel-backs.md`.
+    updates: back::Updates,
+    backs: back::Backs,
 }
 
 /// A volume whose nodes this participant pulls about: the mesh of the diagram its layout is of, by which a change to
@@ -1825,10 +1829,13 @@ impl Projector {
             self.focus = None;
             self.springs.clear();
             self.pulling = Hands::default();
+            self.updates = back::Updates::default();
+            self.backs = back::Backs::default();
             return Output::default();
         };
         let viewer = input.viewer.unwrap_or(HOME);
         self.lay_out(projection, viewer);
+        self.updates.follow(projection, input.now);
         self.keep_meshes(projection);
         if let Some((panel, since)) = &self.thrown
             && (projection.panel(panel).is_none()
@@ -2040,11 +2047,14 @@ impl Projector {
                         })
                         .min_by(|a, b| a.3.total_cmp(&b.3))
                 });
-            told[side].item = pointed.and_then(|(panel, model, fit, _, point)| {
+            // Seen from behind, its back shows, none of its face's items or chips.
+            let facing =
+                pointed.filter(|(panel, model, ..)| !self.seen_behind(panel, *model, viewer));
+            told[side].item = facing.and_then(|(panel, model, fit, _, point)| {
                 let scroll = self.scroll(&panel.id);
                 self.faces_for(panel).item(fit, model, scroll, point)
             });
-            told[side].chip = pointed.and_then(|(panel, model, fit, _, point)| {
+            told[side].chip = facing.and_then(|(panel, model, fit, _, point)| {
                 self.faces_for(panel).chip(fit, model, point)
             });
             let met = pointed
@@ -2412,6 +2422,7 @@ impl Projector {
             .filter_map(|side| told[side].pointed.as_ref().map(|(id, ..)| id.clone()))
             .collect();
         let faces = self.faces_of(projection, &standing, &pointed);
+        let faces = self.backs_of(projection, &standing, faces, viewer, input.now);
         output.sheets = self.sheets(&walls, &standing, &faces, viewer);
         // Each volume's solids, and its labels over the panels, and the card of the node this participant focuses on.
         let time = input
@@ -2457,8 +2468,9 @@ impl Projector {
         // Pointing at a chart's plot with the right ray, not carrying a panel in that hand, its readout follows the ray,
         // drawn over its face.
         let read = right_pointed
-            .filter(|(panel, ..)| {
+            .filter(|(panel, model, ..)| {
                 self.held.right.is_none()
+                    && !self.seen_behind(panel, *model, viewer)
                     && told
                         .right
                         .pointed
@@ -2480,6 +2492,7 @@ impl Projector {
         output.linked = self.linked(
             &standing,
             read.as_ref().map(|(panel, _, (at, ..))| (*panel, *at)),
+            viewer,
         );
         output.readout = read.map(|(_, model, (_, face, readout))| {
             let canvas = match self.readout.take() {
@@ -2614,6 +2627,59 @@ impl Projector {
         Some(held.panel)
     }
 
+    /// Whether `panel`, standing at `model`, is seen from behind by `viewer`, so that its back shows: one standing free,
+    /// floating, carried or let go, whose face looks away from them. A panel in a wall's slot shows its face alone, its
+    /// wall's board behind it. See `design/panel-backs.md`.
+    fn seen_behind(&self, panel: &Panel, model: Mat4, viewer: Vec3) -> bool {
+        let moved = Side::BOTH.into_iter().any(|side| {
+            self.held_in(side) == Some(panel.id.as_str())
+                || self.pending[side]
+                    .as_ref()
+                    .is_some_and(|pending| pending.panel == panel.id)
+        });
+        (moved || !matches!(panel.place, Place::Wall { .. }))
+            && back::seen_from_behind(model, viewer)
+    }
+
+    /// Each of `standing`'s `faces`, or, for a panel seen from behind, its back, as large as its face and framed as it
+    /// is, saying how long ago it last changed as of `now`, and whether it is: its title alone, as a face in a slot is
+    /// drawn far, where its text would be too small to read from `viewer`. Backs no longer seen are forgotten.
+    fn backs_of(
+        &mut self,
+        projection: &Projection,
+        standing: &[Standing],
+        faces: Vec<Arc<Canvas>>,
+        viewer: Vec3,
+        now: Instant,
+    ) -> Vec<(Arc<Canvas>, bool)> {
+        let mut seen: Vec<&str> = Vec::new();
+        let faced = standing
+            .iter()
+            .zip(faces)
+            .map(|((panel, model, fit), face)| {
+                if !self.seen_behind(panel, *model, viewer) {
+                    return (face, false);
+                }
+                seen.push(panel.id.as_str());
+                let size = self.faces_for(panel).at(*fit).size;
+                let border = face.border.unwrap_or(FRAME);
+                // A row of its text, as large as a panel's, as it subtends from the viewer.
+                let distance = model.w_axis.truncate().distance(viewer).max(1e-3);
+                let row = CELL_HEIGHT as f32 * PIXEL * model.y_axis.truncate().length();
+                if self.backs.far(&panel.id, row / distance) {
+                    return (self.faces_for(panel).far_face(size, border), true);
+                }
+                let updated = self.updates.ago(&panel.id, now);
+                (
+                    self.backs.back(projection, panel, updated, size, border),
+                    true,
+                )
+            })
+            .collect();
+        self.backs.retain(&seen);
+        faced
+    }
+
     /// The face of each of `standing`'s panels this frame, as it is laid out, sized and scrolled: framed brightly where it
     /// is carried or `pointed` at, and in blue where it is the newest on its wall, a list's rows marked as
     /// [`Self::mark_rows`] says. Each is the face drawn last frame unless one of those changed, or what the panel shows
@@ -2656,12 +2722,12 @@ impl Projector {
     /// What to draw: each wall with the panels in its layout, and the outline of the slot a panel carried would take,
     /// and each panel floating or carried, the groups farthest from `viewer` first, since panels blend over what is drawn
     /// before them and write depth only once drawn, so that a nearer one covers one behind it, and a wall's panels cover
-    /// the wall. Each of `standing` shows its face of `faces`.
+    /// the wall. Each of `standing` shows its face of `faces`, or, where that is its back, its back, turned.
     fn sheets(
         &mut self,
         walls: &[(&Wall, Mat4)],
         standing: &[Standing],
-        faces: &[Arc<Canvas>],
+        faces: &[(Arc<Canvas>, bool)],
         viewer: Vec3,
     ) -> Vec<Sheet> {
         let sheet = |face: &Arc<Canvas>, model: Mat4| Sheet {
@@ -2753,7 +2819,7 @@ impl Projector {
                         .filter(|((panel, ..), _)| {
                             in_layout(panel, moved) == Some(wall.id.as_str())
                         })
-                        .map(|((_, model, _), face)| sheet(face, *model)),
+                        .map(|((_, model, _), (face, _))| sheet(face, *model)),
                 );
                 // The outline of the slot a panel carried would take, over any panel in it.
                 for model in Side::BOTH.into_iter().filter_map(|side| {
@@ -2775,14 +2841,16 @@ impl Projector {
                 .iter()
                 .zip(faces)
                 .filter(|((panel, ..), _)| in_layout(panel, moved).is_none())
-                .map(|((panel, model, _), face)| {
-                    // A panel carried, or let go and not yet confirmed, is drawn in front of the wall it nears.
+                .map(|((panel, model, _), (face, back))| {
+                    // A panel carried, or let go and not yet confirmed, is drawn in front of the wall it nears; seen
+                    // from behind, its back, turned to face out of it.
                     let ahead = moved.contains(&panel.id);
+                    let model = if *back { back::turned(*model) } else { *model };
                     (
                         model.w_axis.truncate().distance(viewer),
                         vec![Sheet {
                             ahead,
-                            ..sheet(face, *model)
+                            ..sheet(face, model)
                         }],
                     )
                 }),
@@ -3099,7 +3167,12 @@ impl Projector {
     /// The readouts linked to the chart `read` points at, at the place across its axis it points at, over every other
     /// chart standing that shares its time, as [`Output::linked`] says, none carried: drawn from each face as it was
     /// last drawn, without laying anything out, each handed over again while it shows the same.
-    fn linked(&mut self, standing: &[Standing], read: Option<(&Panel, f32)>) -> Vec<Sheet> {
+    fn linked(
+        &mut self,
+        standing: &[Standing],
+        read: Option<(&Panel, f32)>,
+        viewer: Vec3,
+    ) -> Vec<Sheet> {
         let mut kept = std::mem::take(&mut self.linked);
         let Some((pointed, time)) = read.and_then(|(panel, at)| {
             panel
@@ -3126,6 +3199,7 @@ impl Projector {
             }
             let shares = panel.id != pointed.id
                 && !carried.contains(&panel.id)
+                && !self.seen_behind(panel, *model, viewer)
                 && (matches!(time, ChartTime::Instant { .. })
                     || (here.is_some() && wall(panel) == here));
             let Some((face, readout)) = panel
@@ -3409,6 +3483,7 @@ fn newest(projection: &Projection) -> HashMap<&str, &str> {
         .collect()
 }
 
+pub mod back;
 mod boards;
 mod chart;
 pub mod chips;
