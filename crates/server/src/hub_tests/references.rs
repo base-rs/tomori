@@ -213,7 +213,9 @@ fn world_references_resolve_to_what_the_space_has_and_the_agent_is_told_at_once(
         "{text}"
     );
     assert!(
-        text.contains("; box; edges: to object \"yard:hen/pip\", to object \"post/1\""),
+        text.contains(
+            "; box; 0 in, 0 out; edges: to object \"yard:hen/pip\", to object \"post/1\""
+        ),
         "{text}"
     );
 }

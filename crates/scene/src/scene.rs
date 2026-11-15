@@ -2041,10 +2041,11 @@ impl Step {
         if projected.turned {
             feedback.emit(feedback::Event::Hover, now);
         }
-        // Taking hold with the second hand is felt on it, as taking hold is, and so is reaching the least or the most both
-        // hands may size what they hold.
+        // Taking hold with the second hand is felt on it, as taking hold is, and so are taking hold of a node and letting
+        // it go, and reaching the least or the most both hands may size what they hold.
         for (event, side) in [
             (feedback::Event::Choose, projected.joined),
+            (feedback::Event::Choose, projected.pulled),
             (feedback::Event::Hover, projected.bounded),
         ] {
             if let Some(side) = side {
@@ -2559,7 +2560,7 @@ impl Step {
                     .lit
                     .is_some_and(|lit| now.saturating_duration_since(lit) < LIT);
         }
-        // The labels on the rays name the panel each points at, not one carried, and say how to tick the item it meets; on
+        // The labels on the rays name the panel each points at, not one carried nor one whose node is pulled, and say how to tick the item it meets; on
         // a chart's plot, the right ray's readout says what the chart reads there instead, over its face.
         let readout = projected
             .readout
@@ -2576,6 +2577,7 @@ impl Step {
                 projection.extend(projected.linked.iter().cloned());
             } else if let (Some(panel), Some((_, _, point)), None) =
                 (&resolved.panel, panel_pointed, self.projector.held_in(side))
+                && !self.projector.pulling(side)
                 && let Some(shown) = conversation
                     .projection()
                     .and_then(|projection| projection.panel(panel))

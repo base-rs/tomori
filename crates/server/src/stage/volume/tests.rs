@@ -118,12 +118,15 @@ fn the_agent_is_told_of_a_node_with_its_edges_and_of_an_edge_with_its_style() {
             .unwrap()
     };
     let hub = describe(Some("hub"), None);
-    assert!(hub.starts_with("node \"Hub\" (id hub) in diagram beginning \"- Hub: Spaces, under one lock\" (id hub, floating, projected a minute ago; prism; edges: to Store, to Choice"), "{hub}");
+    assert!(hub.starts_with("node \"Hub\" (id hub) in diagram beginning \"- Hub: Spaces, under one lock\" (id hub, floating, projected a minute ago; prism; 0 in, 14 out; edges: to Store, to Choice"), "{hub}");
     assert!(
         hub.ends_with(" and 6 more; detail: \"Spaces, under one lock\")"),
         "{hub}"
     );
-    assert!(describe(Some("leaf"), None).ends_with("cylinder, in group \"g\"; edges: from Hub)"));
+    assert!(
+        describe(Some("leaf"), None)
+            .ends_with("cylinder, in group \"g\"; 1 in, 0 out; edges: from Hub)")
+    );
     for (node, shape) in [
         ("n0", "diamond"),
         ("c", "card"),
@@ -131,7 +134,8 @@ fn the_agent_is_told_of_a_node_with_its_edges_and_of_an_edge_with_its_style() {
         ("b", "box"),
     ] {
         assert!(
-            describe(Some(node), None).contains(&format!("; {shape}; edges: from Hub")),
+            describe(Some(node), None)
+                .contains(&format!("; {shape}; 1 in, 0 out; edges: from Hub")),
             "{node}"
         );
     }
@@ -179,8 +183,11 @@ fn the_agent_is_told_of_a_node_with_its_edges_and_of_an_edge_with_its_style() {
             .unwrap()
     };
     assert!(read(&kept, None, Some(0)).ends_with("; dotted)"));
-    assert!(read(&kept, Some("a"), None).contains("box, in group \"g\"; edges: to b; ref:"));
-    assert!(read(&kept, Some("b"), None).ends_with("box; edges: from a)"));
+    assert!(
+        read(&kept, Some("a"), None)
+            .contains("box, in group \"g\"; 0 in, 1 out; edges: to b; ref:")
+    );
+    assert!(read(&kept, Some("b"), None).ends_with("box; 1 in, 0 out; edges: from a)"));
     // A node of no edges says none.
     let (lone, lone_id) = shown("a\n");
     let told = lone
@@ -194,10 +201,24 @@ fn the_agent_is_told_of_a_node_with_its_edges_and_of_an_edge_with_its_style() {
             0,
         )
         .unwrap();
-    assert!(told.ends_with("; box)"), "{told}");
+    assert!(told.ends_with("; box; 0 in, 0 out)"), "{told}");
+    // An edge pointing both ways, or neither, counts as each; one pointing back, into where it is written from.
+    let (both, both_id) = shown("a <--> b\nc --- a\na <-- d\nc <--> d\n");
+    let told = both
+        .describe_at(
+            &SKY,
+            &both_id,
+            crate::stage::Pointed {
+                node: Some("a"),
+                ..Default::default()
+            },
+            0,
+        )
+        .unwrap();
+    assert!(told.contains("; box; 3 in, 2 out; edges:"), "{told}");
     assert!(
         read(&stage, Some("a"), None)
-            .ends_with("box, in group \"Group\"; edges: to b; ref: \"crates/x\")")
+            .ends_with("box, in group \"Group\"; 0 in, 1 out; edges: to b; ref: \"crates/x\")")
     );
     assert_eq!(stage.named_diagram("sky", "nothing"), None);
 }
