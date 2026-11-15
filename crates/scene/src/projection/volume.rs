@@ -3,17 +3,17 @@
 
 //! Volumes: panels with depth, each showing the diagram the server laid out, its nodes as lit solids, its edges as
 //! tubes through their waypoints with cones for arrowheads, its groups as trays and frames, and its labels from the
-//! shared glyph atlas, each turned to face the viewer about the vertical. Its face is a panel's, its title above a plate
-//! the diagram stands in front of: a dark one in a wall's slot, as a shallow display case, and a faint one floating, so
-//! that what is behind it shows between its nodes. What it draws is built once for each version of its diagram and
-//! kept, as a panel's face is; a frame moves it by its panel's model alone, and dims what is not the node the
-//! participant focuses on and its neighbours. The ray meets its nodes and edges, nearest first, which name them to the
-//! agent. See `design/diagrams.md`.
+//! shared glyph atlas, each turned to face the viewer about the vertical and brought in front of its solids. Its face
+//! is a panel's, its title above a plate the diagram stands in front of: a dark one in a wall's slot, as a shallow
+//! display case, and a faint one floating, so that what is behind it shows between its nodes. What it draws is built
+//! once for each version of its diagram and kept, as a panel's face is; a frame moves it by its panel's model alone,
+//! and dims what is not the node the participant focuses on and its neighbours. The ray meets its nodes and edges,
+//! nearest first, which name them to the agent. See `design/diagrams.md`.
 use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Vec3};
 use tomori_protocol::Panel;
-use tomori_protocol::diagram::{Arrow, Diagram, GroupKind, Shape, Style};
+use tomori_protocol::diagram::{Arrow, Diagram, GroupKind, LABEL_LINES, Shape, Style};
 
 use super::{BRIGHT, DIM, FIT_ROWS, Fit, PADDING, PIXEL, TABLE_COLUMNS};
 use crate::canvas::Canvas;
@@ -33,6 +33,13 @@ pub const EDGE_LABELS: usize = 16;
 /// least [`LEAST_LABEL`] of it.
 const LABEL_PIXEL: f32 = 0.0013;
 const LEAST_LABEL: f32 = 0.6;
+
+/// The widest a label's own text is drawn, in columns: a longer line is wrapped at its words onto the next, and of at
+/// most [`LABEL_LINES`] rows the last is cut with "…" where more would follow.
+const LABEL_COLUMNS: usize = 20;
+
+/// The nearest a label brought in front of its volume comes to the viewer, in metres, unless it stood nearer.
+const NEAREST: f32 = 0.4;
 
 /// How far a volume's back stands in front of its face, in metres, so that its plate is behind everything it draws.
 const STAND_OFF: f32 = 0.01;
@@ -453,8 +460,9 @@ impl Mesh {
         best
     }
 
-    /// The labels it draws with `model`, each turned about the vertical to face `viewer`, sized as the volume is drawn,
-    /// what the participant does not focus on, `focus`, dimmed.
+    /// The labels it draws with `model`, each turned about the vertical to face `viewer`, sized as the volume is drawn
+    /// and brought in front of everything it draws ([`Self::before`]), farthest first, what the participant does not
+    /// focus on, `focus`, left out.
     pub fn sheets(&self, model: Mat4, viewer: Vec3, focus: Option<usize>, sheets: &mut Vec<Sheet>) {
         // A leader's label stands at its target, while it is drawn in full.
         for (index, (leader, path)) in self
@@ -468,20 +476,63 @@ impl Mesh {
             }
         }
         let scale = label_scale(model);
+        let mut drawn: Vec<(f32, Sheet)> = Vec::new();
         for label in &self.labels {
             if focus.is_some() && !self.lit(label.owner, focus) {
                 continue;
             }
-            let at = model.transform_point3(label.at);
-            sheets.push(Sheet {
-                canvas: Some(label.canvas.clone()),
-                model: Some(crate::recording::facing(
-                    at,
-                    Vec3::new(viewer.x, at.y, viewer.z),
-                    scale,
-                )),
-                ahead: false,
-            });
+            // Its first row where a label of one stands, the rest growing upwards, away from what it names.
+            let rows = label.canvas.rows.len().saturating_sub(1);
+            let lift = (rows * CELL_HEIGHT) as f32 * PIXEL / 2.0 * scale;
+            let at = model.transform_point3(label.at) + Vec3::Y * lift;
+            let placed = crate::recording::facing(at, Vec3::new(viewer.x, at.y, viewer.z), scale);
+            let placed = self.before(model, viewer, placed, &label.canvas);
+            drawn.push((
+                at.distance(viewer),
+                Sheet {
+                    canvas: Some(label.canvas.clone()),
+                    model: Some(placed),
+                    ahead: false,
+                },
+            ));
+        }
+        // Farthest first by where they stood, before they were brought forward, so that where two overlap the label of
+        // what is nearer is drawn over the label of what is behind it.
+        drawn.sort_by(|a, b| b.0.total_cmp(&a.0));
+        sheets.extend(drawn.into_iter().map(|(_, sheet)| sheet));
+    }
+
+    /// `placed`, the model of a label of `canvas`, brought in front of everything the volume drawn with `model` draws,
+    /// as `viewer` sees it, so that no node, edge or group of it hides the label: moved towards the viewer to where the
+    /// line from them to its middle enters the box of the volume's extent, grown by the label's half diagonal, and
+    /// shrunk about the viewer as it comes, so that it is seen exactly as large and in the same place. It never comes
+    /// nearer the viewer than [`NEAREST`], unless it stood nearer, so that leaning in to read a diagram, or seen from
+    /// within its box, where it enters at the eyes, its labels stand no nearer than that, and move smoothly as the head
+    /// crosses into the box. A label already in front of that box stays where it is. It never leaves the box so grown,
+    /// so that whatever stands in front of the volume, a panel, a wall or a hand, still hides it by depth, but for a
+    /// panel within a label's half diagonal of the box. See `design/diagrams.md`.
+    fn before(&self, model: Mat4, viewer: Vec3, placed: Mat4, canvas: &Canvas) -> Mat4 {
+        let (width, height) = canvas.size();
+        let (scale, ..) = model.to_scale_rotation_translation();
+        // The label's half diagonal, in the volume's millimetres.
+        let reach = placed.x_axis.truncate().length() * width.hypot(height) / 2.0 / scale.x;
+        let half = Vec3::from_array(self.diagram.extent.map(f32::from)) / 2.0 + Vec3::splat(reach);
+        let inverse = model.inverse();
+        let middle = placed.transform_point3(Vec3::ZERO);
+        match entering(
+            inverse.transform_point3(viewer),
+            inverse.transform_point3(middle),
+            half,
+        ) {
+            Some(entry) if entry < 1.0 => {
+                let distance = middle.distance(viewer);
+                let share = entry.max(NEAREST.min(distance) / distance.max(f32::EPSILON));
+                Mat4::from_translation(viewer)
+                    * Mat4::from_scale(Vec3::splat(share))
+                    * Mat4::from_translation(-viewer)
+                    * placed
+            }
+            _ => placed,
         }
     }
 
@@ -516,11 +567,11 @@ impl Mesh {
         let scale = label_scale(model);
         // Its left edge beside the node.
         let (width, _) = canvas.size();
-        let model = crate::recording::facing(at, Vec3::new(viewer.x, at.y, viewer.z), scale)
+        let placed = crate::recording::facing(at, Vec3::new(viewer.x, at.y, viewer.z), scale)
             * Mat4::from_translation(Vec3::X * width / 2.0);
         Some(Sheet {
+            model: Some(self.before(model, viewer, placed, &canvas)),
             canvas: Some(canvas),
-            model: Some(model),
             ahead: false,
         })
     }
@@ -616,10 +667,18 @@ fn label_scale(model: Mat4) -> f32 {
 /// A label's canvas: `text`, bold in `colour`, and below it, for a card or a focus, `detail` on up to three rows, on a
 /// backing of `opacity`.
 fn label(text: &str, detail: Option<&str>, colour: [f32; 4], opacity: f32) -> Canvas {
-    let columns = text
-        .chars()
-        .count()
-        .clamp(1, tomori_protocol::diagram::LABEL_CHARS + 1);
+    let style = TextStyle::bold(colour);
+    let mut rows = wrap(&[Span::new(text, style)], LABEL_COLUMNS, Wrap::default());
+    if rows.len() > LABEL_LINES {
+        rows.truncate(LABEL_LINES);
+        let last: String = rows[LABEL_LINES - 1]
+            .iter()
+            .map(|(ch, _)| *ch)
+            .filter(|ch| *ch != crate::ui_text::WIDE)
+            .collect();
+        rows[LABEL_LINES - 1] =
+            Row::text(&format!("{}…", last.trim_end()), style, LABEL_COLUMNS).cells;
+    }
     let detail_rows = detail.map_or(Vec::new(), |detail| {
         let mut rows = wrap(
             &[Span::new(detail, TextStyle::plain(DIM))],
@@ -631,17 +690,39 @@ fn label(text: &str, detail: Option<&str>, colour: [f32; 4], opacity: f32) -> Ca
     });
     let columns = detail_rows
         .iter()
+        .chain(&rows)
         .map(Vec::len)
-        .chain([columns])
         .max()
-        .unwrap_or(1);
+        .unwrap_or(0)
+        .max(1);
     let mut canvas = Canvas::new(columns, PIXEL);
     canvas.padding = (3, 2);
     canvas.background = [0.02, 0.035, 0.06, opacity];
-    canvas.rows = std::iter::once(Row::text(text, TextStyle::bold(colour), columns))
-        .chain(detail_rows.into_iter().map(Row::new))
-        .collect();
+    canvas.rows = rows.into_iter().chain(detail_rows).map(Row::new).collect();
     canvas
+}
+
+/// How far along the segment from `from` to `to`, as a share of it, it enters the box `half` either way about the
+/// origin, 0 where it starts within it; `None` where it misses the box.
+fn entering(from: Vec3, to: Vec3, half: Vec3) -> Option<f32> {
+    // Within the box, it enters where it starts.
+    let direction = to - from;
+    let (mut near, mut far) = (f32::NEG_INFINITY, f32::INFINITY);
+    for axis in 0..3 {
+        if direction[axis] == 0.0 {
+            if from[axis].abs() > half[axis] {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = (
+            (-half[axis] - from[axis]) / direction[axis],
+            (half[axis] - from[axis]) / direction[axis],
+        );
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+    }
+    (near <= far && far > 0.0).then_some(near.max(0.0))
 }
 
 /// The tubes of an edge along `path`, of `radius`, drawn in `style`: one a segment, or its dashes or dots.

@@ -26,10 +26,12 @@ pub const GROUPS: usize = 12;
 pub const NESTING: usize = 3;
 /// The longest id of a node or group, in bytes of ASCII letters, digits, `-`, `_` and `.`.
 pub const ID_BYTES: usize = 32;
-/// The longest label of a node or group, of an edge, and a node's detail, in characters, and a node's reference, in
-/// bytes; each is cut with "…".
+/// The longest label of a node or group, of an edge, and a node's detail, in characters, a label's breaks among them,
+/// and a node's reference, in bytes; each is cut with "…".
 pub const LABEL_CHARS: usize = 32;
 pub const EDGE_LABEL_CHARS: usize = 24;
+/// The most lines of a label, each `<br>` the agent writes a break between two (see [`label`]).
+pub const LABEL_LINES: usize = 3;
 pub const DETAIL_CHARS: usize = 240;
 pub const REF_BYTES: usize = 256;
 /// The most edges between one pair of nodes, either way.
@@ -487,6 +489,94 @@ fn clean(text: &str) -> String {
     one_line(text, LABEL_CHARS).replace('"', "'")
 }
 
+/// `text`, as the agent wrote a label, on at most [`LABEL_LINES`] lines of at most `limit` characters together, its
+/// breaks among them, and `…` if it was longer: each `<br>`, `<br/>` or `<br />`, in any case, a break, as a Mermaid
+/// flowchart's, and every other line break, control character or space a plain space, as [`one_line`] makes them, so
+/// that a `\n` is not a break, as it is not in Mermaid. Nothing else is read as HTML: `a < b` and `<b>` are kept as text.
+/// Lines are kept apart by `\n`, empty ones left out and those past the last joined to it by a space.
+///
+/// ```
+/// use tomori_protocol::diagram::label;
+///
+/// assert_eq!(label("Hub<br>under one lock", 32), "Hub\nunder one lock");
+/// assert_eq!(label("a < b <BR /> <b>c</b>", 32), "a < b\n<b>c</b>");
+/// ```
+pub fn label(text: &str, limit: usize) -> String {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while let Some((before, after)) = split_break(rest) {
+        lines.push(before);
+        rest = after;
+    }
+    lines.push(rest);
+    bounded_lines(
+        lines.into_iter().map(|line| one_line(line, line.len())),
+        limit,
+    )
+}
+
+/// The text before the first `<br>`, `<br/>` or `<br />` of `text`, in any case, and after it.
+fn split_break(text: &str) -> Option<(&str, &str)> {
+    let mut from = 0;
+    while let Some(found) = text[from..].find('<') {
+        let at = from + found;
+        let tag = &text[at + 1..];
+        if tag
+            .get(..2)
+            .is_some_and(|name| name.eq_ignore_ascii_case("br"))
+        {
+            let inside = tag[2..].trim_start();
+            let inside = inside.strip_prefix('/').unwrap_or(inside);
+            if let Some(after) = inside.strip_prefix('>') {
+                return Some((&text[..at], after));
+            }
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// `lines`, each already on one line, trimmed, without the empty ones, at most [`LABEL_LINES`] of them, the rest joined
+/// to the last, kept apart by `\n`, and cut to `limit` characters with "…".
+fn bounded_lines(lines: impl Iterator<Item = String>, limit: usize) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if kept.len() == LABEL_LINES {
+            let last = &mut kept[LABEL_LINES - 1];
+            last.push(' ');
+            last.push_str(line);
+        } else {
+            kept.push(line.to_owned());
+        }
+    }
+    let joined = kept.join("\n");
+    if joined.chars().count() <= limit {
+        return joined;
+    }
+    let mut cut: String = joined.chars().take(limit).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    cut
+}
+
+/// A label kept on the wire, its lines apart by `\n`, as a client draws it: within [`LABEL_LINES`] and `limit`, as
+/// [`label`] keeps one.
+fn label_lines(text: &str, limit: usize) -> String {
+    bounded_lines(
+        text.split('\n').map(|line| one_line(line, line.len())),
+        limit,
+    )
+}
+
+/// A label on one line, as text names it, its lines joined by spaces.
+pub fn one_line_label(label: &str) -> String {
+    label.replace('\n', " ")
+}
+
 /// The shape `text` names, in any case, with Mermaid's names for the same.
 pub fn shape(text: &str) -> Option<Shape> {
     match text.trim().to_ascii_lowercase().as_str() {
@@ -900,7 +990,7 @@ impl Builder {
         if let Some(known) = self.groups.iter().position(|group| group.id == id) {
             return Some(known);
         }
-        let mut group = Group::new(id, one_line(label, LABEL_CHARS).trim());
+        let mut group = Group::new(id, self::label(label, LABEL_CHARS));
         group.kind = kind;
         group.parent = parent.and_then(|parent| u8::try_from(parent).ok());
         self.groups.push(group);
@@ -943,7 +1033,7 @@ impl Builder {
             .map(|(id, attributes, group)| {
                 let mut node = Node::new(id.clone(), id.clone());
                 if let Some(label) = &attributes.label {
-                    let label = one_line(label, LABEL_CHARS).trim().to_owned();
+                    let label = self::label(label, LABEL_CHARS);
                     if !label.is_empty() {
                         node.label = label;
                     }
@@ -1004,7 +1094,7 @@ impl Builder {
             }
             // Both fit in a u16, as at most [`NODES`] are kept.
             let mut edge = Edge::new(from as u16, to as u16);
-            edge.label = one_line(&draft.label, EDGE_LABEL_CHARS).trim().to_owned();
+            edge.label = label(&draft.label, EDGE_LABEL_CHARS);
             edge.direction = draft.direction;
             edge.style = draft.style;
             edge.colour = draft.colour;
@@ -1100,7 +1190,7 @@ impl Builder {
             }
             // Both fit in a u16, as at most [`NODES`] and [`REFERENCES`] are kept.
             let mut edge = Edge::new(node as u16, reference as u16);
-            edge.label = one_line(&draft.label, EDGE_LABEL_CHARS).trim().to_owned();
+            edge.label = label(&draft.label, EDGE_LABEL_CHARS);
             edge.direction = match (back, draft.direction) {
                 (true, Arrow::Forward) => Arrow::Back,
                 (true, Arrow::Back) => Arrow::Forward,
@@ -1334,9 +1424,9 @@ impl Diagram {
     pub fn outline(&self) -> String {
         let item = |node: &Node| {
             if node.detail.is_empty() {
-                format!("- {}", node.label)
+                format!("- {}", one_line_label(&node.label))
             } else {
-                format!("- {}: {}", node.label, node.detail)
+                format!("- {}: {}", one_line_label(&node.label), node.detail)
             }
         };
         let mut sections: Vec<String> = Vec::new();
@@ -1357,9 +1447,9 @@ impl Diagram {
                 .map(item)
                 .collect();
             let heading = if group.label.is_empty() {
-                &group.id
+                group.id.clone()
             } else {
-                &group.label
+                one_line_label(&group.label)
             };
             sections.push(
                 std::iter::once(format!("**{heading}**"))
@@ -1382,11 +1472,7 @@ impl Diagram {
                     Arrow::Both => "↔",
                     Arrow::None => "—",
                 };
-                Some(if edge.label.is_empty() {
-                    format!("- {} {arrow} {}", from.label, to.label)
-                } else {
-                    format!("- {} {arrow} {}: {}", from.label, to.label, edge.label)
-                })
+                Some(format!("- {}", named(from, to, arrow, &edge.label)))
             })
             .chain(
                 (0..self.world_edges.len())
@@ -1411,12 +1497,12 @@ impl Diagram {
         let groups = diagram.groups.len();
         for (index, group) in diagram.groups.iter_mut().enumerate() {
             group.parent = group.parent.filter(|parent| usize::from(*parent) < index);
-            group.label = one_line(&group.label, LABEL_CHARS);
+            group.label = label_lines(&group.label, LABEL_CHARS);
         }
         for node in &mut diagram.nodes {
             node.size = node.size.clamp(1, SIZES);
             node.group = node.group.filter(|group| usize::from(*group) < groups);
-            node.label = one_line(&node.label, LABEL_CHARS);
+            node.label = label_lines(&node.label, LABEL_CHARS);
             node.detail = one_line(&node.detail, DETAIL_CHARS);
         }
         let nodes = diagram.nodes.len();
@@ -1427,7 +1513,7 @@ impl Diagram {
         for edge in &mut diagram.edges {
             edge.via.truncate(WAYPOINTS);
             edge.weight = edge.weight.clamp(1, WEIGHTS);
-            edge.label = one_line(&edge.label, EDGE_LABEL_CHARS);
+            edge.label = label_lines(&edge.label, EDGE_LABEL_CHARS);
         }
         diagram.extent = diagram.extent.map(|side| side.min(EXTENT_MM));
         diagram.world.truncate(REFERENCES);
@@ -1440,7 +1526,7 @@ impl Diagram {
         for edge in &mut diagram.world_edges {
             edge.via.clear();
             edge.weight = edge.weight.clamp(1, WEIGHTS);
-            edge.label = one_line(&edge.label, EDGE_LABEL_CHARS);
+            edge.label = label_lines(&edge.label, EDGE_LABEL_CHARS);
         }
         diagram
     }
@@ -1487,7 +1573,11 @@ impl Diagram {
         } else {
             format!(": {}", edge.label)
         };
-        Some(format!("{} {arrow} {label}{reference}{suffix}", node.label))
+        Some(format!(
+            "{} {arrow} {label}{reference}{}",
+            one_line_label(&node.label),
+            one_line_label(&suffix)
+        ))
     }
 
     /// The index of the node `id`, if it has one.
@@ -1508,11 +1598,17 @@ impl Diagram {
         } else {
             "→"
         };
-        Some(if edge.label.is_empty() {
-            format!("{} {arrow} {}", from.label, to.label)
-        } else {
-            format!("{} {arrow} {}: {}", from.label, to.label, edge.label)
-        })
+        Some(named(from, to, arrow, &edge.label))
+    }
+}
+
+/// An edge from `from` to `to`, `arrow` its way, labelled `label`, as it is named, every label on one line.
+fn named(from: &Node, to: &Node, arrow: &str, label: &str) -> String {
+    let (from, to) = (one_line_label(&from.label), one_line_label(&to.label));
+    if label.is_empty() {
+        format!("{from} {arrow} {to}")
+    } else {
+        format!("{from} {arrow} {to}: {}", one_line_label(label))
     }
 }
 

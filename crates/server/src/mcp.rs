@@ -1939,7 +1939,7 @@ fn show_diagram_tool() -> Value {
                         "type": "object",
                         "properties": {
                             "id": { "type": "string", "maxLength": 32, "description": "Letters, digits, -, _ and ." },
-                            "label": { "type": "string", "maxLength": 256 },
+                            "label": { "type": "string", "maxLength": 256, "description": "What it is called, at most 32 characters; <br> breaks it onto another line, at most three, and longer lines wrap. Nothing else is read as HTML." },
                             "shape": { "type": "string", "enum": ["box", "sphere", "cylinder", "prism", "diamond", "card"] },
                             "colour": { "type": "string", "maxLength": 16, "description": "teal, amber, blue, violet, green, red, yellow, grey or white." },
                             "size": { "type": "integer", "minimum": 1, "maximum": 5, "description": "How important it is, drawn as large; by default 1." },
@@ -1957,7 +1957,7 @@ fn show_diagram_tool() -> Value {
                         "properties": {
                             "from": { "type": "string", "maxLength": 32 },
                             "to": { "type": "string", "maxLength": 32 },
-                            "label": { "type": "string", "maxLength": 256 },
+                            "label": { "type": "string", "maxLength": 256, "description": "At most 24 characters; <br> breaks it, as a node's." },
                             "style": { "type": "string", "enum": ["solid", "dashed", "dotted", "thick", "flow"], "description": "flow moves from its from to its to." },
                             "direction": { "type": "string", "enum": ["forward", "back", "both", "none"] },
                             "colour": { "type": "string", "maxLength": 16 },
@@ -1996,7 +1996,7 @@ fn show_diagram_tool() -> Value {
                         "required": ["id", "kind"],
                     },
                 },
-                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges, groups and world, a diagram block's body, as a Mermaid flowchart's: a[Box], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, @{ size: 3, colour: teal, detail: \"…\" }, and fire := object farmyard:campsite/bonfire [The bonfire] to bind fire to a thing in the space." },
+                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges, groups and world, a diagram block's body, as a Mermaid flowchart's: a[Box], a[Two<br>lines], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, @{ size: 3, colour: teal, detail: \"…\" }, and fire := object farmyard:campsite/bonfire [The bonfire] to bind fire to a thing in the space." },
             },
         },
         "annotations": {

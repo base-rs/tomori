@@ -731,3 +731,279 @@ fn a_node_s_default_grey_keeps_its_brightness_and_other_colours_are_the_palette_
     assert!(NODE_GREY[0] > Colour::Grey.rgb()[0]);
     assert_eq!(rgb(Colour::Teal), Colour::Teal.rgb());
 }
+
+#[test]
+fn a_label_s_lines_are_rows_wrapped_at_its_words_onto_at_most_three() {
+    let rows = |canvas: &Canvas| -> Vec<String> {
+        canvas
+            .plain()
+            .lines()
+            .map(|row| row.trim_end().to_owned())
+            .collect()
+    };
+    // Its lines as the agent broke them, as wide as the widest.
+    let broken = label("Hub\nunder one lock", None, BRIGHT, 0.85);
+    assert_eq!(rows(&broken), ["Hub", "under one lock"]);
+    assert_eq!(broken.columns, "under one lock".len());
+    // A long line wrapped at its words within the columns.
+    let long = label("Frame step and its projector", None, BRIGHT, 0.85);
+    assert_eq!(rows(&long), ["Frame step and its", "projector"]);
+    assert!(long.columns <= LABEL_COLUMNS);
+    // At most three rows, the last cut with "…" where more would follow.
+    let many = label(
+        "one two three four five six seven\neight nine ten eleven twelve",
+        None,
+        BRIGHT,
+        0.85,
+    );
+    let shown = rows(&many);
+    assert_eq!(shown.len(), LABEL_LINES);
+    assert_eq!(shown[2], "eight nine ten…");
+    // A card's detail below its rows.
+    let card = label("Hub\nlock", Some("What it does"), BRIGHT, 0.92);
+    assert_eq!(rows(&card), ["Hub", "lock", "What it does"]);
+    // Its first row stands where a label of one would, the rest growing upwards.
+    let mut drawn = diagram(&[("a", Shape::Box, [0, 0, 0])], Vec::new());
+    let model =
+        Mat4::from_translation(Vec3::new(0.0, 1.5, -1.0)) * Mat4::from_scale(Vec3::splat(0.001));
+    // Seen from within the volume's box, nothing moves it.
+    let viewer = Vec3::new(0.0, 1.5, -1.0);
+    let top = |drawn: &Diagram| {
+        let mut sheets = Vec::new();
+        Mesh::new(drawn).sheets(model, viewer, None, &mut sheets);
+        let sheet = &sheets[0];
+        let (_, height) = sheet.canvas.as_ref().unwrap().size();
+        sheet
+            .model
+            .unwrap()
+            .transform_point3(Vec3::Y * -height / 2.0)
+            .y
+    };
+    let one = top(&drawn);
+    drawn.nodes[0].label = "A\nB\nC".into();
+    assert!((top(&drawn) - one).abs() < 1e-5, "{} {one}", top(&drawn));
+}
+
+/// Thirty nodes in three ranks deep, each behind another, with groups, as a dense diagram stands.
+fn dense() -> Diagram {
+    let mut nodes = Vec::new();
+    for z in 0..3_i16 {
+        for y in 0..2_i16 {
+            for x in 0..5_i16 {
+                nodes.push((x, y, z));
+            }
+        }
+    }
+    let mut drawn = Diagram::default();
+    drawn.nodes = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, (x, y, z))| {
+            let mut node = Node::new(format!("n{index}"), format!("Node {index}\nrank {z}"));
+            node.at = [(x - 2) * 130, (y * 2 - 1) * 90, (1 - z) * 120];
+            node.shape = if index % 3 == 0 {
+                Shape::Sphere
+            } else {
+                Shape::Box
+            };
+            node
+        })
+        .collect();
+    drawn.edges = (0..20)
+        .map(|index| {
+            let mut edge = Edge::new(index, index + 10);
+            edge.label = format!("e{index}");
+            edge
+        })
+        .collect();
+    let mut group = Group::new("g", "A group");
+    group.low = [-330, -150, -200];
+    group.high = [330, 150, 200];
+    drawn.groups = vec![group];
+    drawn.extent = [780, 420, 440];
+    drawn
+}
+
+/// Whether anything of the volume `drawn` with `model`, a node's bounds, hides any of a label's corners or its middle
+/// from `viewer`.
+fn hidden(drawn: &Diagram, model: Mat4, viewer: Vec3, sheet: &Sheet) -> bool {
+    let (width, height) = sheet.canvas.as_ref().unwrap().size();
+    let placed = sheet.model.unwrap();
+    let (scale, ..) = model.to_scale_rotation_translation();
+    [
+        (0.0, 0.0),
+        (-0.5, -0.5),
+        (0.5, -0.5),
+        (-0.5, 0.5),
+        (0.5, 0.5),
+    ]
+    .into_iter()
+    .any(|(x, y)| {
+        let point = placed.transform_point3(Vec3::new(x * width, y * height, 0.0));
+        let far = point.distance(viewer);
+        let ray = Ray::new(viewer, point - viewer).unwrap();
+        drawn.nodes.iter().any(|node| {
+            let centre = model.transform_point3(Vec3::from_array(node.at.map(f32::from)));
+            // Every solid's corners are within three quarters of its width of its middle.
+            let radius = node.width() * 0.75 * scale.x;
+            let along = (centre - ray.origin).dot(ray.direction);
+            let off = (ray.origin + ray.direction * along).distance(centre);
+            off < radius && along - (radius * radius - off * off).sqrt() < far
+        })
+    })
+}
+
+#[test]
+fn every_label_is_in_front_of_the_volume_s_nodes_from_wherever_it_is_seen() {
+    let drawn = dense();
+    let mesh = Mesh::new(&drawn);
+    assert_eq!(mesh.labels(), 30 + EDGE_LABELS + 1);
+    let model = Mat4::from_translation(Vec3::new(0.0, 1.4, -1.3))
+        * Mat4::from_rotation_y(0.3)
+        * Mat4::from_scale(Vec3::splat(0.0011));
+    let unmoved = label_scale(model);
+    let mut hidden_where_they_were = 0;
+    for viewer in [
+        Vec3::new(0.0, 1.2, 0.0),
+        Vec3::new(1.1, 1.6, -0.6),
+        Vec3::new(-0.4, 2.2, -0.5),
+        Vec3::new(0.3, 1.4, -2.6),
+        Vec3::new(0.9, 0.9, -0.4),
+        Vec3::new(-0.2, 0.7, -0.9),
+    ] {
+        let mut sheets = Vec::new();
+        mesh.sheets(model, viewer, None, &mut sheets);
+        assert_eq!(sheets.len(), mesh.labels());
+        let mut last = f32::INFINITY;
+        for sheet in &sheets {
+            assert!(!hidden(&drawn, model, viewer, sheet), "from {viewer:?}");
+            // Seen as large as before, from where it was, the farthest drawn first.
+            let placed = sheet.model.unwrap();
+            let at = placed.transform_point3(Vec3::ZERO);
+            let label = mesh
+                .labels
+                .iter()
+                .find(|label| Arc::ptr_eq(&label.canvas, sheet.canvas.as_ref().unwrap()))
+                .unwrap();
+            let rows = label.canvas.rows.len() - 1;
+            let was = model.transform_point3(label.at)
+                + Vec3::Y * (rows * CELL_HEIGHT) as f32 * PIXEL / 2.0 * unmoved;
+            let share = placed.x_axis.truncate().length() / unmoved;
+            assert!(share <= 1.0 + 1e-5);
+            assert!(
+                ((at - viewer) - (was - viewer) * share).length() < 1e-4,
+                "{at:?} {was:?} {share}"
+            );
+            // Drawn farthest first by where they stood, so that a nearer node's label is drawn over a farther one's.
+            let distance = was.distance(viewer);
+            assert!(distance <= last + 1e-5);
+            // Never out of the volume's box, grown by its half diagonal, so that what stands in front of it hides it.
+            let (width, height) = label.canvas.size();
+            let reach = unmoved * width.hypot(height) / 2.0 / 0.0011;
+            let within = model.inverse().transform_point3(at).abs();
+            let half = Vec3::from_array(drawn.extent.map(f32::from)) / 2.0 + Vec3::splat(reach);
+            assert!(within.cmple(half + 1e-2).all(), "{within:?} {half:?}");
+            last = distance;
+            let mut where_it_was = sheet.clone();
+            where_it_was.model = Some(crate::recording::facing(
+                was,
+                Vec3::new(viewer.x, was.y, viewer.z),
+                unmoved,
+            ));
+            hidden_where_they_were += usize::from(hidden(&drawn, model, viewer, &where_it_was));
+        }
+    }
+    // Where they stood among the nodes, many were hidden.
+    assert!(hidden_where_they_were > 10, "{hidden_where_they_were}");
+    // A detail card is brought in front too.
+    let mut detailed = drawn.clone();
+    detailed.nodes[25].detail = "Behind two others".into();
+    let viewer = Vec3::new(0.0, 1.2, 0.0);
+    let card = Mesh::new(&detailed).card(25, model, viewer).unwrap();
+    assert!(!hidden(&drawn, model, viewer, &card));
+    assert!(card.model.unwrap().x_axis.truncate().length() < unmoved);
+    // The line from a viewer within the box enters it nowhere, nor one that misses it, nor one along a side beyond it.
+    let half = Vec3::ONE;
+    assert_eq!(entering(Vec3::ZERO, Vec3::X * 3.0, half), Some(0.0));
+    assert_eq!(
+        entering(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, 4.0), half),
+        None
+    );
+    assert_eq!(
+        entering(Vec3::new(-3.0, 2.0, 0.0), Vec3::new(3.0, 2.0, 0.0), half),
+        None
+    );
+    assert_eq!(
+        entering(Vec3::new(0.0, 0.0, 3.0), Vec3::new(0.0, 0.0, -1.0), half),
+        Some(0.5)
+    );
+}
+
+#[test]
+fn leaning_into_a_volume_its_labels_keep_their_distance_from_the_eyes_and_move_smoothly() {
+    let drawn = dense();
+    let mesh = Mesh::new(&drawn);
+    // Its box's front, grown by a label's half diagonal, is about a quarter of a metre in front of its middle.
+    let model =
+        Mat4::from_translation(Vec3::new(0.0, 1.4, -1.0)) * Mat4::from_scale(Vec3::splat(0.001));
+    let unmoved = label_scale(model);
+    let seen = |z: f32| {
+        let viewer = Vec3::new(0.05, 1.42, z);
+        let mut sheets = Vec::new();
+        mesh.sheets(model, viewer, None, &mut sheets);
+        let mut placed: Vec<(usize, Vec3, f32)> = sheets
+            .iter()
+            .map(|sheet| {
+                let index = mesh
+                    .labels
+                    .iter()
+                    .position(|label| Arc::ptr_eq(&label.canvas, sheet.canvas.as_ref().unwrap()))
+                    .unwrap();
+                let model = sheet.model.unwrap();
+                (
+                    index,
+                    model.transform_point3(Vec3::ZERO),
+                    model.x_axis.truncate().length(),
+                )
+            })
+            .collect();
+        placed.sort_by_key(|(index, ..)| *index);
+        (viewer, placed)
+    };
+    // From a metre away, through the box just outside and just inside it, to its middle.
+    let mut last: Option<Vec<(usize, Vec3, f32)>> = None;
+    let mut moved = 0;
+    for step in 0..=120 {
+        let (viewer, placed) = seen(0.2 - step as f32 * 0.01);
+        for (index, at, scale) in &placed {
+            let label = &mesh.labels[*index];
+            let rows = label.canvas.rows.len() - 1;
+            let was = model.transform_point3(label.at)
+                + Vec3::Y * (rows * CELL_HEIGHT) as f32 * PIXEL / 2.0 * unmoved;
+            // Never nearer the eyes than 0.4 m, unless it stood nearer, and seen where it stood.
+            let distance = at.distance(viewer);
+            assert!(
+                distance >= NEAREST.min(was.distance(viewer)) - 1e-4,
+                "{step}: {distance}"
+            );
+            assert!(((at - viewer) - (was - viewer) * (scale / unmoved)).length() < 1e-4);
+            moved += usize::from(*scale < unmoved - 1e-6);
+        }
+        // A centimetre's step of the head moves no label far, nor makes it jump as the head enters the box.
+        if let Some(last) = &last {
+            for ((_, before, _), (_, after, _)) in last.iter().zip(&placed) {
+                assert!(
+                    before.distance(*after) < 0.05,
+                    "{step}: {before:?} {after:?}"
+                );
+            }
+        }
+        last = Some(placed);
+    }
+    assert!(moved > 100, "{moved}");
+    // A label already in front of the box stays where it is.
+    let viewer = Vec3::new(0.0, 1.4, 1.0);
+    let canvas = &mesh.labels[0].canvas;
+    let ahead = crate::recording::facing(Vec3::new(0.0, 1.4, 0.2), viewer, unmoved);
+    assert_eq!(mesh.before(model, viewer, ahead, canvas), ahead);
+}
