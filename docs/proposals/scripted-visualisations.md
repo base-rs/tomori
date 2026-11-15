@@ -558,7 +558,7 @@ Each phase ends with something the maintainer uses in the headset, in Observe's 
 
 | Phase | What | Crates | Days |
 | --- | --- | --- | --- |
-| 2 | Faster turnaround (sections 9 and 10), once phase 1's interface has been used: the workbook language's spike (5 to 10 days) and, only if it feels good in the headset, its growth (about 30 days more, section 10), or another route | the core (a run-time `Visualisation`), a new host crate per route | 8 to 20 by route |
+| 2 | Faster turnaround (sections 9 and 10), once phase 1's interface has been used: the workbook language's spike (5 to 10 days) and, only if it feels good in the headset, its growth (45 to 60 days more, section 10), or another route | the core (a run-time `Visualisation`), a new host crate per route | 8 to 20 by route |
 | 3 | **Migrating the context model onto channels**: undeclared settings kept, instances, held windows, pin and freeze, resting, chips and messages on the wire, the agent's tools, all on the core's store, with every existing test passing unchanged | `tomori-visual-adapter`, `tomori-server`, `tomori-environment` | about 15 |
 | 4 | The web view: scene pages, SVG, the WebGL2 viewer, the feed, events from signed-in participants | `tomori-visual-svg`, `tomori-visual-web`, `tomori-server` (`pages`) | about 10 |
 | 5 | Reports: `create_report`, `update_report`, `export_report`, share links, CSP | `tomori-server`, `tomori-security` | about 8 |
@@ -592,7 +592,7 @@ Sizes are rough and to be measured. A first reading, not a decision: **dynamical
 
 The maintainer asked to consider a language made for this, rather than JavaScript, Lua, Python or Ruby, which bring a general-purpose language's baggage: a standard library to fence off, modules, ambient clocks and randomness, unbounded loops, and an object model the sandbox has to understand. What he wants is mostly declarative and "fourth-generation", SQL-like in spirit, organised as a **workbook** (as in MATLAB, Jupyter or Observable), where a set of data definitions (get this series, get another, join them, transform them) feeds **several visualisations**, run by a **simple interpreter written in Rust** whose priority is sandboxing, not speed. He considered WebAssembly as the target for scripts and found it slower in practice and more than this needs.
 
-This section records the language as the maintainer decided it in a long design conversation in November 2026, with the recommendations of a research note on prior art, *Prior art for a visualisation workbook language* (`vis-language-research.md`, November 2026, kept with the Observe prototype's notes; cited below as "the research note"). **The order does not change** (decision 14): the Rust interface and the hand-written faster-pods visualisation come first (phase 1); then a **language spike** of one to two weeks, a parser and interpreter for just the lead example's features, driving the same visualisation through the same interface; and the language grows only if it feels good in the headset.
+This section records the language as the maintainer decided it in a long design conversation in November 2026, with the recommendations of a research note on prior art, *Prior art for a visualisation workbook language* (`vis-language-research.md`, November 2026, kept with the Observe prototype's notes; cited below as "the research note"), and the maintainer's decisions on an independent review of this section. **The order does not change**, as the maintainer decided: the Rust interface and the hand-written faster-pods visualisation come first (phase 1); then a **language spike** of one to two weeks, a parser and interpreter for just the lead example's features, driving the same visualisation through the same interface; and the language grows only if it feels good in the headset.
 
 ### Why a language of its own fits here
 
@@ -621,7 +621,7 @@ From the research note, which reads each system's documentation:
 
 ### The lead example
 
-The maintainer's example, with imports added, `notes` an `input` since this workbook only reads it, and three adjustments to fit his other decisions, noted after it:
+The maintainer's example, revised after an independent review of this section and the maintainer's decisions on it (dotted columns, `==`, `own`, interpolated strings, `to_map`):
 
 ```
 import tomori.charts.{scatter3d, timeline, table, sparkline, callouts, highlight, rules}
@@ -629,19 +629,19 @@ import tomori.charts.{scatter3d, timeline, table, sparkline, callouts, highlight
 input  region: Region
 input  time as window: TimeRange
 input  notes: Map(Pod, Text)
-shared focus: Set(Pod)
-shared selected: Set(Pod)
+own    focus: Set(Pod)                 # one value per participant
+shared selected: Set(Pod)              # read and written: `each` reads it
 
 let rate = promql! { sum by (pod, deploy) (rate(admitted_total{region=$region}[5m])) }
 let lat  = promql! { histogram_quantile(0.5, sum by (pod, le) (rate(latency_bucket{region=$region}[5m]))) }
 let deps = sql!    { select at, sha from deploys where region = $region and at >= $window.start }
 
-let data = rate.over(window).join(lat.over(window), on = pod).latest
+let data = rate.over(window).join(lat.over(window), on = .pod).latest
 
-let hot       = data.where(rate > 2 * data.rate.mean).keys
-let hot_notes = hot.map(|p| (p, "2.3× its peers since the last deploy"))
+let hot       = data.where(.rate > 2 * data.mean(.rate))
+let hot_notes = hot.to_map(key = .pod, value = |r| "#{(r.rate / data.mean(.rate)).round(1)}× its peers' traffic")
 
-let scatter = data.scatter3d(x = lat, y = rate, colour = deploy, key = pod)
+let scatter = data.scatter3d(x = .lat, y = .rate, colour = .deploy, key = .pod)
   + hot_notes.callouts()
   + notes.callouts()
   + focus.highlight()
@@ -651,87 +651,107 @@ scatter.on(hover) do |p|
   focus = Set(p.pod)
 end
 
-let trend = rate.over(window).timeline(by = deploy)
-  + deps.rules(x = at, label = sha)
+let trend = rate.over(window).timeline(by = .deploy)
+  + deps.rules(x = .at, label = .sha)
 
-let slowest = data.sort(lat, descending = true).top(10).table(columns = [pod, deploy, lat, rate])
+let slowest = data.sort(.lat, descending = true).top(10).table(columns = [.pod, .deploy, .lat, .rate])
   + hot_notes.callouts()
   + focus.highlight()
 
-let each = selected.map(|p| data.where(pod = p).sparkline(lat))
+let each = selected.map(|p| data.where(.pod == p).sparkline(y = .lat))
 ```
 
-The adjustments: **`selected` is `shared`**, not `output`, because `each` reads it, and an `output` is never read by its own workbook (decision 1; the checker would flag it). **`focus = Set(p.pod)`**, not `{ p.pod }`, because braces are reserved for embedded blocks and types construct as functions (decisions 3 and 4). **The first query is bound as `rate`**, not `rates`, because a query block's value column takes its binding's name, so `x = lat, y = rate` refer to real columns.
-
-What it does: two PromQL queries and one SQL query, each parsed and bound to the `region` channel as AST nodes; a join on `pod`, a label both PromQL results are known to carry, checked before anything runs; four views (`scatter`, `trend`, `slowest`, and `each`, one small panel per selected pod), each a panel by default; annotations layered onto views as data (`hot_notes`, derived and recomputed; `notes`, set from outside, by the agent explaining or a participant); `focus` shared between the scatter and the table, so hovering a pod in the scatter highlights its row; and `selected` chosen in the scatter, opening a sparkline panel per pod.
+What it does: two PromQL queries and one SQL query, each parsed and bound to the `region` channel as AST nodes (the SQL block's `=` and the PromQL matcher's `=` are those languages' own syntax, untouched by the host's rules); a join on `.pod`, a label both PromQL results are known to carry, checked before anything runs; the pods carrying more than twice the mean traffic, with a note each saying by how much (`"2.3× its peers' traffic"`); four views, each a panel by default (`scatter`, `trend`, `slowest`, and `each`, one small panel per selected pod); annotations layered as data (`hot_notes` derived, `notes` set from outside); `focus` held **per participant**, so each person's hover highlights their own pod in the scatter and the table, never someone else's; and `selected` **shared**, chosen in the scatter by anyone, opening a sparkline panel per pod for everyone.
 
 ### The language
 
-**1. Interface: `input`, `output`, `shared`.** A workbook's whole interface with the world is channels (section 1); there is no other external mechanism, and constants or dashboard-style variables are simply channels that rarely change.
+**1. Interface: `input`, `output`, `shared`, `own`.** A workbook's whole interface with the world is channels (section 1); there is no other external mechanism, and constants or dashboard-style variables are simply channels that rarely change.
 
 - `input name: Type`: read-only; a dependency, so a change recomputes what depends on it.
-- `output name: Type`: written only by handlers, never read by this workbook; how a workbook offers a selection or focus to others.
-- `shared name: Type`: both read and written.
-- The binding's name defaults to the channel's; `input time as window: TimeRange` aliases it.
-- The checker flags a `shared` never written (it should be an `input`), an `output` never set, and an `input` never read.
-- Following the research note, an `Option` input removes what it parameterises: `input deploy: Option(Sha)` drops the matcher from the query when unset, the typed form of Evidence's optional predicate.
+- `output name: Type`: written only by handlers, **never read by this workbook's definitions** (its handlers may read it, below); how a workbook offers a selection or focus to others.
+- `shared name: Type`: read and written; one value for everyone in the space.
+- **`own name: Type`**: read and written; **one value per participant**, a person, the agent, a spectator or an automated observer, the same across all of that participant's panels. A hover focus is `own`; a selection made for the room is `shared`. A definition that depends on an `own` channel is evaluated per participant, so it is limited to cheap layers over values already computed (highlights, callouts, filters of a computed table), cached by the channel's value so participants with the same focus share it, and capped.
+- The binding's name defaults to the channel's; `input time as window: TimeRange` aliases it. A channel's name may be qualified with dots (`cursor.time`, `observe.region`); a binding's name is always simple, so a qualified channel needs `as` (`output cursor.time as cursor: Option(Instant)`).
+- The checker flags a `shared` or `own` never written (it should be an `input`), an `output` never set, and an `input` never read.
+- An `Option` input removes what it parameterises: `input deploy: Option(Sha)` drops the matcher from the query when unset, the typed form of Evidence's optional predicate (the research note).
+- **When several views write one output in a tick**, their writes fold in arrival order (below), so the last writer wins; or the declaration states a merge, `output selected: Set(Pod) resolve union` (or `intersect`), as Vega-Lite's `resolve` does for selections.
+
+*A note on the name `own`.* Candidates were `personal`, `private`, `isolated` and `own`. `own` was chosen for now: it is neutral, not human-centric (the agent and observers hold values too), and pairs with `shared`; `private` carries access-control baggage, `isolated` suggests that no other panel sees the value (all of a participant's panels do), and `personal` is human-centric. To be revisited after use.
 
 **2. `let` single definitions.** Immutable; in any order, the workbook being a DAG of names; a name defined twice is an error with both spans; a cycle is refused, naming it. Definitions never write channels; only handlers do. A top-level `view.on(event, …)` is a **handler declaration** attached to a view, not a mutation: the view's value does not change, and each view has at most one handler per event.
 
-**3. Types.** Strongly typed, with inference. Type names are capitalised. Generic types are applied like functions, with parentheses, never angle brackets: `Set(Pod)`, `Map(Pod, Text)`, `Series(Number)`, `Option(Region)`, `Table(key = Pod, lat: Duration, rate: Number)`. A type also constructs its values (`Set(p.pod)`). Types come from Tomori's built-ins (`Number`, `Text`, `Instant`, `Duration`, `TimeRange`, `Ratio`, `Colour`…), from environments (Observe declares `Region` and `Pod`), or from the workbook. Results from sources are **structural and lazily provided** (the research note's erased type providers): a PromQL block's type is a table whose columns are its known labels plus its value; a SQL block's comes from its select list and the source's schema. Columns a source cannot promise are `Option`. Units travel with numbers and label axes.
+**3. `=` and `==`.** `=` binds, and only binds: a `let` definition, a keyword argument (`on = .pod`), or a channel write in a handler (`focus = Set(p.pod)`). **`==` is equality, always** (`where(.pod == p)`), with `!=`, `<`, `<=`, `>`, `>=`. Embedded blocks keep their own languages' syntax.
 
-**4. Calls.** Method chaining is the pipeline: **`a.f(x)` means `f(a, x)`**, so library functions and methods are one thing and there are no classes; a call with no arguments may drop its parentheses (`.latest`, `.keys`). **Keyword arguments are OpenSCAD-style, `name = value`**, with defaults at the definition; an unknown keyword is an error with a suggestion. Closures are `|p| expr` for one-liners and `do |p| … end` for longer blocks. **Braces are reserved for embedded blocks.** There is no dynamic scope: ambient settings (theme, time zone) are inputs.
+**4. Columns are dotted; bare names are definitions.** A **dotted name** refers to a column: `.rate` is shorthand for the row function `|row| row.rate`, and an expression containing dotted names becomes a row function (`.rate > 2 * data.mean(.rate)` is `|row| row.rate > 2 * data.mean(.rate)`). Dotted names are allowed only where the parameter's type expects a row function (`where`, `sort`, encodings such as `x =` and `key =`, `columns = [...]`, `on = .pod`, `aggregate`); anywhere else they are a type error. **The nearest table wins**: inside `data.where(.rate > 2 * data.mean(.rate))`, the second `.rate` belongs to `mean`'s argument, `data`, not to the row `where` is testing. A **bare name** is always a definition or a channel, never a column. An explicit closure, `|r| r.pod`, is always allowed.
 
-**5. Embedded sources: `name! { … }`.** `name` is a registered **source** (section 5), which declares its language and dialect (PromQL; PostgreSQL, ClickHouse or SQLite SQL). `promql!` and `sql!` are shorthands for the space's default source of each language; `observe_prod! { … }` names one explicitly.
+**5. Types.** Strongly typed, with inference. Type names are capitalised. Generic types are applied like functions, with parentheses and keyword arguments, never angle brackets: `Set(Pod)`, `Map(Pod, Text)`, `Series(Number)`, `Option(Region)`, and one notation for tables, **`Table(key = Pod, lat = Duration, rate = Number)`**. A row function returning `T` has type `Column(T)`. Tables have **width subtyping**: a table with extra columns is accepted wherever fewer are required, so a module asking for `Table(key = Pod, load = Ratio)` accepts any table keyed by `Pod` with a `load: Ratio` column. A type constructs its values (`Set(p.pod)`, `Option(c.key)` for a present value, `None` for an absent one). Enumerations' values are written `Type.value` (`DependencyKind.normal`). Types come from Tomori's built-ins (`Number`, `Text`, `Bool`, `Instant`, `Duration`, `TimeRange`, `Ratio`, `Bytes`, `Colour`…), from environments (Observe declares `Region`, `Pod`, `Workload`), or from the workbook. Results from sources are **structural and lazily provided** (the research note's erased type providers): a PromQL block's type is a table whose columns are its known labels plus its value, named after its binding (`rate`, `lat`); a SQL block's comes from its select list and the source's schema. Columns a source cannot promise are `Option`. **Units** are types from Tomori's built-ins, inferred from the source's metadata where it has them (Prometheus's metadata and the `_seconds`, `_bytes`, `_ratio` naming conventions, so a quantile over `_seconds` buckets is a `Duration`; SQL column types), carried through arithmetic, converted where compatible and refused where not, and used to label axes and format text; `.cast(.load, Ratio)` asserts one where inference cannot, checked when values arrive.
+
+**6. Calls and expressions.** Method chaining is the pipeline: **`a.f(x)` means `f(a, x)`**, so library functions and methods are one thing and there are no classes; a call with no arguments may drop its parentheses (`.latest`, `.keys`). **Keyword arguments are OpenSCAD-style, `name = value`**, with defaults at the definition; an unknown keyword is an error with a suggestion. Closures are `|p| expr` for one-liners and `do |p| … end` for longer blocks. **Braces are reserved for embedded blocks.** The rest, briefly: comments run from `#` to the end of the line; `if c then a else b` is an expression; tuples are `(a, b)` and lists `[a, b]`; `and`, `or` and `!` are logical (`!` is not, and is distinct from a tag's `name!`, which needs a name immediately followed by `!` and a brace, `name! {` or `name!{`); arithmetic is `+ - * /`, with `+` also layering views. There is no dynamic scope: ambient settings (theme, time zone) are inputs.
+
+**7. Strings.** Text is written `"…"` and interpolated Ruby-style, **`"#{expr}"`**. A value formats itself through its type and unit (`"#{lat}"` reads `212 ms`, `"#{share}"` reads `37 %`), with methods for the rest (`"#{x.round(1)}"`); there is no format mini-language. **Interpolated text is for display only**: escaped wherever a panel draws it, and refused as input to any source. Queries take values only through `$` parameters bound as values (item 8), so no string a workbook builds can reach a query.
+
+**8. Embedded sources: `name! { … }`.** `name` is a registered **source** (section 5), which declares its language and dialect (PromQL; PostgreSQL, ClickHouse or SQLite SQL). `promql!` and `sql!` are shorthands for the space's default source of each language; `observe_prod! { … }` names one explicitly.
 
 - **Finding the end.** Each source supplies a small, total, versioned **lexical skimmer** that knows only its language's strings, quoted identifiers, comments and dollar quotes, and counts braces outside them; it finds the matching `}` even when the content is wrong. The same skimmer runs on the server, in the WebAssembly build and in editors, so exactly one function decides where a block ends (the research note's point about smuggling bugs when components disagree). If the skimmer fails (an unterminated string), the block ends at the first line holding only `}` at the block's indentation, the error is reported inside the block, and the rest of the workbook still loads. A **raw delimiter**, `name! r#{ … }#` with any number of `#`, covers anything else; the formatter switches to it when needed.
 - **Parsing.** The exact span is parsed by the language's own parser: PromQL by [`promql-parser`](https://github.com/GreptimeTeam/promql-parser) (Apache-2.0, 0.11.1, declared compatible with Prometheus 3.8, used by GreptimeDB and OpenObserve; its error positions and the gateway's dialect to be confirmed in the spike), SQL by `sqlparser` in the source's dialect.
 - **Binding, never interpolation.** `$name` and `$name.field` (an input or a `let` of a scalar, set or time type) are host tokens, recognised by the skimmer outside strings and comments and turned into typed placeholders before the dialect parser runs; `$<digit>`, `$$` and `$tag$` are refused at the start of a name, to keep clear of PostgreSQL's own forms. **Each source defines how each type binds in each position**, so the author never chooses a format: in PromQL a `Region` becomes a matcher's literal value, a `Set(Pod)` an `=~` of regex-escaped keys, an unset `Option` removes the matcher, and a `TimeRange` (through `.over(window)`) becomes the range and its step; in SQL every value is a bound parameter of a prepared statement, sent apart from the text. A value containing quotes, braces or keywords is just a value.
 - **Checks on the parsed tree.** PromQL: every selector names a metric, ranges and subqueries at most a day, offsets at most a week, no `@`, the printed query within 16 KiB, a cost estimate from the tree and metadata (`promql::guard`, moved from Observe's lexer). SQL: read-only (a single `SELECT` or `WITH … SELECT`), only the tables or views the source allow-lists, only allowed functions, a row limit and a statement timeout added.
 - **Validation against the source.** Metric and label names against Prometheus's metadata (labels, series and metadata APIs, read through the shared cached client, bounded and cached; `tomori-prometheus` adds these reads); SQL columns and types from the source's schema or by preparing the statement. Descriptions are cached by `hash(block, schema version)`, sqlx-style, so reloading a workbook checks it without querying, and an unreachable source leaves a block "unchecked" with a warning rather than failing it.
-- **Result labels known statically.** `sum by (pod, deploy)` answers with exactly those labels, so `join(…, on = pod)` and `colour = deploy` are checked before any query runs.
+- **Result labels known statically.** `sum by (pod, deploy)` answers with exactly those labels, so `join(…, on = .pod)` and `colour = .deploy` are checked before any query runs.
 
-**6. Imports for everything that renders.** The language core is data: sources, pipelines, joins, types. Every output comes from an **imported module** offered by Tomori or an environment: `import tomori.charts.{scatter3d, timeline, table}`, `import observe.plate`, `import … as name` for a collision, or a fully qualified name (`tomori.charts.scatter3d(…)`). An import brings free functions, callable as methods by the uniform call. Modules declare **typed signatures**, checked when the workbook loads: Observe's plate needs a table keyed by `Pod` with a load that is a `Ratio`. A module is the language-side face of the scene API (section 3) and of compiled Rust visualisations, which is also the escape hatch: anything the language cannot express becomes a module function written in Rust.
+**9. Imports for everything that renders.** The language core is data: sources, pipelines, joins, types. Every output comes from an **imported module** offered by Tomori or an environment: `import tomori.charts.{scatter3d, timeline, table}`, `import observe.plate`, `import … as name` for a collision, or a fully qualified name (`tomori.charts.scatter3d(…)`). An import brings free functions, callable as methods by the uniform call. Modules declare **typed signatures**, checked when the workbook loads: Observe's plate needs a table keyed by `Pod` with a load that is a `Ratio`. A module is the language-side face of the scene API (section 3) and of compiled Rust visualisations, which is also the escape hatch: anything the language cannot express becomes a module function written in Rust.
 
-**7. Views are values; panels by default.** A view is a value like any other: it can be layered (`+`), passed to a function, inspected (`view.domain(x)`). **Each top-level view becomes a panel** by default; a switcher option instead shows alternatives in one panel, chosen by a chip. **The workbook panel** holds the code and can be tucked away; cables run from it to its view panels (section 6). **Each view panel's back** shows its own view definition, the names it uses, its data's age and its errors, with "show workbook" to bring the workbook panel forward.
+**10. Views are values; panels by default.** A view is a value like any other: it can be layered (`+`), passed to a function, inspected (`view.domain(x)`). **Each top-level view becomes a panel** by default; a switcher option instead shows alternatives in one panel, chosen by a chip. **The workbook panel** holds the code and can be tucked away; cables run from it to its view panels (section 6). **Each view panel's back** shows its own view definition, the names it uses, its data's age and its errors, with "show workbook" to bring the workbook panel forward.
 
-**8. Handlers.** Stored with their view, run **only on events**: `choose`, `hover`, `leave`, `activate`, `deactivate`, and grab, move and release (section 1). A handler is a **pure function of the event and the current channel values** that returns new channel values, as in Elm: `selected = selected.toggle(p.pod)` inside a handler is that return value, not an assignment. Handlers may read any channel's current value, outputs included, but read no source and define nothing. Their writes apply on the **next tick**, so a handler is never re-entered within one, and channel feedback between workbooks is one tick of delay, never a loop. Handlers are **never re-run when data changes**. A hover handler is evaluated on the hoverer's own client where its channel is per person (section 1).
+**11. Handlers.** Stored with their view, run **only on events**: `choose`, `hover`, `leave`, `activate`, `deactivate`, and grab, move and release (section 1). A handler is a **pure function of the event and the current channel values** that returns new channel values, as in Elm: `selected = selected.toggle(p.pod)` inside a handler is that return value, not an assignment. **Handlers may read any channel's current value**, outputs included, since they run at event time; **definitions may not read outputs**. Handlers read no source and define nothing. **Events within a tick are applied in arrival order, each handler seeing the result of the one before** (a fold), so two people toggling different pods in the same tick both count. The writes take effect for definitions on the **next tick**, so a handler is never re-entered within one and channel feedback between workbooks is one tick of delay, never a loop. Handlers are **never re-run when data changes**. In the first phases **handlers run on the server**; the instant feedback of a hover comes from Tomori's built-in client highlight of the hovered item (section 3), and the server's `own` focus follows within a tick. No interpreter runs on clients until phase L4.
 
-**9. Cardinality, explicit.** Four forms, each a function over views, never an implicit loop:
+**12. Cardinality, explicit.** Four forms, each a function over views, never an implicit loop:
 
-- **Merge**: one view, the item as an encoding (`colour = deploy`, `key = pod`).
+- **Merge**: one view, the item as an encoding (`colour = .deploy`, `key = .pod`).
 - **One panel per item**: `set.map(|p| view)`, as `each` above, with a **hard cap** (12 by default) and a stated overflow ("12 of 50 pods, by rate").
-- **Facets**: small multiples in one panel, `view.facet(by = region, scales = shared)`, `shared` by default since independent scales across small multiples mislead, `independent` when asked.
-- **Chooser**: `set.choose(default = first)`, a chip or dropdown on the panel that becomes an `input`; Observable's `viewof`.
+- **Facets**: small multiples in one panel, `view.facet(by = .region, scales = Scales.shared)`, `shared` by default since independent scales across small multiples mislead, `independent` when asked.
+- **Chooser**: `set.choose(default = set.first)`, a chip or dropdown on the panel that becomes an `input`; Observable's `viewof`.
 
-**10. Identity and annotations.** Every mark carries its data's key (`key = pod`), which is how hover, choice, focus and annotations find it, and how a pod in one view is the same pod in another. **Annotations are data**: key, time or range selectors plus content, drawn as layers (`view + notes.callouts() + focus.highlight() + deps.rules(x = at)`), and shared across every view showing those keys. **Derived annotations** are `let` definitions and recompute with the data (`hot_notes`); **externally set ones** arrive through channels, written by the agent explaining, a participant, or another workbook (`notes`). **Attention is channels**: `focus` and `notes`, which the agent can set while it talks.
+**13. Joins and aggregates.** A join states its key (`on = .pod`); where the type says a side is keyed, the checker knows whether the join is one-to-one, many-to-one or many-to-many. **An aggregate across a join that fans out** (summing a column of the "one" side after joining it to the "many" side, which counts it once per match) is **warned of** at check time, naming the join; Malloy's symmetric aggregates are the model if warnings prove not enough. **Sets and maps keep insertion order**, and every built-in is deterministic in order, so iteration, tables and scenes come out the same on every run.
 
-**11. Purity, CSE and caching.** Purity is defined by the language, not by convention: the same expression in the same context gives the same result. That allows **common-subexpression elimination** and **content-hash caching**: a definition's key is the hash of its normalised code (names normalised, so the same expression in two workbooks shares an entry), its input values, and its sources' data versions, with time windows aligned to the step (a sliding window reuses all but its newest step, a separate key covering the live edge). A definition that recomputes to an unchanged hash does not re-run its dependents (early cutoff, as in Salsa, rust-analyzer's incremental engine, which the research note suggests studying). Results are cached per call, as OpenSCAD caches module instances, and shared across workbooks and views. Deterministic failures (out of fuel or memory) are cached too; wall-clock timeouts never are. The language's cache sits above `tomori-prometheus`'s own, which already aligns ranges and asks only for missing steps.
+**14. Identity and annotations.** Every mark carries its data's key (`key = .pod`), which is how hover, choice, focus and annotations find it, and how a pod in one view is the same pod in another. **Annotations are data**: key, time or range selectors plus content, drawn as layers (`view + notes.callouts() + focus.highlight() + deps.rules(x = .at)`), and shared across every view showing those keys. **Derived annotations** are `let` definitions and recompute with the data (`hot_notes`); **externally set ones** arrive through channels, written by the agent explaining, a participant, or another workbook (`notes`). **Attention is channels**: `focus` and `notes`, which the agent can set while it talks.
 
-**12. Sandboxing.** The interpreter counts its own **fuel** (in operations, with built-ins charging per row) and **memory** (bytes in an interpreter-owned arena, source results charged as they enter), with the same limits on the server and in WebAssembly, so a budget is exceeded at the same step everywhere. Parse depth, string and collection sizes and call depth are bounded. There is no `while` and no recursion, so every workbook terminates; iterative algorithms (force layouts, clustering) are host built-ins with budgets of their own. A host deadline is only a backstop. Errors are fatal for the definition that raised them; its dependents show "upstream failed", and a source failure is a typed result shown on the panel. The interpreter follows Rhai's "don't panic" rule, with its parser and skimmers fuzzed.
+**15. Purity, CSE and caching.** Purity is defined by the language, not by convention: the same expression in the same context gives the same result. That allows **common-subexpression elimination** (`data.mean(.rate)` above is computed once) and **content-hash caching**. A definition's key is the hash of:
 
-**13. Sharing.** A workbook and its state are **shared in the space by default**: everyone sees the same views, focus and selection. A personal variant is a copy. Only fleeting channels (hover, the cursor) are per person.
+- its normalised code (names normalised, so the same expression in two workbooks can share an entry);
+- its input values;
+- **the identity of each source it reads and the space's grants**, so a result is shared only between workbooks that could read the same data, never across spaces with different grants;
+- each source's **data version**: for Prometheus, which has none, the query's evaluation time aligned to the step (a sliding window reuses all but its newest step, the live edge keyed apart); for SQL, a source-declared version (a change counter, `max(updated_at)`) or else a time-to-live;
+- and, for a cached failure, the fuel and memory limits it failed under.
+
+**Sources declare determinism**: a query that is not deterministic (PromQL or SQL using `now()` or `random()`, or SQL rows read without `order by`) is neither cached nor shared, and the checker says so on the block. A definition that recomputes to an unchanged hash does not re-run its dependents (early cutoff, as in Salsa, rust-analyzer's incremental engine, which the research note suggests studying). Results are cached per call, as OpenSCAD caches module instances. Deterministic failures (out of fuel or memory) are cached under their limits; wall-clock timeouts never are. The language's cache sits above `tomori-prometheus`'s own, which already aligns ranges and asks only for missing steps.
+
+**16. Sandboxing and termination.** The interpreter counts its own **fuel** (in operations, with built-ins charging per row) and **memory** (bytes in an interpreter-owned arena, source results charged as they enter), with the same limits on the server and in WebAssembly, so a budget is exceeded at the same step everywhere. Parse depth, string and collection sizes and call depth are bounded. There is no `while`, and **no recursion**: a closure cannot refer to itself (a `let` closure naming itself is a cycle, refused), and there is no self-application; **so every workbook terminates**. Iterative algorithms (force layouts, clustering, springs) are built-in or imported native functions with budgets of their own (`layout.force(…)`), never user loops. A host deadline is only a backstop. Errors are fatal for the definition that raised them; its dependents show "upstream failed", and a source failure is a typed result shown on the panel. The interpreter follows Rhai's "don't panic" rule, with its parser and skimmers fuzzed.
+
+**17. Sharing.** A workbook and its `shared` channels are **shared in the space by default**: everyone sees the same views and selection. A personal variant is a copy. Only `own` channels (hover focus, the cursor) and fleeting per-person values differ between participants.
+
+**18. Streams, later.** A live source could be typed as a stream (`Live(T)`), with a head the cache knows moves; for now a source's refresh recomputes its dependents within the caps.
 
 ### An Observe example: the plate
 
 Observe's region disc of control rods, offered as a module with a typed signature:
 
 ```
--- In Observe's module (Rust), declared to the language:
---   module observe.plate
---     fn plate(data: Table(key = Pod, load: Ratio), label: Option(Text) = None) -> View
---   types Region, Pod
+# In Observe's module (Rust), declared to the language:
+#   module observe.plate
+#     fn plate(data: Table(key = Pod, load = Ratio), label: Option(Column(Text)) = None) -> View
+#   types Region, Pod
 
 import observe.plate
 import tomori.charts.{highlight, callouts}
 
-input  region: Region
-input  notes: Map(Pod, Text)
-shared focus: Set(Pod)
+input region: Region
+input notes: Map(Pod, Text)
+own   focus: Set(Pod)
 
-let load = promql! { max by (pod) (scaling_pressure{region=$region}) }   -- value: Number
+let load = promql! { max by (pod) (scaling_pressure{region=$region}) }   # its value column, load, is a Number
 
-let rods = load.latest.as(load = Ratio).plate(label = pod)
+let rods = load.latest.cast(.load, Ratio).plate(label = .pod)
   + focus.highlight()
   + notes.callouts()
 
@@ -740,7 +760,7 @@ rods.on(hover) do |p|
 end
 ```
 
-The plate's signature is checked at load: a table keyed by `Pod` with a `load: Ratio` column. Without `.as(load = Ratio)` the error says so: `plate needs load: Ratio; load is Number here (add .as(load = Ratio))`. Because `focus` is shared and keyed by `Pod`, hovering a rod highlights the same pod in the lead example's scatter and table in the same space, and the reverse.
+The plate's signature is checked at load: a table keyed by `Pod` with a `load: Ratio` column (extra columns allowed). Without `.cast(.load, Ratio)` the error says so: `plate needs load: Ratio; load is Number here (add .cast(.load, Ratio))`. Because `focus` is an `own` channel keyed by `Pod`, a participant hovering a rod highlights the same pod in the lead example's scatter and table in their own view.
 
 ### Two more examples
 
@@ -749,46 +769,52 @@ The plate's signature is checked at load: a table keyed by `Pod` with a `load: R
 ```
 import tomori.charts.{lines, bars, rules}
 
-input time as window: TimeRange
-input trial: Workload
-input control: Workload
+input  time as window: TimeRange
+input  trial: Workload
+input  control: Workload
 output cursor.time as cursor: Option(Instant)
 
 let arms   = Set(trial, control)
 let intake = promql! { sum by (pod, workload) (rate(root_admissions_total{workload=~$arms}[2m])) }
 
 let spread = intake.over(window)
-  .group(by = [workload, t])
-  .aggregate(cv = stddev(intake) / mean(intake), pods = count())
+  .group(by = [.workload, .t])
+  .aggregate(cv = stddev(.intake) / mean(.intake), pods = count())
 
-let chart = spread.lines(x = t, y = cv, colour = workload, y_from = 0) + rules(y = 0.1, label = "target")
-chart.on(hover, |p| cursor = p.t)
+let chart = spread.lines(x = .t, y = .cv, colour = .workload, y_from = 0)
+  + rules(y = 0.1, label = "target")
+chart.on(hover, |p| cursor = Option(p.t))
 
-let now = spread.where(t = spread.t.last).bars(x = workload, y = cv, colour = workload)
+let now = spread.where(.t == spread.last(.t))
+  .bars(x = .workload, y = .cv, colour = .workload, label = |r| "#{r.cv.round(2)}")
 ```
+
+`$arms`, a `Set(Workload)`, binds as an `=~` of regex-escaped values; `cursor.time` is the per-participant cursor channel of section 1, so hovering the chart moves each person's own cursor on the other charts of the wall.
 
 **Tomori's crate graph from `cargo metadata`.**
 
 ```
 import tomori.charts.{graph}
+import tomori.layout
 
-input depth: Number
+input  depth: Number
 shared crate as focus: Option(Crate)
 
-let crates = cargo! { packages where workspace }
-let deps   = cargo! { dependencies where kind = normal }
+let crates = cargo! { packages }.where(.workspace)
+let deps   = cargo! { dependencies }.where(.kind == DependencyKind.normal)
 
 let role = |c| if c.name.starts_with("tomori-client") then "client"
                else if c.name.starts_with("tomori-environment") then "environment"
                else "module"
 
-let crate_graph = graph(nodes = crates, edges = deps, key = name, shape = role, colour = role, layout = force)
+let crate_graph = graph(nodes = crates, edges = deps, key = .crate, shape = role, colour = role,
+                        layout = layout.force())
   .neighbourhood(of = focus, depth = depth)
 
-crate_graph.on(choose, |c| focus = c.name)
+crate_graph.on(choose, |c| focus = Option(c.crate))
 ```
 
-Pulling a node is the client's springs (section 1, who owns a grab); choosing one writes `crate`, which any other panel following it sees.
+`role` is a row function, so it is accepted where `shape` and `colour` expect one; `focus` is an `Option(Crate)`, written with the chosen node's key; the force layout is a native function with its own step budget. Pulling a node is the client's springs (section 1, who owns a grab); choosing one writes `crate`, which any other panel following it sees.
 
 ### Implementation
 
@@ -796,7 +822,7 @@ Pulling a node is the client's springs (section 1, who owns a grab); choosing on
 - **Native built-ins do the work**: joins, aggregations, `rate`, windows, resampling, sorting, and every module function. A workbook spends almost all its time in Rust.
 - **Sources register their languages**: a skimmer, a parser, a checker that yields the result's type, a binder per type and position, and a cost estimate, behind one trait in the core. PromQL lives with `tomori-prometheus`; SQL with a SQL source; `cargo!` with `tomori-visual-kinds`. The language crate knows no query language.
 - **The same `Visualisation`.** A workbook's definitions run in one shared evaluator; **each top-level view is a `Visualisation`** whose `update` reads the evaluator's results, whose `draw` is the view's value, and whose `event` runs its handlers. Sources, channels, scheduling, scenes, backs and the agent's tools are those of the Rust prototypes, so nothing downstream knows whether a panel was compiled or written in a workbook.
-- **In the browser**, the same crate builds for `wasm32-unknown-unknown` for offline reports that embed a workbook with frozen source answers; in the live web view the browser still only draws scene descriptions.
+- **In the browser**, the same crate builds for `wasm32-unknown-unknown` (phase L4) for offline reports that embed a workbook with frozen source answers, and for running handlers on a viewer's own client where that proves worth it; until then handlers run on the server and the live web view only draws scene descriptions.
 
 ### Agent authoring
 
@@ -815,9 +841,10 @@ Pulling a node is the client's springs (section 1, who owns a grab); choosing on
 
 | Phase | What | Days |
 | --- | --- | --- |
-| L1, spike (after phase 1) | Just the lead example's features: `import`, `input`/`shared`, `let` with any order and single definition, `promql!` with the skimmer, `promql-parser` and `$region` bound as a matcher, `.over`, `.join`, `.latest`, `scatter3d` with keyword encodings, `on(hover)` writing `focus`; fuel and memory counted. Drives the faster-pods visualisation through the same interface. **Judged by:** its scene equals the hand-written kind's golden scene from the same fixture, and it feels good in the headset when the agent writes and edits it | 5 to 10 |
-| L2, only if L1 feels good | The rest of this section: types and modules with signatures, `sql!` and `cargo!`, annotations, cardinality, the workbook panel, caching with early cutoff, the tools, the metadata reads | about 30 |
-| L3, L4 | Workbooks as reports; the interpreter in WebAssembly for offline reports | about 9 |
+| L1, spike (after phase 1) | Just the lead example's features: `import`, `input`/`own`/`shared`, `let` with any order and single definition, dotted columns and `==`, `promql!` with the skimmer, `promql-parser` and `$region` bound as a matcher, `.over`, `.join`, `.where`, `.latest`, `scatter3d` with keyword encodings, `on(hover)` writing `focus` on the server; **basic type checking** (tables' columns from PromQL label sets, row functions, keyword arguments, channel kinds), the riskiest part; fuel and memory counted. Drives the faster-pods visualisation through the same interface. **Judged by:** its scene equals the hand-written kind's golden scene from the same fixture, type errors point at the right span, and it feels good in the headset when the agent writes and edits it | 5 to 10 |
+| L2, only if L1 feels good | The rest of this section: the full type system with units, width subtyping and modules' signatures; `sql!` and `cargo!` with their skimmers and binders; strings; annotations; cardinality; merge rules and join warnings; the workbook panel; caching with early cutoff and determinism; the tools; the metadata reads | 45 to 60 |
+| L3 | Workbooks as reports | about 5 |
+| L4 | The interpreter in WebAssembly: offline reports, and handlers on viewers' clients if wanted | about 5 |
 
 ### Open questions
 
