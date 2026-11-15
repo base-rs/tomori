@@ -37,15 +37,15 @@ This proposal is organised around that order.
 
 ## Recommendation in brief
 
-- **A visualisation is a Rust value implementing one trait, `Visualisation`**, in a new core crate with no Tomori dependency, proposed as `base-visualisation`, with Tomori as one host through an adapter crate (section 2). It declares the sources it reads and the parameters it takes; `update` reads sources and changes its own state, returning **when it wants to run next**; `draw` builds a scene from that state, purely; `event` receives pointing, grabbing, releasing and choosing, and returns the same. Tomori runs it on the server, diffs successive scenes and sends only what changed.
-- **Kinds are registered; instances are made by the agent.** Tomori and environments register visualisation kinds (`observe:faster-pods`, `tomori:crates`), each with a typed parameter list like an environment action's. In phase 1 the agent's interface is `show_visualisation { kind, id, params, place }`: it chooses and parameterises compiled code. Later, a script or a loaded module is just another implementation of the same trait.
-- **Inputs that are also outputs are channels**: named, typed, observable values in the space (`time`, `region`, `selection`, `hovered_pod`). A kind declares the channels it subscribes to and publishes; values are scoped space, wall and panel, with inheritance, which **is** today's context model, generalised rather than duplicated: a context parameter becomes a shared channel, a chip shows a channel's binding at a scope, and the linked time cursor becomes a built-in participant-local channel. Changes settle once per tick in dependency order, in one direction, with cycles refused and fast channels kept on the client. The wiring is listed to the agent and drawn as cables on panels' backs.
-- **Sources are a registry of named, typed, read-only capabilities.** The server's builder and environments register them (`prometheus:observe`, which is Observe's shared cached client; `cargo:workspace`); a visualisation reaches them by name and type through its context; every answer carries its **provenance**.
-- **Outputs are a scene description** (instanced points, bars, lines and tubes, meshes, labels, axes, legends, groups, and a graph primitive that is #534's interactive diagram), plus **declared behaviours** (springs, drag, easing, hover) that clients run natively at frame rate. Clients never run visualisation code; the headset, the spectator and the browser all draw the same description.
-- **Every panel gets a back**, flipped by a chip, by turning it over in the hand, or by the agent, showing its source, query, window, refresh, provenance and errors, and its jacks; cables show which panels feed which.
-- **The web renders the same description** (SVG for 2D, WebGL2 for 3D); **reports** compose narrative and frozen or live visualisations at a signed-in URL, with share links and a static export.
-- **Crates of their own.** The trait, channels, source traits and the scene description are a core crate with no Tomori dependency, proposed as `base-visualisation` (a future `base-rs/visualisation` repository), beside a viewer runtime and separate renderers; Tomori is one host, through an adapter crate that maps channels onto the context model and scenes onto panels. CI checks that the core never depends on Tomori, and that kinds depend only on the core and sources.
-- **Phase 1, in Observe's space:** (a) the back of a panel for Observe's charts, about 5 days; (b1) the core, the runtime, the Tomori adapter and the scene panel, about 13 days, and (b2) channels, with the context model and the linked cursor moved onto them, about 8 days; (c) two compiled visualisations written only against the core and sources: Observe's faster-pods 3D scatter, following the shared `time` and publishing `hovered_pod` to light that pod's rod on Observe's region disc, about 4 days, and Tomori's crate graph with grab-and-pull springs reusing #534, about 3 days on top of #534's phases (a) and (b). Faster turnaround, the web, reports and hand wiring come later; the choice between dynamic Rust, an interpreter and WebAssembly is deferred until the interface has been used.
+- **A visualisation is a Rust value implementing one trait, `Visualisation`**, in a core crate with no Tomori dependency, `tomori-visual-core` (section 2). It declares the sources it reads, the channels it follows and sets, and the parameters it takes; `update` reads sources and changes its own state, returning **when it wants to run next**; `draw` builds a scene from that state, purely; `event` receives pointing, grabbing, moving, releasing and choosing. Tomori runs it on the server, diffs successive scenes and sends only what changed.
+- **Kinds are registered; instances are made by the agent.** Tomori and environments register visualisation kinds (`observe:faster-pods`, `tomori:crates`), each with typed parameters like an environment action's. In phase 1 the agent's interface is `show_visualisation { kind, id, params, place }`: it chooses and parameterises compiled code. Later, a script or a loaded module is just another implementation of the same trait.
+- **Sources are a registry of named, typed, read-only capabilities** (`prometheus:observe`, Observe's shared cached client; `cargo:workspace`), reached by name and type through the visualisation's context; every answer carries its **provenance**.
+- **Inputs that are also outputs are channels**: named, typed, observable values (`time`, `region`, `cursor.time`, `hovered_pod`), shared or held per person, scoped to a panel, a wall or the space, kept or expiring, settled once per tick in dependency order with cycles refused, and evaluated on the viewer's own client first where they are fast. The linked time cursor (#379) is the worked example. In phase 1 the context model's `time` and parameters reach visualisations through an **adapter bridge**; moving the context model itself onto channels is a later phase of its own.
+- **Outputs are a scene description** of the core's own types (instanced points, bars, lines and tubes, meshes, labels, axes, legends, groups, a graph, colours by role, an opaque extension hook) plus **declared behaviours** that clients run at frame rate. Clients never run visualisation code; the headset, the spectator and later the browser draw the same description.
+- **Crates of their own, extraction-ready.** `tomori-visual-core`, `tomori-visual-runtime` and `tomori-visual-adapter` start in Tomori's workspace under its naming and shared-version rules; CI checks that the core and runtime depend on no other Tomori crate, so the core can later move to its own `base-rs` repository under a `base-*` name. `tomori-protocol` keeps its own scene wire format, converted in the adapter.
+- **Every panel gets a back**, flipped by a chip, by turning it over in the hand, or by the agent, showing its source, query, window, refresh, provenance, errors and channels; cables show which panels feed which.
+- **Web and reports later**: the same description as SVG or WebGL2, and reports at a signed-in URL with share links and a static export.
+- **Phase 1, each step usable in the headset, about 60 days in all:** (a) the back of a panel for Observe's charts, about 7 days; (b) the core, the adapter, the scene panel and the faster-pods scatter following `time` through the bridge, about 27 days; (c) channels proper, with the linked cursor and `hovered_pod` lighting a pod's rod on Observe's region disc, about 14 days; (d) Tomori's crate graph with grab-and-pull, about 12 days including #534's prerequisite phases. The choice between dynamic Rust, an interpreter and WebAssembly is deferred until the interface has been used.
 
 ## What exists today
 
@@ -64,7 +64,7 @@ The last row matters: an environment's server side is already "compiled code, ev
 
 ### The trait
 
-In the core crate, `base-visualisation` (section 2), which depends on nothing of Tomori:
+In the core crate, `tomori-visual-core` (section 2), which depends on nothing of Tomori:
 
 ```rust
 /// A panel's worth of code: it reads sources, keeps its own state, draws a scene from it and reacts to people.
@@ -100,7 +100,7 @@ pub struct Next { pub redraw: bool, pub then: Then }
 pub enum Then {
     Idle,                    // only when something changes or someone presses refresh
     At(SystemTime),          // once, at a time: the next minute, the end of a window
-    Every(Duration),         // a cadence, at least a second
+    Every(Duration),         // a cadence, at least 5 seconds
     WhileViewed(Duration),   // a cadence while someone can read the panel, otherwise idle (#509's `on view`)
 }
 ```
@@ -143,6 +143,15 @@ Every source answer is a `Sourced<T>`, the value with its provenance; the contex
 
 `Event` is `{ kind, item, group, hand, participant, at }`, where `kind` is `Point` (words begun while pointing, which also tells the agent the item's `detail`), `Trigger`, `Grab`, `Move` (the held item moving, at most 10 a second), `Release { inside }`, `Both` (two hands each holding an item) or `Choose` (A on a choosable item, as a list's row is chosen). Visitors' events never reach a visualisation. Without an `event` implementation the defaults are Tomori's: the trigger gives a private focus, as on a diagram; the grip carries the whole panel.
 
+**Who owns a grab.** A grab has two owners at two speeds, and neither guesses:
+
+- **The client owns the motion.** Where the scene declares a behaviour on an item, `drag` or the springs of a `graph`, the holder's client runs it at frame rate: the item follows the hand, the springs settle around it, with no round trip. An item with no such behaviour does not move.
+- **The visualisation owns the meaning.** It receives `Grab` when the hold begins, `Move` at most 10 times a second while it lasts (the item's position, not every frame), and `Release` with where it ended and whether inside its box. On release it may accept the position, move the item elsewhere, pin it, or change anything else in its state and draw again; its next scene is the truth, and the client eases to it.
+- **Without a handler**, the client's behaviour alone applies and nothing reaches the visualisation; without a behaviour or handler, the grip carries the whole panel, as today.
+- **First grab wins, per item.** Holding is an intent with an epoch, as #534 and physics already define: the server grants the first that arrives; a second participant's client sees the item in the first one's hand and lets go of its own. Different people may hold different items.
+- **Shared motion.** While an item is held, other participants see it where the holder's presence says, interpolated; for a graph, the server runs #534's solver for the shared layout and streams positions as live data, as #534's phase (c) proposes.
+
+
 Events run on the server, so a reaction arrives about a tenth of a second later. That suits "show this pod's trace"; anything that must follow the hand at frame rate is a declared behaviour (section 3) or a per-participant channel evaluated on the client (below).
 
 ### Channels: inputs that are also outputs
@@ -152,13 +161,13 @@ A **channel** is a named, typed, observable value in a space. Visualisations, en
 **Declaring.** A channel is declared by whoever owns its meaning, with a key typed at compile time:
 
 ```rust
-pub const TIME: ChannelKey<TimeBinding> = ChannelKey::tomori("time");            // Follows, Live { minutes }, Window { from_ms, to_ms }
-pub const CURSOR_TIME: ChannelKey<Option<Instant>> = ChannelKey::tomori("cursor.time");  // per participant, expiring
-pub const SELECTION: ChannelKey<Keys> = ChannelKey::tomori("selection");
+pub const TIME: ChannelKey<TimeBinding> = ChannelKey::builtin("time");            // Follows, Live { minutes }, Window { from_ms, to_ms }
+pub const CURSOR_TIME: ChannelKey<Option<Instant>> = ChannelKey::builtin("cursor.time");  // per participant, expiring
+pub const SELECTION: ChannelKey<Keys> = ChannelKey::builtin("selection");
 
 // In Observe's common crate:
-pub const REGION: ChannelKey<Text> = ChannelKey::environment("region");            // with its choices, as a context parameter today
-pub const HOVERED_POD: ChannelKey<Keys> = ChannelKey::environment("hovered_pod"); // per participant, expiring
+pub const REGION: ChannelKey<Text> = ChannelKey::namespaced("observe", "region");  // bridged to its context parameter in phase 1
+pub const HOVERED_POD: ChannelKey<Keys> = ChannelKey::namespaced("observe", "hovered_pod"); // per participant, expiring
 ```
 
 | Property | Choices | Notes |
@@ -177,24 +186,26 @@ These are properties of one mechanism, not two systems: a long-lived shared sett
 Today's linked time cursor (#379, `projection.md`) is the model the maintainer agreed for every channel. Expressed as a channel:
 
 ```rust
-pub const CURSOR_TIME: ChannelKey<Option<Instant>> = ChannelKey::tomori("cursor.time")
+pub const CURSOR_TIME: ChannelKey<Option<Instant>> = ChannelKey::builtin("cursor.time")
     .per_participant()                // a value for each person
-    .scoped(Scope::Wall)              // an Observe terminal's three charts share one; another wall has its own
+    .scopes([Scope::Group, Scope::Space]) // the publisher's axis picks: a live chart its wall (a group), a fixed window the space
     .expiring(Duration::from_secs(1)) // cleared if its publisher stops: pointer lost, headset asleep, connection gone
     .relayed(Rate::per_second(10));   // what others need goes through the server, at most 10 a second
 
-pub const TIME: ChannelKey<TimeBinding> = ChannelKey::tomori("time")
+pub const TIME: ChannelKey<TimeBinding> = ChannelKey::builtin("time")
     .shared()                         // one value for everyone
     .scoped(Scope::Inherited)         // panel, else wall, else space: today's context settings
     .kept()                           // kept with the space; never expires
     .relayed(Rate::per_second(2));    // a chip pressed or the agent's set_channel, coalesced
 ```
 
-**Publishing.** The chart pointed at publishes `Some(t)` as the ray moves along its plot, the instant under the ray, and `None` as the ray leaves it. Publishing is a value at the publisher's scope: the wall the chart stands on.
+The core names the levels of a host's scope tree `Panel`, `Group` and `Space`, never walls; Tomori's adapter maps a wall to a `Group`.
+
+**Publishing.** The chart pointed at publishes `Some(t)` as the ray moves along its plot, the instant under the ray, and `None` as the ray leaves it. Publishing is a value at the publisher's scope, which its time axis decides, as #379 does: a **live** chart publishes at its **wall** (an Observe terminal's three charts share one value, another wall has its own); a **fixed-window** chart publishes at the **space**, since an absolute instant means the same wherever the chart stands; a subscriber listens at the scope its own axis implies, so live and fixed never meet. The maintainer's "scoped to a wall" is the live case, the common one.
 
 **Notification.** Every panel on that wall subscribing to `cursor.time` is told each transition, `None → Some(t)`, `Some(t) → Some(t′)` and `Some(t) → None`, once per frame at most, after the frame's writes have settled. Its response is its own: a chart draws its readout at `t` (its line down the plot there, a dot on each series and their values, fainter than the pointed chart's own) or hides it; a chart whose window does not reach `t` within half a point draws nothing; a scene with a time axis draws a plane at `t`.
 
-**Per person.** The channel holds one value for each participant on the wall. Each subscriber chooses what it shows: **the viewer's own** (`Show::Mine`, a chart's default, which is today's behaviour) or **everyone's** (`Show::Everyone`), each participant's readout in their own colour with their name, the viewer's strongest, for a presenter walking a room through an incident.
+**Per person.** The channel holds one value for each participant at each scope. Each subscriber chooses what it shows: **the viewer's own** (`Show::Mine`, a chart's default, which is today's behaviour) or **everyone's** (`Show::Everyone`), each participant's readout in their own colour with their name, the viewer's strongest, for a presenter walking a room through an incident.
 
 **Local first.** The viewer's own cursor never waits for the server: it is published and settled on their own client every frame, so their readouts move with their hand. Only when some subscriber in the scope shows everyone's does the client relay its value, with presence, which already reaches the server up to 20 times a second, at most 10 times a second and only when it changed; the server passes it to the clients of participants who can see that wall. A relayed value for a live window is carried as how long before the server's receipt it points, so that two devices' clocks never misplace it.
 
@@ -218,15 +229,21 @@ pub const TIME: ChannelKey<TimeBinding> = ChannelKey::tomori("time")
 
 Nothing a participant sees changes; what changes is that new subscribers (a scene's time plane, an environment's own 3D timeline) and new choices (everyone's cursors) come at the cost of a declaration.
 
-**Scopes and inheritance, unified with the context model.** A shared channel has a value at up to three scopes: the **space** (what its declarer publishes; an environment's selection today), each **wall** and each **panel**. A panel's effective value is its own setting, else its wall's, else the space's, exactly the inheritance `panel-context.md` requires of parameters. A setting at a scope is one of: **follows** (inherit), **fixed** (a value), or, new, **linked** (follow a named channel that another panel publishes, `Setting::Linked { panel, channel }`), which is how one chart's brushed window drives another without a shared name. Chips draw a panel's or wall's binding of each channel it subscribes to, as they draw parameters today; instances (a copy shown with a different fixed value) and pinning by pulling off a wall work unchanged, since they are defined on settings.
+**Scopes and inheritance: bridged in phase 1, unified later.** A shared channel has a value at up to three scopes: the **space**, each **wall** and each **panel**, a panel's effective value being its own setting, else its wall's, else the space's. That is exactly the inheritance `panel-context.md` requires of context parameters and time, but `panel-context.md` requires much more besides: settings of parameters a side no longer declares are kept; instances under `~` ids, at most 8 an environment; held windows, accepting only content declared for a fixed window; pinning by pulling a panel off its wall; freezing a copy of a chart; resting panels coming back with their settings; and the chips and messages on the wire. Moving all of that onto a new store is a project, not a step.
+
+So phase 1 uses an **adapter bridge**. The core asks its host for a channel's value through a trait (`ChannelHost`); for a channel backed by the context model, Tomori's adapter answers from the existing model:
+
+- **`time`** reads the panel's effective time binding as `panel-context.md` resolves it today (its own setting, else its wall's, else following), so a visualisation on a wall fixed to an incident's window reads that window, a pinned copy keeps its own, and a frozen one keeps what it showed. A visualisation that publishes `time` (a brush) writes a panel setting through the same path `set_context` uses, refused where the model refuses it.
+- **An environment's parameters** (Observe's `region`) read the panel's binding of that parameter, or the side's selection where it follows; a visualisation subscribes to them by declaring it depends on them, which the adapter turns into `Panel::depends_on`.
+- **Changes** reach the visualisation as `Wake::Channels`, from the moments the server already tells a side `Intent::context()`.
+- **Chips, instances, pinning, freezing and the agent's `contexts` and `set_context`** keep working unchanged, because nothing under them changed.
+
+New channels with no counterpart in the context model (`cursor.time`, `hovered_pod`, `selection`, `crate`) live in the core's own channel store from phase 1(c). **Migrating the context model itself onto the store** is a later phase of its own, with its existing tests as the proof, estimated at about 15 days (section 8). Until then the two meet only in the adapter.
 
 A per-participant channel has no inheritance: its scope is where its publisher stands, a wall, the space, or the panel alone, and its subscribers at that scope hear it, as the worked example shows.
 
-**Migration of what exists.** No wire change is needed at first; the server's model changes underneath:
+**What stays and what moves, later.** When the migration phase comes: `Space::set_context` declares shared `Text` channels; `Panel::depends_on` subscribes; `Intent::context()` is the change notification; chips show bindings; `contexts` and `set_context` become views of `channels` and `set_channel`. The linked time cursor moves onto `cursor.time` in phase 1(c) already, since it is client-side, per participant and has no persistence to migrate; `hovered_series` is its twin, a per-participant, expiring `Option<Keys>`: a chart's readout publishes the series pointed at, and charts subscribing brighten it and dim the rest.
 
-- **Context parameters become shared channels.** `Space::set_context(Vec<ContextParameter>)` declares shared `Text` channels at space scope, with the side's selection as their space value; `Panel::depends_on` subscribes a published panel to them; `Intent::context()` is the notification of a change in a panel's effective values; `ContextChip` and `ContextSetting` show a channel's binding; `contexts` and `set_context` stay as the agent's names for `channels` and `set_channel` limited to these. `time` is the built-in `TimeBinding` channel. The bounds (3 parameters and time, 16 choices, 8 instances) stay until the model has been used.
-- **The linked time cursor becomes `cursor.time`**, as the worked example above maps, rule for rule.
-- **Highlighting a series across charts**, the maintainer's example, is then `hovered_series`, a per-participant, wall-scoped, expiring `Option<Keys>` channel, the cursor's twin: a chart's readout publishes the series pointed at by its key, and every chart subscribing brightens that series and dims the rest.
 
 **Propagation, avoiding KVO's pitfalls.**
 
@@ -254,7 +271,7 @@ The declared graph is the wiring: each subscription and publication is a **jack*
 
 ### Update control
 
-The visualisation decides when it runs: `Next::then` is its own schedule, so a chart of a 30-second-scrape metric asks for `Every(30 s)`, a clock asks `At(next minute)`, a crate graph asks `Every(10 s)` and reads again only when `Cargo.lock`'s digest changed, and a fixed window asks `Idle` once read. Tomori bounds it rather than overrides it: a panel's refresh policy, where #509 is accepted and someone has set one, caps the cadence (`manual` turns `Every` into `Idle`), the live-panel budget counts any visualisation woken more often than once a minute, and the server never wakes one more than once a second.
+The visualisation decides when it runs: `Next::then` is its own schedule, so a chart of a 30-second-scrape metric asks for `Every(30 s)`, a clock asks `At(next minute)`, a crate graph asks `Every(10 s)` and reads again only when `Cargo.lock`'s digest changed, and a fixed window asks `Idle` once read. Tomori bounds it rather than overrides it: a panel's refresh policy, where #509 is accepted and someone has set one, caps the cadence (`manual` turns `Every` into `Idle`), the live-panel budget counts any visualisation woken more often than once a minute, and the server never wakes one more often than every 5 seconds, nor one reading Prometheus more often than its cache's bucket (15 s), since a faster cadence would only re-read cached answers. Anything faster than that is a behaviour or a per-participant channel on the client, not an update.
 
 ### Lifecycle
 
@@ -277,40 +294,42 @@ A trait is the "any code" the maintainer asked for, at compile time: a visualisa
 
 The interface is useful beyond a headset: a dashboard, a report generator, a desktop tool or another project's server could run the same visualisations against the same sources. So, at the maintainer's request, it lives in crates of its own with a well-defined interface, and Tomori is one host of it.
 
+### Naming and placement
+
+`design/crates.md` requires every workspace crate to be named `tomori-*`, live under `crates/` without the prefix, and share the workspace's one version; `base-*` crates (`base-http`, `base-http-server`, `base-scheduler`) live in their own `base-rs` repositories. So the crates **start in Tomori's workspace as `tomori-visual-*`**, under those rules, while the interface is found, with the core kept **extraction-ready**; once it stabilises (after phase 2 has used it from run-time code), it **moves to its own repository, `base-rs/visual`, as `base-visual`**, with its own semantic versions, which Tomori then pins. Being extraction-ready means: no dependency on any other Tomori crate, no Tomori names in its API, its own tests and documentation, and nothing in it that only Tomori could host.
+
 ### The layout
 
-| Crate | What it holds | Depends on | Built by |
+| Crate (folder) | What it holds | Depends on | Built by |
 | --- | --- | --- | --- |
-| **`base-visualisation`** (the core) | The `Visualisation` trait, `Kind`, `Context`, `Wake`, `Next`, `Event`, `Problem`; channels: `ChannelKey<T>`, the value types, holding, scopes, lifetimes, rates, and the **channel store** with its settle (topological order, echo suppression, cycle refusal, expiry); the `Source` trait, `Sourced<T>`, provenance and the registry; the **scene description** (primitives, palettes and materials, groups and transforms, declared behaviours, items' keys, channel bindings), its builder, scales and diffing; and a test harness running a visualisation against fake sources with golden scenes | `serde`, `serde_json`, `glam`; nothing of Tomori, no `wgpu`, no protocol, no async runtime | Servers and clients (it holds no credentials) |
-| **`base-visualisation-runtime`** | What a viewer runs: applying a scene's diffs, easing, the declared behaviours (springs, drag, hover, orbit), picking items with a ray, and per-participant channels settled locally each frame with expiry and relay hooks; no GPU, it yields instances, lines and labels for a renderer to draw | The core; #534's spring solver (below) | Clients, the web viewer (as WebAssembly) |
-| Renderers | Draw what the runtime yields | The runtime and a graphics stack | Each its own |
-| **`tomori-visualisation`** (the adapter, server side) | Tomori as a host: scopes ↔ walls and panels; channels ↔ the context model (parameters, `time`, chips, `Intent::context()`, `contexts` and `set_context`); scenes ↔ panels (`Panel::scene`, live-data diffs, limits); events from pointing and grab intents; registering kinds and sources from `ServerBuilder` and environments; the agent's tools' logic | The core; `tomori-protocol`, `tomori-environment` | `tomori-server` |
-| Tomori's client side of the adapter | In `tomori-scene` (`projection::scene`): a scene panel's runtime, drawn through `tomori-render`'s solids, tubes and the glyph atlas; local channels (`cursor.time`) and relaying them with presence | The runtime | Headset, desktop, spectator |
-| **Sources** | `tomori-prometheus` implements `Source` behind a `visualisation` feature (it is a leaf crate with no Tomori dependency, so the core's rule holds); `cargo metadata` and files in `tomori-visualisation-kinds` for now | The core, and their own clients | Servers only (the existing rule that no client builds `tomori-prometheus`) |
-| **Kinds** | Tomori's built-in visualisations (`tomori:crates`) in `tomori-visualisation-kinds`; Observe's (`observe:faster-pods`) in a module of Observe's server crate | The core and the sources they read, **never Tomori's internals** | Servers |
+| **`tomori-visual-core`** (`crates/visual-core`) | The `Visualisation` trait, `Kind`, `Context`, `Wake`, `Next`, `Event`, `Problem`; channels: `ChannelKey<T>`, value types, holding, scopes, lifetimes, rates, the `ChannelHost` trait a host implements, and the channel store with its settle (topological order, echo suppression, cycle refusal, expiry); the `Source` trait, `Sourced<T>`, provenance and the registry; the **scene description** in its own types: primitives, `Graph`, `Shape`, `Colour` by role, materials, groups and transforms, declared behaviours, items' keys, channel bindings, the opaque `Extension`; its builder, scales and diffing; a test harness with fake sources and golden scenes | `serde`, `serde_json`, `glam`; **no `tomori-*` crate**, no `wgpu`, no protocol, no async runtime | Servers and clients (it holds no credentials) |
+| **`tomori-visual-runtime`** (`crates/visual-runtime`) | What a viewer runs: applying a scene's diffs, easing, `drag`, `hover` and `orbit`, picking items with a ray, level of detail, per-participant channels settled locally each frame with expiry and relay hooks; no GPU: it yields instances, lines and labels for a renderer | `tomori-visual-core` only | Clients; later the web viewer as WebAssembly |
+| **`tomori-visual-adapter`** (`crates/visual-adapter`) | Tomori as a host: the scope tree (panel → wall → space); the context bridge (`time` and parameters ↔ the context model); scenes ↔ panels, and **converting the core's scene description into `tomori-protocol`'s scene wire types** and back: `Graph` into a volume's `Diagram`, `Colour` roles into the chart palette, `Extension` keys into face drawers (#306); events from pointing and grab intents; registering kinds and sources from `ServerBuilder` and environments; the tools' logic. Its server half is behind a `server` feature; clients build the conversion only | The core and runtime; `tomori-protocol`, `tomori-environment` | `tomori-server` (with `server`), `tomori-scene` |
+| **`tomori-visual-kinds`** (`crates/visual-kinds`) | Tomori's built-in visualisations (`tomori:crates`) and the `cargo metadata` source | The core only | Servers |
+| Observe's kinds | `observe:faster-pods`, a module of Observe's server crate | The core and `tomori-prometheus`'s source, never Tomori's internals | Observe's server |
+| Sources | `tomori-prometheus` implements the core's `Source` behind a `visual` feature; it is already a leaf with no Tomori dependency | The core and its own client | Servers only (the existing rule that no client builds `tomori-prometheus`) |
+| Renderers | Phase 1 draws through Tomori's own `tomori-scene` and `tomori-render` (solids, tubes, the glyph atlas), via the adapter's conversion, so nothing is drawn twice. Later, as each is needed: `tomori-visual-svg` (2D to SVG, pure Rust, for web pages and reports), `tomori-visual-web` (the runtime in WebAssembly with a WebGL2 or WebGPU drawing), and a standalone `tomori-visual-wgpu` for other hosts, extracted from `tomori-render`'s solids only when someone outside Tomori needs it | The runtime and a graphics stack | Each its own |
 
-**Renderers, in order.** Phase 1 draws scenes through Tomori's own pipelines, via `tomori-scene` and `tomori-render`, so nothing is drawn twice. Later, as each is needed: `base-visualisation-svg` (2D scenes and charts to SVG, pure Rust, for the web pages, reports and static export); `base-visualisation-web` (the runtime built to WebAssembly with a WebGL2 or WebGPU drawing of its output, served as the web viewer); and `base-visualisation-wgpu`, a standalone renderer for hosts other than Tomori, extracted from `tomori-render`'s instanced solids when someone outside Tomori needs it, not before.
+**The wire format is Tomori's, not the core's.** `tomori-protocol` gets its own `scene` module, owned and versioned with the protocol as every other panel kind is, and **does not depend on the core**. The adapter converts between the two, so a change to the core's description changes the adapter, not the protocol, and the protocol changes only when what crosses the wire changes. The cost is one conversion each way, which is small beside meshing.
 
-**The springs.** #534's phase (c) proposes a shared `tomori-diagram` crate for the spring solver, depending on nothing beyond `glam`. It has no Tomori dependency either, so the runtime's `springs` behaviour should be that solver, not a second one: either the runtime depends on it, or the solver moves into the runtime and `tomori-diagram` keeps the layouts. To be agreed with #534.
+**The graph and the springs.** The core's `Graph` is its own type; the adapter turns it into `tomori_protocol::diagram::Diagram`, so Tomori draws it with #534's encoding and spring solver, and the core never sees either. #534's phase (c) proposes moving the solver into a shared `tomori-diagram` crate; if that crate depends on nothing of Tomori beyond `glam`, a generic `springs` behaviour in the runtime could later reuse it, which the dependency rule below would then have to allow by name. Until then the runtime has no spring solver, and springs come only through `Graph` in Tomori.
 
-**How the core reaches a host.** The core never names walls or panels. A host gives it a tree of scopes (each scope's parent: panel → wall → space in Tomori, and whatever a dashboard has elsewhere), the participants who may hold per-participant values, a clock, and a place to send scene diffs; the core's channel store resolves inheritance over that tree, and its `Context` hands a visualisation its sources and channels. The adapter is where Tomori's names meet the core's.
+**How the core reaches a host.** The core never names walls, panels or participants' handles. A host supplies a scope tree (each scope's parent), participants as opaque ids, a clock, a `ChannelHost` for channels it backs itself, and a sink for scene diffs and problems. The adapter is where Tomori's names meet the core's.
 
-### Rules
+### Rules, checked in CI
 
-- **The core and the runtime depend on no `tomori-*` crate.** `bake/tests/dependencies.rs` checks it in CI, as it already checks that no client builds `tomori-prometheus`, and checks that kinds depend only on the core and sources.
-- **Sources are server-only**; the core and runtime are allowed on clients, since they hold no credentials.
-- **Kinds see only the core.** A kind written against `base-visualisation` and a source can be lifted into another host unchanged; that is the test of the interface.
-- **`tomori-protocol` carries the core's scene description** as `Panel::scene`, with the description's own format number, so a client can tell a description it cannot read from one it can; the protocol depends on the core, never the reverse.
+- **`tomori-visual-core` and `tomori-visual-runtime` depend on no `tomori-*` crate other than each other** (the runtime on the core). `bake/tests/dependencies.rs` checks it on the resolved dependency graph, beside its existing rule that no client builds `tomori-prometheus`, and checks that `tomori-visual-kinds` depends only on the core. With the graph, colour and extension types above, nothing in the core or runtime needs a Tomori crate, so the rule passes from the first commit.
+- **Kinds see only the core and sources**: Observe's faster-pods module and `tomori-visual-kinds` import no Tomori internals, so a kind can be lifted into another host unchanged; that is the test of the interface.
+- **`tomori-protocol` never depends on the core**; the adapter converts.
+- **Sources stay server-only**; the core and runtime are allowed on clients, since they hold no credentials.
 
-### Name, home and versioning
+### Versioning
 
-- **Name:** `base-visualisation`, following the `base-rs` organisation's `base-*` crates (`base-http-server`, `base-http-client`), with `-runtime`, `-svg`, `-web` and `-wgpu` beside it. It is named so from the start, so that moving it changes no imports.
-- **Home:** under `crates/visualisation*` in Tomori's workspace while the interface is being found, released with the workspace's one version (`0.x`, breaking changes accepted); then, once phase 2's turnaround work has used it from run-time code and it has stopped changing every week, its own repository, `base-rs/visualisation`, with its own semantic versions, which Tomori pins.
-- **The scene description's format** is versioned apart from the crate: a number bumped on any change to what a viewer must understand, so that a headset, a browser and a server of different releases can tell whether they agree.
+In the workspace, the crates share Tomori's one version and release (`0.x`, breaking changes accepted), as `design/crates.md` requires. The protocol's scene format changes with the protocol, under its own compatibility rules (non-exhaustive types, `Hello::scenes`, older peers sent the summary). On extraction, `base-visual` gets its own versions and changelog, and `tomori-visual-adapter` pins it.
 
 ## 3. The scene and interaction API
 
-A scene is a tree of items in the panel's own unit box, x, y and z each from −0.5 to 0.5, scaled to the panel as a volume is (`diagrams.md`). A scene of zero depth is **flat**, drawn on the face as a chart is; any other is **deep**, standing in front of its plate as a volume does. The description and its builder are Rust in the core, `base-visualisation`; `tomori-protocol` carries the description as `Panel::scene`.
+A scene is a tree of items in the panel's own unit box, x, y and z each from −0.5 to 0.5, scaled to the panel as a volume is (`diagrams.md`). A scene of zero depth is **flat**, drawn on the face as a chart is; any other is **deep**, standing in front of its plate as a volume does. The description and its builder are Rust in the core, `tomori-visual-core`; `tomori-protocol` carries the description as `Panel::scene`.
 
 ### Primitives
 
@@ -323,15 +342,28 @@ A scene is a tree of items in the panel's own unit box, x, y and z each from −
 | `scene.label(text, at)` with size, anchor, billboard | The shared glyph atlas | Text, always drawn as text |
 | `scene.axes(x, y, z)`, `scene.grid(…)` | Rules, ticks and labels from scales | Any plot |
 | `scene.legend(…)` | On the face below the title, as #534's | What colour and shape mean |
-| `scene.graph(id, diagram)` | **#534's interactive diagram**: a `tomori_protocol::diagram::Diagram` with kinds and groups, drawn by the volume code with its visual encoding and springs | Dependency graphs, topologies |
-| `scene.extension(key, payload, fallback)` | An environment's face drawer (#306), else the fallback items | Shading or density a scene cannot draw |
+| `scene.graph(id, graph)` | The core's own `Graph`: nodes (key, label, `Shape`, colour by role, size, group, detail), edges (from, to, label, direction, weight) and groups, with a layout hint. In Tomori, the adapter converts it to a volume's diagram, so #534's encoding and springs draw it | Dependency graphs, topologies |
+| `scene.extension(key, payload, fallback)` | An opaque, keyed escape hatch: the core carries a key and bytes it never reads, with fallback items; **its meaning lives in the host**. Tomori's adapter maps a key to an environment's face drawer (#306); any other host draws the fallback | Shading or density a scene cannot draw |
 | `scene.group(id, transform, …)` | A node of the tree | Moving, focusing or hiding items together |
 
 Scales (`linear`, `log`, `time`, `band`) and helpers (`extent`, `bin`, `group_by`, `quantile`) live beside the builder, so a visualisation's code reads like a D3 chart's.
 
 ### Colour and materials
 
-Colours come from palettes, never free RGB, so every scene stays legible and colour-blind safe: categorical (the eight Okabe–Ito-based `Colour::SERIES`, then shapes and dashes beyond eight), sequential and diverging ramps tested under simulated colour blindness, and named tones (`good`, `warn`, `bad`, `muted`). Colour-blind mode (#516) swaps them per participant. Two materials: **solid**, lit from above and opaque, as diagram solids; **glow**, unlit, for highlights. No translucency, for the reasons #530 and #534 give.
+The core has its own colour type, by **role**, never by RGB or by any host's palette names, so every scene stays legible and colour-blind safe on any host:
+
+```rust
+#[non_exhaustive]
+pub enum Colour {
+    Category(u8),                 // the nth of a categorical set: the host draws its own distinct, colour-blind-safe colours, then shapes or dashes past its count
+    Sequential(f32),              // 0..1 along a perceptually even ramp
+    Diverging(f32),               // -1..1 about a neutral middle
+    Tone(Tone),                   // Good, Warn, Bad, Muted, Neutral, Accent
+}
+```
+
+A host maps roles to colours. Tomori's adapter maps `Category` to the eight Okabe–Ito-based series colours (`Colour::SERIES` in `tomori-protocol`), the ramps to tested ramps, and tones to its own; colour-blind mode (#516) swaps them per participant without the visualisation knowing. Two materials: **solid**, lit and opaque, as diagram solids; **glow**, unlit, for highlights. No translucency, for the reasons #530 and #534 give.
+
 
 ### Animation
 
@@ -341,7 +373,7 @@ An item whose id persists between scenes eases to its new position, size and col
 
 A behaviour is a named, parameterised piece of Tomori's own client code acting on items the scene names:
 
-- `springs { nodes, edges, rest, stiffness, repulsion, damping, home }`: #534's spring layout and fan, the same solver. A `scene.graph` gets it by default.
+- `springs { nodes, edges, rest, stiffness, repulsion, damping, home }`: a spring layout. In phase 1 it is offered only through `scene.graph`, which Tomori's adapter draws with #534's solver; a generic springs behaviour in `tomori-visual-runtime` waits until that solver can live in a crate with no other Tomori dependency (section 2).
 - `drag { items, along: free | plane | axis, snap, bounds }`: an item follows the hand within a constraint; `Release` tells the visualisation where it ended.
 - `hover { items, grow, label }`: what the ray's touch does, privately.
 - `publish_on_hover(channel)` and `emphasise_when(channel)`: the declarative ends of participant channels (section 1).
@@ -363,7 +395,7 @@ The ray meets an item within its solid's bounds, or a line within 1.5 cm or half
 ### Snapshots and extensions
 
 - **Snapshots.** Freezing a scene panel (its time chip, a pinned copy, or the agent) keeps its scene description and its data with the panel and drops the instance: a window onto frozen geometry that every client and the web draw with no code running, as a frozen chart is (`panel-context.md`). A true portal, the geometry seen through the panel's rectangle with parallax, needs a render to texture per eye and waits on the measurements that parked #529.
-- **Extensions.** `scene.extension` places an environment's face drawer (#306, tier 1 or tier 3) inside a scene where that environment's client crate is present, with the visualisation's own fallback items elsewhere.
+- **Extensions.** `scene.extension` is opaque to the core; Tomori's adapter turns a key it knows into an environment's face drawer (#306, tier 1 or tier 3) where that environment's client crate is present, and every other client or host draws the fallback items.
 
 ## 4. Where visualisations run
 
@@ -465,70 +497,76 @@ This changes `security.md`'s rule that the web pages are "plain HTML ... without
 
 ## 8. Phasing
 
-Each phase is tried in Observe's space on a Quest 3 before the next starts. Estimates are for one agent working with the maintainer's review, tests included.
+Each phase ends with something the maintainer uses in the headset, in Observe's space on a Quest 3, and is judged there before the next starts. Estimates are for one agent working with the maintainer's review, tests and headset tuning included, and are meant to be realistic rather than hopeful: about 60 days for phase 1.
 
-### Phase 1 (a): the back of a panel, for Observe's charts (about 5 days, and 1 in Observe)
+| Phase | What | Days |
+| --- | --- | --- |
+| 1(a) | The back of a panel, for Observe's charts | about 7 |
+| 1(b) | The core, the adapter, the scene panel, and the faster-pods scatter following `time` through the bridge | about 27 |
+| 1(c) | Channels proper: `cursor.time`, `hovered_series` and `hovered_pod`, jacks and cables on backs | about 14 |
+| 1(d) | Tomori's crate graph with grab and pull, including #534's prerequisite phases | about 12 |
+
+### Phase 1(a): the back of a panel, for Observe's charts (about 7 days)
 
 - **`tomori-environment`:** `Back` (rows, links, actions) and `Panel::with_back`.
 - **`tomori-protocol`:** `Panel::back`, `Hello::backs`, `ClientMessage::FlipPanel`.
-- **`tomori-server`:** keeping and bounding backs (30 rows, as a list's); an automatic back for every panel (identity, origin, age, version); `flip_panel`; `panels` and `inspect` listing backs.
-- **`tomori-scene`:** the back's canvas from rows, the ⟲ chip, the flip animation (private by default), the reverse face of a floating panel, the wrist roll while carrying; read-only jacks for the context parameters and time a panel depends on, with their bindings, ahead of channels.
-- **Observe** (`environment-observe-server`, `environment-observe`): its agent charts publish a back with the source's name, each series' label and full PromQL, window and step, refresh cadence, when last read and how long it took, series kept of how many, whether partial; actions Refresh, Freeze and Clear.
-- **Judged by:** can the maintainer, on the bridge, flip a chart and know what it queries and how fresh it is without asking.
+- **`tomori-server`** (about 2 days): keeping and bounding backs (30 rows, as a list's); an automatic back for every panel (identity, origin, age, version, and its context bindings read-only); `flip_panel`; `panels` and `inspect` listing backs.
+- **`tomori-scene`** (about 3 days): the back's canvas from rows; the ⟲ chip; the flip animation; the reverse face of a floating panel; the wrist roll while carrying; whether a flip is private or shared, per the maintainer's decision (question 7).
+- **Observe** (`environment-observe-server`, `environment-observe`; about 1 day): its agent charts publish a back with the source's name, each series' label and full PromQL, window and step, refresh cadence, when last read and how long it took, series kept of how many, whether partial; actions Refresh, Freeze and Clear.
+- **Judged by:** on the bridge, the maintainer flips one of a terminal's charts and knows what it queries, over what window and how fresh it is, without asking; flipping back is as easy; the walls stay readable.
 
-### Phase 1 (b1): the core, the adapter and the scene panel (about 13 days)
+### Phase 1(b): the core, the adapter, the scene panel and the faster-pods scatter (about 27 days)
 
-- **`base-visualisation`**, new, under `crates/visualisation` (about 5 days): `Visualisation`, `Kind`, `Context`, `Wake`, `Next`, `Event`, `Problem`; the `Source` trait, `Sourced`, provenance and the registry with grants; the scene description, its builder with scales and palettes, and diffing; the scope tree a host supplies; the test harness with fake sources and golden scenes. No `tomori-*` dependency.
-- **`base-visualisation-runtime`**, new (about 2 days): applying diffs, easing, picking, level of detail, yielding instances, lines and labels.
-- **`bake`** (half a day): the dependency rules above in `bake/tests/dependencies.rs`.
-- **`tomori-visualisation`**, the adapter, new (about 3 days): kinds and sources registered from `ServerBuilder::visualisation` and `::source` and from environments; the visualisation thread pool and scheduler honouring `Next`; scenes ↔ panels, diffs as live data; events from intents; instances, saved state and last scenes kept across restarts; the tools' logic (`visualisations`, `show_visualisation`, `update_visualisation`, `visualisation_logs`, `clear_visualisation`); pointing notes from `detail`; backs from `Visualisation::back`.
-- **`tomori-protocol`** (about 1 day): `Panel::scene` carrying the core's description with its format number, `Hello::scenes`, `Limits::scenes` and `Limits::items`; older peers sent the summary.
-- **`tomori-server`** and **`tomori-environment`** (half a day): wiring the adapter into the hub and stage, the MCP tools, `Environment::with_visualisation` and `with_source`.
-- **`tomori-prometheus`** (half a day): `Source` behind the `visualisation` feature, and `promql::guard`, moved from Observe.
-- **`tomori-scene`** (about 1 day): `projection::scene`, a scene panel's runtime drawn through the volume's solids, tubes and labels, with trigger focus and grab and release sent as intents. `tomori-render`: no new pipeline expected.
+- **`tomori-visual-core`** (about 6 days): the trait and its types, sources and provenance, the scene description in the core's own types (`Graph`, `Shape`, `Colour` by role, `Extension`), the builder with scales, diffing, the `ChannelHost` trait (only host-backed channels in this phase), the test harness.
+- **`tomori-visual-runtime`** (about 3 days): applying diffs, easing within its budget, `hover`, picking, level of detail.
+- **`bake`** (half a day): the dependency rules in `bake/tests/dependencies.rs`.
+- **`tomori-protocol`** (about 2 days): its own `scene` module, `Panel::scene`, `Hello::scenes`, `Limits::scenes` and `Limits::items`; older peers sent the summary.
+- **`tomori-visual-adapter`** (about 5 days): kinds and sources registered from `ServerBuilder` and environments; the evaluation pool and scheduler honouring `Next` within the caps (section 11); scenes ↔ panels, converted to the protocol's types, diffs as live data; **the context bridge for `time` and parameters**; instances, saved state and last scenes across restarts; events from intents; the tools (`visualisations`, `show_visualisation`, `update_visualisation`, `visualisation_logs`, `clear_visualisation`); pointing notes from `detail`; backs from `Visualisation::back`.
+- **`tomori-server`**, **`tomori-environment`** (about 1 day): wiring the adapter into the hub and stage, the MCP tools, `Environment::with_visualisation` and `with_source`.
+- **`tomori-prometheus`** (about 1 day): `Source` behind the `visual` feature, and `promql::guard`, moved from Observe with its tests.
+- **`tomori-scene`** and **`tomori-render`** (about 5 days): the scene panel: a runtime per panel drawn through the instanced solids, tubes and glyph atlas, axes and ticks, the legend, flat scenes on the face and deep ones in front of the plate, slot and floating sizes, trigger focus, grab and release sent as intents, the frame budget shared with volumes; lavapipe renders.
+- **`observe:faster-pods`** in Observe (about 3 days): as below, with a fixture source and golden scenes.
+- **Headset measurement and tuning** (about half a day): the checklist in section 11.
+- **Judged by:** the agent shows the faster-pods scatter from a sentence; the maintainer reads "faster pods get more traffic" from it at a glance, turns it round, points at a pod and hears its figures, grabs one to see its trajectory; setting the wall's time chip to the last 6 hours changes the scatter and the charts beside it together; frame time stays within budget.
 
-### Phase 1 (b2): channels (about 8 days)
-
-- **`base-visualisation`** (about 2 days): `ChannelKey<T>`, the value types with `Option`, holding, scopes, lifetimes and rates; the channel store's settle in topological order, echo suppression, the 8-tick guard, cycle refusal, expiry; `Wake::Channels`.
-- **`base-visualisation-runtime`** (about 1 day): per-participant channels settled locally each frame, expiry, `Show::Mine` and `Show::Everyone`, relay hooks; `publish_on_hover` and `emphasise_when`.
-- **`tomori-visualisation`** (about 2 days): **the context model moved onto channels**, with no change to what clients or sides see, the existing tests of `panel-context.md` passing unchanged as the proof; `Setting::Linked`; `channels` and `set_channel`, with `contexts` and `set_context` kept.
-- **`tomori-protocol`** and **`tomori-server`** (about 1 day): relaying per-participant values with presence, at their declared rates, to those who can see the scope; `Setting::Linked` on the wire.
-- **`tomori-environment`** (half a day): a side declares channels (`Space::declare_channel`, of which `set_context` becomes a form); its client side reads and sets per-participant channels (`ClientContext::channel`, `publish`).
-- **`tomori-scene`** (about 1.5 days): **the linked time cursor moved onto `cursor.time`**, the existing tests of `projection.md` passing unchanged; `hovered_series` from a chart's readout; the back's jacks from channels, and cables to the wall's strip and to linked panels.
-- **Judged by:** nothing visible changes for existing panels; a scene joins the cursor and the hover with a line of declaration each; and a third host could use the channel store without Tomori (a unit test drives it with a scope tree of its own).
-
-### Phase 1 (c): two compiled visualisations (about 4 and 3 days)
-
-**`observe:faster-pods`**, a module of Observe's server crate (`environment-observe-server`, its pure parts in `environment-observe`) that imports only `base-visualisation` and `tomori-prometheus`'s source, registered through `Environment::with_visualisation`:
+**`observe:faster-pods`**, a module of Observe's server crate (`environment-observe-server`, its pure parts in `environment-observe`) that imports only `tomori-visual-core` and `tomori-prometheus`'s source, registered through `Environment::with_visualisation`:
 
 - **Sources:** `prometheus:observe`. **Parameters:** `top` (pods, 300 by default).
-- **Subscribes:** `time` (shared), inherited from the wall it stands on, so that when the wall is set to the last 6 hours, or a window around an incident, the scatter and every chart beside it change together; `region` (shared, Observe's existing parameter), following the bridge's open region; and `hovered_pod` (participant), to emphasise a pod hovered anywhere.
-- **Publishes:** `hovered_pod` (participant), by `publish_on_hover` on its points keyed by pod; and `selection` (shared, `Keys`) of the pods grabbed, so another panel can follow what is held.
-- **Update:** on `Wake::Channels` for `time` or `region`, and on its schedule: two `range_all` reads at a step chosen from the window (p95 request queuing by pod and revision, and requests a second by pod and revision), joined on pod and time; `Every(1 min)` while viewed and the window is live, else idle; a fixed window read once.
-- **Draw:** about 3,600 points, requests a second across, p95 up on a log scale, time in depth, coloured by deployment revision; axes, a legend of revisions, and a regression line per revision so the claim "faster pods get more traffic" is drawn, not only seen; a plane at `cursor.time` when someone points at a time on a chart on its wall.
-- **Events:** pointing tells the agent the pod's figures; the trigger focuses one revision; **grab** a point draws that pod's trajectory through the window, lifts its label and adds it to `selection`; **both** hands on two pods draw both trajectories; release clears.
-- **Observe's client side** (about 1 day of the 4) subscribes to `hovered_pod`: hovering a point in the scatter lights **that pod's rod on the region disc** (Observe's "plate" of every instance) at frame rate, on the hoverer's own client only; and it publishes `hovered_pod` when its own rods are pointed at, so pointing at a rod brightens the pod's points in the scatter. Neither knows the other exists; both know only the channel.
-- **Fixture:** invented pods for the tests and the spectator's golden render.
+- **Channels (bridged):** follows `time`, inherited from the wall it stands on, and Observe's `region`, following the bridge's open region.
+- **Update:** on `Wake::Channels` and on its schedule: two `range_all` reads at a step chosen from the window (p95 request queuing by pod and revision, and requests a second by pod and revision), joined on pod and time; `Every(1 min)` while viewed and the window is live, else idle; a fixed window read once.
+- **Draw:** about 3,600 points, requests a second across, p95 up on a log scale, time in depth, coloured by deployment revision (`Colour::Category`); axes, a legend, and a regression line per revision.
+- **Events:** pointing tells the agent the pod's figures; the trigger focuses one revision; **grab** draws that pod's trajectory through the window and lifts its label (no behaviour moves the point; the visualisation owns the meaning, section 1); **both** hands on two pods draw both; release clears.
 
-**`tomori:crates`**, in `tomori-visualisation-kinds` (depending only on the core and its `cargo metadata` source; registered by `tomori-server`):
+### Phase 1(c): channels proper (about 14 days)
 
-- **Sources:** `cargo:workspace`. **Parameters:** `depth`. **Publishes and subscribes:** `crate` (shared, `Keys`), the focused crate, so a second panel, such as a list of that crate's design documents, can follow it, and the agent can set it with `set_channel` while explaining.
-- **Update:** `metadata()`; `Every(10 s)`, drawing again only when `Cargo.lock`'s digest or a manifest changed, so the graph follows the code as it is edited.
-- **Draw:** one `scene.graph`: crates as nodes, kinds from the crate's role (client, server, environment, protocol, leaf), groups for the workspace's families, edges for dependencies; **#534's visual encoding, springs, fan, pins and two-node paths come with the graph primitive**, not from this visualisation.
-- **Events:** **Choose** (A) on a crate publishes it as `crate`, collapsing everything beyond `depth` (its own write does not wake it twice); pointing tells the agent its dependents and dependencies with counts; grab and pull is #534's.
-- **Coordination with #534:** this needs #534's phases (a) and (b) (about 6 days, its own estimate), and its phase (c), the shared `tomori-diagram` solver, for pulling to be shared rather than local. This proposal's `scene.graph` is how a visualisation reaches #534's work; it adds no second spring solver or encoding. If #534 has not landed, `tomori:crates` draws today's static volume and gains the springs when #534 does.
+- **`tomori-visual-core`** (about 3 days): the channel store for channels the host does not back: shared and per-participant holding, scopes, lifetimes, rates, settle in topological order, echo suppression, the 8-tick guard, cycle refusal, expiry; `Show::Mine` and `Show::Everyone`.
+- **`tomori-visual-runtime`** (about 2 days): per-participant channels settled locally each frame, expiry, relay hooks; `publish_on_hover` and `emphasise_when`.
+- **`tomori-visual-adapter`**, **`tomori-protocol`**, **`tomori-server`** (about 3 days): relaying per-participant values with presence at their declared rates to those who can see the scope; `channels` and `set_channel` (bridged channels read and set through the context model; `contexts` and `set_context` unchanged).
+- **`tomori-scene`** (about 3 days): **the linked time cursor on `cursor.time`**, live charts at their wall's scope and fixed windows at the space's, its existing tests in `projection.md`'s validation passing unchanged; `hovered_series`; the back's jacks from channels, with cables to the wall and to the declarer.
+- **`tomori-environment`** and **Observe** (about 3 days): a client side reads and sets per-participant channels (`ClientContext::channel`, `publish`); the scatter publishes `hovered_pod` from its points and emphasises it; Observe's client side lights **that pod's rod on the region disc** when it is hovered in the scatter, and publishes `hovered_pod` when its own rods are pointed at; the scatter draws a plane at `cursor.time`.
+- **Judged by:** pointing at a time on one of a terminal's charts shows readouts on its other two, exactly as today, and a plane in the scatter on the same wall; hovering a pod in the scatter lights its rod on the disc, and pointing at a rod brightens its points, both at frame rate; flipping a panel shows its channels and cables.
+
+### Phase 1(d): Tomori's crate graph (about 12 days)
+
+- **#534's phases (a) and (b)** (about 6 days, its own estimate): the visual encoding, and grab and pull on a single client. This proposal adds no second encoding or solver.
+- **`tomori-visual-core`** and **`tomori-visual-adapter`** (about 2 days): `Graph` converted into a volume's `Diagram` with kinds and groups; grab, move and release on a graph's nodes sent to the visualisation as well as driving #534's springs (section 1).
+- **`tomori-visual-kinds`** (about 3 days): the `cargo:workspace` source and `tomori:crates`: crates as nodes, kinds by role, groups by family, dependencies as edges; `Every(10 s)`, drawing again only when `Cargo.lock` or a manifest changed; **Choose** (A) on a crate publishes `crate` (a shared channel from 1(c)) and collapses everything beyond `depth`; on release inside the box the visualisation pins the node, outside it lets #534's home springs return it.
+- **Headset tuning** (about 1 day).
+- **Judged by:** the maintainer pulls `tomori-scene` towards themselves and sees its inputs fan left and outputs right; the graph follows a dependency added in the code within ten seconds; another participant sees the pull (once #534's phase (c) shares it; until then, it is local, as #534 phase (b) is).
 
 ### Later phases
 
-| Phase | What | Crates | Effort |
+| Phase | What | Crates | Days |
 | --- | --- | --- | --- |
-| 2 | Faster turnaround (section 9), once phase 1's interface has been used | `base-visualisation` (a run-time `Visualisation`), a new host crate per route | 5 to 15 days by route |
-| 3 | The web view: scene pages, SVG, the WebGL2 viewer, the feed, events from signed-in participants | `base-visualisation-svg` and `base-visualisation-web`, new; `tomori-server` (`pages`) | about 8 days |
-| 4 | Reports: `create_report`, `update_report`, `export_report`, share links, CSP | `tomori-server`, `tomori-security` | about 6 days |
-| 5 | Wiring by hand: dragging cables between jacks, `Setting::Linked` from a participant, cables routed between walls, a wall's "show wiring" chip | `tomori-protocol`, `tomori-server`, `tomori-scene` | about 4 days |
-| 6 | Snapshots and export: freezing scenes, `export_data` | `tomori-visualisation`, `base-visualisation` | about 3 days |
-| 7 | More behaviours (drag, orbit) and extensions over #306's drawers | `tomori-scene`, #306's crates | about 3 days each |
-| 8 | More sources: files, git, the agent's data, environments' own | `tomori-visualisation-kinds`, `tomori-visualisation` | about 2 days each |
+| 2 | Faster turnaround (section 9), once phase 1's interface has been used | the core (a run-time `Visualisation`), a new host crate per route | 8 to 20 by route |
+| 3 | **Migrating the context model onto channels**: undeclared settings kept, instances, held windows, pin and freeze, resting, chips and messages on the wire, the agent's tools, all on the core's store, with every existing test passing unchanged | `tomori-visual-adapter`, `tomori-server`, `tomori-environment` | about 15 |
+| 4 | The web view: scene pages, SVG, the WebGL2 viewer, the feed, events from signed-in participants | `tomori-visual-svg`, `tomori-visual-web`, `tomori-server` (`pages`) | about 10 |
+| 5 | Reports: `create_report`, `update_report`, `export_report`, share links, CSP | `tomori-server`, `tomori-security` | about 8 |
+| 6 | Wiring by hand: dragging cables between jacks, `Setting::Linked`, cables between walls, "show wiring" | `tomori-protocol`, `tomori-visual-adapter`, `tomori-scene` | about 5 |
+| 7 | Snapshots and export: freezing scenes, `export_data` | `tomori-visual-adapter`, the core | about 4 |
+| 8 | More behaviours (drag, orbit, generic springs) and extensions over #306's drawers | `tomori-visual-runtime`, `tomori-scene`, #306's crates | about 4 each |
+| 9 | More sources: files, git, the agent's data, environments' own | `tomori-visual-kinds`, `tomori-visual-adapter` | about 2 each |
+| 10 | Extracting the core to `base-rs/visual` as `base-visual` | the core, its own repository | about 3 |
 
 ## 9. Faster turnaround, later
 
@@ -550,32 +588,44 @@ Sizes are rough and to be measured. A first reading, not a decision: **dynamical
 
 ## 10. Security, deferred but bounded
 
-Phase 1 visualisations are server code, written or reviewed like any other, with the same trust as an environment's server side; the agent can already change the server's code. So phase 1 adds no boundary beyond what exists, with three rules that cost nothing now and keep the later boundary possible:
+Phase 1 visualisations are server code, written or reviewed like any other, with the same trust as an environment's server side; the agent can already change the server's code. So phase 1 adds no boundary beyond what exists, with four rules that cost nothing now and keep the later boundary possible:
 
 - **Credentials stay in sources.** A visualisation sees `Sourced<T>` answers through typed handles, filtered by the source's label filter; no source gives out an endpoint or a token. A later sandboxed visualisation, in another process, can then be given handles that proxy over a pipe, holding no secrets.
 - **Clients never run visualisation code.** Only Tomori's behaviours run on devices, so no later route changes what a headset or browser trusts.
 - **Visitors cause nothing.** Their events never reach a visualisation, they write no channel, and share links are frozen by default.
-- **What a person hovers stays theirs unless shown.** A per-participant value leaves its client only when a subscriber at its scope shows everyone's, and then only to people who can see that wall, never logged and never kept; otherwise only in a pointing note when they speak.
+- **What a person hovers stays theirs unless shown.** A per-participant value leaves its client only when a subscriber at its scope shows everyone's, and then only to people who can see that scope, never logged and never kept; otherwise only in a pointing note when they speak.
 
-The boundary to define with phase 2, once the interface is known: who may create code-at-run-time visualisations (the agent only, acting for owners and collaborators, is the obvious start); a separate, credential-free worker process for run-time code whatever the route; limits on memory, CPU per call and source requests per space; what a persisted visualisation may do unattended; and what live report panels may read for someone outside the space.
+**A decision for the maintainer: who may read Prometheus.** A visualisation reading `prometheus:observe` can show production metrics in any space it is granted to, to everyone there, visitors included. The choices: (1) **granted to every space by default**, which is what "usable in any space" asks and suits a server with one operator; (2) **only spaces that opt in**, by the operator's configuration naming them; (3) **owner-approved per space**, an owner granting it from the hand menu or the status page, shown on the space's wall. Recommended: Tomori's builder defaults to (2), so a source reaches no space unless configured, and Observe's server configures (1) for its own deployment, where the operator and the owners are the same people; (3) once spaces are shared more widely.
+
+The boundary to define with phase 2, once the interface is known: who may create visualisations from code arriving at run time (the agent only, acting for owners and collaborators, is the obvious start); a separate, credential-free worker process for run-time code whatever the route; limits on memory, CPU per call and source requests per space; what a persisted visualisation may do unattended; and what live report panels may read for someone outside the space.
 
 ## 11. Risks and open questions
 
 ### Risks
 
-- **The interface fits two examples and nothing else.** Mitigation: before phase 2, write a third kind of a different shape (a heat map of a fleet, or a flame graph from a file) against it, and change the trait where it strains.
-- **Phase 1 tempts template thinking.** Compiled kinds with parameters are templates. They are a means to find the interface, and phase 2 is what returns "any code" to the agent; the plan should not stop at phase 1.
-- **Two ways to draw a graph.** Diagrams and visualisations overlap. `scene.graph` makes them one drawing path; the rule is that a diagram is structure the agent describes, a visualisation is data code computes.
-- **Blocking reads and slow code.** Compiled updates cannot be preempted. The thread pool keeps them off the hub's lock; a slow one is visible on its back.
-- **Channels becoming KVO after all.** Declared, typed, settled channels are easier to reason about than KVO, but a space with dozens of channels and links can still surprise. Mitigations: the wiring is always visible (backs, cables, `channels`); a change's cause is logged with the settle that carried it ("`time` set by Ada on wall Charts; woke 6 panels"); and the first version keeps the context model's small bounds.
-- **A reusable core shaped by one host.** Tomori's walls, chips and intents could leak into the core. Mitigations: the core knows only a scope tree, participants and a clock; kinds are checked to import nothing of Tomori; and a unit test drives the core with a host of its own.
-- **Moving the context model underneath.** It is a large, well-tested requirement; the migration is judged by its existing tests passing unchanged, and is done before anything new depends on channels.
-- **Handler latency.** About 100 ms on a local network; anything tracking the hand must be a behaviour, and the vocabulary will need to grow from use.
+- **Quest cost.** Easing 16,384 items means rewriting their instances while a change settles: about 512 KiB of instance data a frame at 32 bytes each. Budgets: at most 4,096 items eased a frame on the headset, the rest snapping; only changed items eased, for 0.3 s; one scene easing at a time per frame turn, as faces are laid out two a frame; springs only on graphs, within #534's 64 nodes; the frame budget of volumes (100,000 triangles, 16,384 solids) shared; level of detail by distance (section 3). Measured on a Quest 3 at 2.0× with 2× MSAA before phase 1(b) is judged.
+- **Server CPU.** Compiled updates cannot be preempted. Caps in phase 1: at most 16 visualisations a space and 64 a server; an evaluation pool of 4 threads unless configured, never the hub's lock; an update over 2 s logged on its back, one over 30 s abandoned (its thread marked hung, its instance not scheduled again, the pool replacing the thread); `Every` no faster than 5 s, and Prometheus reads no faster than the cache's bucket.
+- **Bandwidth per participant.** A first scene at most about 160 KiB; diffs by item id, positions as `i16` and colours as roles, so a refresh of 3,600 moved points is about 36 KiB; at most one diff a second a panel, as published panels are paced; per-participant relays at most 10 a second, a few bytes each, only where someone shows everyone's. Whether the protocol's frames are compressed (deflate or zstd for scene frames over a size) is measured, not assumed.
+- **Determinism between server and client.** The server's graph solver runs in `f64` and is the truth; the holder's client predicts in `f32` and is corrected by the server's positions, blended over 150 ms, as #534 proposes; the two are never compared bit for bit. Saved positions are rounded to millimetres, so restarts and tests agree.
+- **The interface fits two examples and nothing else.** Before phase 2, a third kind of a different shape (a fleet heat map, a flame graph from a file) is written against it, and the trait changed where it strains.
+- **Phase 1 tempts template thinking.** Compiled kinds with parameters are templates; they are the means to find the interface, and phase 2 returns "any code" to the agent.
+- **Two ways to draw a graph.** `scene.graph` converts to a volume, so diagrams and visualisations share one drawing path.
+- **Channels becoming KVO after all.** The wiring is always visible (backs, cables, `channels`); a change's cause is logged with the settle that carried it ("`time` set by Ada on wall Charts; woke 6 panels").
+- **A reusable core shaped by one host.** The core knows only a scope tree, opaque participants and a clock; kinds import nothing of Tomori; a unit test drives the core with a host of its own.
+- **Handler latency.** About 100 ms on a local network; anything tracking the hand is a behaviour.
 - **Web posture.** Serving Tomori's own viewer script changes the pages' threat model; the CSP and server-made SVG keep it small.
+
+### Test plan
+
+- **The core and runtime, headless:** golden scenes from fixtures; diffs; channel settles (order, echo suppression, cycles, expiry, rates) with a toy host; the runtime's easing, picking and level of detail; the dependency rules.
+- **The adapter:** the bridge against `panel-context.md`'s cases (inherited, fixed, instances, pinned and frozen copies, held windows); conversions into the protocol's types and back; scheduling caps; restarts.
+- **Rendering, offscreen on lavapipe:** each primitive, flat and deep scenes in a slot and floating, the faster-pods fixture and the crate graph, saved as previews for review, as `TOMORI_VOLUME_PREVIEW` does for volumes; the spectator's render of a scene panel.
+- **The linked cursor:** `projection.md`'s existing cursor tests passing unchanged on `cursor.time`.
+- **Headset checklist, each phase:** frame time and GPU time in Observe's busy view with a scene at its limits; CPU time to apply a full scene and a refresh; easing while turning the head; readability of axes and labels from 2 and 4 m; pointing and grabbing at 1 m and 4 m; hover reaction at frame rate; a second participant seeing a grab; battery and thermal over 20 minutes.
 
 ### Open questions for the maintainer
 
-1. **Where do kinds live?** Proposed: Tomori's in `tomori-visualisation-kinds`, Observe's in a module of its server crate, both depending only on the core and sources. Should an application be able to register kinds without an environment?
+1. **Where do kinds live?** Proposed: Tomori's in `tomori-visual-kinds`, Observe's in a module of its server crate, both depending only on the core and sources. Should an application be able to register kinds without an environment?
 2. **Is `update` / `draw` / `event` the right split,** or should a visualisation build its scene directly in `update` and `event` (simpler, but no purity for tests and restarts)?
 3. **Who controls refresh** when a visualisation's own schedule and a participant's #509 policy disagree? Proposed: the policy caps the schedule. Should refresh itself be a channel, so a wall's policy is inherited as `time` is? #509 already models it beside the context with the same inheritance, so it would fit.
 4. **Channels' names and reach.** Proposed: Tomori's built-ins unprefixed (`time`, `cursor.time`, `selection`), an environment's its own (`region`, `hovered_pod`), all within one space. Should a channel ever cross spaces, such as one incident window followed by several spaces?
@@ -588,8 +638,18 @@ The boundary to define with phase 2, once the interface is known: who may create
 11. **The web viewer:** hand-written WebGL2 first, as proposed, or straight to `tomori-render` in WebAssembly?
 12. **Portals:** is a snapshot standing in front of its plate enough, or is a parallax window wanted enough to revisit #529?
 13. **Phase 2's first route:** loaded Rust, as the nearest step from phase 1, or an interpreter, as the nearest to how the agent wrote Python?
-14. **The core's name and home:** `base-visualisation`, in Tomori's workspace until it settles and then `base-rs/visualisation`, as proposed? And should #534's spring solver live in the runtime?
+14. **The core's name and home:** `tomori-visual-core` in Tomori's workspace, extraction-ready, then `base-rs/visual` as `base-visual` once it settles, as proposed? And should #534's spring solver live in the runtime?
 
 ## Design documents this would change
 
-A new `design/visualisations.md` (the trait, kinds, context, wakes, events, scheduling, channels and their propagation, the scene builder, tools, and later the run-time routes and their boundary); `design/projection.md` (the scene panel kind, `Hello::scenes`, `Limits::scenes` and `items`, the back of every panel, `FlipPanel`, scene diffs as live data); `design/data-sources.md` (the source registry, grants, `promql::guard`, provenance); `design/diagrams.md` (`scene.graph` as a way to reach a volume, with #534); `design/environments.md` (`Panel::with_back`, `with_visualisation`, `with_source`); `design/panel-context.md` (parameters and time as shared channels, scopes and inheritance, `Setting::Linked`, `channels` and `set_channel`), `design/projection.md`'s linked time cursor (as the participant channel `cursor.time`, and `hovered_series`); `design/mcp.md` (the visualisation tools, `channels` and `set_channel`, `flip_panel`, the report tools, `export_data`); `design/interaction.md` and `design/responders.md` (flipping, grabbing items in scenes); `design/rendering.md` (scenes in the volumes' budget, cables); `design/security.md` (report pages, share links, CSP, Tomori's own script in the web pages, and later the run-time boundary); `design/spectator.md` (drawing scenes); `design/clients.md` (the web as a client of scene descriptions); and `design/crates.md` (`base-visualisation`, `base-visualisation-runtime`, the renderers, `tomori-visualisation` and `tomori-visualisation-kinds`, and their dependency rules).
+A new `design/visualisations.md` (the trait, kinds, context, wakes, events, scheduling, channels and their propagation, the scene builder, tools, and later the run-time routes and their boundary); `design/projection.md` (the scene panel kind, `Hello::scenes`, `Limits::scenes` and `items`, the back of every panel, `FlipPanel`, scene diffs as live data); `design/data-sources.md` (the source registry, grants, `promql::guard`, provenance); `design/diagrams.md` (`scene.graph` as a way to reach a volume, with #534); `design/environments.md` (`Panel::with_back`, `with_visualisation`, `with_source`); `design/panel-context.md` (parameters and time as shared channels, scopes and inheritance, `Setting::Linked`, `channels` and `set_channel`), `design/projection.md`'s linked time cursor (as the participant channel `cursor.time`, and `hovered_series`); `design/mcp.md` (the visualisation tools, `channels` and `set_channel`, `flip_panel`, the report tools, `export_data`); `design/interaction.md` and `design/responders.md` (flipping, grabbing items in scenes); `design/rendering.md` (scenes in the volumes' budget, cables); `design/security.md` (report pages, share links, CSP, Tomori's own script in the web pages, and later the run-time boundary); `design/spectator.md` (drawing scenes); `design/clients.md` (the web as a client of scene descriptions); and `design/crates.md` (`tomori-visual-core`, `tomori-visual-runtime`, `tomori-visual-adapter`, `tomori-visual-kinds`, later renderers, their dependency rules, and the core's eventual move to its own `base-rs` repository).
+
+## Decisions for the maintainer
+
+1. **Private or shared panel flips** (question 7): needed to approve phase 1(a). Recommended: a participant's flip is private, the agent's shared.
+2. **Prometheus access by default** (question 8, section 10): every space, opt-in spaces, or owner-approved. Recommended: opt-in by default in Tomori's builder; Observe configures every space for its own deployment.
+3. **Whether the context migration happens in phase 1.** Recommended: **no**; phase 1 uses the adapter bridge, and the migration is phase 3, about 15 days.
+4. **The core's name and home:** `tomori-visual-core` in the workspace now, extraction-ready, moving to `base-rs/visual` as `base-visual` once it settles?
+5. **Who turns on everyone's cursors** (question 5): the subscriber's choice, or the publisher's consent?
+6. **Implicit by name, or explicit links only** (question 6): follow channels by name through the scopes, with links for exceptions, as proposed?
+7. **Grants** (question 8): settled with decision 2.
