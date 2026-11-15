@@ -629,7 +629,58 @@ Not a specification; enough to judge. Lines starting `--` are comments.
 - `note """…"""`: Markdown, shown in the workbook and in reports.
 - `refresh EVERY while viewed`: the workbook's own cadence, as `Next` is for compiled kinds.
 
+A query block may be written as a method (`prom.range(time, step) { … }`) or, more briefly, as the source's name with `over` a time channel (`prometheus { … } over window`); both mean the same.
+
 **Expressions.** Source calls (`prom.range(…)`, `cargo.packages()`); `|` pipelines of `where`, `select`, `derive`, `rename`, `join … on`, `group by … aggregate`, `sort`, `top N by … per …`, `rate`, `window`, `resample`, `offset`, `fit`; marks (`mark point3d`, `mark line`, `mark bars3d`, `mark surface`, `graph`, `tree`, `timeline`) with encodings and scales; `layer` to overlay; `facet by` for small multiples; `legend`, `rule`, `label`. Handlers: `on hover|grab|release|choose -> channel NAME = …` or `-> state NAME = …`. Source queries are written in the source's own language inside braces, `prom.range(time, step) { … }`, and **parsed, not passed as strings** (below); `$name` splices a value into the parsed query.
+
+**The lead example: traffic, latency and deploys, from two sources, in 3D.** The maintainer's own sketch, in this section's syntax, kept as close to it as the cell kinds allow:
+
+```
+workbook "Pods by latency, traffic and deploy" v1
+
+uses prometheus:observe as prometheus
+uses sql:deploys        as sql            -- a read-only database source, its tables allow-listed
+input region = channel region
+input window = channel time
+
+let pods = prometheus {
+  sum by (pod, deploy) (rate(admitted_total{region=$region}[5m]))
+} over window                              -- columns known statically: t, pod, deploy, value
+
+let lat = prometheus {
+  histogram_quantile(0.5, sum by (pod, le) (rate(latency_bucket{region=$region}[5m])))
+} over window                              -- columns: t, pod, value
+
+let deploys = sql {
+  select sha, started_at, finished_at from deploys
+  where region = $region and started_at >= $window.start
+}                                          -- columns: sha: Text, started_at: Instant, finished_at: Instant
+
+let data =
+  pods join lat on pod                     -- `pod` is in both label sets, checked before anything runs
+  | latest                                 -- each pod's newest point
+  | label deploy from deploys              -- attach each row's deploy record, matching `deploy` to `sha`
+
+view scatter3d data
+  x: lat  y: pods  z: deploy  colour: deploy  label: pod
+  on hover pod -> channel hovered_pod      -- per participant, evaluated on the hoverer's client
+```
+
+What it shows, line by line:
+
+- **Channels as inputs.** `region` and `window` follow the space's channels (section 1): a wall fixed to an incident's window, or the bridge opening another region, recomputes `pods`, `lat` and `deploys`, then `data` and the view, in that order, once.
+- **Parsed, typed blocks.** `prometheus { … }` is PromQL and `sql { … }` is SQL, each parsed when the cell is written; `over window` makes the PromQL block a range query over the channel's window, at a step chosen to keep within 240 points. Errors point inside the block.
+- **Parameters bound as AST nodes, never strings.** `$region` becomes a label matcher's value in the PromQL tree and a bound parameter in the SQL statement; `$window.start` is the window's start as a typed `Instant`. Nothing is spliced into text, so a region named `x"} or vector(1) or {"` is just an odd region.
+- **A join on a statically known label.** Both blocks' label sets are known from their `by (…)` clauses, so `join … on pod` is checked before either query runs, and `z: deploy` and `colour: deploy` are known to exist; `label … from` matches `deploy` against the SQL result's `sha` column, whose type the statement declares.
+- **A 3D view that publishes a channel.** Each pod is a point at its median latency, its traffic and its deploy; hovering one publishes its `pod` to `hovered_pod`, which Observe's region disc and any other subscriber show on the hoverer's own client.
+
+**How SQL is parsed and bound.** A SQL source parses each block with the `sqlparser` crate (Apache-2.0) in the dialect the source declares (PostgreSQL, MySQL, SQLite), and then:
+
+- **Read-only by construction**: the block must be a single `SELECT` (or `WITH … SELECT`); any other statement, a second statement, or a function the source does not allow (anything with side effects, file or network access) is refused at authoring time with its span.
+- **An allow-list**: the source's configuration names the tables, or views, a workbook may read; any other table, schema or system catalogue named in the statement is refused, so a source can expose `deploys` without exposing the database.
+- **Parameters as bound values**: each `$name` becomes a positional parameter of the prepared statement, sent with its typed value through the driver's binding, never formatted into the SQL text; `$` is allowed only where an expression may stand.
+- **Typed results**: the statement's columns and types come from the parsed select list and the source's schema (or from preparing the statement), so `deploys`' columns are known before it runs, as Prometheus label sets are.
+- **Bounded**: a row limit is added to every statement (`LIMIT`, or the dialect's form), with a statement timeout and the space's request quota; the connection is the source's own, read-only where the database supports it, with credentials that never leave the server.
 
 **Example 1: the faster-pods scatter.**
 
