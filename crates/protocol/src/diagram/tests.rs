@@ -394,6 +394,89 @@ fn text_is_cleaned_and_cut() {
 }
 
 #[test]
+fn a_label_s_br_breaks_its_lines_as_mermaid_s_and_nothing_else_is_html() {
+    // Every form Mermaid takes, in any case, in a node's, an edge's and a group's label.
+    let (diagram, warnings) = parse(
+        "a[Hub<br>one lock] -->|patches<BR/>sent| b[\"Stage<br />and walls<bR  />kept\"]\nsubgraph g [tomori-<br>server]\n  b\nend\n",
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(diagram.nodes[0].label, "Hub\none lock");
+    assert_eq!(diagram.nodes[1].label, "Stage\nand walls\nkept");
+    assert_eq!(diagram.edges[0].label, "patches\nsent");
+    assert_eq!(diagram.groups[0].label, "tomori-\nserver");
+    // Plain `<`, `>` and every other tag are kept as text, uninterpreted; so is Markdown's `\n`, which Mermaid does not
+    // break at, and a line break of the tool's JSON is a space.
+    for (written, kept) in [
+        ("a < b > c", "a < b > c"),
+        ("<b>bold</b> <i>", "<b>bold</b> <i>"),
+        ("<br", "<br"),
+        ("<brr> <br/ > <b r>", "<brr> <br/ > <b r>"),
+        ("x<", "x<"),
+        ("one\\ntwo", "one\\ntwo"),
+        ("one\ntwo", "one two"),
+        ("<br>", ""),
+    ] {
+        assert_eq!(label(written, LABEL_CHARS), kept, "{written}");
+    }
+    // Empty lines are left out, and those past the third joined to it.
+    assert_eq!(label("<br>a<br><br> <br>b", LABEL_CHARS), "a\nb");
+    assert_eq!(label("1<br>2<br>3<br>4<br/>5", LABEL_CHARS), "1\n2\n3 4 5");
+    // Its breaks count among its characters, and it is cut with "…", never after a break.
+    let cut = label(&format!("{}<br>{}", "x".repeat(20), "y".repeat(20)), 32);
+    assert_eq!(cut, format!("{}\n{}…", "x".repeat(20), "y".repeat(11)));
+    assert_eq!(
+        label(&format!("{}<br>y", "x".repeat(31)), 32),
+        format!("{}…", "x".repeat(31))
+    );
+    // The tool's labels are read alike.
+    let (diagram, _) = Diagram::from_json(&serde_json::json!({
+        "nodes": [{ "id": "a", "label": "Hub<br/>one lock" }, { "id": "b" }],
+        "edges": [{ "from": "a", "to": "b", "label": "a<br>b" }],
+    }))
+    .unwrap();
+    assert_eq!(diagram.nodes[0].label, "Hub\none lock");
+    assert_eq!(diagram.edges[0].label, "a\nb");
+    // Named in text, and in the outline an older client shows, each label is on one line.
+    assert_eq!(diagram.edge_name(0).unwrap(), "Hub one lock → b: a b");
+    let (diagram, _) = parse(
+        "subgraph g [Two<br>lines]\n  a[Hub<br>lock]\nend\na --> b : x<br>y\nfire := object farmyard:campsite/bonfire [Fire]\na --> fire : here<br>now\n",
+    );
+    assert_eq!(
+        diagram.outline(),
+        "- b\n\n**Two lines**\n- Hub lock\n\n**Edges**\n- Hub lock → b: x y\n- Hub lock → Fire (farmyard:campsite/bonfire): here now"
+    );
+    assert_eq!(
+        diagram.world_edge_name(0, false).unwrap(),
+        "Hub lock → Fire: here now"
+    );
+    assert_eq!(one_line_label("a\nb"), "a b");
+}
+
+#[test]
+fn a_client_draws_a_label_s_lines_within_bounds_whatever_it_is_sent() {
+    let node = Node::new("a", "1\n2\n\n3\n4\u{7}5");
+    let group = Group::new("g", "xy\n".repeat(40));
+    let mut edge = Edge::new(0, 1);
+    edge.label = format!("{}\nyy", "e".repeat(30));
+    let diagram = Diagram {
+        nodes: vec![node, Node::new("b", "<br>kept as sent")],
+        edges: vec![edge],
+        groups: vec![group],
+        ..Diagram::default()
+    }
+    .bounded();
+    assert_eq!(diagram.nodes[0].label, "1\n2\n3 4 5");
+    // What the server sent is not read again as the agent's text.
+    assert_eq!(diagram.nodes[1].label, "<br>kept as sent");
+    assert_eq!(
+        diagram.groups[0].label,
+        format!("xy\nxy\n{}…", ["xy"; 9].join(" "))
+    );
+    assert_eq!(diagram.groups[0].label.chars().count(), LABEL_CHARS + 1);
+    assert_eq!(diagram.edges[0].label, format!("{}…", "e".repeat(24)));
+}
+
+#[test]
 fn a_client_draws_a_diagram_within_bounds_whatever_it_is_sent() {
     let mut node = Node::new("a", "x".repeat(100));
     node.size = 0;

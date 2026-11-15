@@ -483,6 +483,21 @@ fn the_protocol_initialises_lists_tools_and_refuses_what_it_does_not_answer() {
             }
         }
     }
+    // A diagram's labels break onto their lines with `<br>`, as Mermaid's do, which its tool says.
+    let diagram = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "show_diagram")
+        .unwrap();
+    let properties = &diagram["inputSchema"]["properties"];
+    for described in [
+        &properties["nodes"]["items"]["properties"]["label"]["description"],
+        &properties["edges"]["items"]["properties"]["label"]["description"],
+        &properties["source"]["description"],
+    ] {
+        assert!(described.as_str().unwrap().contains("<br>"), "{described}");
+    }
     for tool in listed["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object");
         assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{tool}");
