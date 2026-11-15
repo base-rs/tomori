@@ -45,7 +45,7 @@ This proposal is organised around that order.
 - **Crates of their own, extraction-ready.** `tomori-visual-core`, `tomori-visual-runtime` and `tomori-visual-adapter` start in Tomori's workspace under its naming and shared-version rules; CI checks that the core and runtime depend on no other Tomori crate, so the core can later move to its own `base-rs` repository under a `base-*` name. `tomori-protocol` keeps its own scene wire format, converted in the adapter.
 - **Every panel gets a back**, flipped by a chip, by turning it over in the hand, or by the agent, showing its source, query, window, refresh, provenance, errors and channels; cables show which panels feed which.
 - **Web and reports later**: the same description as SVG or WebGL2, and reports at a signed-in URL with share links and a static export.
-- **Phase 1, each step usable in the headset, about 60 days in all:** (a) the back of a panel for Observe's charts, about 7 days; (b) the core, the adapter, the scene panel and the faster-pods scatter following `time` through the bridge, about 27 days; (c) channels proper, with the linked cursor and `hovered_pod` lighting a pod's rod on Observe's region disc, about 14 days; (d) Tomori's crate graph with grab-and-pull, about 12 days including #534's prerequisite phases. The choice between dynamic Rust, an interpreter and WebAssembly is deferred until the interface has been used.
+- **Phase 1, each step usable in the headset, about 60 days in all:** (a) the back of a panel for Observe's charts, about 7 days; (b) the core, the adapter, the scene panel and the faster-pods scatter following `time` through the bridge, about 27 days; (c) channels proper, with the linked cursor and `hovered_pod` lighting a pod's rod on Observe's region disc, about 14 days; (d) Tomori's crate graph with grab-and-pull, about 12 days including #534's prerequisite phases. The choice between dynamic Rust, an interpreter and WebAssembly is deferred until the interface has been used; the leading candidate for the agent's route is a **purpose-built declarative workbook language** with its own sandboxed Rust interpreter and embedded, parsed source queries (section 10).
 
 ## What exists today
 
@@ -276,7 +276,7 @@ The visualisation decides when it runs: `Next::then` is its own schedule, so a c
 ### Lifecycle
 
 1. **Create.** The agent calls `show_visualisation`; the server checks the kind's parameters and the space's grants, calls `make`, then `update(Created)` and `draw`, and answers the tool call with the scene's counts, the provenance of every read, warnings and the log's first lines, or the problem in the kind's own words. A visualisation whose first update fails is not projected.
-2. **Run.** Updates run on a pool of visualisation threads, never under the hub's lock, since a source read may block for seconds; `draw` runs after any call returning `redraw`, and the hub takes the diff. A call taking over 2 s is logged on the back; compiled code cannot be preempted, which is acceptable in phase 1 (section 10).
+2. **Run.** Updates run on a pool of visualisation threads, never under the hub's lock, since a source read may block for seconds; `draw` runs after any call returning `redraw`, and the hub takes the diff. A call taking over 2 s is logged on the back; compiled code cannot be preempted, which is acceptable in phase 1 (section 11).
 3. **Problems.** A failed update keeps the last good scene, marks the panel stale on its face, and puts the problem on its back; three in a row stop automatic wakes until a refresh or a change of parameters. A panic is caught, the instance dropped and its last scene kept, frozen, with one warning.
 4. **Teardown.** Throwing the panel away, closing the space or `clear_visualisation` drops the instance. Its kind, parameters, saved state and last scene are kept with the space; after a restart the last scene is shown, marked as of when it was made, and `restore` (or `make`) and `update(Restored)` run.
 
@@ -442,7 +442,7 @@ A space is **granted** sources by the operator's configuration: Tomori's own to 
 
 ### Quotas, provenance and export
 
-- **Quotas** in phase 1 are the sources' own (the client's slots, cache and limits) and a count per space of source requests a minute, logged rather than enforced; they become limits with the security boundary (section 10).
+- **Quotas** in phase 1 are the sources' own (the client's slots, cache and limits) and a count per space of source requests a minute, logged rather than enforced; they become limits with the security boundary (section 11).
 - **Provenance:** every `Sourced<T>` records the source's name, the query, the instant or range and step, when it was read, how long it took, how many series or rows, whether it was partial, and warnings. It is shown on the back, given by `visualisation_logs`, told to the agent on `inspect` (as `tomori_prometheus::Metric`'s JSON), and printed beneath each figure in reports. A scene drawn from partial data says so on its face.
 - **Export:** `export_data` writes what the visualisation last read, through its optional `fn data(&self) -> Option<Table>`, to `exports/` under the session's directory as CSV or JSON, Parquet later, with a provenance file beside it, when someone asks.
 
@@ -521,12 +521,12 @@ Each phase ends with something the maintainer uses in the headset, in Observe's 
 - **`tomori-visual-runtime`** (about 3 days): applying diffs, easing within its budget, `hover`, picking, level of detail.
 - **`bake`** (half a day): the dependency rules in `bake/tests/dependencies.rs`.
 - **`tomori-protocol`** (about 2 days): its own `scene` module, `Panel::scene`, `Hello::scenes`, `Limits::scenes` and `Limits::items`; older peers sent the summary.
-- **`tomori-visual-adapter`** (about 5 days): kinds and sources registered from `ServerBuilder` and environments; the evaluation pool and scheduler honouring `Next` within the caps (section 11); scenes ↔ panels, converted to the protocol's types, diffs as live data; **the context bridge for `time` and parameters**; instances, saved state and last scenes across restarts; events from intents; the tools (`visualisations`, `show_visualisation`, `update_visualisation`, `visualisation_logs`, `clear_visualisation`); pointing notes from `detail`; backs from `Visualisation::back`.
+- **`tomori-visual-adapter`** (about 5 days): kinds and sources registered from `ServerBuilder` and environments; the evaluation pool and scheduler honouring `Next` within the caps (section 12); scenes ↔ panels, converted to the protocol's types, diffs as live data; **the context bridge for `time` and parameters**; instances, saved state and last scenes across restarts; events from intents; the tools (`visualisations`, `show_visualisation`, `update_visualisation`, `visualisation_logs`, `clear_visualisation`); pointing notes from `detail`; backs from `Visualisation::back`.
 - **`tomori-server`**, **`tomori-environment`** (about 1 day): wiring the adapter into the hub and stage, the MCP tools, `Environment::with_visualisation` and `with_source`.
 - **`tomori-prometheus`** (about 1 day): `Source` behind the `visual` feature, and `promql::guard`, moved from Observe with its tests.
 - **`tomori-scene`** and **`tomori-render`** (about 5 days): the scene panel: a runtime per panel drawn through the instanced solids, tubes and glyph atlas, axes and ticks, the legend, flat scenes on the face and deep ones in front of the plate, slot and floating sizes, trigger focus, grab and release sent as intents, the frame budget shared with volumes; lavapipe renders.
 - **`observe:faster-pods`** in Observe (about 3 days): as below, with a fixture source and golden scenes.
-- **Headset measurement and tuning** (about half a day): the checklist in section 11.
+- **Headset measurement and tuning** (about half a day): the checklist in section 12.
 - **Judged by:** the agent shows the faster-pods scatter from a sentence; the maintainer reads "faster pods get more traffic" from it at a glance, turns it round, points at a pod and hears its figures, grabs one to see its trajectory; setting the wall's time chip to the last 6 hours changes the scatter and the charts beside it together; frame time stays within budget.
 
 **`observe:faster-pods`**, a module of Observe's server crate (`environment-observe-server`, its pure parts in `environment-observe`) that imports only `tomori-visual-core` and `tomori-prometheus`'s source, registered through `Environment::with_visualisation`:
@@ -558,7 +558,7 @@ Each phase ends with something the maintainer uses in the headset, in Observe's 
 
 | Phase | What | Crates | Days |
 | --- | --- | --- | --- |
-| 2 | Faster turnaround (section 9), once phase 1's interface has been used | the core (a run-time `Visualisation`), a new host crate per route | 8 to 20 by route |
+| 2 | Faster turnaround (sections 9 and 10), once phase 1's interface has been used: the workbook language's spike and version 1 (about 34 days, section 10), or another route | the core (a run-time `Visualisation`), a new host crate per route | 8 to 20 by route |
 | 3 | **Migrating the context model onto channels**: undeclared settings kept, instances, held windows, pin and freeze, resting, chips and messages on the wire, the agent's tools, all on the core's store, with every existing test passing unchanged | `tomori-visual-adapter`, `tomori-server`, `tomori-environment` | about 15 |
 | 4 | The web view: scene pages, SVG, the WebGL2 viewer, the feed, events from signed-in participants | `tomori-visual-svg`, `tomori-visual-web`, `tomori-server` (`pages`) | about 10 |
 | 5 | Reports: `create_report`, `update_report`, `export_report`, share links, CSP | `tomori-server`, `tomori-security` | about 8 |
@@ -586,7 +586,232 @@ Once the trait has been used by the two prototypes and a few more kinds, the age
 
 Sizes are rough and to be measured. A first reading, not a decision: **dynamically loaded Rust** keeps one language and the compiler's checking, and suits a maintainer happy with a rebuild of one crate rather than the server; **JavaScript on QuickJS** is the strongest interpreter for an agent writing code mid-conversation, and its browser build would let a static report keep its interactivity offline; **WebAssembly** is the natural boundary once security matters, since its interface (WIT) can be generated from the same trait. These could coexist: loaded Rust for the maintainer's own kinds, an interpreter for the agent's throwaway ones.
 
-## 10. Security, deferred but bounded
+**A purpose-built language** is a further option the maintainer raised: a small declarative workbook language with its own Rust interpreter, rather than any general-purpose language above. Section 10 develops it; if accepted, it replaces the interpreter columns of this table as phase 2's route for the agent.
+
+## 10. A purpose-built visualisation language, later
+
+The maintainer asked to consider a language made for this, rather than JavaScript, Lua, Python or Ruby, which bring a general-purpose language's baggage: a standard library to fence off, a module system, ambient clocks and randomness, unbounded loops, and an object model the sandbox has to understand. His idea: mostly declarative, "fourth-generation" and SQL-like; organised as a **workbook**, as in MATLAB or Jupyter, where a sequence of data steps (get this series, get another, join them, transform) feeds **several visualisations**; run by a **simple interpreter written in Rust**, where sandboxing matters and speed does not. He considered WebAssembly as the target for scripts and finds it slower in practice and more than this needs.
+
+The plan does not change: the Rust interface and hand-written prototypes come first (phase 1), and the language comes after, as one more way to produce the same `Visualisation`. This section argues it is the strongest candidate for phase 2's "any code" route, and sketches it well enough to judge.
+
+### Why a language of its own fits here
+
+- **The domain is narrow and regular.** Almost every visualisation the maintainer has asked for is: read a few series or tables from declared sources, reshape them (filter, join, group, rate, resample), and map columns onto marks. That is a query language plus a grammar of graphics, not a general-purpose program. A language with only those things has nothing to fence off.
+- **Sandboxing by construction.** No loops without bounds, no recursion, no I/O, no clock, no randomness, no reflection: the only effects are reading declared sources and producing scenes and channel values. Fuel and memory are counted in a few dozen built-ins rather than in a whole runtime. A general-purpose engine has to be made safe; this one is safe because it can express nothing unsafe.
+- **The dataflow is visible.** A workbook's cells name their inputs, so Tomori knows exactly what to recompute when a source refreshes or a channel changes, what to show on a panel's back, and what a report must freeze. A JavaScript `update` is opaque by comparison.
+- **The agent writes it well enough, if it looks familiar.** Models write SQL, PRQL, KQL, jq, PromQL and ggplot fluently. A language built from their keywords and shapes inherits that fluency without inheriting their runtimes. The risk is real (section 12 below and this section's risks) but bounded by keeping it small and familiar.
+- **Parity without cross-compiling.** The interpreter is plain Rust with no dependencies of its own, so it builds for the browser as WebAssembly, where it runs a workbook over frozen data for an offline report. The script is never compiled to WebAssembly or JavaScript; only the small interpreter is, once. That sidesteps the maintainer's concern about WebAssembly as a script target.
+
+### Precedents, and what to borrow
+
+| Precedent | What it gets right | What we take | What does not fit |
+| --- | --- | --- | --- |
+| **Grammar of graphics** (ggplot2, Vega-Lite) | Marks, encodings (column → channel), scales, facets, layers; a chart is a mapping, not drawing code | Marks, `x`/`y`/`z`/`colour`/`size`/`shape`/`label` encodings, scales with domains and units, layers, facets as small multiples on a wall | Vega-Lite's JSON verbosity; its 2D-only marks (we add `point3d`, `bars3d`, `surface`, `graph`, `tree`, `timeline`); its browser-side interaction model |
+| **Pipeline query languages** (PRQL, Kusto/KQL, jq) | Data flows top to bottom through `|`; each step is one transform; readable and composable | `|` pipelines; `where`, `select`, `derive`, `join`, `group … aggregate`, `sort`, `take`, `top`; jq's terseness for nested JSON from `cargo metadata` | SQL's inside-out nesting; jq's cleverness where a step should be named |
+| **Notebooks and workbooks** (MATLAB, Jupyter, Observable) | A workbook of named steps, run top to bottom; results inspected step by step; **Observable's cells are reactive**: change one and its dependents rerun | Named cells, reactive dependents, per-cell previews and errors, several views from one data pipeline, notes between cells for a report | Jupyter's hidden mutable kernel state and out-of-order execution; MATLAB's imperative loops |
+| **PromQL** | Time series are first class; instant vs range; `rate`, `by`, `offset`; labels are the join keys | Series as tables with a time column and labels; `rate`, `window`, `resample`, `offset`; labels as columns; PromQL itself embedded verbatim for Prometheus sources | Re-implementing PromQL: the source evaluates it, the workbook reshapes the answer |
+| **Elm** | Views are pure functions of state; events update state; no side effects | Views pure in data, channels and local state; `on` handlers that only set state or channels | Elm's general-purpose type system and modules |
+
+**What a 3D, shared, live space adds.** Marks in depth (`point3d`, `bars3d`, `surface`, `graph`, `tree`, `timeline`), with a `z` encoding and a level of detail; interaction as grabbing and pointing rather than mouse brushing; channels as the inputs and outputs of cells, scoped to panels, walls and the space (section 1); one evaluation for everyone on the server, with participants' hovers evaluated on their own clients through declared bindings; and liveness: cells recompute as sources refresh, at the cadence the workbook declares and the caps allow.
+
+### A syntax sketch
+
+Not a specification; enough to judge. Lines starting `--` are comments.
+
+**Cells.** A workbook is a sequence of cells, each one of:
+
+- `uses SOURCE as NAME`: a declared source (section 5); nothing else can be read.
+- `input NAME = channel CHANNEL`: a channel followed (section 1), such as `time` or `region`.
+- `param NAME: TYPE = DEFAULT`: a parameter the agent or a chip sets.
+- `state NAME: TYPE = INITIAL`: local state, changed only by handlers.
+- `let NAME = EXPR`: a **data cell**, a named, reusable result.
+- `view NAME "TITLE" = EXPR`: a **view cell**, a visualisation that becomes a panel.
+- `note """…"""`: Markdown, shown in the workbook and in reports.
+- `refresh EVERY while viewed`: the workbook's own cadence, as `Next` is for compiled kinds.
+
+**Expressions.** Source calls (`prom.range(…)`, `cargo.packages()`); `|` pipelines of `where`, `select`, `derive`, `rename`, `join … on`, `group by … aggregate`, `sort`, `top N by … per …`, `rate`, `window`, `resample`, `offset`, `fit`; marks (`mark point3d`, `mark line`, `mark bars3d`, `mark surface`, `graph`, `tree`, `timeline`) with encodings and scales; `layer` to overlay; `facet by` for small multiples; `legend`, `rule`, `label`. Handlers: `on hover|grab|release|choose -> channel NAME = …` or `-> state NAME = …`. Source queries are written in the source's own language inside braces, `prom.range(time, step) { … }`, and **parsed, not passed as strings** (below); `$name` splices a value into the parsed query.
+
+**Example 1: the faster-pods scatter.**
+
+```
+workbook "Faster pods get more traffic" v1
+
+uses prometheus:observe as prom
+input time   = channel time          -- inherited from the wall, through the bridge
+input region = channel region
+param top: Int = 300
+state held: Keys = {}
+refresh 1m while viewed
+
+let step = auto_step(time, points: 240)
+
+let latency =
+  prom.range(time, step) {
+    histogram_quantile(0.95, sum by (pod, revision, le) (rate(request_queuing_seconds_bucket{region=$region}[5m])))
+  }                                           -- known statically: columns t, pod, revision, value
+  | rename value -> p95 : s | derive p95 = p95 as ms
+
+let traffic =
+  prom.range(time, step) {
+    sum by (pod, revision) (rate(request_queuing_seconds_count{region=$region}[5m]))
+  }
+  | rename value -> rps : req/s
+
+let pods =
+  latency
+  | join traffic on pod, revision, t
+  | top top by mean(rps) per pod
+
+view scatter "Faster pods get more traffic" =
+  layer pods
+    | mark point3d  x: rps  y: p95 scale log  z: t scale time  colour: revision  label: pod  key: pod
+  layer pods | fit linear p95 ~ rps per revision
+    | mark line  colour: revision
+  layer pods | where pod in held
+    | mark line3d  x: rps  y: p95  z: t  colour: revision  width: 2
+  legend colour "deployment"
+  on hover   -> channel hovered_pod = key       -- evaluated on the hoverer's client
+  on grab    -> state held = held + key
+  on release -> state held = held - key
+```
+
+**Example 2: trial against control, the spread of per-pod intake (CV), two views from one pipeline.**
+
+```
+workbook "Trial vs control: per-pod intake spread" v1
+
+uses prometheus:observe as prom
+input time = channel time
+param trial:   Text = "web-rs-low-priority-trial"
+param control: Text = "web-rs-low-priority"
+
+let intake(workload) =
+  prom.range(time) { sum by (pod) (rate(root_admissions_total{workload=$workload}[2m])) }
+
+let spread =
+  union trial: intake(trial), control: intake(control) as arm
+  | group by arm, t
+  | aggregate cv = stddev(value) / mean(value), pods = count()
+
+note """The coefficient of variation of per-pod intake: lower means traffic is spread more evenly."""
+
+view lines "Spread of per-pod intake (CV)" =
+  spread | mark line  x: t  y: cv scale linear from 0  colour: arm
+  rule y: 0.1 label "target"
+  on hover -> channel cursor.time = t
+
+view now "CV now" =
+  spread | where t == last(t) | mark bar  x: arm  y: cv  colour: arm  label: format(cv, "0.00")
+```
+
+**Example 3: Tomori's crate graph from `cargo metadata`.**
+
+```
+workbook "Tomori's crates" v1
+
+uses cargo:workspace as cargo
+input focus = channel crate
+param depth: Int = 2
+refresh 10s while viewed                      -- recomputed only if Cargo.lock or a manifest changed
+
+let crates =
+  cargo.packages() | where workspace
+  | derive role = case
+      name like "tomori-client-*"      -> "client"
+      name like "tomori-environment-*" -> "environment"
+      name in ["tomori-protocol", "tomori-world"] -> "interface"
+      else "module"
+
+let deps =
+  cargo.dependencies() | where kind == "normal" and from in crates.name and to in crates.name
+
+view crates "Tomori's crates" =
+  graph nodes: crates  key: name  label: name  shape: role  colour: role
+        edges: deps    from: from  to: to
+        layout: force
+  | neighbourhood of focus depth depth
+  on choose -> channel crate = key
+  on release inside -> pin key                 -- the client's springs moved it; the view keeps it
+```
+
+### Source queries are typed embedded languages, parsed, not strings
+
+A query to a source is written in that source's own language, inside braces, and the workbook **parses** it: a Prometheus query is a PromQL expression in the workbook's syntax tree, not a string sent on trust. Observe's `chart` action today checks PromQL with a small lexer of its own (`query_chart::guard`) and splices nothing; a workbook can do much better.
+
+```
+let admitted =
+  prom.range(time, step) {
+    sum by (pod, revision) (rate(admitted_total{region=$region, workload=~$workloads}[5m]))
+  }
+```
+
+**The parser.** [`promql-parser`](https://github.com/GreptimeTeam/promql-parser) parses PromQL into an AST and prints it back. It is Apache-2.0 (compatible with Tomori's MIT), at 0.11.1 (October 2026) after 25 releases since February 2023, with about a million downloads, used in production by GreptimeDB and OpenObserve, and declares compatibility with Prometheus 3.8's PromQL; later additions to PromQL are not guaranteed. Two things to confirm in the spike before relying on it: how precisely its errors locate a problem (the workbook needs a span to point at; a position may have to be recovered or contributed upstream), and whether the gateway's dialect has anything it does not read. A parser of our own remains possible but is not the first choice.
+
+**What parsing gives:**
+
+- **Syntax errors when the agent writes the cell**, with a span inside the braces (`line 14, col 38: unexpected "]"; expected a duration`), before anything is sent.
+- **Names validated against the source's metadata.** Metric names and label names are checked against Prometheus's own metadata (the label names and values, series and metadata APIs), read through the shared cached client with tight bounds: one bounded read per metric checked, answers cached for minutes, a limit on series asked for, background priority. A misspelt metric is caught as `no metric "request_queueing_seconds_count" in prometheus:observe; did you mean "request_queuing_seconds_count"?`, and a label that metric never carries as a warning. `tomori-prometheus` does not read these APIs yet (`data-sources.md`, open questions); the language phase adds them, bounded as its other reads are.
+- **Types checked.** An instant vector, a range vector, a scalar and a string are told apart: `rate` given an instant vector, a range vector where `prom.range` expects an instant expression, or a binary operation between incompatible types is an error at authoring time, not a refusal from the gateway.
+- **Safe parameter splicing.** `$region` is allowed only where the grammar takes a value, and is inserted into the AST as a label matcher's value, never as text: a `Text` channel becomes `region="…"` with the value as a literal, a `Keys` value becomes `=~` with each key regex-escaped and joined, and a `Duration` parameter fills a range or offset. A value containing quotes, braces or PromQL keywords is just a value; there is no string to inject into. `$` anywhere else is an error.
+- **The existing guards as AST checks.** Every selector names a concrete metric (no label-only selector, no `__name__` matcher); every range and subquery is at most a day; every `offset` at most a week; no `@`; the printed query within the client's 16 KiB; the window within 240 steps; and, now possible, a **cost estimate** from the AST and the metadata (selectors × estimated series × steps), refused past a bound with the reason, as Observe learnt to split reads that answered past the client's limit. `promql::guard` moves from Observe's lexer to these checks, in `tomori-prometheus`, shared by Observe's `chart` action and workbooks.
+- **Result label sets known statically.** `sum by (pod, revision) (…)` answers with exactly the labels `pod` and `revision`; `rate(x{…}[5m])` keeps `x`'s labels. The checker therefore knows a cell's columns before it runs: joins on `pod, revision` are checked, a typo in a join key is caught, and lines can be labelled by value (`colour: revision`) knowing the column exists. Where the labels depend on what the series carry (a selector without aggregation), the metadata read supplies them, or the check waits for the answer.
+
+**Other sources, the same pattern.** Each source can register an embedded language with the interpreter: **SQL** for a database source (parsed with `sqlparser`, the same splicing as bound parameters, read-only statements only); **`cargo metadata`** as a small typed query over packages and dependencies (`cargo { packages where workspace }`); **git** as typed log and blame queries (`git { log since $time paths "crates/scene" }`). The interpreter knows none of these languages; a source supplies a parser, a checker producing the result's schema, a splicer and a cost estimate, behind one trait in the core.
+
+**How errors and validation reach the agent.** `show_workbook` and `update_workbook` answer at once with, for each cell: parse errors with the span inside the embedded query, underlined in an excerpt; validation results (unknown metric or label, with suggestions; type mismatches; guard refusals with the bound and the estimate); the statically known columns; and, once run, the provenance of the query actually sent, printed from the AST with the spliced values, so the agent and the panel's back see exactly what reached Prometheus. Metadata lookups themselves are cached and counted in the space's request quota, and a source that cannot answer metadata turns validation into a warning, not a refusal.
+
+
+### Semantics
+
+- **A reactive dataflow graph.** Each cell depends on the names it references. A cell is recomputed when a source it reads refreshes (at the workbook's `refresh`, within the caps), when a channel or parameter it reads changes, or when a cell it depends on changes; dependents are recomputed in topological order, each once per settle, as channels are (section 1). Cells may be written in any order; a cycle is refused, naming it. Views depend on `state`; data cells may not, so a handler never causes a query.
+- **Deterministic.** No clock but `now`, the evaluation's instant; no randomness; stable sorts and joins in input order; floating point as Rust's `f64`. The same sources' answers, channels, parameters and state give the same tables and scenes, which makes caching by input digest safe and tests golden.
+- **Types.** Scalars (numbers with **units**, text, booleans, instants, durations, time ranges), **tables** (typed columns; a **series** is a table with a time column `t` and label columns, as a Prometheus range answer is), **graphs** (nodes and edges tables with keys), **trees**, and views. Types are inferred; names, columns and units are checked before a cell runs where they are known, and when a source answers where they are not (a Prometheus answer's labels). Units are carried through arithmetic, converted where compatible (`s` to `ms`), refused where not (`ms + req/s`), and label axes.
+- **Errors per cell.** A failed cell reports its span, message and a suggestion (`no column "revison" in latency; did you mean "revision"?`); its dependents are marked blocked; views keep their last good scene, marked stale. Each cell's status, row count, schema, time and fuel used are kept for the agent and the back of the panel.
+
+### Implementation
+
+- **`tomori-visual-lang`**, a new crate depending only on `tomori-visual-core`, under the same extraction rule; each source's embedded language lives with its source (PromQL in `tomori-prometheus`), registered with the interpreter by the source, so the language crate knows no query language itself. A hand-written lexer and recursive-descent parser with spans; a checker; a tree-walking interpreter over a small typed IR. Simplicity over speed: the language is glue, so its interpreter's speed hardly matters.
+- **Native built-ins do the work.** Joins (hash joins in deterministic order), aggregations, `rate`, `window`, `resample`, `fit`, `top`, and building the scene from marks and encodings are Rust, registered in a built-in table. A workbook of a dozen cells spends almost all its time in them.
+- **Sandboxing.** **Fuel**: each built-in charges for the rows it touches, each evaluation step one unit, with a budget per evaluation (a refresh) and per handler. **Memory**: tables live in an accounting arena, with a cap per workbook (64 MiB to start) and per cell; a cell over it fails with that error. **Time**: a deadline checked at every fuel charge. **No ambient I/O**: the only way to data is a `uses` source, through the core's `Context` and its quotas. Because there is no foreign function interface, no `eval`, no loops without a bound and no recursion, these limits are the whole sandbox; a separate process is still worth having later for defence in depth, but is not what makes it safe.
+- **The same `Visualisation`.** A workbook implements the core's interface: its data cells run in one shared evaluator per workbook, and **each view cell is a `Visualisation`** whose `update` reads the evaluator's results, whose `draw` is the view's mark expression, and whose `event` runs its `on` handlers. Sources, channels, scheduling, scenes, backs and the agent's tools are exactly those of the Rust prototypes, so nothing downstream knows whether a panel was compiled or written in a workbook.
+- **Escape hatches.** A compiled Rust kind can be used as a mark (`| kind observe:world-clock(area: "europe")`), and a Rust built-in can be registered by an environment (`Builtins::register("percentile_bands", …)`), so anything the language cannot express is a small amount of Rust, not a new language feature.
+- **In the browser.** The same crate builds for `wasm32-unknown-unknown` with no imports but a clock it is not allowed to read anyway. In phase 1's web view it is not needed (the browser draws scene descriptions); it is for **static, offline reports**, which embed a workbook with its frozen source answers and let a reader change a parameter or hover without a server.
+
+### Agent authoring
+
+- **Tools.** `show_workbook { id, source }` evaluates every cell and answers with each cell's status, rows, schema, a few sample rows, time and fuel, and errors with spans and the offending line underlined; its views appear as panels. `update_workbook { id, cell, source }` replaces one cell, re-evaluating only what depends on it. `workbook_cell { id, cell }` previews a cell's result (first and last rows, or a small text chart). `workbook_source { id }` returns the source with line numbers.
+- **Discovering sources.** `sources` lists the space's granted sources with their call signatures and, for Prometheus, how to find metric names; schemas returned by a cell's preview tell the agent the columns it can use next.
+- **The workbook as an artefact.** A workbook is a text file in the session's directory (visible to git and to the agent's own editing) and is kept with the space. With `note` cells, a workbook **is** a report's skeleton: `create_report` from a workbook renders its notes, its views frozen or live, and each view's provenance as a page (section 7), so the conversation's question, data steps, charts and conclusion travel together.
+- **Instructions.** A short grammar reference and the three examples above as an MCP resource; Tomori's layer of the instructions says to start from an example, check each cell's preview, and say what a view shows in a sentence.
+
+### Risks
+
+- **Scope creep.** Every language grows. Mitigations: a **tiny core** (the cell kinds, pipelines, a fixed set of verbs and marks, `case`, simple parameterised `let`); no user-defined loops, recursion, modules or objects, ever; new power arrives as **native built-ins** and **compiled kinds** behind the escape hatches, not as syntax.
+- **Learning curve, for the agent and people.** Mitigations: keywords and shapes borrowed from SQL, PRQL, KQL and ggplot, so priors carry; errors that suggest the fix; per-cell previews; examples first in the instructions.
+- **Tooling.** Mitigations: a grammar for `tomori-highlight` so workbooks read well on code panels; errors with spans from the first version; a tree-sitter grammar later if editors need it.
+- **Versioning.** Each workbook says its version (`v1`); the interpreter keeps reading every version it has released, and a breaking change bumps it.
+- **Two ways to do everything.** Rust kinds and workbooks overlap. The rule: workbooks for what the agent composes in a conversation; Rust for what is reused heavily, needs speed, or needs drawing a mark cannot express, then offered to workbooks as a mark or built-in.
+
+### Phasing
+
+| Phase | What | Days |
+| --- | --- | --- |
+| L1, spike | The parser and interpreter for a subset, including PromQL blocks parsed with `promql-parser` and `$region` spliced as a matcher (`uses`, `input`, `param`, `let`, `view`; `where`, `rename`, `join`, `top`, `derive`; `mark point3d` with encodings; `on hover -> channel`), with fuel and memory accounting, evaluating the faster-pods workbook through the core's interface. **Judged by:** its scene equals the hand-written Rust kind's golden scene from the same fixture, and the agent writes it from the example | about 8 |
+| L2, version 1 | Embedded PromQL on `promql-parser` with splicing, the guards as AST checks and static label sets (about 4 days), and bounded metadata reads in `tomori-prometheus` (about 2 days); types and units, every verb and mark (including `graph`, `tree`, `timeline`, `surface`, facets, layers), `state` and handlers, the reactive scheduler, per-cell errors, the tools, the highlighting grammar; the CV comparison and crate graph as workbooks. **Judged by:** in the headset, the agent builds and revises a two-view workbook during a conversation, fixing its own errors from the per-cell answers, including a misspelt metric caught before any query runs | about 26 |
+| L3, reports | `note` cells, `create_report` from a workbook, frozen and live views with provenance | about 5, after the web phases |
+| L4, browser | The interpreter in WebAssembly for offline reports with frozen data | about 4 |
+
+The language phases follow phase 1 and replace, if the maintainer agrees, the interpreter options of section 9; dynamically loaded Rust remains an alternative for the maintainer's own heavy kinds.
+
+### Open questions for the maintainer
+
+1. **Name.** Candidates: *Lumen*, *Vista*, *Atlas*, or simply "Tomori workbooks". Checked against crates.io and existing languages before choosing.
+2. **File format and extension.** Proposed: plain UTF-8 text, one workbook per file, `.workbook` or a short extension after the name (`.lum`); stored in the session's directory and kept with the space.
+3. **Typed?** Proposed: typed with inference, units included, checked before running where schemas are known and on the source's answer otherwise; no type annotations required except on `param` and `state`.
+4. **Embedded PromQL on `promql-parser`** (Apache-2.0, declared compatible with Prometheus 3.8), or a parser of our own if its error positions or coverage of the gateway's dialect fall short?
+5. **The only scripting route, or alongside dynamic Rust?** Proposed: the language is the agent's route; compiled Rust kinds stay for heavy or bespoke drawing and are usable from workbooks; dynamically loaded Rust modules only if rebuilding the server for a new compiled kind proves too slow in practice.
+
+## 11. Security, deferred but bounded
 
 Phase 1 visualisations are server code, written or reviewed like any other, with the same trust as an environment's server side; the agent can already change the server's code. So phase 1 adds no boundary beyond what exists, with four rules that cost nothing now and keep the later boundary possible:
 
@@ -599,7 +824,7 @@ Phase 1 visualisations are server code, written or reviewed like any other, with
 
 The boundary to define with phase 2, once the interface is known: who may create visualisations from code arriving at run time (the agent only, acting for owners and collaborators, is the obvious start); a separate, credential-free worker process for run-time code whatever the route; limits on memory, CPU per call and source requests per space; what a persisted visualisation may do unattended; and what live report panels may read for someone outside the space.
 
-## 11. Risks and open questions
+## 12. Risks and open questions
 
 ### Risks
 
@@ -642,14 +867,15 @@ The boundary to define with phase 2, once the interface is known: who may create
 
 ## Design documents this would change
 
-A new `design/visualisations.md` (the trait, kinds, context, wakes, events, scheduling, channels and their propagation, the scene builder, tools, and later the run-time routes and their boundary); `design/projection.md` (the scene panel kind, `Hello::scenes`, `Limits::scenes` and `items`, the back of every panel, `FlipPanel`, scene diffs as live data); `design/data-sources.md` (the source registry, grants, `promql::guard`, provenance); `design/diagrams.md` (`scene.graph` as a way to reach a volume, with #534); `design/environments.md` (`Panel::with_back`, `with_visualisation`, `with_source`); `design/panel-context.md` (parameters and time as shared channels, scopes and inheritance, `Setting::Linked`, `channels` and `set_channel`), `design/projection.md`'s linked time cursor (as the participant channel `cursor.time`, and `hovered_series`); `design/mcp.md` (the visualisation tools, `channels` and `set_channel`, `flip_panel`, the report tools, `export_data`); `design/interaction.md` and `design/responders.md` (flipping, grabbing items in scenes); `design/rendering.md` (scenes in the volumes' budget, cables); `design/security.md` (report pages, share links, CSP, Tomori's own script in the web pages, and later the run-time boundary); `design/spectator.md` (drawing scenes); `design/clients.md` (the web as a client of scene descriptions); and `design/crates.md` (`tomori-visual-core`, `tomori-visual-runtime`, `tomori-visual-adapter`, `tomori-visual-kinds`, later renderers, their dependency rules, and the core's eventual move to its own `base-rs` repository).
+A new `design/visualisations.md` (the trait, later the workbook language and its embedded source queries, kinds, context, wakes, events, scheduling, channels and their propagation, the scene builder, tools, and later the run-time routes and their boundary); `design/projection.md` (the scene panel kind, `Hello::scenes`, `Limits::scenes` and `items`, the back of every panel, `FlipPanel`, scene diffs as live data); `design/data-sources.md` (the source registry, grants, `promql::guard`, provenance); `design/diagrams.md` (`scene.graph` as a way to reach a volume, with #534); `design/environments.md` (`Panel::with_back`, `with_visualisation`, `with_source`); `design/panel-context.md` (parameters and time as shared channels, scopes and inheritance, `Setting::Linked`, `channels` and `set_channel`), `design/projection.md`'s linked time cursor (as the participant channel `cursor.time`, and `hovered_series`); `design/mcp.md` (the visualisation tools, `channels` and `set_channel`, `flip_panel`, the report tools, `export_data`); `design/interaction.md` and `design/responders.md` (flipping, grabbing items in scenes); `design/rendering.md` (scenes in the volumes' budget, cables); `design/security.md` (report pages, share links, CSP, Tomori's own script in the web pages, and later the run-time boundary); `design/spectator.md` (drawing scenes); `design/clients.md` (the web as a client of scene descriptions); and `design/crates.md` (`tomori-visual-core`, `tomori-visual-runtime`, `tomori-visual-adapter`, `tomori-visual-kinds`, later renderers, their dependency rules, and the core's eventual move to its own `base-rs` repository).
 
 ## Decisions for the maintainer
 
 1. **Private or shared panel flips** (question 7): **decided** by the maintainer, November 2026: private by default, with a way to flip for everyone when showing others (the ⟲ chip's "flip for everyone", or the agent's `flip_panel` on request). Phase 1(a) is scoped accordingly.
-2. **Prometheus access by default** (question 8, section 10): every space, opt-in spaces, or owner-approved. Recommended: opt-in by default in Tomori's builder; Observe configures every space for its own deployment.
+2. **Prometheus access by default** (question 8, section 11): every space, opt-in spaces, or owner-approved. Recommended: opt-in by default in Tomori's builder; Observe configures every space for its own deployment.
 3. **Whether the context migration happens in phase 1.** Recommended: **no**; phase 1 uses the adapter bridge, and the migration is phase 3, about 15 days.
 4. **The core's name and home:** `tomori-visual-core` in the workspace now, extraction-ready, moving to `base-rs/visual` as `base-visual` once it settles?
 5. **Who turns on everyone's cursors** (question 5): the subscriber's choice, or the publisher's consent?
 6. **Implicit by name, or explicit links only** (question 6): follow channels by name through the scopes, with links for exceptions, as proposed?
 7. **Grants** (question 8): settled with decision 2.
+8. **A purpose-built workbook language** for phase 2 (section 10): pursue it, with its name, file extension, typing, embedded PromQL on `promql-parser`, and whether it is the only scripting route (section 10's open questions).
