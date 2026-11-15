@@ -25,6 +25,8 @@ pub(crate) struct Shared {
     pub name: Mutex<String>,
     /// Whether the participants' voices are delivered to play, as [`Client::hear`] last said.
     pub participants: AtomicBool,
+    /// Whether the participants' voices not delivered to play are delivered to measure, as [`Client::measure`] last said.
+    pub measuring: AtomicBool,
 }
 
 impl Shared {
@@ -32,6 +34,11 @@ impl Shared {
     /// does not play it mutes, and the participants' voices as [`Client::hear`] last said.
     pub fn delivers(&self, source: u32) -> bool {
         crate::playback::is_agent(source) || self.participants.load(Ordering::Relaxed)
+    }
+
+    /// Whether received audio not delivered to play is delivered to measure, as [`Client::measure`] last said.
+    pub fn measures(&self) -> bool {
+        self.measuring.load(Ordering::Relaxed)
     }
 
     pub fn set_state(&self, state: ConnectionState) {
@@ -64,6 +71,7 @@ impl Sender {
                 closing: Cancellation::new(),
                 name: Mutex::new(String::new()),
                 participants: AtomicBool::new(true),
+                measuring: AtomicBool::new(false),
             }),
         }
     }
@@ -153,6 +161,7 @@ impl Sender {
 pub struct Client {
     sender: Sender,
     audio: Option<Receiver<AudioFrame>>,
+    measured: Option<Receiver<AudioFrame>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -175,11 +184,14 @@ impl Client {
             closing: Cancellation::new(),
             name: Mutex::new(options.name.clone()),
             participants: AtomicBool::new(options.hearing.participants()),
+            measuring: AtomicBool::new(false),
         });
         if options.microphone_rearm_on_disconnect {
             shared.outbox.require_microphone_rearm();
         }
         let (audio_sender, audio): (SyncSender<AudioFrame>, _) =
+            mpsc::sync_channel(options.incoming_audio_limit.max(1));
+        let (measured_sender, measured): (SyncSender<AudioFrame>, _) =
             mpsc::sync_channel(options.incoming_audio_limit.max(1));
         let thread_shared = shared.clone();
         let thread = crate::system::spawn("tomori-client", move || {
@@ -188,6 +200,7 @@ impl Client {
                 shared: &thread_shared,
                 options: &options,
                 audio: &audio_sender,
+                measured: &measured_sender,
                 learned: std::cell::Cell::new(None),
             };
             futures_lite::future::block_on(session::run(&context));
@@ -197,6 +210,7 @@ impl Client {
         Ok(Self {
             sender: Sender { shared },
             audio: Some(audio),
+            measured: Some(measured),
             thread: Some(thread),
         })
     }
@@ -237,13 +251,35 @@ impl Client {
     }
 
     /// Deliver the participants' voices from now on only if `hearing` plays them, dropping them as they arrive, before
-    /// their samples are decoded; what was delivered already still plays. The agent's speech is always delivered, for
+    /// their samples are decoded, unless [`Self::measure`] asks for them; what was delivered already still plays. The agent's speech is always delivered, for
     /// the player to mute; see [`crate::connection::Connection::hear`].
     pub fn hear(&self, hearing: Hearing) {
         self.sender
             .shared
             .participants
             .store(hearing.participants(), Ordering::Relaxed);
+    }
+
+    /// Move the participants' voices delivered to measure and not play, as [`Self::measure`] asks, to another thread,
+    /// typically to a [`crate::playback::Player`]'s [`crate::playback::Player::measure`]. Returns `None` if already taken.
+    pub fn take_measured(&mut self) -> Option<Receiver<AudioFrame>> {
+        self.measured.take()
+    }
+
+    /// Deliver the participants' voices that [`Self::hear`] does not play to measure from now on, decoded and kept apart
+    /// from those played, or drop them as they arrive, as by default. Asked only while something ducks under them; see
+    /// [`crate::DuckUnder`].
+    pub fn measure(&self, measuring: bool) {
+        self.sender
+            .shared
+            .measuring
+            .store(measuring, Ordering::Relaxed);
+    }
+
+    /// Whether the participants' voices not played are delivered to measure, as [`Self::measure`] last said.
+    #[cfg(test)]
+    pub(crate) fn measures(&self) -> bool {
+        self.sender.shared.measures()
     }
 
     /// The next received audio frame, unless the receiver was taken.

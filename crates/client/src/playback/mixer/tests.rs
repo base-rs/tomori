@@ -1152,3 +1152,79 @@ fn the_ambience_its_thread_feeds_plays_in_the_mix_beneath_cues() {
     assert!(mixer.take_ambience_bus().is_some());
     assert_eq!(mixer.playing_ambience(), (0, 0));
 }
+
+#[test]
+fn a_voice_measured_ducks_agent_speech_and_the_ambience_but_is_never_heard() {
+    let mut mixer = mixer();
+    // An ambient sound that began before anyone spoke, at 1 000, and the agent speaking at 1 000.
+    mixer.ambient(Sound::new(vec![1_000.0; 2_000], RATE), [0.0; 3]);
+    let mut outputs = Vec::new();
+    for sequence in 0..75 {
+        mixer.measure(frame(1, sequence, 10_000));
+        mixer.push(frame(AGENT_SOURCE, sequence, 1_000));
+        outputs.push(mix(&mut mixer, 4));
+    }
+    // A person measured speaking for 300 ms ducks both, as a person heard does.
+    assert_eq!(mixer.duck_depth(), duck::DEPTH_DB);
+    assert_eq!(mixer.ambience_duck_depth(), 12.0);
+    // Nothing of them is heard: only the agent's speech and the ambient sound play, each going down, never above the
+    // two together.
+    assert!(outputs.iter().flatten().all(|sample| *sample <= 2_000));
+    let ducked = outputs.last().unwrap();
+    assert!(
+        ducked.iter().all(|sample| (*sample - 398 - 251).abs() <= 3),
+        "{ducked:?}"
+    );
+    // Nor are they counted among the voices playing, nor given a level.
+    assert_eq!(mixer.voices().count(), 0);
+    assert_eq!(mixer.source_level(1), 0.0);
+    assert!(mixer.is_source_playing(1));
+    // Agent speech is never only measured.
+    mixer.measure(frame(REPLAY_SOURCE, 0, 1_000));
+    assert!(!mixer.sources().any(|source| source == REPLAY_SOURCE));
+}
+
+#[test]
+fn a_voice_measured_alone_is_silent_and_heard_again_once_played() {
+    let mut mixer = mixer();
+    for sequence in 0..4 {
+        mixer.measure(frame(1, sequence, 10_000));
+    }
+    assert_eq!(mix(&mut mixer, 8), [0; 8]);
+    // Played from its next frame on, as when everyone's voices are played again.
+    mixer.push(frame(1, 4, 10_000));
+    mixer.push(frame(1, 5, 10_000));
+    assert_eq!(mix(&mut mixer, 4), [10_000; 4]);
+    assert_eq!(mixer.voices().collect::<Vec<_>>(), [1]);
+    // Measured again, it is silent at once, what was played of it included.
+    mixer.push(frame(1, 6, 10_000));
+    mixer.measure(frame(1, 7, 10_000));
+    assert_eq!(mix(&mut mixer, 8), [0; 8]);
+    // The local microphone and frames gated off are no more measured than played.
+    mixer.set_local_source(Some(2));
+    mixer.measure(frame(2, 0, 10_000));
+    mixer.measure(AudioFrame {
+        gate: Gate::Off,
+        ..frame(3, 0, 10_000)
+    });
+    assert_eq!(mixer.sources().collect::<Vec<_>>(), [1]);
+}
+
+#[test]
+fn at_most_so_many_voices_are_measured_at_once() {
+    let mut mixer = mixer();
+    for source in 1..=MEASURED as u32 + 2 {
+        mixer.measure(frame(source, 0, 10_000));
+    }
+    let mut sources = mixer.sources().collect::<Vec<_>>();
+    sources.sort_unstable();
+    assert_eq!(sources, (1..=MEASURED as u32).collect::<Vec<_>>());
+    // Those measured already go on being measured, and a voice played is not counted.
+    mixer.measure(frame(1, 1, 10_000));
+    mixer.push(frame(9, 0, 10_000));
+    assert_eq!(mixer.sources().count(), MEASURED + 1);
+    // Once one is gone, another is measured.
+    mixer.clear_source(2);
+    mixer.measure(frame(MEASURED as u32 + 1, 1, 10_000));
+    assert!(mixer.sources().any(|source| source == MEASURED as u32 + 1));
+}

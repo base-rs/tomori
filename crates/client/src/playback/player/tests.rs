@@ -571,3 +571,27 @@ mod ambience {
         assert!(control.end_ambience());
     }
 }
+
+#[test]
+fn voices_to_measure_duck_agent_speech_and_are_never_played() {
+    let (sender, mut player, control) = player();
+    let (measure, measured) = mpsc::sync_channel(64);
+    player.measure(measured);
+    let mut loudest = 0;
+    for sequence in 0..75 {
+        measure.send(frame(1, sequence, 10_000)).unwrap();
+        sender.send(frame(AGENT_SOURCE, sequence, 1_000)).unwrap();
+        let output = render(&mut player, FRAME);
+        loudest = output.into_iter().fold(loudest, i16::max);
+    }
+    let mixer = player.mixer().expect("prepared");
+    assert_eq!(mixer.duck_depth(), crate::playback::duck::DEPTH_DB);
+    assert_eq!(loudest, 1_000);
+    // Clearing discards those not yet rendered too.
+    for sequence in 75..79 {
+        measure.send(frame(1, sequence, 10_000)).unwrap();
+    }
+    control.clear();
+    render(&mut player, FRAME);
+    assert_eq!(player.mixer().expect("prepared").sources().count(), 0);
+}

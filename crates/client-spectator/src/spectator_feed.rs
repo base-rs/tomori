@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
-use tomori_client::Hearing;
+use tomori_client::{DuckUnder, Hearing};
 use tomori_protocol::{Hand, ServerMessage};
 use tomori_render::scenery::Sceneries;
 use tomori_scene::scene::{Frame, Step};
@@ -66,6 +66,10 @@ pub struct SpectatorOptions {
     /// Whether it plays the environment's ambience and its ambient sounds, as the participant it follows would hear
     /// them: off, by default, for an audience that hears the conversation alone. See `design/spectator.md`.
     pub ambience: bool,
+    /// Whose speech the agent's speech and the ambience duck under: the voices it plays, by default, or everyone's, so
+    /// that a participant whose voice it does not play, such as someone presenting with it, still has them duck while
+    /// they speak, measured and never played. See `design/spectator.md`.
+    pub duck_under: DuckUnder,
     /// Whether its window, or the PipeWire source's preview window, is borderless, for a clean capture into OBS or a
     /// shared screen, rather than a decorated window with the platform's title bar that can be moved, resized and made
     /// full screen. The PipeWire source without a window has no window to be borderless. See `design/spectator.md`.
@@ -73,7 +77,8 @@ pub struct SpectatorOptions {
 }
 
 impl SpectatorOptions {
-    /// No server, space, participant or token, every voice played, no ambience, and a decorated window.
+    /// No server, space, participant or token, every voice played, no ambience, ducking under the voices played, and a
+    /// decorated window.
     pub fn new() -> Self {
         Self::default()
     }
@@ -157,6 +162,7 @@ impl Feed {
         connection.feedback().mute_sounds();
         connection.hear_ambience(options.ambience);
         connection.hear(options.voices);
+        connection.duck_under(options.duck_under);
 
         // If a space is given, join it directly, as the lobby's accept would.
         if let Some(space) = &options.space {
@@ -216,6 +222,20 @@ impl Feed {
         self.connection.hear(voices);
         log::info!("Spectator: voices {}", voices.name());
         voices
+    }
+
+    /// Whose speech the agent's speech and the ambience duck under, as its connection was last told.
+    pub fn duck_under(&self) -> DuckUnder {
+        self.connection.ducking_under()
+    }
+
+    /// Duck under everyone's speech from now on if it ducked under the voices played, or under the voices played if it
+    /// ducked under everyone's, as D in its window does, logging the choice, and return it.
+    pub fn next_duck_under(&mut self) -> DuckUnder {
+        let duck_under = self.duck_under().next();
+        self.connection.duck_under(duck_under);
+        log::info!("Spectator: ducking under {}", duck_under.name());
+        duck_under
     }
 
     /// Whether it plays the environment's ambience and its ambient sounds, as its connection was last told.
@@ -750,6 +770,25 @@ mod tests {
         // Each is what its connection was told, so that it is what plays.
         demonstrating.next_voices();
         assert_eq!(demonstrating.connection.hearing(), Hearing::Nobody);
+    }
+
+    #[test]
+    fn ducking_follows_the_voices_played_unless_chosen_and_d_toggles_it() {
+        assert_eq!(
+            feed(SpectatorOptions::new()).duck_under(),
+            DuckUnder::Played
+        );
+        let mut presenting = feed(SpectatorOptions {
+            voices: Hearing::Agent,
+            duck_under: DuckUnder::Everyone,
+            ..Default::default()
+        });
+        assert_eq!(presenting.connection.ducking_under(), DuckUnder::Everyone);
+        assert_eq!(presenting.next_duck_under(), DuckUnder::Played);
+        // Each is what its connection was told, so that it is what ducks.
+        assert_eq!(presenting.connection.ducking_under(), DuckUnder::Played);
+        assert_eq!(presenting.next_duck_under(), DuckUnder::Everyone);
+        assert_eq!(presenting.duck_under(), DuckUnder::Everyone);
     }
 
     #[test]

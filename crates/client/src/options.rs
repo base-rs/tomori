@@ -8,7 +8,8 @@ use tomori_protocol::{EnvironmentVersion, Keepalive, Limits};
 use crate::Backoff;
 
 /// Whose voices a client plays: everyone's, the agent's speech alone, live or played again, or none. A participant's
-/// voice not played is dropped as it arrives, before its samples are decoded; the agent's speech, not played, is muted
+/// voice not played is dropped as it arrives, before its samples are decoded, unless [`DuckUnder::Everyone`] has it
+/// measured, never played, while something ducks; the agent's speech, not played, is muted
 /// rather than dropped, so that it is still measured and the agent is still seen speaking. The spectator chooses, so that
 /// a demonstration's own voice does not come back out of its speakers. See `design/spectator.md`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,6 +61,46 @@ impl Hearing {
     /// Whether the agent's speech is muted.
     pub(crate) fn mutes_agent(self) -> bool {
         self == Self::Nobody
+    }
+}
+
+/// Whose speech what ducks follows, the agent's speech and the environment's ambience: the voices played, as ever, or
+/// everyone's, including participants' voices a [`Hearing`] does not play, which are then measured, never played, while
+/// something ducks. The spectator chooses, so that someone presenting with it, whose own voice it does not play, still
+/// has the ambience and the agent's speech duck while they speak. See `design/spectator.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DuckUnder {
+    /// The voices played alone, at no cost for those not played.
+    #[default]
+    Played,
+    /// Everyone's speech, whether or not their voice is played.
+    Everyone,
+}
+
+impl DuckUnder {
+    /// Every choice, in the order [`Self::next`] cycles through them.
+    pub const EVERY: [Self; 2] = [Self::Played, Self::Everyone];
+
+    /// Its name on a command line: `played` or `everyone`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Played => "played",
+            Self::Everyone => "everyone",
+        }
+    }
+
+    /// The choice [`Self::name`] names, if any.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::EVERY.into_iter().find(|duck| duck.name() == name)
+    }
+
+    /// The other choice.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Played => Self::Everyone,
+            Self::Everyone => Self::Played,
+        }
     }
 }
 
@@ -225,5 +266,18 @@ mod tests {
             [false, false, true]
         );
         assert_eq!(Hearing::default(), Hearing::All);
+    }
+
+    #[test]
+    fn each_duck_under_is_named_and_cycles_with_the_voices_played_by_default() {
+        for duck in DuckUnder::EVERY {
+            assert_eq!(DuckUnder::named(duck.name()), Some(duck));
+        }
+        assert_eq!(DuckUnder::named("some"), None);
+        assert_eq!(
+            DuckUnder::EVERY.map(DuckUnder::next),
+            [DuckUnder::Everyone, DuckUnder::Played]
+        );
+        assert_eq!(DuckUnder::default(), DuckUnder::Played);
     }
 }

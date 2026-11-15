@@ -103,6 +103,11 @@ impl Speaker {
             .take_audio()
             .expect("a new client's audio is taken once, here");
         let (mut player, control) = Player::new(audio, MixerOptions::default());
+        player.measure(
+            client
+                .take_measured()
+                .expect("a new client's measured voices are taken once, here"),
+        );
         if self.probe {
             player.load_probe();
         }

@@ -20,6 +20,9 @@ const FADE: Duration = Duration::from_millis(10);
 const VOICES: usize = 8;
 /// The most ambient sounds that play at once; another replaces the one furthest through.
 const AMBIENT: usize = 3;
+/// The most participants' voices measured at once without being played, for ducking alone; another is dropped until
+/// one runs dry. See [`Mixer::measure`].
+pub const MEASURED: usize = 4;
 
 /// A sound an environment plays at a place in the scene, such as an animal calling: its samples, in `i16`
 /// units, at `rate` samples a second, which the mixer plays at its own rate. See `design/spatial-audio.md`.
@@ -105,6 +108,9 @@ struct Source {
     arrived: u64,
     /// Set while a replay stopped here fades out and then plays silently until it runs dry: how far it has faded, in samples, from 0 at full volume to the length of a fade, silent.
     stopped: Option<u32>,
+    /// Whether it is played, as its last frame was [`Mixer::push`]ed, or only measured for ducking, as its last frame was
+    /// [`Mixer::measure`]d: never rendered, and given no level.
+    heard: bool,
 }
 
 impl Source {
@@ -116,6 +122,7 @@ impl Source {
             ears: Ears::new(output_rate),
             arrived: 0,
             stopped: None,
+            heard: true,
         }
     }
 }
@@ -215,8 +222,13 @@ impl Pass<'_> {
         }
         let energy: f32 = scratch.iter().map(|sample| sample * sample).sum();
         let rms = (energy / frames.max(1) as f32).sqrt() / f32::from(i16::MAX);
-        source.level = rms.min(1.0).max(source.level * self.release);
         source.loud = rms >= super::duck::THRESHOLD;
+        // A voice measured and not played ducks what it should, and nothing more: it has no level and is not heard.
+        if !source.heard {
+            source.level = 0.0;
+            return played;
+        }
+        source.level = rms.min(1.0).max(source.level * self.release);
         match self.layout {
             Layout::Mono => source
                 .ears
@@ -543,11 +555,13 @@ impl Mixer {
     }
 
     /// The others whose voices are contributing audio now, by their numbers: every source but the agent's speech, live or
-    /// played again, that [`Self::is_source_playing`] says plays.
+    /// played again, and voices only measured, that [`Self::is_source_playing`] says plays.
     pub fn voices(&self) -> impl Iterator<Item = u32> + '_ {
         self.sources
             .iter()
-            .filter(|(source, playing)| !is_agent(**source) && playing.buffer.is_playing())
+            .filter(|(source, playing)| {
+                !is_agent(**source) && playing.heard && playing.buffer.is_playing()
+            })
             .map(|(source, _)| *source)
     }
 
@@ -566,6 +580,27 @@ impl Mixer {
 
     /// Queue a received frame for playback.
     pub fn push(&mut self, frame: AudioFrame) {
+        self.queue(frame, true);
+    }
+
+    /// Queue a participant's frame that is not to be played, only measured, so that what ducks under people speaking
+    /// ducks under them too: it is consumed in real time as a played voice is, but never rendered, given no level, nor
+    /// counted among [`Self::voices`]. Its source is played again from its next [`Self::push`]ed frame. Agent speech is
+    /// never only measured, and at most [`MEASURED`] voices are: a frame from another is dropped. See
+    /// `design/spectator.md`.
+    pub fn measure(&mut self, frame: AudioFrame) {
+        let measured = self.sources.values().filter(|source| !source.heard).count();
+        let known = self
+            .sources
+            .get(&frame.source)
+            .is_some_and(|source| !source.heard);
+        if is_agent(frame.source) || (!known && measured >= MEASURED) {
+            return;
+        }
+        self.queue(frame, false);
+    }
+
+    fn queue(&mut self, frame: AudioFrame, heard: bool) {
         if frame.gate == Gate::Off || Some(frame.source) == self.local_source {
             return;
         }
@@ -588,6 +623,7 @@ impl Mixer {
             source.arrived = self.arrivals;
             self.arrivals += 1;
         }
+        source.heard = heard;
         source.buffer.push(frame, &mut self.statistics);
     }
 
