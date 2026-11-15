@@ -1,19 +1,22 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Volumes: panels with depth, each showing the diagram the server laid out, its nodes as lit solids, its edges as
-//! tubes through their waypoints with cones for arrowheads, its groups as trays and frames, and its labels from the
-//! shared glyph atlas, each turned to face the viewer about the vertical and brought in front of its solids. Its face
-//! is a panel's, its title above a plate the diagram stands in front of: a dark one in a wall's slot, as a shallow
-//! display case, and a faint one floating, so that what is behind it shows between its nodes. What it draws is built
-//! once for each version of its diagram and kept, as a panel's face is; a frame moves it by its panel's model alone,
-//! and dims what is not the node the participant focuses on and its neighbours. The ray meets its nodes and edges,
-//! nearest first, which name them to the agent. See `design/diagrams.md`.
+//! Volumes: panels with depth, each showing the diagram the server laid out, its nodes as lit solids in their groups'
+//! colours and their kinds' shapes, its edges as tubes curved through their waypoints from surface to surface, narrowing
+//! towards where they point, its layers as floors and containers as frames, a legend of its groups and kinds on its
+//! face, and its labels from the shared glyph atlas, each turned to face the viewer about the vertical and brought in
+//! front of its solids. Its face is a panel's, its title above a plate the diagram stands in front of: a dark one in a
+//! wall's slot, as a shallow display case, and a faint one floating, so that what is behind it shows between its nodes.
+//! What it draws is built once for each version of its diagram and kept, as a panel's face is; a frame moves it by its
+//! panel's model alone, and dims what is not the node the participant focuses on and its neighbours. The ray meets its
+//! nodes and edges, nearest first, which name them to the agent. See `design/diagrams.md`.
 use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Vec3};
 use tomori_protocol::Panel;
-use tomori_protocol::diagram::{Arrow, Diagram, GroupKind, LABEL_LINES, Shape, Style};
+use tomori_protocol::diagram::{
+    Arrow, Diagram, GROUP_COLOURS, GroupKind, LABEL_LINES, Shape, Style,
+};
 
 use super::{BRIGHT, DIM, FIT_ROWS, Fit, PADDING, PIXEL, TABLE_COLUMNS};
 use crate::canvas::Canvas;
@@ -41,14 +44,34 @@ const LABEL_COLUMNS: usize = 20;
 /// The nearest a label brought in front of its volume comes to the viewer, in metres, unless it stood nearer.
 const NEAREST: f32 = 0.4;
 
+/// How far away a volume floating and one in a wall's slot are read from, in metres, from which its front is seen
+/// within its plate.
+const FLOATING_READ: f32 = 1.3;
+const SLOT_READ: f32 = 2.0;
 /// How far a volume's back stands in front of its face, in metres, so that its plate is behind everything it draws.
 const STAND_OFF: f32 = 0.01;
 
-/// The radius of an edge's tube, of its arrowhead's cone and how long that is, and a flow's beads, in millimetres of
-/// the volume.
-const TUBE_MM: f32 = 4.0;
-const CONE_MM: (f32, f32) = (12.0, 30.0);
-const BEAD_MM: f32 = 9.0;
+/// The radius of an edge's tube where it leaves its source and where it reaches its target, narrowing between so that
+/// which way it points reads from any side; of one with no direction, or both; and of the beads moving along a flow
+/// and along the edges of the node the participant focuses on, in millimetres of the volume.
+const TAPER_MM: (f32, f32) = (3.5, 1.4);
+const TUBE_MM: f32 = 2.4;
+const BEAD_MM: f32 = 5.5;
+/// How much narrower a [`Solid::Taper`] is at its top than at its base, as [`TAPER_MM`] narrows: a straight edge that
+/// points is one, of as few triangles as a tube.
+pub const TAPER_RATIO: f32 = TAPER_MM.1 / TAPER_MM.0;
+/// How many tubes a curved edge that points is drawn in, along it, each a little narrower than the last.
+const TAPER_PIECES: usize = 8;
+/// An arrowhead's radius and length where an edge points, in millimetres of the volume, and how far along the edge its
+/// middle one's point stands, as a share.
+const ARROW_MM: (f32, f32) = (14.0, 34.0);
+const MIDDLE_ARROW: f32 = 0.6;
+/// How far towards white an arrowhead is from its edge's colour.
+const ARROW_LIGHT: f32 = 0.6;
+/// How many pieces each span of an edge's curve through its waypoints is drawn in.
+const CURVE_PIECES: usize = 8;
+/// How far within a node's surface an edge ends, in millimetres, so that it meets it without a seam.
+const EMBED_MM: f32 = 1.0;
 /// A dashed edge's dashes and gaps, and a dotted one's spacing, in millimetres, and the most of either along an edge.
 const DASH_MM: (f32, f32) = (24.0, 16.0);
 const DOT_MM: f32 = 22.0;
@@ -59,10 +82,18 @@ const FLOW_MM: f32 = 120.0;
 
 /// How bright what the participant does not focus on is drawn, as a share.
 const DIMMED: f32 = 0.2;
-/// An edge's colour, unless it has one, and a group's tray's, frame's and floor's.
-const EDGE: [f32; 3] = [0.6, 0.66, 0.74];
-const TRAY: [f32; 3] = [0.16, 0.2, 0.26];
-const FRAME: [f32; 3] = [0.34, 0.4, 0.5];
+/// An edge's colour between nodes of different groups, unless it has one, and a group's floor's or frame's without a
+/// colour of its own.
+const EDGE: [f32; 3] = [0.42, 0.46, 0.53];
+const NEUTRAL_GROUP: [f32; 3] = [0.34, 0.4, 0.5];
+/// How bright an edge within a group is drawn in the group's colour, and a layer's floor's and a container's frame's
+/// bars, as shares.
+const WITHIN: f32 = 0.75;
+const FRAMED: f32 = 0.7;
+/// How thick a layer's floor's and a container's frame's bars are, in millimetres.
+const BAR_MM: f32 = 2.5;
+/// How far towards white a nested group's colour is from its parent's, for each level.
+const NESTED: f32 = 0.3;
 
 /// How far the ray may pass an edge and still meet it: 1.5 cm, or half a degree, whichever is larger.
 const EDGE_REACH: (f32, f32) = (0.015, 0.0087);
@@ -81,11 +112,13 @@ pub enum Solid {
     Cone,
     /// A thin tube, along its height, as an edge's segment.
     Tube,
+    /// A thin tube narrowing along its height, to [`TAPER_RATIO`] at its top, as a straight edge that points.
+    Taper,
 }
 
 impl Solid {
     /// Every solid, in the order the renderer keeps their meshes.
-    pub const ALL: [Solid; 7] = [
+    pub const ALL: [Solid; 8] = [
         Solid::Box,
         Solid::Sphere,
         Solid::Cylinder,
@@ -93,6 +126,7 @@ impl Solid {
         Solid::Diamond,
         Solid::Cone,
         Solid::Tube,
+        Solid::Taper,
     ];
 }
 
@@ -145,18 +179,23 @@ pub struct Mesh {
     labels: Vec<Label>,
     /// Each node's middle and radius.
     nodes: Vec<(Vec3, f32)>,
-    /// Each edge's path, from surface to surface, and its colour.
+    /// Each edge's path, from surface to surface, from where it points from to where it points, and its colour.
     edges: Vec<(Vec<Vec3>, [f32; 3])>,
+    /// The edges that point one way, whose beads move while the participant focuses on either end.
+    pointing: Vec<bool>,
     /// The edges that flow.
     flows: Vec<usize>,
     /// Each node's detail card, for a node with a detail, which the participant focusing on it sees beside it.
     cards: Vec<Option<Arc<Canvas>>>,
+    /// Its legend, of its groups and kinds, kept with it.
+    legend: Vec<Entry>,
     /// Its world edges to things here, drawn in the space.
     leaders: Vec<leaders::Leader>,
 }
 
-/// A node's grey, the colour a node is unless it says another: as bright as the chart palette's grey was before it was
-/// darkened to tell a chart's eighth series apart, since a lit solid in the space is not text on a dark face.
+/// A node's grey, the colour a node in no group is unless it says another, and an explicit grey: as bright as the chart
+/// palette's grey was before it was darkened to tell a chart's eighth series apart, since a lit solid in the space is
+/// not text on a dark face.
 const NODE_GREY: [f32; 3] = [0.56, 0.6, 0.66];
 
 /// A node's or an edge's colour, as the palette has it, but for grey, [`NODE_GREY`].
@@ -165,6 +204,145 @@ fn rgb(colour: tomori_protocol::chart::Colour) -> [f32; 3] {
         tomori_protocol::chart::Colour::Grey => NODE_GREY,
         colour => colour.rgb(),
     }
+}
+
+/// Each group's colour: the palette's, told apart with colour blindness (`Colour::SERIES`), for each group at the top
+/// in the order written, its own nested groups' paler for each level, and none past [`GROUP_COLOURS`] at the top.
+pub fn group_colours(diagram: &Diagram) -> Vec<Option<[f32; 3]>> {
+    let mut colours: Vec<Option<[f32; 3]>> = Vec::new();
+    let mut tops = 0;
+    for group in &diagram.groups {
+        let colour = match group
+            .parent
+            .and_then(|parent| colours.get(usize::from(parent)))
+        {
+            Some(parent) => {
+                parent.map(|colour| colour.map(|channel| channel + (1.0 - channel) * NESTED))
+            }
+            None => {
+                tops += 1;
+                tomori_protocol::chart::Colour::SERIES
+                    .get(tops - 1)
+                    .filter(|_| tops <= GROUP_COLOURS)
+                    .map(|colour| colour.rgb())
+            }
+        };
+        colours.push(colour);
+    }
+    colours
+}
+
+/// The colour of `node` of `diagram`, whose groups are coloured `groups`: its own, or else its group's, or else grey.
+fn node_colour(node: &tomori_protocol::diagram::Node, groups: &[Option<[f32; 3]>]) -> [f32; 3] {
+    match node.colour {
+        tomori_protocol::chart::Colour::Grey => node
+            .group
+            .and_then(|group| groups.get(usize::from(group)).copied().flatten())
+            .unwrap_or(NODE_GREY),
+        colour => colour.rgb(),
+    }
+}
+
+/// How far from a node's middle its solid's surface is along `direction`, a unit vector, in its millimetres: `solid`
+/// scaled by `scale`, as it is drawn, faceted as its mesh is.
+pub fn surface(solid: Solid, scale: Vec3, direction: Vec3) -> f32 {
+    let half = scale / 2.0;
+    let d = direction.abs();
+    let reach = |extent: f32, part: f32| {
+        if part > 1e-6 {
+            extent / part
+        } else {
+            f32::INFINITY
+        }
+    };
+    match solid {
+        // Its faces between its corners, a little within the sphere about them.
+        Solid::Sphere => half.x * 0.92,
+        Solid::Diamond => 1.0 / (d.x / half.x + d.y / half.y + d.z / half.z),
+        Solid::Cylinder | Solid::Prism => {
+            let sides = if solid == Solid::Cylinder { 12.0 } else { 6.0 };
+            let sector = std::f32::consts::TAU / sides;
+            let across = direction.x.hypot(direction.z);
+            let side = if across > 1e-6 {
+                let angle = direction.z.atan2(direction.x).rem_euclid(sector);
+                reach(
+                    half.x * (sector / 2.0).cos() / (angle - sector / 2.0).cos(),
+                    across,
+                )
+            } else {
+                f32::INFINITY
+            };
+            side.min(reach(half.y, d.y))
+        }
+        _ => reach(half.x, d.x)
+            .min(reach(half.y, d.y))
+            .min(reach(half.z, d.z)),
+    }
+}
+
+/// The solid a node of `shape`, `width` across, is drawn as, its size along each of its axes, and which way they point:
+/// a prism lies with a hexagon, pointed to either side, towards the front, so that it is not taken for a box seen
+/// from there.
+fn body(shape: Shape, width: f32) -> (Solid, Vec3, Mat3) {
+    let upright = Mat3::IDENTITY;
+    match shape {
+        Shape::Sphere => (Solid::Sphere, Vec3::splat(width), upright),
+        Shape::Cylinder => (
+            Solid::Cylinder,
+            Vec3::new(width, width * 0.8, width),
+            upright,
+        ),
+        Shape::Prism => (
+            Solid::Prism,
+            Vec3::new(width, width * 0.5, width),
+            Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2),
+        ),
+        Shape::Diamond => (Solid::Diamond, Vec3::splat(width), upright),
+        Shape::Card => (
+            Solid::Box,
+            Vec3::new(width * 1.4, width, width * 0.12),
+            upright,
+        ),
+        _ => (
+            Solid::Box,
+            Vec3::new(width, width * 0.7, width * 0.7),
+            upright,
+        ),
+    }
+}
+
+/// `points` curved smoothly through each of them, a Catmull–Rom spline of [`CURVE_PIECES`] pieces a span; two points,
+/// a straight line, as they are.
+fn curved(points: &[Vec3]) -> Vec<Vec3> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+    let last = points.len() - 1;
+    let mut curve = vec![points[0]];
+    for span in 0..last {
+        let (p1, p2) = (points[span], points[span + 1]);
+        let p0 = if span == 0 {
+            p1 * 2.0 - p2
+        } else {
+            points[span - 1]
+        };
+        let p3 = if span + 1 == last {
+            p2 * 2.0 - p1
+        } else {
+            points[span + 2]
+        };
+        for piece in 1..=CURVE_PIECES {
+            let t = piece as f32 / CURVE_PIECES as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            curve.push(
+                0.5 * (p1 * 2.0
+                    + (p2 - p0) * t
+                    + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t2
+                    + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t3),
+            );
+        }
+    }
+    curve
 }
 
 /// The basis turning a solid's height, its Y, along `direction`.
@@ -187,80 +365,93 @@ impl Mesh {
             .iter()
             .map(|node| (point(node.at), node.width() / 2.0))
             .collect();
+        let groups = group_colours(&diagram);
+        let bodies: Vec<(Solid, Vec3, Mat3)> = diagram
+            .nodes
+            .iter()
+            .map(|node| body(node.shape, node.width()))
+            .collect();
         for (index, node) in diagram.nodes.iter().enumerate() {
-            let (at, radius) = nodes[index];
-            let width = radius * 2.0;
-            let (solid, scale) = match node.shape {
-                Shape::Sphere => (Solid::Sphere, Vec3::splat(width)),
-                Shape::Cylinder => (Solid::Cylinder, Vec3::new(width, width * 0.8, width)),
-                Shape::Prism => (Solid::Prism, Vec3::new(width, width * 0.7, width)),
-                Shape::Diamond => (Solid::Diamond, Vec3::splat(width)),
-                Shape::Card => (Solid::Box, Vec3::new(width * 1.4, width, width * 0.12)),
-                _ => (Solid::Box, Vec3::new(width, width * 0.7, width * 0.7)),
-            };
+            let (solid, scale, basis) = bodies[index];
             parts.push(Part {
                 solid,
-                position: at,
+                position: nodes[index].0,
                 scale,
-                basis: Mat3::IDENTITY,
-                colour: rgb(node.colour),
+                basis,
+                colour: node_colour(node, &groups),
                 owner: Owner::Node(index),
             });
         }
         let mut edges = Vec::new();
         let mut flows = Vec::new();
+        let mut pointing = Vec::new();
         for (index, edge) in diagram.edges.iter().enumerate() {
-            let (from, to) = (nodes[usize::from(edge.from)], nodes[usize::from(edge.to)]);
-            let mut path: Vec<Vec3> = std::iter::once(from.0)
+            let (from, to) = (usize::from(edge.from), usize::from(edge.to));
+            let mut path: Vec<Vec3> = std::iter::once(nodes[from].0)
                 .chain(edge.via.iter().copied().map(point))
-                .chain(std::iter::once(to.0))
+                .chain(std::iter::once(nodes[to].0))
                 .collect();
-            // From surface to surface.
+            // From surface to surface, of each end's solid as it is drawn.
             let last = path.len() - 1;
             let start = (path[1] - path[0]).try_normalize().unwrap_or(Vec3::X);
             let end = (path[last] - path[last - 1])
                 .try_normalize()
                 .unwrap_or(Vec3::X);
-            path[0] += start * from.1;
-            path[last] -= end * to.1;
-            let colour = edge.colour.map_or(EDGE, rgb);
-            let radius = TUBE_MM
-                * (1.0 + 0.5 * f32::from(edge.weight.saturating_sub(1)))
+            let (solid, scale, basis) = bodies[from];
+            path[0] +=
+                start * (surface(solid, scale, basis.transpose() * start) - EMBED_MM).max(0.0);
+            let (solid, scale, basis) = bodies[to];
+            path[last] -=
+                end * (surface(solid, scale, basis.transpose() * -end) - EMBED_MM).max(0.0);
+            let mut path = curved(&path);
+            // From where it points from, so that it narrows towards where it points and its beads move that way.
+            if edge.direction == Arrow::Back {
+                path.reverse();
+            }
+            let shared = diagram.nodes[from]
+                .group
+                .filter(|group| Some(*group) == diagram.nodes[to].group)
+                .and_then(|group| groups.get(usize::from(group)).copied().flatten());
+            let colour = edge.colour.map_or_else(
+                || shared.map_or(EDGE, |colour| colour.map(|channel| channel * WITHIN)),
+                rgb,
+            );
+            let heavier = (1.0 + 0.5 * f32::from(edge.weight.saturating_sub(1)))
                 * if edge.style == Style::Thick { 2.0 } else { 1.0 };
-            let owner = Owner::Edge(index);
-            tubes(&path, edge.style, radius, colour, owner, &mut parts);
-            let (head, tail) = match edge.direction {
-                Arrow::Forward => (true, false),
-                Arrow::Back => (false, true),
-                Arrow::Both => (true, true),
-                _ => (false, false),
+            let points = matches!(edge.direction, Arrow::Forward | Arrow::Back);
+            let width = if points {
+                (TAPER_MM.0 * heavier, TAPER_MM.1 * heavier)
+            } else {
+                (TUBE_MM * heavier, TUBE_MM * heavier)
             };
-            for (wanted, tip, direction) in [(head, path[last], end), (tail, path[0], -start)] {
-                if wanted {
-                    parts.push(Part {
-                        solid: Solid::Cone,
-                        position: tip - direction * CONE_MM.1 / 2.0,
-                        scale: Vec3::new(CONE_MM.0 * 2.0, CONE_MM.1, CONE_MM.0 * 2.0),
-                        basis: along(direction),
-                        colour,
-                        owner,
-                    });
-                }
+            let owner = Owner::Edge(index);
+            tubes(&path, edge.style, width, colour, owner, &mut parts);
+            // Arrowheads where it points and along its middle, lighter than the edge, so that which way it
+            // points reads at a glance; shorter on a short edge.
+            if points {
+                parts.extend(arrowheads(&path, colour, owner));
             }
             if edge.style == Style::Flow {
                 flows.push(index);
             }
+            pointing.push(points);
             edges.push((path, colour));
         }
-        for group in &diagram.groups {
+        for (index, group) in diagram.groups.iter().enumerate() {
             let (low, high) = (point(group.low), point(group.high));
             let size = (high - low).max(Vec3::ONE);
             let middle = (low + high) / 2.0;
+            let colour = groups[index];
             match group.kind {
+                // A cluster is told by its members' colour alone.
+                GroupKind::Cluster => {}
                 GroupKind::Container => {
                     // Its twelve edges, as a frame.
+                    let colour = colour.map_or(NEUTRAL_GROUP, |colour| {
+                        colour.map(|channel| channel * FRAMED)
+                    });
                     for axis in 0..3 {
-                        let mut scale = Vec3::splat(3.0);
+                        let mut scale = Vec3::splat(BAR_MM);
                         scale[axis] = size[axis];
                         let (a, b) = ((axis + 1) % 3, (axis + 2) % 3);
                         for corner in 0..4 {
@@ -272,40 +463,43 @@ impl Mesh {
                                 position,
                                 scale,
                                 basis: Mat3::IDENTITY,
-                                colour: FRAME,
+                                colour,
                                 owner: Owner::Group,
                             });
                         }
                     }
                 }
-                _ => parts.push(Part {
-                    // A tray beneath its members, or a floor, thicker.
-                    solid: Solid::Box,
-                    position: Vec3::new(middle.x, low.y, middle.z),
-                    scale: Vec3::new(
-                        size.x,
-                        if group.kind == GroupKind::Layer {
-                            10.0
-                        } else {
-                            5.0
-                        },
-                        size.z,
-                    ),
-                    basis: Mat3::IDENTITY,
-                    colour: TRAY,
-                    owner: Owner::Group,
-                }),
+                // A layer's floor beneath its members, its four edges, thin, in its colour, which hide nothing behind it.
+                GroupKind::Layer => {
+                    let colour = colour.map_or(NEUTRAL_GROUP, |colour| {
+                        colour.map(|channel| channel * FRAMED)
+                    });
+                    for (axis, across) in [(0, 2), (2, 0)] {
+                        let mut scale = Vec3::splat(BAR_MM);
+                        scale[axis] = size[axis];
+                        for side in [low[across], high[across]] {
+                            let mut position = Vec3::new(middle.x, low.y, middle.z);
+                            position[across] = side;
+                            parts.push(Part {
+                                solid: Solid::Box,
+                                position,
+                                scale,
+                                basis: Mat3::IDENTITY,
+                                colour,
+                                owner: Owner::Group,
+                            });
+                        }
+                    }
+                }
             }
-            let text = if group.label.is_empty() {
-                &group.id
-            } else {
-                &group.label
-            };
-            labels.push(Label {
-                canvas: Arc::new(label(text, None, DIM, 0.6)),
-                at: Vec3::new(low.x, high.y, high.z),
-                owner: Owner::Group,
-            });
+            // A group with a colour is named by the legend; one without, past the palette, by a label of its own.
+            if colour.is_none() {
+                labels.push(Label {
+                    canvas: Arc::new(label(group_name(group), None, DIM, 0.6)),
+                    at: Vec3::new(low.x, high.y, high.z),
+                    owner: Owner::Group,
+                });
+            }
         }
         // The largest nodes' labels first, in the order written, then the edges' with labels.
         let mut order: Vec<usize> = (0..diagram.nodes.len()).collect();
@@ -345,6 +539,7 @@ impl Mesh {
             .collect();
         Self {
             cards,
+            legend: legend(&diagram),
             leaders: leaders::Leader::of(&diagram),
             source: source.clone(),
             diagram,
@@ -352,6 +547,7 @@ impl Mesh {
             labels,
             nodes,
             edges,
+            pointing,
             flows,
         }
     }
@@ -627,10 +823,19 @@ impl Mesh {
                 self.lit(part.owner, focus),
             );
         }
-        for &edge in &self.flows {
+        // A flow's beads, and, while the participant focuses on a node, those of the edges that point to or from it.
+        let focused = |edge: usize| {
+            let edge = &self.diagram.edges[edge];
+            focus.is_some_and(|focus| {
+                usize::from(edge.from) == focus || usize::from(edge.to) == focus
+            })
+        };
+        let beading = (0..self.edges.len())
+            .filter(|edge| self.flows.contains(edge) || (self.pointing[*edge] && focused(*edge)));
+        for edge in beading {
             let (path, colour) = &self.edges[edge];
             let length = path_length(path);
-            let bright = colour.map(|channel| (channel * 1.6).min(1.0));
+            let bright = colour.map(|channel| (channel * 1.6 + 0.15).min(1.0));
             for bead in 0..BEADS {
                 let share = (time * FLOW_MM / length.max(1.0) + bead as f32 / BEADS as f32).fract();
                 push(
@@ -725,16 +930,47 @@ fn entering(from: Vec3, to: Vec3, half: Vec3) -> Option<f32> {
     (near <= far && far > 0.0).then_some(near.max(0.0))
 }
 
-/// The tubes of an edge along `path`, of `radius`, drawn in `style`: one a segment, or its dashes or dots.
+/// The arrowheads of an edge along `path`, from where it points from to where it points, in `colour`, a little brighter:
+/// one with its point at the path's end, against the target's surface, and one a little past its middle, clear of the
+/// labels above its ends, each as long as [`ARROW_MM`] says or a fifth of the edge, whichever is shorter.
+fn arrowheads(path: &[Vec3], colour: [f32; 3], owner: Owner) -> Vec<Part> {
+    let length = path_length(path);
+    let long = ARROW_MM.1.min(length / 5.0);
+    let radius = ARROW_MM.0 * long / ARROW_MM.1;
+    // A light tone of the edge's colour, two thirds of the way to white, so that it stands out on the edge.
+    let colour = colour.map(|channel| channel + (1.0 - channel) * ARROW_LIGHT);
+    [length * MIDDLE_ARROW, length]
+        .into_iter()
+        .filter_map(|tip_at| {
+            let tip = point_along(path, tip_at);
+            let direction = (tip - point_along(path, tip_at - long)).try_normalize()?;
+            Some(Part {
+                solid: Solid::Cone,
+                position: tip - direction * long / 2.0,
+                scale: Vec3::new(radius * 2.0, long, radius * 2.0),
+                basis: along(direction),
+                colour,
+                owner,
+            })
+        })
+        .collect()
+}
+
+/// The tubes of an edge along `path`, from `width`'s first radius at its start to its second at its end, drawn in
+/// `style`: pieces narrowing along it, or a segment each of its own width, or its dashes or dots, each as wide as the
+/// edge is where it stands.
 fn tubes(
     path: &[Vec3],
     style: Style,
-    radius: f32,
+    width: (f32, f32),
     colour: [f32; 3],
     owner: Owner,
     parts: &mut Vec<Part>,
 ) {
-    let tube = |from: Vec3, to: Vec3, parts: &mut Vec<Part>| {
+    let length = path_length(path);
+    // How wide it is, as a radius, a share of the way along it, narrowing evenly by a share of itself.
+    let radius = |share: f32| width.0 * (width.1 / width.0).powf(share.clamp(0.0, 1.0));
+    let tube = |from: Vec3, to: Vec3, radius: f32, parts: &mut Vec<Part>| {
         let length = (to - from).length();
         parts.push(Part {
             solid: Solid::Tube,
@@ -745,16 +981,18 @@ fn tubes(
             owner,
         });
     };
-    let length = path_length(path);
+    let share = |at: f32| at / length.max(1e-3);
     match style {
         Style::Dashed => {
             let step = (DASH_MM.0 + DASH_MM.1).max(length / DASHES as f32);
             let dash = step * DASH_MM.0 / (DASH_MM.0 + DASH_MM.1);
             let mut at = 0.0;
             while at < length {
+                let to = (at + dash).min(length);
                 tube(
                     point_along(path, at),
-                    point_along(path, (at + dash).min(length)),
+                    point_along(path, to),
+                    radius(share((at + to) / 2.0)),
                     parts,
                 );
                 at += step;
@@ -769,7 +1007,7 @@ fn tubes(
                 parts.push(Part {
                     solid: Solid::Diamond,
                     position: point_along(path, at),
-                    scale: Vec3::splat(radius * 3.0),
+                    scale: Vec3::splat(radius(share(at)) * 3.0),
                     basis: Mat3::IDENTITY,
                     colour,
                     owner,
@@ -777,9 +1015,30 @@ fn tubes(
                 at += step;
             }
         }
+        // Narrowing: straight, a [`Solid::Taper`], whose widths are the edge's at its ends; curved, tubes of even length
+        // along it, each as wide as it is at its middle.
+        _ if width.0 != width.1 && path.len() == 2 => parts.push(Part {
+            solid: Solid::Taper,
+            position: (path[0] + path[1]) / 2.0,
+            scale: Vec3::new(width.0 * 2.0, length, width.0 * 2.0),
+            basis: along(path[1] - path[0]),
+            colour,
+            owner,
+        }),
+        _ if width.0 != width.1 => {
+            let piece = length / TAPER_PIECES as f32;
+            for index in 0..TAPER_PIECES {
+                tube(
+                    point_along(path, piece * index as f32),
+                    point_along(path, piece * (index + 1) as f32),
+                    radius((index as f32 + 0.5) / TAPER_PIECES as f32),
+                    parts,
+                );
+            }
+        }
         _ => {
             for pair in path.windows(2) {
-                tube(pair[0], pair[1], parts);
+                tube(pair[0], pair[1], width.0, parts);
             }
         }
     }
@@ -835,35 +1094,271 @@ fn passing(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3) -> (f32, f32) {
     (along_ray, (origin + direction * along_ray - point).length())
 }
 
-/// How many columns and rows of body a volume's face has, sized as `fit` says: a slot's, or, floating, as large as its
-/// diagram, its longest side within [`FLOATING`], and never narrower than its title.
-pub(super) fn fit(panel: &Panel, diagram: &Diagram, fit: Fit) -> (usize, usize) {
+/// The most rows a volume's legend takes on its face, beyond which it counts what it leaves out, and how many rows
+/// above it are kept apart from the diagram, whose nearest nodes, below the eyes, are seen lower than the plate. A
+/// legend takes at most a quarter of its face's body, fewer rows on a small slot, counting the rest.
+pub const LEGEND_ROWS: usize = 4;
+const LEGEND_GAP: usize = 2;
+/// How many rows below its heading a face keeps clear of its diagram, so that the labels above its highest nodes stand
+/// clear of its title.
+const LABEL_ROOM: usize = 2;
+/// A legend's entries' colour of text, and of the solids showing its kinds.
+const LEGEND_TEXT: [f32; 4] = [0.72, 0.76, 0.82, 1.0];
+const LEGEND_SOLID: [f32; 3] = [0.62, 0.66, 0.72];
+
+/// An entry of a volume's legend: a group, by its colour, or a kind, by the solid its nodes are drawn as, and its name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Entry {
+    pub text: String,
+    pub swatch: Swatch,
+}
+
+/// What an entry of a legend shows beside its name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Swatch {
+    /// A dot of a group's colour.
+    Colour([f32; 3]),
+    /// A small solid, as a kind's nodes are drawn, its size along each of its axes, its longest 1, and which way they
+    /// point.
+    Solid(Solid, Vec3, Mat3),
+}
+
+impl Entry {
+    /// How many cells it takes on its row: its swatch, a space, and its name.
+    fn cells(&self) -> usize {
+        cells(&self.text)
+    }
+}
+
+/// How many cells an entry named `text` takes on its row: its swatch, a space, and its name.
+fn cells(text: &str) -> usize {
+    2 + text.chars().count()
+}
+
+/// The legend of `diagram`: each group with a colour, by its label, in the order written, then each kind its nodes are
+/// of, but the module, a box, which a node of no kind is too, in the order first given; empty for a diagram of neither.
+pub fn legend(diagram: &Diagram) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = diagram
+        .groups
+        .iter()
+        .zip(group_colours(diagram))
+        .filter_map(|(group, colour)| {
+            Some(Entry {
+                text: group_name(group).to_owned(),
+                swatch: Swatch::Colour(colour?),
+            })
+        })
+        .collect();
+    for node in kinds(diagram) {
+        let (solid, scale, basis) = body(node.shape, 1.0);
+        entries.push(Entry {
+            text: node.kind.clone(),
+            swatch: Swatch::Solid(solid, scale / scale.max_element(), basis),
+        });
+    }
+    entries
+}
+
+/// A group's name: its label, or else its id.
+fn group_name(group: &tomori_protocol::diagram::Group) -> &str {
+    if group.label.is_empty() {
+        &group.id
+    } else {
+        &group.label
+    }
+}
+
+/// The first node of each kind of `diagram` but the module, in the order written.
+fn kinds(diagram: &Diagram) -> Vec<&tomori_protocol::diagram::Node> {
+    let mut first: Vec<&tomori_protocol::diagram::Node> = Vec::new();
+    for node in &diagram.nodes {
+        if !node.kind.is_empty()
+            && node.kind != tomori_protocol::diagram::KINDS[0].0
+            && !first.iter().any(|known| known.kind == node.kind)
+        {
+            first.push(node);
+        }
+    }
+    first
+}
+
+/// How many cells each entry of the legend of `diagram` takes, as [`legend`] would make them, without making them.
+fn legend_widths(diagram: &Diagram) -> Vec<usize> {
+    diagram
+        .groups
+        .iter()
+        .zip(group_colours(diagram))
+        .filter(|(_, colour)| colour.is_some())
+        .map(|(group, _)| cells(group_name(group)))
+        .chain(kinds(diagram).into_iter().map(|node| cells(&node.kind)))
+        .collect()
+}
+
+/// Entries `widths` cells wide laid out in rows of `columns` cells, two apart, at most `most` of them, each entry by its
+/// index with the column it begins at, and how many were left out, which the last row counts as `+N`.
+fn legend_rows(widths: &[usize], columns: usize, most: usize) -> (Vec<Vec<(usize, usize)>>, usize) {
+    let mut rows: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut at = columns;
+    for (index, width) in widths.iter().enumerate() {
+        if at + width > columns {
+            if rows.len() == most {
+                return (rows, widths.len() - index);
+            }
+            rows.push(Vec::new());
+            at = 0;
+        }
+        // A row is begun before the first, as `at` begins past the end of none.
+        let last = rows.len() - 1;
+        rows[last].push((at, index));
+        at += width + 2;
+    }
+    (rows, 0)
+}
+
+/// How many rows a floating face of `diagram` gives its diagram.
+fn diagram_rows(diagram: &Diagram) -> usize {
+    let (_, height) = floating_size(diagram);
+    ((height / (CELL_HEIGHT as f32 * PIXEL)).ceil() as usize).clamp(FIT_ROWS.0, FIT_ROWS.1)
+}
+
+/// How many columns a face sized as `fit` says has for `panel` and `diagram`, the most rows its legend may take, so
+/// that, with the rows kept apart from the diagram, it takes at most a quarter of the face's body, and how many rows
+/// its diagram has, which a floating face grows by its legend's.
+fn shape(panel: &Panel, diagram: &Diagram, fit: Fit) -> (usize, usize, usize) {
     match fit {
-        Fit::Slot(cells) => (cells.columns, cells.body),
+        Fit::Slot(cells) => (
+            cells.columns,
+            (cells.body / 4).saturating_sub(LEGEND_GAP).min(LEGEND_ROWS),
+            cells.body,
+        ),
         Fit::Text => {
-            let (width, height) = floating_size(diagram);
-            let columns = (width / (CELL_WIDTH as f32 * PIXEL)).ceil() as usize;
-            let rows = (height / (CELL_HEIGHT as f32 * PIXEL)).ceil() as usize;
+            let (width, _) = floating_size(diagram);
+            let columns = ((width / (CELL_WIDTH as f32 * PIXEL)).ceil() as usize)
+                .max(super::heading_width(panel))
+                .clamp(super::FIT_COLUMNS.0, TABLE_COLUMNS);
+            let rows = diagram_rows(diagram) + LABEL_ROOM;
             (
-                columns
-                    .max(super::heading_width(panel))
-                    .clamp(super::FIT_COLUMNS.0, TABLE_COLUMNS),
-                rows.clamp(FIT_ROWS.0, FIT_ROWS.1),
+                columns,
+                (rows / 3).saturating_sub(LEGEND_GAP).min(LEGEND_ROWS),
+                rows,
             )
         }
     }
 }
 
+/// How many rows the legend of entries `widths` cells wide takes on a face of `columns`, at most `most`, with
+/// [`LEGEND_GAP`] above it apart from the diagram; none for none.
+fn legend_height(widths: &[usize], columns: usize, most: usize) -> usize {
+    match legend_rows(widths, columns.saturating_sub(4), most).0.len() {
+        0 => 0,
+        rows => rows + LEGEND_GAP,
+    }
+}
+
+/// The rows of the legend of `entries` on a face of `columns`, at most `most`, each entry a dot of its group's colour,
+/// or room for the small solid [`legend_icons`] draws there, and its name.
+fn legend_lines(entries: &[Entry], columns: usize, most: usize) -> Vec<Row> {
+    let widths: Vec<usize> = entries.iter().map(Entry::cells).collect();
+    let (rows, more) = legend_rows(&widths, columns.saturating_sub(4), most);
+    let count = rows.len();
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let mut spans = Vec::new();
+            let mut at = 0;
+            for (column, entry) in row {
+                let entry = &entries[entry];
+                spans.push(Span::new(
+                    " ".repeat(column - at),
+                    TextStyle::plain(LEGEND_TEXT),
+                ));
+                match entry.swatch {
+                    Swatch::Colour(colour) => spans.push(
+                        Mark::Dot.span(1, TextStyle::plain([colour[0], colour[1], colour[2], 1.0])),
+                    ),
+                    Swatch::Solid(..) => spans.push(Span::new(" ", TextStyle::plain(LEGEND_TEXT))),
+                }
+                spans.push(Span::new(
+                    format!(" {}", entry.text),
+                    TextStyle::plain(LEGEND_TEXT),
+                ));
+                at = column + entry.cells();
+            }
+            if more > 0 && index + 1 == count {
+                spans.push(Span::new(format!("  +{more}"), TextStyle::plain(DIM)));
+            }
+            Row::new(crate::ui_text::cut(&spans, columns))
+        })
+        .collect()
+}
+
+/// The small solids of the legend of `mesh`, kept with it, on the face of `panel`, sized as `fit` says, drawn with
+/// `face`, each beside its kind's name, as a node of that kind is drawn.
+pub fn legend_icons(panel: &Panel, mesh: &Mesh, fit: Fit, face: Mat4, out: &mut Vec<Instance>) {
+    let diagram = mesh.source();
+    let (columns, body) = self::fit(panel, diagram, fit);
+    let (width, height) = super::sized(columns, body);
+    let (_, most, _) = shape(panel, diagram, fit);
+    let widths: Vec<usize> = mesh.legend.iter().map(Entry::cells).collect();
+    let (rows, _) = legend_rows(&widths, columns.saturating_sub(4), most);
+    // The face's last rows, below its heading's three and its body's others.
+    let first = 3 + body - rows.len();
+    let (scale, rotation, _) = face.to_scale_rotation_translation();
+    let size = CELL_HEIGHT as f32 * PIXEL * 0.8;
+    for (index, row) in rows.iter().enumerate() {
+        for (column, entry) in row {
+            let Swatch::Solid(solid, shape, turned) = mesh.legend[*entry].swatch else {
+                continue;
+            };
+            let at = Vec3::new(
+                -width / 2.0
+                    + (PADDING.0 as f32 + (*column as f32 + 0.5) * CELL_WIDTH as f32) * PIXEL,
+                height / 2.0
+                    - (PADDING.1 as f32 + ((first + index) as f32 + 0.5) * CELL_HEIGHT as f32)
+                        * PIXEL,
+                size / 2.0 + STAND_OFF,
+            );
+            out.push(Instance {
+                solid,
+                position: face.transform_point3(at),
+                scale: shape * size * scale,
+                basis: Mat3::from_quat(rotation) * turned,
+                colour: LEGEND_SOLID,
+            });
+        }
+    }
+}
+
+/// How many columns and rows of body a volume's face has, sized as `fit` says: a slot's, or, floating, as large as its
+/// diagram, its longest side within [`FLOATING`], and never narrower than its title, with room above it for its labels
+/// and its legend's rows below.
+pub(super) fn fit(panel: &Panel, diagram: &Diagram, fit: Fit) -> (usize, usize) {
+    let (columns, most, rows) = shape(panel, diagram, fit);
+    match fit {
+        Fit::Slot(cells) => (cells.columns, cells.body),
+        Fit::Text => (
+            columns,
+            rows + legend_height(&legend_widths(diagram), columns, most),
+        ),
+    }
+}
+
 /// How wide and tall a volume of `diagram` floats, in metres, at its own scale: its longest side within [`FLOATING`].
+/// Its plate grows by as much as its front, nearer the eyes, is seen larger from [`FLOATING_READ`] away, so that the
+/// diagram drawn within it is as large.
 fn floating_size(diagram: &Diagram) -> (f32, f32) {
     let extent = diagram.extent.map(|side| f32::from(side.max(1)) / 1000.0);
     let longest = extent.iter().copied().fold(0.0, f32::max);
     let scale = longest.clamp(FLOATING.0, FLOATING.1) / longest;
-    (extent[0] * scale, extent[1] * scale)
+    let nearer = FLOATING_READ / (FLOATING_READ - (extent[2] * scale).min(FLOATING_READ / 3.0));
+    // No more than its rows may grow, so that it does not grow only wider.
+    let tallest = (FIT_ROWS.1 * CELL_HEIGHT) as f32 * PIXEL;
+    let nearer = nearer.min((tallest / (extent[1] * scale)).max(1.0));
+    (extent[0] * scale * nearer, extent[1] * scale * nearer)
 }
 
-/// A volume's face, sized as `fit` says, framed by `border`: its title, bold, its metadata and age, a rule, and below
-/// them the plate its diagram stands in front of, dark in a slot and faint floating.
+/// A volume's face, sized as `fit` says, framed by `border`: its title, bold, its metadata and age, a rule, the plate its
+/// diagram stands in front of, dark in a slot and faint floating, and its legend at its foot.
 pub(super) fn face(panel: &Panel, diagram: &Diagram, fit: Fit, border: Option<[f32; 4]>) -> Canvas {
     let (columns, body) = self::fit(panel, diagram, fit);
     let mut canvas = Canvas::new(columns, PIXEL);
@@ -878,27 +1373,43 @@ pub(super) fn face(panel: &Panel, diagram: &Diagram, fit: Fit, border: Option<[f
         Row::text(&super::about(panel), TextStyle::plain(DIM), columns),
         Mark::Rule.row(columns, TextStyle::plain(DIM)),
     ];
-    canvas
-        .rows
-        .extend(std::iter::repeat_n(Row::new(Vec::new()), body));
+    let (_, most, _) = shape(panel, diagram, fit);
+    let legend = legend_lines(&legend(diagram), columns, most);
+    canvas.rows.extend(std::iter::repeat_n(
+        Row::new(Vec::new()),
+        body.saturating_sub(legend.len()),
+    ));
+    canvas.rows.extend(legend);
     canvas
 }
 
 /// Where a volume of `diagram` stands on its face, sized as `fit` says: from its own millimetres into the face's own
-/// metres, its middle in the middle of the plate below its heading, as large as fits there, no deeper than half its
-/// height in a slot, and its back just in front of the face.
+/// metres, its middle in the middle of the plate between the room below its heading kept for its labels and its
+/// legend, as large as fits there, no deeper than half its height in a slot, and its back just in front of the face.
 pub fn placed(panel: &Panel, diagram: &Diagram, fit: Fit) -> Mat4 {
     let (columns, body) = self::fit(panel, diagram, fit);
+    let (_, most, _) = shape(panel, diagram, fit);
     let (width, height) = super::sized(columns, body);
+    let legend = legend_height(&legend_widths(diagram), columns, most);
+    let room = LABEL_ROOM.min(body.saturating_sub(legend + 1));
+    let body = body.saturating_sub(legend + room).max(1);
     let area = (
         (columns * CELL_WIDTH) as f32 * PIXEL,
         (body * CELL_HEIGHT) as f32 * PIXEL,
     );
-    let top = height / 2.0 - (PADDING.1 + 3 * CELL_HEIGHT) as f32 * PIXEL;
+    let top = height / 2.0 - (PADDING.1 + (3 + room) * CELL_HEIGHT) as f32 * PIXEL;
     let left = -width / 2.0 + PADDING.0 as f32 * PIXEL;
     let middle = Vec3::new(left + area.0 / 2.0, top - area.1 / 2.0, 0.0);
     let extent = diagram.extent.map(|side| f32::from(side.max(1)));
-    let mut scale = (area.0 / extent[0]).min(area.1 / extent[1]);
+    // As large as fits, its front, nearer the eyes than the face, seen within the area from as far as it is read,
+    // straight on, so that nothing of it is seen over its title or its legend: where its front, `depth` before the
+    // face, seen from `read` away, grows by `read / (read - depth)`.
+    let read = match fit {
+        Fit::Slot(_) => SLOT_READ,
+        Fit::Text => FLOATING_READ,
+    };
+    let fits = |area: f32, side: f32| area * read / (side * read + area * extent[2]);
+    let mut scale = fits(area.0, extent[0]).min(fits(area.1, extent[1]));
     if matches!(fit, Fit::Slot(_)) {
         scale = scale.min(area.1 / 2.0 / extent[2]);
     }
@@ -917,6 +1428,8 @@ pub struct Drawn {
     pub focus: Option<usize>,
     pub time: f32,
     pub viewer: Vec3,
+    /// The small solids of its legend, in the scene, on its face.
+    pub legend: Vec<Instance>,
 }
 
 impl PartialEq for Drawn {
@@ -927,6 +1440,7 @@ impl PartialEq for Drawn {
             && self.focus == other.focus
             && self.time == other.time
             && self.viewer == other.viewer
+            && self.legend == other.legend
     }
 }
 
@@ -935,6 +1449,7 @@ impl Drawn {
     pub fn instances(&self, out: &mut Vec<Instance>) {
         self.mesh
             .instances(self.model, self.focus, self.time, self.viewer, out);
+        out.extend_from_slice(&self.legend);
     }
 }
 

@@ -18,6 +18,7 @@ fn each_solid_is_a_unit_mesh_of_few_triangles_lit_by_its_normals() {
         (Solid::Tube, 12),
         (Solid::Diamond, 8),
         (Solid::Cone, 16),
+        (Solid::Taper, 12),
     ] {
         let vertices = mesh(solid);
         assert_eq!(vertices.len(), triangles * 3, "{solid:?}");
@@ -119,6 +120,7 @@ fn drawn(diagram: &Diagram, count: usize) -> Vec<Drawn> {
             focus: None,
             time: 0.5,
             viewer: Vec3::ZERO,
+            legend: Vec::new(),
         })
         .collect()
 }

@@ -104,9 +104,52 @@ fn attributes_classes_and_comments() {
         texts(&warnings),
         [
             "line 6: \"ghost\" is not a node",
-            "line 7: \"missing\" is not a class"
+            "line 7: \"missing\" is not a class: declare it with classDef, or use a kind: module, store, external, interface, process, decision"
         ]
     );
+    // A class with a shape is the node's kind, the first given it kept; one without only styles it.
+    assert_eq!((hub.kind.as_str(), leaf.kind.as_str()), ("big", "big"));
+}
+
+#[test]
+fn classes_name_kinds_whose_shapes_nodes_take_unless_they_give_their_own() {
+    let (diagram, warnings) = parse(
+        "flowchart TD\ndb[(Tokens)]:::store\ncache:::store\nuser:::external\napi[[API]]:::interface\njob:::process\nok:::decision\nplain\nclass plain module\nbrackets{{Hexagon}}:::store\nrect[Rectangle]:::store\nclassDef crate shape: prism, fill:#f9f, stroke:#333, stroke-width:2px\nscene:::crate\nclassDef hot fill:#f96, stroke:#333, colour: red\nwarm:::hot\nclassDef store fill:#ccc\nodd@{ kind: store }\nclassDef averyveryverylongkindname size: 2, shape: box\nlong:::averyveryverylongkindname\n",
+    );
+    let of = |id: &str| {
+        let node = &diagram.nodes[diagram.node(id).unwrap()];
+        (node.kind.as_str(), node.shape)
+    };
+    assert_eq!(of("db"), ("store", Shape::Cylinder));
+    assert_eq!(of("cache"), ("store", Shape::Cylinder));
+    assert_eq!(of("user"), ("external", Shape::Sphere));
+    assert_eq!(of("api"), ("interface", Shape::Card));
+    assert_eq!(of("job"), ("process", Shape::Prism));
+    assert_eq!(of("ok"), ("decision", Shape::Diamond));
+    assert_eq!(of("plain"), ("module", Shape::Box));
+    // Brackets give a node their own shape, before its kind's, but for a rectangle, Mermaid's plain node.
+    assert_eq!(of("brackets"), ("store", Shape::Prism));
+    assert_eq!(of("rect"), ("store", Shape::Cylinder));
+    // A classDef declares a kind of its own, Mermaid's styles in it left to the groups' colours.
+    assert_eq!(of("scene"), ("crate", Shape::Prism));
+    assert_eq!(
+        diagram.nodes[diagram.node("scene").unwrap()].colour,
+        Colour::Grey
+    );
+    assert_eq!(of("odd"), ("store", Shape::Cylinder));
+    // A class that only styles is no kind, its attributes given all the same; a known kind styled is still that kind.
+    assert_eq!(of("warm"), ("", Shape::Box));
+    assert_eq!(
+        diagram.nodes[diagram.node("warm").unwrap()].colour,
+        Colour::Red
+    );
+    assert_eq!(of("db"), ("store", Shape::Cylinder));
+    assert_eq!(of("long"), ("", Shape::Box));
+    assert_eq!(
+        texts(&warnings),
+        ["line 19: \"averyveryverylongkindname\" is too long a kind: at most 16 bytes"]
+    );
+    assert!(diagram.outline().contains("- Tokens (store)"));
 }
 
 #[test]

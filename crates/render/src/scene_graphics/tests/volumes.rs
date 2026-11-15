@@ -400,11 +400,131 @@ fn a_dense_volume_s_labels_are_drawn_over_its_nodes_from_wherever_it_is_seen() {
         }
         crate::test_support::preview("TOMORI_VOLUME_LABELS_PREVIEW", &sheet);
         for (viewpoint, kept, text) in counts {
-            assert!(text > 1_000, "{text} text pixels");
+            // Its groups are named by its legend rather than labels, and its diagram drawn small enough that its front is
+            // seen within its plate.
+            assert!(text > 600, "{text} text pixels");
             assert!(
                 kept * 1000 >= text * 995,
                 "from {viewpoint:?}, {kept} of {text} text pixels kept"
             );
         }
     });
+}
+
+/// Tomori's own crates, as the maintainer asked to see them in the headset: about thirty nodes in six groups, each of a
+/// kind, as the agent writes them with Mermaid's classes. See `design/diagrams.md`.
+pub(crate) const CRATES: &str = "```diagram\ntitle: Tomori's crates\nid: crates\nlayout: layered down\n---\nquest((Quest 3)):::external\nsubgraph clients [Clients]\n  client_quest[client-quest]:::process\n  client_desktop[client-desktop]:::process\n  client_spectator[client-spectator]:::process\n  client[client]\nend\nsubgraph drawing [Drawing]\n  scene[scene]@{ size: 2 }\n  render[render]\n  text[text]\n  assets[assets]\n  world[world]\nend\nsubgraph serving [Server]\n  server_app[server-app]:::process\n  server[server]@{ size: 2 }\n  speech[speech]\n  discovery[discovery]\n  access{Paired?}:::decision\n  tokens[(Token store)]:::store\nend\nsubgraph agents [Agent]\n  backend[backend]:::interface\n  backend_opencode[backend-opencode]\n  opencode((OpenCode)):::external\nend\nsubgraph environments [Environments]\n  environment[environment]:::interface\n  farmyard[farmyard]\n  farmyard_client[farmyard-client]\n  github[github]\n  sky[sky]\n  prometheus[prometheus]\nend\nsubgraph shared [Shared]\n  kind: layer\n  protocol[protocol]:::interface\n  security[security]\n  highlight[highlight]\n  physics[physics]\nend\nmetrics((Prometheus)):::external\nquest --> client_quest\nclient_quest & client_desktop & client_spectator --> client\nclient_quest & client_desktop & client_spectator --> render\nclient_quest --> farmyard_client\nclient --> protocol & security & discovery\nrender --> scene & text & assets & world\nscene --> protocol & text & world & physics\nworld --> assets\nserver_app --> server & farmyard & github & sky & prometheus & backend_opencode\nserver --> protocol & security & speech & highlight & backend & environment & discovery & access\naccess --> tokens\nbackend_opencode --> backend\nbackend_opencode --> opencode : HTTP\nfarmyard & github & sky --> environment\nfarmyard --> physics\nfarmyard_client --> farmyard\nenvironment --> protocol\nprometheus --> metrics\n```\n";
+
+/// Set `TOMORI_CRATE_DIAGRAM_PREVIEW` to a PNG path to save what this renders: Tomori's crates as a volume, floating
+/// beside Ada as the server placed it, from where she stands and from above and to one side, to judge how it reads.
+#[test]
+fn tomori_s_crates_read_as_coloured_groups_of_shaped_kinds() {
+    let (projection, added) = projected(&format!("Here are the crates.\n\n{CRATES}"));
+    let volume = projection.panels[0].clone();
+    let diagram = volume.diagram.as_ref().expect("a volume, sent its diagram");
+    assert_eq!(diagram.nodes.len(), 30);
+    assert_eq!(diagram.groups.len(), 6);
+    let volume_at = match &volume.place {
+        Place::Free { pose } => Vec3::from_array(pose.position),
+        _ => unreachable!("floating beside Ada, looking at no wall"),
+    };
+    // From 1.1 m in front of it, about where a floating diagram is read, and from above and 40° to its side.
+    let towards = ((arrival::HOME - volume_at) * Vec3::new(1.0, 0.0, 1.0)).normalize();
+    let eyes = [
+        volume_at + towards * 1.1,
+        volume_at + glam::Quat::from_rotation_y(0.7) * towards * 1.0 + Vec3::Y * 0.4,
+    ];
+    test_gpu::with(|gpu| {
+        let images = rendered(gpu, &volume, &added, &eyes, volume_at);
+        let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 2);
+        image::imageops::replace(&mut sheet, &images[0], 0, 0);
+        image::imageops::replace(&mut sheet, &images[1], 0, HEIGHT.into());
+        crate::test_support::preview("TOMORI_CRATE_DIAGRAM_PREVIEW", &sheet);
+        for image in &images {
+            let coloured = image
+                .pixels()
+                .filter(|pixel| {
+                    let low = pixel[0].min(pixel[1]).min(pixel[2]);
+                    let high = pixel[0].max(pixel[1]).max(pixel[2]);
+                    high > 90 && high - low > 60
+                })
+                .count();
+            assert!(coloured > 400, "{coloured} coloured pixels");
+        }
+    });
+}
+
+/// What `volume` looks like from each of `eyes`, looking at `at`, standing as the server placed it with `added` the wall
+/// beside it, each a frame of a participant whose eyes are there, so that its labels face and come towards them.
+fn rendered(
+    test_gpu::Gpu { device, queue, .. }: test_gpu::Gpu,
+    volume: &tomori_protocol::Panel,
+    added: &Wall,
+    eyes: &[Vec3],
+    at: Vec3,
+) -> Vec<image::RgbaImage> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("crate diagram test eye"),
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+    renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+    let mut panels = Panels::new(&device, &renderer);
+    let lens =
+        glam::camera::rh::proj::directx::perspective(1.1, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0);
+    let images = eyes
+        .iter()
+        .map(|eye| {
+            let head = Mat4::from_translation(*eye);
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: Pose::from_transform(head),
+                viewer: Some(*eye),
+                space_head: head,
+                trigger: Some(0.0),
+                beam: true,
+                ray: tomori_scene::pointing::Ray::new(*eye, -Vec3::Y),
+                ..Default::default()
+            };
+            let mut conversation = joined();
+            show_projection(&mut conversation, vec![added.clone()], vec![volume.clone()]);
+            let mut step = Step::default();
+            let frame = step.update(
+                &senses,
+                &mut conversation,
+                &mut felt(),
+                Instant::now(),
+                0.01,
+            );
+            assert_eq!(frame.volumes.len(), 1);
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let (_, left_out) = renderer.volume_counts();
+            assert_eq!(left_out, 0);
+            renderer.render(
+                &device,
+                &queue,
+                std::slice::from_ref(&view),
+                &[lens * glam::camera::rh::view::look_at_mat4(*eye, at, Vec3::Y)],
+                Mat4::IDENTITY,
+                &panels.list(Mat4::IDENTITY),
+            );
+            read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+        })
+        .collect();
+    assert!(pollster::block_on(scope.pop()).is_none());
+    images
 }

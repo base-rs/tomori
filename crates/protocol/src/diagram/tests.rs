@@ -139,12 +139,12 @@ fn attributes_keep_the_first_of_each_and_name_what_they_cannot_set() {
         [
             attributes.set("size", "9"),
             attributes.set("colour", "mauve"),
-            attributes.set("fill", "#fff"),
+            attributes.set("outline", "#fff"),
         ],
         [
             Err("size \"9\" is not from 1 to 5".to_owned()),
             Err("\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, yellow, grey or white".to_owned()),
-            Err("\"fill\" is not an attribute of a node".to_owned()),
+            Err("\"outline\" is not an attribute of a node".to_owned()),
         ]
     );
     assert_eq!(colour("Gray"), Some(Colour::Grey));
@@ -896,5 +896,48 @@ fn a_reference_s_attributes_are_set_once_each() {
     assert_eq!(
         binding.set("colour", "mauve").unwrap_err(),
         "\"mauve\" is not a colour of the palette: teal, amber, blue, violet, green, red, yellow, grey or white"
+    );
+}
+
+#[test]
+fn the_tool_gives_kinds_and_a_diagram_warns_of_groups_past_the_palette() {
+    let (diagram, warnings) = Diagram::from_json(&serde_json::json!({
+        "nodes": [
+            {"id": "db", "kind": "store"},
+            {"id": "x", "kind": "not a kind"},
+            {"id": "y", "kind": "store", "shape": "diamond"},
+        ],
+    }))
+    .unwrap();
+    assert_eq!(
+        (diagram.nodes[0].kind.as_str(), diagram.nodes[0].shape),
+        ("store", Shape::Cylinder)
+    );
+    assert_eq!(diagram.nodes[1].kind, "");
+    assert_eq!(diagram.nodes[2].shape, Shape::Diamond);
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .text
+            .starts_with("node x: \"not a kind\" is not a kind")
+    );
+    // Its kind travels with it, and a kind a client cannot hold is dropped.
+    let sent: Diagram = serde_json::from_value(serde_json::to_value(&diagram).unwrap()).unwrap();
+    assert_eq!(sent.nodes[0].kind, "store");
+    let mut odd = diagram.clone();
+    odd.nodes[0].kind = "much too long for a kind".into();
+    assert_eq!(odd.bounded().nodes[0].kind, "");
+    let body: String = (0..9)
+        .map(|group| format!("subgraph g{group}\n  n{group}\nend\n"))
+        .collect();
+    let (diagram, warnings) = parse(&format!(
+        "{body}subgraph g0\n  subgraph inner\n    m\n  end\nend\n"
+    ));
+    assert_eq!(diagram.groups.len(), 10);
+    assert_eq!(
+        texts(&warnings),
+        [
+            "9 groups at the top: \"g8\" and those after it are drawn without a colour, as the palette has 8; nest them, or use fewer"
+        ]
     );
 }

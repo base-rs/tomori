@@ -72,10 +72,12 @@ fn every_shape_is_a_solid_and_every_edge_style_and_arrow_is_drawn() {
     assert_eq!(counted(&instances, Solid::Prism), 1);
     assert!(counted(&instances, Solid::Diamond) > 1);
     assert_eq!(counted(&instances, Solid::Sphere), 1 + BEADS);
-    // Forward, back, both ends' and the flow's arrowheads: five, and none on the thick edge.
-    assert_eq!(counted(&instances, Solid::Cone), 5);
-    // The solid edge through its waypoint is two tubes, the dashed one several, the thick and the flow one each.
-    assert!(counted(&instances, Solid::Tube) > 2 + 2 + 2);
+    // The solid edge through its waypoint narrows along itself in tubes, and the straight flow is one narrowing tube;
+    // the dashed one is several tubes, and the thick one, pointing nowhere, one; the three that point one way have two
+    // arrowheads each, one at their target and one past their middle.
+    assert_eq!(counted(&instances, Solid::Cone), 3 * 2);
+    assert_eq!(counted(&instances, Solid::Taper), 1);
+    assert!(counted(&instances, Solid::Tube) > TAPER_PIECES + 2 + 1);
     // The card shows its detail on its label; six nodes' labels and the edge's.
     assert_eq!(mesh.labels(), 7);
     // Its flow moves: its beads stand elsewhere a moment later.
@@ -87,7 +89,7 @@ fn every_shape_is_a_solid_and_every_edge_style_and_arrow_is_drawn() {
 }
 
 #[test]
-fn groups_are_trays_floors_and_frames_with_their_labels() {
+fn clusters_are_their_colour_alone_and_layers_floors_and_containers_frames_in_theirs() {
     let mut drawn = diagram(&[("a", Shape::Box, [0, 0, 0])], Vec::new());
     for (id, kind) in [
         ("t", GroupKind::Cluster),
@@ -104,13 +106,24 @@ fn groups_are_trays_floors_and_frames_with_their_labels() {
     let mesh = Mesh::new(&drawn);
     let mut instances = Vec::new();
     mesh.instances(Mat4::IDENTITY, None, 0.0, Vec3::ZERO, &mut instances);
-    // The node, a tray, a floor and a frame's twelve edges.
-    assert_eq!(counted(&instances, Solid::Box), 1 + 1 + 1 + 12);
-    assert_eq!(mesh.labels(), 1 + 3);
+    // The node, no tray, a floor's four edges at its foot and a frame's twelve, each thin, in its group's colour.
+    assert_eq!(counted(&instances, Solid::Box), 1 + 4 + 12);
+    // The node's label alone: each group has a colour, which the legend names.
+    assert_eq!(mesh.labels(), 1);
+    use tomori_protocol::chart::Colour;
+    let floor = Colour::Amber.rgb().map(|channel| channel * FRAMED);
+    for bar in &instances[1..5] {
+        assert_eq!((bar.colour, bar.position.y), (floor, -100.0));
+        assert_eq!(bar.scale.min_element(), BAR_MM);
+    }
+    assert_eq!(
+        instances[5].colour,
+        Colour::Blue.rgb().map(|channel| channel * FRAMED)
+    );
     // Focused on the node, the groups dim.
     let mut focused = Vec::new();
     mesh.instances(Mat4::IDENTITY, Some(0), 0.0, Vec3::ZERO, &mut focused);
-    assert_eq!(focused[1].colour, TRAY.map(|channel| channel * DIMMED));
+    assert_eq!(focused[1].colour, floor.map(|channel| channel * DIMMED));
     // A volume floating is as large as its face's cells, as every panel is.
     let panel = Panel::new(
         "panel-1",
@@ -153,6 +166,7 @@ fn a_volume_is_moved_by_its_model_and_its_focus_dims_what_is_not_joined_to_the_n
         focus: None,
         time: 0.0,
         viewer: Vec3::ZERO,
+        legend: Vec::new(),
     };
     let mut instances = Vec::new();
     volume.instances(&mut instances);
@@ -249,10 +263,11 @@ fn a_volume_fits_its_slot_and_floats_as_large_as_its_diagram_within_bounds() {
         fit(&panel, &drawn, Fit::Slot(cells)),
         (cells.columns, cells.body)
     );
-    // Floating, 600 by 400 mm, a little wider than 30 columns and 15 rows.
+    // Floating, 600 by 400 mm and 200 deep, a little wider than 30 columns and 15 rows, grown by a sixth as its front
+    // is seen larger from 1.3 m away, and two rows kept for its labels.
     let (columns, rows) = fit(&panel, &drawn, Fit::Text);
     assert!(
-        (34..=38).contains(&columns) && (17..=19).contains(&rows),
+        (40..=44).contains(&columns) && (21..=24).contains(&rows),
         "{columns} {rows}"
     );
     // Tiny, it grows to the least; huge, it shrinks to the most; never wider than its rows allow.
@@ -296,7 +311,7 @@ fn labels_are_drawn_smaller_with_the_volume_down_to_their_least() {
         point_along(&[Vec3::ZERO, Vec3::ZERO, Vec3::X], 0.0),
         Vec3::ZERO
     );
-    assert_eq!(Solid::ALL.len(), 7);
+    assert_eq!(Solid::ALL.len(), 8);
     // More nodes than are labelled: the largest are.
     let nodes: Vec<(String, Shape, [i16; 3])> = (0..40)
         .map(|index| (format!("n{index}"), Shape::Box, [index as i16 * 100, 0, 0]))
@@ -857,7 +872,8 @@ fn hidden(drawn: &Diagram, model: Mat4, viewer: Vec3, sheet: &Sheet) -> bool {
 fn every_label_is_in_front_of_the_volume_s_nodes_from_wherever_it_is_seen() {
     let drawn = dense();
     let mesh = Mesh::new(&drawn);
-    assert_eq!(mesh.labels(), 30 + EDGE_LABELS + 1);
+    // Its group has a colour, which the legend names rather than a label.
+    assert_eq!(mesh.labels(), 30 + EDGE_LABELS);
     let model = Mat4::from_translation(Vec3::new(0.0, 1.4, -1.3))
         * Mat4::from_rotation_y(0.3)
         * Mat4::from_scale(Vec3::splat(0.0011));
@@ -1006,4 +1022,402 @@ fn leaning_into_a_volume_its_labels_keep_their_distance_from_the_eyes_and_move_s
     let canvas = &mesh.labels[0].canvas;
     let ahead = crate::recording::facing(Vec3::new(0.0, 1.4, 0.2), viewer, unmoved);
     assert_eq!(mesh.before(model, viewer, ahead, canvas), ahead);
+}
+
+/// A diagram of a node in each group, nine at the top and one nested, an explicit colour and a node in none.
+fn grouped() -> Diagram {
+    let mut drawn = diagram(&[], Vec::new());
+    for index in 0..9 {
+        drawn
+            .groups
+            .push(Group::new(format!("g{index}"), format!("Group {index}")));
+        let mut node = Node::new(format!("n{index}"), "N");
+        node.group = Some(index);
+        drawn.nodes.push(node);
+    }
+    let mut nested = Group::new("inner", "");
+    nested.parent = Some(0);
+    drawn.groups.push(nested);
+    let mut node = Node::new("inner-node", "N");
+    node.group = Some(9);
+    drawn.nodes.push(node);
+    let mut own = Node::new("own", "N");
+    own.group = Some(1);
+    own.colour = tomori_protocol::chart::Colour::Red;
+    drawn.nodes.push(own);
+    drawn.nodes.push(Node::new("loose", "N"));
+    drawn
+}
+
+#[test]
+fn nodes_take_their_group_s_colour_from_the_palette_nested_paler_and_none_past_it() {
+    use tomori_protocol::chart::Colour;
+    let drawn = grouped();
+    let colours = group_colours(&drawn);
+    for (index, colour) in Colour::SERIES.iter().enumerate() {
+        assert_eq!(colours[index], Some(colour.rgb()));
+    }
+    assert_eq!(colours[8], None);
+    let paler = colours[9].unwrap();
+    let teal = Colour::Teal.rgb();
+    assert!(
+        (0..3).all(|channel| paler[channel] > teal[channel]),
+        "{paler:?}"
+    );
+    let mesh = Mesh::new(&drawn);
+    let mut instances = Vec::new();
+    mesh.instances(Mat4::IDENTITY, None, 0.0, Vec3::ZERO, &mut instances);
+    let colour = |node: usize| instances[node].colour;
+    assert_eq!(colour(0), teal);
+    assert_eq!(colour(1), Colour::Amber.rgb());
+    // Past the palette, in none, and grey: the node's grey; its own colour, its own.
+    assert_eq!(colour(8), NODE_GREY);
+    assert_eq!(colour(9), paler);
+    assert_eq!(colour(10), Colour::Red.rgb());
+    assert_eq!(colour(11), NODE_GREY);
+    // Its legend names each group with a colour, the one past the palette left out.
+    let entries = legend(&drawn);
+    assert_eq!(entries.len(), 9);
+    assert_eq!(entries[0].text, "Group 0");
+    assert_eq!(
+        entries[8],
+        Entry {
+            text: "inner".into(),
+            swatch: Swatch::Colour(paler)
+        }
+    );
+}
+
+#[test]
+fn an_edge_within_a_group_is_its_colour_and_between_groups_neutral() {
+    let mut drawn = grouped();
+    drawn.edges = vec![
+        edge(0, 9, Style::Solid, Arrow::Forward),
+        edge(1, 10, Style::Solid, Arrow::Forward),
+        edge(0, 1, Style::Solid, Arrow::Forward),
+        edge(2, 3, Style::Solid, Arrow::Forward),
+    ];
+    // Within a group: the second group's, though one of its nodes has its own colour.
+    drawn.nodes[3].group = Some(2);
+    let mut coloured = edge(2, 11, Style::Solid, Arrow::Forward);
+    coloured.colour = Some(tomori_protocol::chart::Colour::Violet);
+    drawn.edges.push(coloured);
+    let mesh = Mesh::new(&drawn);
+    let colours: Vec<[f32; 3]> = mesh.edges.iter().map(|(_, colour)| *colour).collect();
+    let within =
+        |colour: tomori_protocol::chart::Colour| colour.rgb().map(|channel| channel * WITHIN);
+    use tomori_protocol::chart::Colour;
+    assert_eq!(
+        colours,
+        [
+            EDGE,
+            within(Colour::Amber),
+            EDGE,
+            within(Colour::Blue),
+            Colour::Violet.rgb()
+        ]
+    );
+}
+
+#[test]
+fn an_edge_ends_on_the_surface_of_each_solid_as_it_is_drawn() {
+    // The point `surface` finds is on each solid's surface, whichever way.
+    let directions: Vec<Vec3> = (0..40)
+        .map(|index| {
+            let a = index as f32 * 0.7;
+            let b = index as f32 * 1.3;
+            Vec3::new(a.cos() * b.sin(), b.cos(), a.sin() * b.sin()).normalize()
+        })
+        .chain([Vec3::X, Vec3::Y, Vec3::Z, -Vec3::Y])
+        .collect();
+    for shape in [
+        Shape::Box,
+        Shape::Card,
+        Shape::Sphere,
+        Shape::Cylinder,
+        Shape::Prism,
+        Shape::Diamond,
+    ] {
+        let (solid, scale, basis) = body(shape, 60.0);
+        let half = scale / 2.0;
+        for direction in &directions {
+            let local = basis.transpose() * *direction;
+            let point = local * surface(solid, scale, local);
+            let p = point.abs() / half;
+            // How far out the point is, where 1 is the surface.
+            let out = match solid {
+                Solid::Sphere => point.length() / half.x / 0.92,
+                Solid::Diamond => p.x + p.y + p.z,
+                Solid::Cylinder | Solid::Prism => {
+                    let sides = if solid == Solid::Cylinder { 12.0 } else { 6.0 };
+                    let sector = std::f32::consts::TAU / sides;
+                    let angle = point.z.atan2(point.x).rem_euclid(sector);
+                    let across = point.x.hypot(point.z) * (angle - sector / 2.0).cos()
+                        / (half.x * (sector / 2.0).cos());
+                    across.max(p.y)
+                }
+                _ => p.max_element(),
+            };
+            assert!((out - 1.0).abs() < 1e-3, "{shape:?} {direction} {out}");
+        }
+    }
+    // An edge from a box above to a short cylinder below starts and ends within a millimetre of their faces.
+    let drawn = diagram(
+        &[
+            ("a", Shape::Box, [0, 200, 0]),
+            ("b", Shape::Cylinder, [0, 0, 0]),
+            ("c", Shape::Prism, [200, 0, 0]),
+        ],
+        vec![
+            edge(0, 1, Style::Solid, Arrow::None),
+            edge(2, 1, Style::Solid, Arrow::Back),
+        ],
+    );
+    let mesh = Mesh::new(&drawn);
+    let path = &mesh.edges[0].0;
+    assert!(
+        (path[0].y - (200.0 - 21.0 + EMBED_MM)).abs() < 1e-3,
+        "{:?}",
+        path[0]
+    );
+    assert!(
+        (path[1].y - (24.0 - EMBED_MM)).abs() < 1e-3,
+        "{:?}",
+        path[1]
+    );
+    // Pointing back, it runs from the cylinder to the prism, whose hexagon faces the front, its point to the side.
+    let back = &mesh.edges[1].0;
+    assert!(
+        (back[0].x - (30.0 - EMBED_MM)).abs() < 1e-3,
+        "{:?}",
+        back[0]
+    );
+    assert!((back[back.len() - 1].x - (200.0 - 30.0 + EMBED_MM)).abs() < 1e-3);
+    // Straight on, nowhere is there no surface.
+    assert_eq!(surface(Solid::Box, Vec3::ONE, Vec3::Y), 0.5);
+}
+
+#[test]
+fn an_edge_narrows_towards_where_it_points_curving_through_its_waypoints() {
+    let mut drawn = diagram(
+        &[
+            ("a", Shape::Sphere, [-200, 0, 0]),
+            ("b", Shape::Sphere, [200, 0, 0]),
+        ],
+        vec![edge(0, 1, Style::Solid, Arrow::Forward)],
+    );
+    drawn.edges[0].via = vec![[-60, 80, 0], [60, -80, 0]];
+    let mesh = Mesh::new(&drawn);
+    let pieces: Vec<&Part> = mesh
+        .parts
+        .iter()
+        .filter(|part| part.solid == Solid::Tube)
+        .collect();
+    assert_eq!(pieces.len(), TAPER_PIECES);
+    // Each narrower than the last, by as much, from about the source's width to about the target's.
+    let step = (TAPER_MM.1 / TAPER_MM.0).powf(1.0 / TAPER_PIECES as f32);
+    for pair in pieces.windows(2) {
+        assert!((pair[1].scale.x / pair[0].scale.x - step).abs() < 1e-3);
+    }
+    assert!(pieces[0].scale.x < TAPER_MM.0 * 2.0 && pieces[0].scale.x > TAPER_MM.0 * 2.0 * step);
+    // Straight, it is one narrowing tube, as wide as the edge at its source.
+    let straight = Mesh::new(&diagram(
+        &[
+            ("a", Shape::Sphere, [-200, 0, 0]),
+            ("b", Shape::Sphere, [200, 0, 0]),
+        ],
+        vec![edge(0, 1, Style::Solid, Arrow::Forward)],
+    ));
+    assert_eq!(straight.parts[2].solid, Solid::Taper);
+    assert!((straight.parts[2].scale.x - TAPER_MM.0 * 2.0).abs() < 1e-4);
+    assert!((TAPER_RATIO - TAPER_MM.1 / TAPER_MM.0).abs() < 1e-6);
+    // Its arrowheads point where it points; one of no length has none.
+    let cones: Vec<&Part> = straight
+        .parts
+        .iter()
+        .filter(|part| part.solid == Solid::Cone)
+        .collect();
+    assert_eq!(cones.len(), 2);
+    assert!(cones.iter().all(|cone| (cone.basis * Vec3::Y).x > 0.99));
+    let together = Mesh::new(&diagram(
+        // Two boxes whose faces, less what an edge reaches into them, meet.
+        &[("a", Shape::Box, [0, 0, 0]), ("b", Shape::Box, [58, 0, 0])],
+        vec![edge(0, 1, Style::Solid, Arrow::Forward)],
+    ));
+    assert!(together.parts.iter().all(|part| part.solid != Solid::Cone));
+    // Its path is a smooth curve through both waypoints.
+    let path = &mesh.edges[0].0;
+    assert_eq!(path.len(), 3 * CURVE_PIECES + 1);
+    for waypoint in [Vec3::new(-60.0, 80.0, 0.0), Vec3::new(60.0, -80.0, 0.0)] {
+        assert!(path.iter().any(|point| (*point - waypoint).length() < 1e-3));
+    }
+    // Dashed, its dashes narrow too; dotted, its dots.
+    for style in [Style::Dashed, Style::Dotted] {
+        drawn.edges[0].style = style;
+        let mesh = Mesh::new(&drawn);
+        let widths: Vec<f32> = mesh
+            .parts
+            .iter()
+            .filter(|part| matches!(part.owner, Owner::Edge(_)) && part.solid != Solid::Cone)
+            .map(|part| part.scale.x)
+            .collect();
+        assert!(widths.first() > widths.last(), "{style:?} {widths:?}");
+    }
+}
+
+#[test]
+fn beads_move_along_the_focused_node_s_edges_that_point() {
+    let drawn = diagram(
+        &[
+            ("a", Shape::Box, [-200, 0, 0]),
+            ("b", Shape::Box, [0, 0, 0]),
+            ("c", Shape::Box, [200, 0, 0]),
+        ],
+        vec![
+            edge(0, 1, Style::Solid, Arrow::Forward),
+            edge(1, 2, Style::Solid, Arrow::None),
+            edge(2, 0, Style::Flow, Arrow::Forward),
+        ],
+    );
+    let mesh = Mesh::new(&drawn);
+    let beads = |focus: Option<usize>| {
+        let mut instances = Vec::new();
+        mesh.instances(Mat4::IDENTITY, focus, 0.3, Vec3::ZERO, &mut instances);
+        counted(&instances, Solid::Sphere)
+    };
+    // The flow's always; focused on b, its edge from a too, but not the one that points nowhere.
+    assert_eq!(beads(None), BEADS);
+    assert_eq!(beads(Some(1)), 2 * BEADS);
+    assert_eq!(beads(Some(0)), 2 * BEADS);
+}
+
+#[test]
+fn a_legend_of_groups_and_kinds_stands_below_the_diagram_with_a_solid_for_each_kind() {
+    let mut drawn = grouped();
+    drawn.groups.truncate(2);
+    for node in &mut drawn.nodes {
+        node.group = node.group.filter(|group| *group < 2);
+    }
+    for (index, kind, shape) in [
+        (0, "store", Shape::Cylinder),
+        (1, "store", Shape::Cylinder),
+        (2, "module", Shape::Box),
+        (3, "process", Shape::Prism),
+    ] {
+        drawn.nodes[index].kind = kind.into();
+        drawn.nodes[index].shape = shape;
+    }
+    let entries = legend(&drawn);
+    let texts: Vec<&str> = entries.iter().map(|entry| entry.text.as_str()).collect();
+    assert_eq!(texts, ["Group 0", "Group 1", "store", "process"]);
+    let panel = Panel::new(
+        "panel-1",
+        "Kinds",
+        "",
+        Place::Free {
+            pose: Pose::default(),
+        },
+    )
+    .with_diagram(drawn.clone());
+    let face = face(&panel, &drawn, Fit::Text, None);
+    let text: Vec<String> = face
+        .rows
+        .iter()
+        .map(|row| crate::ui_text::plain(&row.cells))
+        .collect();
+    assert!(
+        text[text.len() - 2].contains("Group 0")
+            && text[text.len() - 2].contains("store")
+            && text[text.len() - 1].contains("process"),
+        "{text:?}"
+    );
+    // Its rows add to a floating face's, and the diagram stands above them.
+    let mut bare = drawn.clone();
+    bare.groups.clear();
+    for node in &mut bare.nodes {
+        node.group = None;
+        node.kind.clear();
+    }
+    assert!(legend(&bare).is_empty());
+    let (_, rows) = fit(&panel, &drawn, Fit::Text);
+    let (_, bare_rows) = fit(&panel, &bare, Fit::Text);
+    assert_eq!(rows, bare_rows + 2 + LEGEND_GAP);
+    // Room kept below the heading for the labels above its highest nodes.
+    assert!(rows >= LABEL_ROOM + 2 + LEGEND_GAP + FIT_ROWS.0);
+    // As large, and half its rows higher about the face's middle, as the face grows by them below it.
+    let (with, without) = (
+        placed(&panel, &drawn, Fit::Text),
+        placed(&panel, &bare, Fit::Text),
+    );
+    assert_eq!(with.x_axis, without.x_axis);
+    let higher = with.w_axis.y - without.w_axis.y;
+    assert!(
+        (higher - (2 + LEGEND_GAP) as f32 / 2.0 * (CELL_HEIGHT as f32) * PIXEL).abs() < 1e-5,
+        "{higher}"
+    );
+    // A solid for each kind beside its name, on the face, as its nodes are drawn.
+    let mut icons = Vec::new();
+    legend_icons(
+        &panel,
+        &Mesh::new(&drawn),
+        Fit::Text,
+        Mat4::from_translation(Vec3::Z),
+        &mut icons,
+    );
+    let solids: Vec<Solid> = icons.iter().map(|icon| icon.solid).collect();
+    assert_eq!(solids, [Solid::Cylinder, Solid::Prism]);
+    assert!(
+        icons
+            .iter()
+            .all(|icon| icon.position.z > 1.0 && icon.scale.max_element() < 0.02)
+    );
+    // Too many to fit its rows, it counts the rest.
+    let many: Vec<Entry> = (0..40)
+        .map(|index| Entry {
+            text: format!("Group {index}"),
+            swatch: Swatch::Colour([1.0; 3]),
+        })
+        .collect();
+    let widths: Vec<usize> = many.iter().map(Entry::cells).collect();
+    let (rows, more) = legend_rows(&widths, 30, LEGEND_ROWS);
+    assert_eq!(rows.len(), LEGEND_ROWS);
+    assert_eq!(more, 40 - rows.iter().map(Vec::len).sum::<usize>());
+    assert_eq!(legend_widths(&drawn), widths_of(&legend(&drawn)));
+    let mut crowded = drawn.clone();
+    for index in 2..8 {
+        crowded
+            .groups
+            .push(Group::new(format!("a-long-group-{index}"), ""));
+    }
+    let panel = panel.with_diagram(crowded.clone());
+    let face = super::face(
+        &panel,
+        &crowded,
+        Fit::Slot(super::super::Cells::STANDARD),
+        None,
+    );
+    let text: Vec<String> = face
+        .rows
+        .iter()
+        .map(|row| crate::ui_text::plain(&row.cells))
+        .collect();
+    // On a standard slot, it takes at most a quarter of its body with the rows above it, counting the rest.
+    let shown: Vec<&String> = text.iter().filter(|row| !row.trim().is_empty()).collect();
+    assert_eq!(shown.len(), 3 + 1, "{text:?}");
+    assert!(shown[3].contains('+'), "{text:?}");
+    // On a slot too small to spare a quarter, none.
+    let tiny = super::super::Cells {
+        body: 8,
+        ..super::super::Cells::STANDARD
+    };
+    let face = super::face(&panel, &crowded, Fit::Slot(tiny), None);
+    assert!(
+        face.rows[3..]
+            .iter()
+            .all(|row| crate::ui_text::plain(&row.cells).trim().is_empty())
+    );
+}
+
+fn widths_of(entries: &[Entry]) -> Vec<usize> {
+    entries.iter().map(Entry::cells).collect()
 }

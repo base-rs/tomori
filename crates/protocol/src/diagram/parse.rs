@@ -266,7 +266,7 @@ impl Reader {
         }
         let group = self.group();
         for mention in ends.iter().flatten() {
-            if mention.shape.is_none() {
+            if mention.label.is_none() {
                 self.builder.mentioned(&mention.id);
             }
             let attributes = match &mention.attributes {
@@ -304,18 +304,42 @@ impl Reader {
     }
 
     fn finish(mut self) -> (Diagram, Vec<Warning>) {
+        // A class a classDef declares gives its attributes, and one every diagram knows, or whose classDef gives a shape,
+        // is the node's kind.
         for (node, class, line) in std::mem::take(&mut self.given) {
             self.builder.at_line(line);
-            match self.classes.iter().find(|(name, ..)| *name == class) {
-                Some((_, attributes, _)) if self.builder.has_node(&node) => {
-                    self.builder.node(&node, attributes.clone(), None);
+            let declared = self.classes.iter().find(|(name, ..)| *name == class);
+            let known = declared.is_some() || super::kind_shape(&class).is_some();
+            if !known {
+                self.builder.warn(format!(
+                    "\"{}\" is not a class: declare it with classDef, or use a kind: {}",
+                    clean(&class),
+                    super::kind_names()
+                ));
+            } else if !self.builder.has_node(&node) {
+                self.builder
+                    .warn(format!("\"{}\" is not a node", clean(&node)));
+            } else {
+                // A class is a kind where every diagram knows it or its classDef gives it a shape; one that only styles,
+                // as Mermaid's `classDef hot fill:#f96` does, gives its attributes alone.
+                let declared = declared
+                    .map(|(_, attributes, _)| attributes.clone())
+                    .unwrap_or_default();
+                let mut kind = (super::kind_shape(&class).is_some() || declared.shape.is_some())
+                    .then(|| class.clone());
+                if kind.take_if(|kind| !super::valid_kind(kind)).is_some() {
+                    self.builder.warn(format!(
+                        "\"{}\" is too long a kind: at most {} bytes",
+                        clean(&class),
+                        super::KIND_BYTES
+                    ));
                 }
-                Some(_) => self
-                    .builder
-                    .warn(format!("\"{}\" is not a node", clean(&node))),
-                None => self
-                    .builder
-                    .warn(format!("\"{}\" is not a class", clean(&class))),
+                let attributes = Attributes {
+                    kind,
+                    ..Attributes::default()
+                }
+                .or(&declared);
+                self.builder.node(&node, attributes, None);
             }
         }
         if !self.open.is_empty() {
@@ -472,7 +496,8 @@ impl<'a> Cursor<'a> {
                 .until(close)
                 .ok_or_else(|| format!("{open} is not closed by {close}"))?;
             mention.label = Some(unquoted(label.trim()).to_owned());
-            mention.shape = Some(*shape);
+            // A rectangle, Mermaid's plain node, gives a label alone, so that its kind gives its shape.
+            mention.shape = (*shape != Shape::Box).then_some(*shape);
         }
         if self.eat("@{") {
             let inside = self.until("}").ok_or("@{ is not closed by }")?;
