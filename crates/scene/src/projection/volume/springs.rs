@@ -5,9 +5,9 @@
 //! the length the server laid it out at, a push between nodes that come too close, a weak spring holding each node
 //! home, and damping, stepped at a fixed rate in the volume's own millimetres. A node held is fixed where the hand
 //! holds it; while one alone is held, the nodes its edges come from fan out to its left and those they go to its right,
-//! as its holder sees it, and the rest fall back, away from them. Let go outside the volume, a node springs home; let
-//! go inside, it stays pinned there, the rest settling about it. With nothing held or pinned, every node springs home,
-//! and once all are there it is done. It is this participant's alone and sends nothing. See `design/diagrams.md`.
+//! as its holder sees it, and the rest fall back, away from them. Let go, a node stays pinned exactly where it was let
+//! go, within the volume or beyond it, the rest settling about it, until [`Springs::unpin`] puts every node back. With
+//! nothing held or pinned, every node springs home, and once all are there it is done. It is this participant's alone and sends nothing. See `design/diagrams.md`.
 use glam::Vec3;
 use tomori_protocol::diagram::{Arrow, Diagram};
 
@@ -182,10 +182,10 @@ impl Springs {
         }
     }
 
-    /// Let go of what `hand` holds: pinned where it is held, or else free to spring home.
-    pub fn let_go(&mut self, hand: usize, pin: bool) {
+    /// Let go of what `hand` holds, pinned exactly where it is held.
+    pub fn let_go(&mut self, hand: usize) {
         if let Some((node, target)) = self.held[hand].take() {
-            self.pins[node] = pin.then_some(target);
+            self.pins[node] = Some(target);
             self.at[node] = target;
             self.velocity[node] = Vec3::ZERO;
             self.still = 0.0;

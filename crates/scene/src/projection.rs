@@ -1603,8 +1603,6 @@ impl Pull {
 /// How fast a hand's stick reels a node it pulls along its ray, in metres a second at full push, and how near and far.
 const REEL: f32 = 1.5;
 const REEL_RANGE: (f32, f32) = (0.15, 8.0);
-/// How far beyond a volume's extent a node let go is still within it, and so pinned, in its millimetres.
-const PIN_MARGIN_MM: f32 = 30.0;
 
 /// Which of a volume's live layout's hands `side` is.
 fn hand_index(side: Side) -> usize {
@@ -1999,7 +1997,10 @@ impl Projector {
         // scrolled, within that.
         self.distances(&standing, viewer);
         let sizes = self.lay_out_standing(&standing, true);
-        self.pull(&standing, &hands, viewer, input.dt);
+        // A hand letting go this frame holds its node where it was drawn the frame before, so that the hand opening, which
+        // turns it, never moves it.
+        let letting_go = Hands::from_fn(|side| edges[side].1);
+        self.pull(&standing, &hands, letting_go, viewer, input.dt);
         if let Some((panel, rows)) = input.scroll
             && let Some(limit) = self.faces.get(panel).and_then(|faces| faces.limit)
             && rows.is_finite()
@@ -2183,36 +2184,17 @@ impl Projector {
             }
         }
         // A squeeze on a node of a volume, its ray on it or the hand touching it, takes hold of the node, to pull it about,
-        // rather than the volume; letting go pins it where it is within the volume, or lets it spring home from without.
+        // rather than the volume; letting go pins it where it is, within the volume or beyond it.
         for side in Side::BOTH {
             let (pressed, released) = edges[side];
-            if released && let Some(mut pull) = self.pulling[side].take() {
-                // A node is pulled only while its volume's layout is kept, of a diagram that has it.
+            if released && let Some(pull) = self.pulling[side].take() {
+                // Pinned exactly where it was let go, as it was last drawn in the hand, within the volume or beyond it,
+                // never moved by the hand opening; only the trigger on the volume puts it back.
                 let live = self
                     .springs
                     .get_mut(&pull.panel)
                     .expect("a node pulled has its volume's layout");
-                let node = live
-                    .node(&pull.node)
-                    .expect("a node pulled is in its diagram");
-                // Pinned where the hand lets it go, as it holds it now, if that is within the volume.
-                let within = standing
-                    .iter()
-                    .find(|(panel, ..)| panel.id == pull.panel)
-                    .is_some_and(|(panel, model, fit)| {
-                        let model = *model * volume::placed(panel, live.base.source(), *fit);
-                        let at = pull
-                            .target(&hands[side], 0.0)
-                            .map_or(live.springs.positions()[node], |at| {
-                                model.inverse().transform_point3(at)
-                            });
-                        live.springs.move_to(hand_index(side), at);
-                        let extent = live.base.source().extent;
-                        let half = Vec3::from_array(extent.map(f32::from)) / 2.0
-                            + Vec3::splat(PIN_MARGIN_MM);
-                        at.abs().cmple(half).all()
-                    });
-                live.springs.let_go(hand_index(side), within);
+                live.springs.let_go(hand_index(side));
                 live.drawn = false;
                 output.pulled = Some(side);
             }
@@ -3252,7 +3234,14 @@ impl Projector {
     /// Follow each node a hand pulls with it, run each volume's live layout on by `dt`, as seen from `viewer`, and draw
     /// it as it stands; forget a layout whose volume no longer stands or whose diagram changed, and one that is done,
     /// every node home.
-    fn pull(&mut self, standing: &[Standing], hands: &Hands<Hold>, viewer: Vec3, dt: f32) {
+    fn pull(
+        &mut self,
+        standing: &[Standing],
+        hands: &Hands<Hold>,
+        letting_go: Hands<bool>,
+        viewer: Vec3,
+        dt: f32,
+    ) {
         self.springs.retain(|id, _| {
             self.meshes.contains_key(id) && standing.iter().any(|(panel, ..)| panel.id == *id)
         });
@@ -3288,7 +3277,7 @@ impl Projector {
             for side in Side::BOTH {
                 let Some(pull) = self.pulling[side]
                     .as_mut()
-                    .filter(|pull| pull.panel == panel.id)
+                    .filter(|pull| pull.panel == panel.id && !letting_go[side])
                 else {
                     continue;
                 };
