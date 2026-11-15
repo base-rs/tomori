@@ -38,7 +38,7 @@ pub use client::{Client, Sender};
 pub use connection_state::{ConnectionState, Disconnect, Event};
 pub use events::Events;
 pub use microphone::Microphone;
-pub use options::{Hearing, Options, Transport};
+pub use options::{DuckUnder, Hearing, Options, Transport};
 pub use outbox::{FailedUtterance, Membership, SendError, UtteranceFailure};
 pub use tomori_protocol::Keepalive;
 pub use tomori_security::Fingerprint;

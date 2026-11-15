@@ -27,7 +27,7 @@ use tomori_scene::{conversation, spatial_audio};
 
 pub use spectator_feed::SpectatorOptions;
 /// Whose voices a spectator plays, its [`SpectatorOptions::voices`].
-pub use tomori_client::Hearing;
+pub use tomori_client::{DuckUnder, Hearing};
 
 use pipewire_video::Producer;
 use spectator_feed::Feed;

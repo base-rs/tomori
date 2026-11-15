@@ -848,6 +848,8 @@ fn a_server_the_search_finds_is_listed_and_a_failure_to_search_is_shown_once() {
 enum Say {
     Message(ServerMessage),
     Audio(tomori_protocol::AudioFrame),
+    /// A frame as it is, however malformed.
+    Frame(Frame),
     Close,
 }
 
@@ -930,6 +932,9 @@ impl Peer {
                         }
                         Ok(Say::Audio(frame)) => {
                             let _ = stream.write_all(&chunk(&Frame::audio(&frame).encode()));
+                        }
+                        Ok(Say::Frame(frame)) => {
+                            let _ = stream.write_all(&chunk(&frame.encode()));
                         }
                         Ok(Say::Close) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) if !gone.load(Ordering::Relaxed) => {}
@@ -1526,6 +1531,90 @@ fn the_voices_chosen_are_played_from_the_first_frame_and_as_they_change() {
         peer.speak_as(tomori_protocol::AGENT_SOURCE, from, connection, session);
         assert_eq!(played(&held, connection), (agent, true), "{hearing:?}");
     }
+}
+
+#[test]
+fn voices_not_played_are_measured_only_ducking_under_everyone_while_something_ducks() {
+    use crate::{DuckUnder, Hearing};
+    const PERSON: u32 = 7;
+    /// The sources its player's mixer holds.
+    fn sources(held: &Held) -> Vec<u32> {
+        let player = held.player.lock().unwrap().clone().expect("opened");
+        let player = player.lock().unwrap();
+        player
+            .mixer()
+            .map(|mixer| mixer.sources().collect())
+            .unwrap_or_default()
+    }
+    let measures = |connection: &Connection| connection.client.as_ref().unwrap().measures();
+    let peer = Peer::start();
+    let held = Held::default();
+    let mut session = Script::default();
+    let mut connection = connection(&mut session, Scripted::default(), held.clone());
+    // As the spectator is: no cues, no ambience, the agent's speech alone, ducking under everyone.
+    connection.feedback().mute_sounds();
+    connection.hear_ambience(false);
+    connection.hear(Hearing::Agent);
+    connection.duck_under(DuckUnder::Everyone);
+    assert_eq!(connection.ducking_under(), DuckUnder::Everyone);
+    session.push(Action::Connect(peer.choice()));
+    until(&mut connection, &mut session, |_, session| {
+        session.connected()
+    });
+    until(&mut connection, &mut session, |_, _| held.opened());
+    let (connection, session) = (&mut connection, &mut session);
+    // Nothing ducks, so a person speaking is dropped as they arrive, as when ducking under the voices played.
+    assert!(!measures(connection));
+    peer.speak_as(PERSON, 0, connection, session);
+    assert!(!held.heard());
+    assert_eq!(sources(&held), [] as [u32; 0]);
+    // The ambience ducks: they are measured, and never heard.
+    connection.hear_ambience(true);
+    assert!(measures(connection));
+    peer.speak_as(PERSON, 10, connection, session);
+    assert!(!(0..3).any(|_| held.heard()));
+    assert_eq!(sources(&held), [PERSON]);
+    // A malformed frame from them is dropped quietly, as one not measured is, rather than ending the connection: what
+    // follows it on the connection still arrives.
+    let mut malformed = Frame::audio(&tomori_protocol::AudioFrame {
+        gate: Gate::Live,
+        source: PERSON,
+        sequence: 20,
+        timestamp: 0,
+        sample_rate: 48_000,
+        samples: vec![8_000; 960],
+    });
+    malformed.payload.push(0);
+    peer.say.send(Say::Frame(malformed)).unwrap();
+    peer.say(
+        ServerMessage::Spaces { spaces: vec![] },
+        connection,
+        session,
+    );
+    // Not measured while ducking under the voices played, nor while their voices are played, nor while only the
+    // ambience could duck and it is off, with the agent's speech muted.
+    connection.duck_under(DuckUnder::Played);
+    assert!(!measures(connection));
+    connection.duck_under(DuckUnder::Everyone);
+    connection.hear(Hearing::All);
+    assert!(!measures(connection));
+    connection.hear_ambience(false);
+    connection.hear(Hearing::Nobody);
+    peer.speak(connection, session);
+    held.heard();
+    connection.poll(true, session);
+    assert!(!measures(connection));
+    held.flush();
+    // The agent's speech ducks only while it plays.
+    connection.hear(Hearing::Agent);
+    assert!(!measures(connection));
+    peer.speak_as(tomori_protocol::AGENT_SOURCE, 10, connection, session);
+    assert!(held.heard());
+    connection.poll(true, session);
+    assert!(measures(connection));
+    held.flush();
+    connection.poll(true, session);
+    assert!(!measures(connection));
 }
 
 #[test]

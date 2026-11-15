@@ -4,12 +4,19 @@
 //! The `tomori-spectator` executable's command line: which output, which space and whom to follow, and running it.
 use crate::SpectatorOptions;
 use anyhow::{Context, Result, bail};
-use tomori_client::Hearing;
+use tomori_client::{DuckUnder, Hearing};
 
 /// The voices `--voices` names, `all`, `agent` or `none`, for a command line that takes it, such as `tomori --spectator`'s.
 pub fn parse_voices(value: &str) -> Result<Hearing> {
     Hearing::named(value)
         .with_context(|| format!("--voices takes all, agent or none, not {value:?}"))
+}
+
+/// Whose speech `--duck-under` names what ducks follows, `played` or `everyone`, for a command line that takes it, such
+/// as `tomori --spectator`'s.
+pub fn parse_duck_under(value: &str) -> Result<DuckUnder> {
+    DuckUnder::named(value)
+        .with_context(|| format!("--duck-under takes played or everyone, not {value:?}"))
 }
 
 /// Whether `--ambience` names it on or off, for a command line that takes it, such as `tomori --spectator`'s.
@@ -56,6 +63,7 @@ impl Command {
             token,
             voices: Hearing::All,
             ambience: false,
+            duck_under: DuckUnder::Played,
             borderless: false,
         };
         let (mut audio_output, mut mode) = (None, None);
@@ -73,6 +81,9 @@ impl Command {
                 "--follow" => options.follow = Some(value("a participant name")?),
                 "--voices" => options.voices = parse_voices(&value("all, agent or none")?)?,
                 "--ambience" => options.ambience = parse_ambience(&value("on or off")?)?,
+                "--duck-under" => {
+                    options.duck_under = parse_duck_under(&value("played or everyone")?)?
+                }
                 "--audio-output" => audio_output = Some(value("an output's name")?),
                 "--borderless" => options.borderless = true,
                 _ if mode.is_none() => {
@@ -139,7 +150,7 @@ impl Command {
 }
 
 /// What `--help` shows.
-pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--audio-output NAME]
+pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--audio-output NAME]
 
 Renders a live space as a read-only view that follows a participant, for OBS or a call.
 
@@ -156,6 +167,7 @@ Options:
   --follow NAME        follow this participant by name (default: the first in the space).
   --voices WHICH       play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.
   --ambience ON|OFF    play the environment's ambience and ambient sounds beneath the voices, as the participant followed hears them (on), or not (off, the default, for a clean capture); A in the window turns it on and off.
+  --duck-under WHOSE   duck the agent's speech and the ambience under the voices played (played, the default) or under everyone's speech (everyone), measuring and never playing the voices --voices leaves out, so that someone presenting is not heard twice and is still spoken over quietly; D in the window switches.
   --audio-output NAME  on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.";
 
 #[cfg(test)]
@@ -225,6 +237,7 @@ mod tests {
                 token: Some("tomori_t".into()),
                 voices: Hearing::All,
                 ambience: false,
+                duck_under: DuckUnder::Played,
                 borderless: false,
             }
         );
@@ -258,6 +271,23 @@ mod tests {
             "--ambience takes on or off, not \"loud\""
         );
         assert_eq!(error(&["--ambience"]), "--ambience needs on or off");
+    }
+
+    #[test]
+    fn ducking_is_under_the_voices_played_by_default_or_under_everyone() {
+        assert_eq!(parse(&[]).unwrap().options.duck_under, DuckUnder::Played);
+        for duck_under in DuckUnder::EVERY {
+            let command = parse(&["--duck-under", duck_under.name()]).unwrap();
+            assert_eq!(command.options.duck_under, duck_under);
+        }
+        assert_eq!(
+            error(&["--duck-under", "some"]),
+            "--duck-under takes played or everyone, not \"some\""
+        );
+        assert_eq!(
+            error(&["--duck-under"]),
+            "--duck-under needs played or everyone"
+        );
     }
 
     #[test]
@@ -339,6 +369,7 @@ mod tests {
             "--audio-output",
             "--voices",
             "--ambience",
+            "--duck-under",
             "--borderless",
         ] {
             assert!(HELP.contains(output), "{output}");

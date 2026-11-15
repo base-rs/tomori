@@ -92,6 +92,8 @@ impl FromIterator<u32> for Voices {
 /// Unlike a [`Mixer`] shared with the application, the player also calls [`Mixer::push`] from the callback, so the callback allocates and frees: a buffer for each new source, and each frame's samples once played. Received frames are 20 ms each, so this is a few small allocations per callback; nothing waits on a lock.
 pub struct Player {
     audio: Receiver<AudioFrame>,
+    /// Participants' voices to measure and not play, while there are any. See [`Self::measure`].
+    measured: Option<Receiver<AudioFrame>>,
     commands: Receiver<Command>,
     shared: Arc<Shared>,
     options: MixerOptions,
@@ -138,6 +140,7 @@ impl Player {
         });
         let player = Self {
             audio,
+            measured: None,
             commands: receiver,
             shared: shared.clone(),
             options,
@@ -154,6 +157,18 @@ impl Player {
             ambience: Arc::default(),
         };
         (player, control)
+    }
+
+    /// Measure the participants' voices from `measured`, typically from [`crate::Client::take_measured`], for ducking
+    /// alone, never playing them: see [`Mixer::measure`].
+    pub fn measure(&mut self, measured: Receiver<AudioFrame>) {
+        self.measured = Some(measured);
+    }
+
+    /// Its mixer, once prepared, for tests that look at what it holds.
+    #[cfg(test)]
+    pub(crate) fn mixer(&self) -> Option<&Mixer> {
+        self.mixer.as_ref()
     }
 
     /// Synthesize the echo probe now and for later mixers, outside the audio callback, so that [`PlayerControl::play_probe`] can play it. Only the echo test needs it.
@@ -225,11 +240,23 @@ impl Player {
                     mixer.clear();
                     // Including what arrived before the clear but was not yet rendered, such as a backlog from while no output played.
                     while self.audio.try_recv().is_ok() {}
+                    while self
+                        .measured
+                        .as_ref()
+                        .is_some_and(|measured| measured.try_recv().is_ok())
+                    {}
                 }
             }
         }
         while let Ok(frame) = self.audio.try_recv() {
             mixer.push(frame);
+        }
+        while let Some(frame) = self
+            .measured
+            .as_ref()
+            .and_then(|measured| measured.try_recv().ok())
+        {
+            mixer.measure(frame);
         }
         // The latest scene, swapped rather than copied, so that the callback never allocates for it; one the application is writing is taken next time.
         let slot = match self.shared.scene.try_lock() {

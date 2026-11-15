@@ -5,7 +5,8 @@
 //!
 //! The session is the client's conversation with the server, as `tomori-scene`'s `Conversation` is: state that asks for [`Action`]s and applies [`Event`]s and [`Report`]s, so that nothing in it touches the network or a device. The application calls [`Connection::poll`] once a frame.
 use crate::{
-    Client, ConnectionState, Disconnect, Event, Fingerprint, Hearing, Options, Transport,
+    Client, ConnectionState, Disconnect, DuckUnder, Event, Fingerprint, Hearing, Options,
+    Transport,
     capture::Capture,
     discovery,
     feedback::{self, Event as Feedback, Hand},
@@ -310,6 +311,8 @@ pub struct Connection {
     listening_as: Option<u32>,
     /// Whose voices play, on this connection and the next.
     hearing: Hearing,
+    /// Whose speech what ducks follows, on this connection and the next.
+    duck_under: DuckUnder,
     /// The other participants in the space, kept between frames to avoid allocating.
     others: Vec<u32>,
     /// Where [`Self::listen`] last placed the voices, kept so that it can be read back.
@@ -571,6 +574,7 @@ impl Connection {
             local_source: None,
             listening_as: None,
             hearing: Hearing::All,
+            duck_under: DuckUnder::Played,
             others: Vec::new(),
             placed: Scene::default(),
             echo_test: None,
@@ -663,6 +667,34 @@ impl Connection {
         if let Some(client) = &self.client {
             client.hear(hearing);
         }
+        self.measure();
+    }
+
+    /// Duck the agent's speech and the environment's ambience under the voices played, or under everyone's speech, as
+    /// the spectator chooses: with everyone's, the participants' voices not played are measured and never played, only
+    /// while the ambience is heard or the agent's speech is played, and otherwise dropped as they arrive, as with the
+    /// voices played. See `design/spectator.md`.
+    pub fn duck_under(&mut self, duck_under: DuckUnder) {
+        self.duck_under = duck_under;
+        self.measure();
+    }
+
+    /// Whose speech what ducks follows, as [`Self::duck_under`] last said.
+    pub fn ducking_under(&self) -> DuckUnder {
+        self.duck_under
+    }
+
+    /// Ask the client to deliver the participants' voices not played to measure only while something heard ducks under
+    /// them: the ambience, or the agent's speech playing and not muted here.
+    fn measure(&self) {
+        let Some(client) = &self.client else {
+            return;
+        };
+        let ducks = self.feedback.hears_ambience()
+            || (self.speaker.agent_speech().0 && !self.speaker.muted && !self.speaker.voiceless);
+        client.measure(
+            self.duck_under == DuckUnder::Everyone && !self.hearing.participants() && ducks,
+        );
     }
 
     /// The voices played, as [`Self::hear`] last said.
@@ -674,6 +706,7 @@ impl Connection {
     /// client plays cues; the player is told at the next poll. See [`feedback::Feedback::hear_ambience`].
     pub fn hear_ambience(&mut self, heard: bool) {
         self.feedback.hear_ambience(heard);
+        self.measure();
     }
 
     /// Whether the environment's ambience plays, as [`Self::hear_ambience`] last said, or as this client plays cues.
@@ -887,6 +920,7 @@ impl Connection {
         session.report(Report::Replaying(self.speaker.is_replaying()));
         let (playing, level) = self.speaker.agent_speech();
         session.report(Report::AgentSpeech { playing, level });
+        self.measure();
         session.report(Report::Voices(self.speaker.voices()));
         self.listen_live();
         self.cue(session);

@@ -35,6 +35,8 @@ pub(crate) struct Context<'a> {
     pub shared: &'a Shared,
     pub options: &'a Options,
     pub audio: &'a SyncSender<AudioFrame>,
+    /// Where the participants' voices not played are delivered to measure, while they are.
+    pub measured: &'a SyncSender<AudioFrame>,
     /// The certificate of the first connection over TLS that the server welcomed, pinned for every connection after it, so that a reconnect never accepts another certificate, nor falls back to plain HTTP.
     pub learned: Cell<Option<Fingerprint>>,
 }
@@ -584,19 +586,28 @@ fn deliver(
         FrameKind::Audio => {
             // A voice not played is dropped before its samples are decoded, so a malformed frame from one is dropped
             // quietly rather than ending the connection: it would never be played, and its header named a source, which
-            // only the server sets. A header too short to name one is refused below.
-            if AudioFrame::source_of(&frame.payload)
+            // only the server sets. A header too short to name one is refused below. While it is measured instead, it
+            // is decoded and delivered apart, never to be played, and a malformed one is still dropped quietly.
+            let delivered = if AudioFrame::source_of(&frame.payload)
                 .is_some_and(|from| !context.shared.delivers(from))
             {
-                return Ok(());
-            }
-            let audio = frame.to_audio().map_err(protocol)?;
+                if !context.shared.measures() {
+                    return Ok(());
+                }
+                let Ok(audio) = frame.to_audio() else {
+                    return Ok(());
+                };
+                (audio, context.measured)
+            } else {
+                (frame.to_audio().map_err(protocol)?, context.audio)
+            };
+            let (audio, to) = delivered;
             // What this participant records never plays back to them. The server does not relay it back; this guards against a server that does.
             if audio.source == source {
                 return Ok(());
             }
             // Playback is real time: if the application falls behind, newer audio is dropped rather than queued without bound.
-            let _ = context.audio.try_send(audio);
+            let _ = to.try_send(audio);
         }
         FrameKind::Image => {
             if let Some((hash, png)) = receive_image(receiving, frame.to_image().map_err(protocol)?)
