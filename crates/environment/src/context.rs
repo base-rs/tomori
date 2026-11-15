@@ -18,8 +18,10 @@ pub const CONTEXT_LABEL_CHARS: usize = 16;
 /// is cut.
 pub const CONTEXT_VALUE_CHARS: usize = 32;
 
-/// The most choices a parameter offers.
-pub const CONTEXT_CHOICES: usize = 16;
+/// The most choices a parameter offers: enough for every region of a large deployment. A size guard only: the agent's
+/// `contexts` tells every parameter and its choices whole on each of its pages, which must leave room for walls and
+/// panels within what the agent reads, as `tomori-server`'s tests check for choices at their longest.
+pub const CONTEXT_CHOICES: usize = 32;
 
 /// The id of Tomori's own parameter, a panel's time: live, the last minutes up to now, or fixed to a window of absolute
 /// instants in UTC. A side never declares it, and names it in [`crate::Panel::depends_on`] for a panel that is not a

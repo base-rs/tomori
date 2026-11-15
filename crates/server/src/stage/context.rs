@@ -23,10 +23,6 @@ pub const LIVE_MINUTES: u32 = 7 * 24 * 60;
 /// The widest fixed window a setting gives, in milliseconds: 31 days.
 pub const WINDOW_MS: i64 = 31 * 86_400_000;
 
-/// The most instances an environment shows in a space, shown or resting, as the agent's `copy_panel` makes them, within
-/// the panels it may show.
-pub const INSTANCES: usize = 8;
-
 /// The most settings a wall or a panel holds: one for each parameter a side may declare, and time; those read back from
 /// the state file are held to it too.
 pub const SETTINGS: usize = CONTEXT_PARAMETERS + 1;
@@ -634,10 +630,10 @@ impl Stage {
     /// Returns the instance's identity and its environment's id for it, or why it is refused: a panel not shown here, one
     /// its environment did not publish, one that depends on nothing, so that a copy would show the same, a destination on
     /// the Tomori wall, which holds no environment's panels, a setting [`Setting::checked`] refuses or one of a parameter
-    /// it does not depend on, no settings or only those the panel shows already, by its own or its wall's, more than
-    /// [`INSTANCES`] instances, shown or resting, and more than the panels an environment may show. The copy shows what
-    /// the panel shows until its side publishes it, without the panel's reference nor its rows' keys and references,
-    /// and none of its rows is chosen until then. See `design/panel-context.md`.
+    /// it does not depend on, no settings or only those the panel shows already, by its own or its wall's, and more than
+    /// the panels an environment may show, among which its copies count as any of its panels, with no bound of their
+    /// own. The copy shows what the panel shows until its side publishes it, without the panel's reference nor its
+    /// rows' keys and references, and none of its rows is chosen until then. See `design/panel-context.md`.
     pub(crate) fn copy_panel(
         &mut self,
         walls: &Walls<'_>,
@@ -707,30 +703,14 @@ impl Stage {
             );
         }
         let room = self.room(walls.environment);
-        let instances = room
-            .panels
-            .iter()
-            .filter(|kept| {
-                kept.published
-                    .as_ref()
-                    .is_some_and(|published| published.of.is_some())
-            })
-            .count()
-            + room
-                .resting
-                .iter()
-                .filter(|resting| resting.of.is_some())
-                .count();
-        if instances >= INSTANCES {
-            return Err("An environment shows at most 8 copies of its panels in a space.");
-        }
         let shown = room
             .panels
             .iter()
             .filter(|kept| kept.published.is_some())
             .count();
-        if shown >= super::published::PUBLISHED {
-            return Err(super::published::MOST_PUBLISHED.as_str());
+        // A copy leaves room for its environment's own panels.
+        if shown + super::published::COPY_ROOM >= super::published::PUBLISHED {
+            return Err(super::published::MOST_COPIES.as_str());
         }
         // Onto the Tomori wall, by any name, is the status wall's, which holds no environment's panels.
         if matches!(self.resolve(walls, to), super::Spot::Status(_)) {

@@ -17,6 +17,20 @@ pub(super) static MOST_PUBLISHED: std::sync::LazyLock<String> = std::sync::LazyL
     format!("An environment publishes at most {PUBLISHED} panels in a space.")
 });
 
+/// How many of the [`PUBLISHED`] panels an environment shows copies never take: a copy, made or restored, is refused
+/// where it would leave fewer free, so that its side can always put up a few more of its own at once. Its own panels
+/// always win: one past every panel is still published, the newest copy taken away to make room. See
+/// `design/panel-context.md`.
+pub const COPY_ROOM: usize = 16;
+
+/// Why a copy past what [`COPY_ROOM`] leaves is refused, to whoever asked for it.
+pub(crate) static MOST_COPIES: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "There is no room for another copy: an environment keeps {COPY_ROOM} of its {PUBLISHED} panels free for its own. \
+         Throw a copy away first."
+    )
+});
+
 /// What makes a kept panel one its environment published: the environment's id for it, the reference the agent can
 /// inspect it by, its chart, if it is a chart panel, and its rows and the one it highlights, if it is a list panel. It
 /// is kept only while its environment's run in the space has published it, never written: what the space keeps of it
@@ -742,10 +756,75 @@ impl Stage {
             .iter()
             .filter(|waiting| !shown.contains(waiting))
             .count();
-        if shown.len() + others >= PUBLISHED {
+        // A copy restored, as its side publishes it again after a restart, takes no room its own panels keep.
+        if tomori_environment::is_instance(id) {
+            if shown.len() + others + COPY_ROOM >= PUBLISHED {
+                return Err(MOST_COPIES.as_str());
+            }
+            return Ok(());
+        }
+        // Its own panels always win: copies are taken away for one, so only its own, and its own waiting, count.
+        let own = shown
+            .iter()
+            .chain(waiting.iter().filter(|waiting| !shown.contains(waiting)))
+            .filter(|id| !tomori_environment::is_instance(id))
+            .count();
+        if own >= PUBLISHED {
             return Err(MOST_PUBLISHED.as_str());
         }
         Ok(())
+    }
+
+    /// Whether publishing a panel of the side's own as `id` in `environment` needs a copy taken away first: one not
+    /// shown, where the environment shows every panel it may. Its own panels always win.
+    fn needs_room(&self, environment: &str, id: &str) -> bool {
+        let Some(room) = self.rooms.get(environment) else {
+            return false;
+        };
+        let shown: Vec<&str> = room
+            .panels
+            .iter()
+            .filter_map(|kept| kept.published.as_ref())
+            .map(|published| published.id.as_str())
+            .collect();
+        !tomori_environment::is_instance(id) && !shown.contains(&id) && shown.len() >= PUBLISHED
+    }
+
+    /// Take away the newest copy the environment shows in `environment`, as dismissed, so that its side is told and what
+    /// it publishes to it after is ignored. Returns its identity and its title, which are said on the status wall.
+    fn take_newest_copy(&mut self, environment: &str) -> (String, String) {
+        let room = self.room(environment);
+        // The server mints instances' ids in order, so the newest has the longest id, and the greatest of those as long.
+        let Some(index) = room
+            .panels
+            .iter()
+            .enumerate()
+            .filter(|(_, kept)| {
+                kept.published
+                    .as_ref()
+                    .is_some_and(|published| published.of.is_some())
+            })
+            .max_by_key(|(_, kept)| {
+                kept.published
+                    .as_ref()
+                    .map(|published| (published.id.len(), published.id.clone()))
+            })
+            .map(|(index, _)| index)
+        else {
+            unreachable!(
+                "every panel shown, and admitted as within what its own take, so at least one is a copy"
+            )
+        };
+        let kept = room.panels.remove(index);
+        let published = kept.published.expect("a copy is published");
+        room.dismissed.insert(published.id);
+        (kept.id, kept.content.title)
+    }
+
+    /// The copies taken away to make room for their environment's own panels since this was last asked, each by its
+    /// identity and title, to say on the status wall and tell the agent.
+    pub(crate) fn take_evicted(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.evicted)
     }
 
     /// Publish `publishing` at `now` onto the environment's own wall it names in `walls`' environment, in the slot it
@@ -764,7 +843,6 @@ impl Stage {
         now: u64,
     ) -> Result<Change, &'static str> {
         self.admits(walls, &publishing, &[])?;
-        let wall = format!("environment-{}", publishing.wall);
         if self.unchanged(walls.environment, &publishing) {
             // An instance its side publishes as it was copied is its side's now all the same.
             if let Some(published) = self.published_mut(walls.environment, publishing.id()) {
@@ -778,6 +856,37 @@ impl Stage {
         {
             return Ok(Change::Unchanged);
         }
+        // Its own panels always win: a new one where every panel shows takes the newest copy away, but only where it is
+        // then put up, the room as it was otherwise, so that no copy is lost to a publish refused.
+        if !self.needs_room(walls.environment, publishing.id()) {
+            return self.put_up(walls, publishing, now);
+        }
+        let room = self
+            .rooms
+            .get(walls.environment)
+            .cloned()
+            .expect("a panel needs room only where its environment shows every one");
+        let taken = self.take_newest_copy(walls.environment);
+        match self.put_up(walls, publishing, now) {
+            Ok(change) => {
+                self.evicted.push(taken);
+                Ok(change)
+            }
+            Err(error) => {
+                self.rooms.insert(walls.environment.to_owned(), room);
+                Err(error)
+            }
+        }
+    }
+
+    /// Put up `publishing`, which changes what is shown, at `now`, as [`Stage::publish`] says.
+    fn put_up(
+        &mut self,
+        walls: &Walls<'_>,
+        publishing: Publishing,
+        now: u64,
+    ) -> Result<Change, &'static str> {
+        let wall = format!("environment-{}", publishing.wall);
         let Publishing {
             id,
             content,

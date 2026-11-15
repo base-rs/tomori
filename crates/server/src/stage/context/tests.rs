@@ -138,8 +138,14 @@ fn a_side_declares_at_most_three_parameters_cleaned_by_safe_ids_never_time() {
     ];
     assert!(declared(twice).unwrap_err().contains("same id"));
     let choices = ContextParameter::new("region", "R", "a")
-        .with_choices((0..17).map(|index| format!("c{index}")));
-    assert!(declared(vec![choices]).unwrap_err().contains("16 choices"));
+        .with_choices((0..=CONTEXT_CHOICES).map(|index| format!("c{index}")));
+    assert!(declared(vec![choices]).unwrap_err().contains("32 choices"));
+    let most = ContextParameter::new("region", "R", "a")
+        .with_choices((0..CONTEXT_CHOICES).map(|index| format!("c{index}")));
+    assert_eq!(
+        declared(vec![most]).unwrap()[0].choices.len(),
+        CONTEXT_CHOICES
+    );
 }
 
 #[test]
@@ -1021,82 +1027,237 @@ fn a_copy_is_refused_where_it_would_mean_nothing_and_bounded() {
             .contains("Only a panel its environment published")
     );
     assert!(stage.instance_of("console", &notes).is_none());
-    // At most eight, shown or resting.
-    for index in 0..INSTANCES {
-        let pose = Pose::at([index as f32 - 4.0, 1.5, -1.5]);
+    // More than the eight copies there once were are made, each counted among the panels its environment shows.
+    for index in 0..9 {
+        let pose = Pose::at([index as f32 - 4.5, 1.5, -1.5]);
         assert!(
             copy(&mut stage, &latency, eu(), &Destination::Free(pose)).is_ok(),
             "{index}"
         );
     }
-    assert!(
-        copy(&mut stage, &latency, eu(), &first)
-            .unwrap_err()
-            .contains("at most 8")
-    );
 }
 
-#[test]
-fn copies_count_towards_the_panels_an_environment_shows() {
-    // Six walls of 24 slots, room for every panel an environment may show.
-    let declared: Vec<crate::EnvironmentWall> = (0..6)
+/// Six walls of 24 slots, room for every panel an environment may show.
+fn roomy() -> Vec<crate::EnvironmentWall> {
+    (0..6)
         .map(|index| {
             crate::EnvironmentWall::new(Pose::at([3.0 * index as f32 - 7.5, 1.5, -4.0]))
                 .with_grid(tomori_protocol::Grid::from((8, 3)))
         })
-        .collect();
+        .collect()
+}
+
+/// Publish `count` panels of the environment's own, from the `from`th, each depending on its region, on `walls`.
+fn own(
+    stage: &mut Stage,
+    walls: &Walls<'_>,
+    from: usize,
+    count: usize,
+) -> Result<(), &'static str> {
+    for index in from..from + count {
+        let panel = Panel::text(format!("p{index}"), "P", "x")
+            .depends_on(["region"])
+            .on_wall(index as u32 % 6, None);
+        stage.publish(walls, Publishing::new(panel).unwrap(), 0)?;
+    }
+    Ok(())
+}
+
+/// How many panels `stage` shows of its environment's own, and how many copies.
+fn counted(stage: &Stage, walls: &Walls<'_>) -> (usize, usize) {
+    let shown = stage.view("s", walls, 0).panels;
+    let copies = shown
+        .iter()
+        .filter(|panel| {
+            stage
+                .published("console", &panel.id)
+                .is_some_and(|(id, _)| tomori_environment::is_instance(id))
+        })
+        .count();
+    (shown.len() - copies, copies)
+}
+
+#[test]
+fn copies_leave_room_for_the_environment_s_own_panels_which_always_win() {
+    use crate::stage::published::{COPY_ROOM, MOST_COPIES, MOST_PUBLISHED, PUBLISHED};
+    let declared = roomy();
     let walls = Walls {
         declared: &declared,
         ..console()
     };
     let mut stage = Stage::default();
     stage.declare_parameters("console", parameters());
-    for index in 0..crate::stage::published::PUBLISHED {
-        let panel = Panel::text(format!("p{index}"), "P", "x")
-            .depends_on(["region"])
-            .on_wall(index as u32 % 6, None);
-        stage
-            .publish(&walls, Publishing::new(panel).unwrap(), 0)
-            .unwrap();
-    }
+    own(&mut stage, &walls, 0, 20).unwrap();
     let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    // Copies up to what leaves its own room are made; one more is refused, saying why, as is one pinned by pulling.
+    let copies = PUBLISHED - COPY_ROOM - 20;
+    for index in 0..copies {
+        let to = Destination::Wall {
+            wall: format!("environment-{}", index % 6),
+            slot: None,
+        };
+        assert!(stage.copy_panel(&walls, &id, eu(), &to).is_ok(), "{index}");
+    }
+    assert_eq!(counted(&stage, &walls), (20, copies));
     let to = Destination::Free(Pose::at([0.0, 1.5, -1.5]));
-    assert!(
+    assert_eq!(
+        stage.copy_panel(&walls, &id, eu(), &to),
+        Err(MOST_COPIES.as_str())
+    );
+    let pulled = crate::stage::Target::Free(Pose::at([0.0, 1.5, -1.5]));
+    assert_eq!(
+        stage.place_pulled(&walls, &id, pulled, None),
+        Err(MOST_COPIES.as_str())
+    );
+    // Its own panels are published in the room kept, and past every panel too, the newest copy taken away for each.
+    own(&mut stage, &walls, 20, COPY_ROOM).unwrap();
+    assert_eq!(counted(&stage, &walls), (20 + COPY_ROOM, copies));
+    let newest = format!(
+        "~{}",
         stage
-            .copy_panel(&walls, &id, eu(), &to)
-            .unwrap_err()
-            .contains("at most 128")
+            .contexts("console")
+            .keys()
+            .filter_map(|id| id.strip_prefix('~')?.parse::<u64>().ok())
+            .max()
+            .unwrap()
+    );
+    own(&mut stage, &walls, 20 + COPY_ROOM, 2).unwrap();
+    assert_eq!(counted(&stage, &walls), (22 + COPY_ROOM, copies - 2));
+    assert!(
+        stage.dismissed("console", &newest),
+        "the newest copy is taken away, as dismissed"
+    );
+    assert_eq!(stage.take_evicted().len(), 2, "each said once");
+    assert!(stage.take_evicted().is_empty());
+    // Republishing its own, again and again, takes nothing away.
+    for _ in 0..3 {
+        own(&mut stage, &walls, 0, 22 + COPY_ROOM).unwrap();
+    }
+    assert_eq!(counted(&stage, &walls), (22 + COPY_ROOM, copies - 2));
+    assert!(stage.take_evicted().is_empty());
+    // Nor does republishing one of its own a participant dismissed, which stays away, with every panel shown again.
+    let first = stage
+        .view("s", &walls, 0)
+        .panels
+        .iter()
+        .find(|panel| {
+            stage
+                .published("console", &panel.id)
+                .is_some_and(|(id, _)| id == "p0")
+        })
+        .unwrap()
+        .id
+        .clone();
+    stage.dismiss(&walls, &first).unwrap();
+    own(&mut stage, &walls, 22 + COPY_ROOM, 1).unwrap();
+    assert_eq!(counted(&stage, &walls), (22 + COPY_ROOM, copies - 2));
+    assert_eq!(own(&mut stage, &walls, 0, 1), Ok(()));
+    assert_eq!(counted(&stage, &walls), (22 + COPY_ROOM, copies - 2));
+    assert!(stage.take_evicted().is_empty());
+    // Its own panels alone are still held to every panel.
+    let mut full = Stage::default();
+    full.declare_parameters("console", parameters());
+    own(&mut full, &walls, 0, PUBLISHED).unwrap();
+    assert_eq!(
+        own(&mut full, &walls, PUBLISHED, 1),
+        Err(MOST_PUBLISHED.as_str())
     );
 }
 
 #[test]
-fn instances_resting_count_towards_the_most_an_environment_shows() {
-    let walls = console();
-    let (mut stage, latency, _, _) = stage();
-    let to = Destination::Free(Pose::at([0.0, 1.5, -1.5]));
-    stage.copy_panel(&walls, &latency, eu(), &to).unwrap();
-    // Its side's run ends: the copy rests; started again, it publishes its chart, which is copied again.
+fn a_panel_of_its_own_refused_for_a_full_wall_takes_no_copy_away() {
+    use crate::stage::published::{COPY_ROOM, PUBLISHED};
+    // Six roomy walls, and a seventh of one slot.
+    let mut declared = roomy();
+    declared.push(
+        crate::EnvironmentWall::new(Pose::at([0.0, 1.5, 4.0]))
+            .with_grid(tomori_protocol::Grid::from((1, 1))),
+    );
+    let walls = Walls {
+        declared: &declared,
+        ..console()
+    };
+    let mut stage = Stage::default();
+    stage.declare_parameters("console", parameters());
+    own(&mut stage, &walls, 0, 20).unwrap();
+    let small = |index: usize| {
+        Publishing::new(
+            Panel::text(format!("small{index}"), "S", "x")
+                .depends_on(["region"])
+                .on_wall(6, None),
+        )
+        .unwrap()
+    };
+    stage.publish(&walls, small(0), 0).unwrap();
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    let copies = PUBLISHED - COPY_ROOM - 21;
+    for index in 0..copies {
+        let to = Destination::Wall {
+            wall: format!("environment-{}", index % 6),
+            slot: None,
+        };
+        stage.copy_panel(&walls, &id, eu(), &to).unwrap();
+    }
+    own(&mut stage, &walls, 20, COPY_ROOM).unwrap();
+    assert_eq!(counted(&stage, &walls), (21 + COPY_ROOM, copies));
+    // Every panel shown, one more of its own on the full wall is refused, and every copy stays.
+    assert_eq!(
+        stage.publish(&walls, small(1), 0),
+        Err("That wall is full.")
+    );
+    assert_eq!(counted(&stage, &walls), (21 + COPY_ROOM, copies));
+    assert!(stage.take_evicted().is_empty());
+}
+
+#[test]
+fn copies_restored_after_a_restart_leave_room_for_the_environment_s_own_panels() {
+    use crate::stage::published::{COPY_ROOM, MOST_COPIES, PUBLISHED};
+    let declared = roomy();
+    let walls = Walls {
+        declared: &declared,
+        ..console()
+    };
+    let mut stage = Stage::default();
+    stage.declare_parameters("console", parameters());
+    own(&mut stage, &walls, 0, 20).unwrap();
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    let copies = PUBLISHED - COPY_ROOM - 20;
+    for index in 0..copies {
+        let to = Destination::Wall {
+            wall: format!("environment-{}", index % 6),
+            slot: None,
+        };
+        stage.copy_panel(&walls, &id, eu(), &to).unwrap();
+    }
+    let instances: Vec<String> = stage
+        .contexts("console")
+        .keys()
+        .filter(|id| tomori_environment::is_instance(id))
+        .cloned()
+        .collect();
+    // Its side's run ends and it starts again, putting up more of its own first: the copies it restores are held to
+    // what leaves its own room, the rest refused, saying why.
     stage.rest("console");
     stage.declare_parameters("console", parameters());
-    let chart = Chart::new(181).with_time(TimeAxis::Live { step_ms: 5_000 });
-    stage
-        .publish(
-            &walls,
-            Publishing::new(Panel::chart("latency", "Latency", chart).depends_on(["region"]))
-                .unwrap(),
-            0,
-        )
-        .unwrap();
-    let latency = stage.view("s", &walls, 0).panels[0].id.clone();
-    for _ in 1..INSTANCES {
-        stage.copy_panel(&walls, &latency, eu(), &to).unwrap();
-    }
-    assert!(
-        stage
-            .copy_panel(&walls, &latency, eu(), &to)
-            .unwrap_err()
-            .contains("at most 8")
-    );
+    own(&mut stage, &walls, 0, 20 + COPY_ROOM).unwrap();
+    let restored = instances
+        .iter()
+        .enumerate()
+        .filter(|(index, instance)| {
+            let panel = Panel::text(instance.as_str(), "P", "x")
+                .depends_on(["region"])
+                .on_wall(*index as u32 % 6, None);
+            match stage.publish(&walls, Publishing::new(panel).unwrap(), 0) {
+                Ok(_) => true,
+                Err(error) => {
+                    assert_eq!(error, MOST_COPIES.as_str());
+                    false
+                }
+            }
+        })
+        .count();
+    assert_eq!(restored, PUBLISHED - COPY_ROOM - (20 + COPY_ROOM));
+    assert_eq!(counted(&stage, &walls), (20 + COPY_ROOM, restored));
 }
 
 #[test]

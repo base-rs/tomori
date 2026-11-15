@@ -4,6 +4,23 @@
 //! What the server side of a space's environment keeps and sends through the hub: its state, events, descriptions, actions, zones and context, and the panels it publishes onto its environment's walls, paced by their rates; and the sides started and stopped to match the spaces bound to their environments. See `design/environments.md`.
 use super::*;
 
+/// The kind of Tomori's notice that a copy was taken away for its environment's own panels, one replacing the last.
+const EVICTED: &str = "copies";
+
+/// Tomori's notice that a copy was taken away, saying `body`.
+fn evicted_notice(body: String) -> crate::stage::Content {
+    crate::stage::Content {
+        title: "Copies".to_owned(),
+        body,
+        meta: vec![("source".to_owned(), "Tomori".to_owned())],
+        code: None,
+        slug: None,
+        image: None,
+        diagram: None,
+        warnings: Vec::new(),
+    }
+}
+
 impl tomori_environment::Outlet for SpaceOutlet {
     fn share(&self, state: String) -> tomori_environment::Result<()> {
         self.hub
@@ -296,6 +313,29 @@ impl Hub {
         let change = record
             .stage
             .publish(&walls, publishing, crate::cards::unix_now())?;
+        // A copy taken away for its environment's own panel is said on the status wall, and told to the agent before
+        // the next words, so that whoever made it knows where it went.
+        let mut told = Vec::new();
+        for (copy, title) in record.stage.take_evicted() {
+            let title = crate::space::one_line(&title, 80);
+            let said = format!(
+                "Tomori took away the copy \"{title}\" to make room for the environment's own panels, which always \
+                 have room. Copy it again once there is room."
+            );
+            log::info!(
+                "Took away the copy {copy}, \"{title}\", in space {space}, to make room for its environment's own panel."
+            );
+            record.stage.project_notice(
+                &walls,
+                EVICTED,
+                evicted_notice(said.clone()),
+                crate::cards::unix_now(),
+            );
+            told.push((copy, format!("[{said}]")));
+        }
+        for (copy, note) in told {
+            record.model.note_panel(&copy, note);
+        }
         // Taken, so that a later refusal of it is said again.
         channel.accept(&id);
         if change == crate::stage::Change::Unchanged {

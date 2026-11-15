@@ -82,8 +82,8 @@ impl Stage {
     /// Pin `panel` as a participant pulls it to `target`, off the wall it is on: for one its environment published that
     /// depends on anything it does not fix itself, a copy of it, an instance with that fixed as [`pins`] says, made to
     /// be put at `target` in its place, the panel staying where it is, following; for an instance, those fixed on it
-    /// itself, as it is Tomori's already, and moved itself. Returns the copy made, if any, or why it is refused, as at the
-    /// most instances an environment shows. Nothing for a panel put on a wall, its own or another, whose context it then
+    /// itself, as it is Tomori's already, and moved itself. Returns the copy made, if any, or why it is refused, as past the
+    /// panels an environment may show. Nothing for a panel put on a wall, its own or another, whose context it then
     /// takes, one floating already, or one fixing all it depends on already.
     pub(crate) fn pin_pulled(
         &mut self,

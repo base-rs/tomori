@@ -5685,6 +5685,169 @@ fn a_copy_is_told_to_its_side_as_it_is_made_and_again_with_its_wall_s_settings_o
     assert_eq!(bare.of(), Some("pods"));
 }
 
+/// A copy refused for want of room left for its environment's own panels is refused to the agent, saying why, and said
+/// on the status wall, so that everyone sees why none was made.
+#[test]
+fn a_copy_without_room_left_for_the_environment_s_own_panels_is_refused_and_said_on_the_status_wall()
+ {
+    let CopyYard {
+        hub,
+        _jobs,
+        id,
+        _commands,
+        pods,
+        ..
+    } = copy_yard();
+    let made = {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        let mut made = 0;
+        while made < crate::stage::PUBLISHED {
+            let pose = upright([(made % 12) as f32 - 6.0, 1.4, -2.0 - (made / 12) as f32]);
+            let settings = vec![("pod".into(), copy_fixed(&format!("pod-{made}")))];
+            match record.stage.copy_panel(
+                &walls,
+                &pods,
+                settings,
+                &crate::stage::Destination::Free(pose),
+            ) {
+                Ok(_) => made += 1,
+                Err(error) => {
+                    assert_eq!(error, crate::stage::MOST_COPIES.as_str());
+                    break;
+                }
+            }
+        }
+        made
+    };
+    // Every panel but the 16 kept for its own (`COPY_ROOM`), and the list of pods copied.
+    assert_eq!(made, crate::stage::PUBLISHED - 16 - 1);
+    // What the status wall says now, of the agent's last refusal.
+    let said = |did: &str| {
+        let state = hub.lock();
+        let environments = hub.environments();
+        let projection = state
+            .space(&id)
+            .unwrap()
+            .versioned(&environments, crate::cards::unix_now());
+        projection.panels.iter().any(|panel| {
+            panel
+                .body
+                .contains(&format!("The agent could not {did} the panel"))
+                && panel.body.contains("Throw a copy away first.")
+        })
+    };
+    let refused = hub
+        .agent_copy_panel(
+            "session",
+            &pods,
+            None,
+            vec![("pod".into(), copy_fixed("pod-x"))],
+        )
+        .unwrap_err();
+    assert_eq!(refused, crate::stage::MOST_COPIES.as_str());
+    assert!(said("copy"), "said on the status wall");
+    let pinned = hub
+        .agent_pin_panel("session", &pods, Some("wall environment-0"))
+        .unwrap_err();
+    assert_eq!(pinned, crate::stage::MOST_COPIES.as_str());
+    assert!(said("pin"), "said on the status wall");
+}
+
+/// A copy taken away to make room for its environment's own panel is said on the status wall, logged, and told to the
+/// agent before the next words.
+#[test]
+fn a_copy_taken_away_for_the_environment_s_own_panel_is_said_on_the_status_wall_and_told_to_the_agent()
+ {
+    let (hub, _jobs) = hub_with(FakeBackend::new());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    hub.set_environments(Environments::new([
+        crate::environments::Environment::new("sky", "Sky"),
+        crate::environments::Environment::new("yard", "Yard")
+            .with_walls((0..6).map(|index| {
+                crate::EnvironmentWall::new(upright([3.0 * index as f32 - 7.5, 1.4, -4.0]))
+                    .with_grid(tomori_protocol::Grid::from((8, 3)))
+            }))
+            .with_server_side(Recording(seen.clone())),
+    ]));
+    hub.serving();
+    let mut bound = request("ada");
+    bound.environment = "yard".to_owned();
+    let (id, _commands) = running(&hub, &bound, Snapshot::default());
+    let outlet = yard_outlet(&hub, &id);
+    let start = Instant::now();
+    hub.channel_set_context(&outlet, copy_parameters(), start)
+        .unwrap();
+    let own = |index: usize| {
+        tomori_environment::Panel::text(format!("p{index}"), "P", "x")
+            .depends_on(["region"])
+            .on_wall(index as u32 % 6, None)
+    };
+    // Every panel shown: its own, copies as many as leave its own 16, and 16 more of its own.
+    {
+        let mut state = hub.lock();
+        let environments = hub.environments();
+        let walls = environments.walls("yard");
+        let record = state.space_mut(&id).unwrap();
+        let publish = |stage: &mut crate::stage::Stage, index: usize| {
+            stage
+                .publish(
+                    &walls,
+                    crate::stage::Publishing::new(own(index)).unwrap(),
+                    0,
+                )
+                .unwrap();
+        };
+        for index in 0..20 {
+            publish(&mut record.stage, index);
+        }
+        let first = record.stage.view("s", &walls, 0).panels[0].id.clone();
+        for index in 0..crate::stage::PUBLISHED - 16 - 20 {
+            let to = crate::stage::Destination::Wall {
+                wall: format!("environment-{}", index % 6),
+                slot: None,
+            };
+            let settings = vec![("region".into(), copy_fixed("EU-WEST1"))];
+            record
+                .stage
+                .copy_panel(&walls, &first, settings, &to)
+                .unwrap();
+        }
+        for index in 20..36 {
+            publish(&mut record.stage, index);
+        }
+        assert_eq!(
+            record.stage.view("s", &walls, 0).panels.len(),
+            crate::stage::PUBLISHED
+        );
+    }
+    // One more of its own, published by its side, takes the newest copy away, said and told.
+    hub.channel_publish_at(&outlet, own(36), start + Duration::from_secs(5))
+        .unwrap();
+    hub.flush_publishes(start + Duration::from_secs(10));
+    let state = hub.lock();
+    let record = state.space(&id).unwrap();
+    let environments = hub.environments();
+    let projection = record.versioned(&environments, crate::cards::unix_now());
+    assert!(
+        projection
+            .panels
+            .iter()
+            .any(|panel| panel.body.contains("Tomori took away the copy \"P\"")),
+        "said on the status wall"
+    );
+    assert!(
+        record
+            .model
+            .notes()
+            .iter()
+            .any(|note| note.contains("Tomori took away the copy")),
+        "told to the agent"
+    );
+}
+
 /// A copy whose panel its side withdraws says so, takes no more updates, and is taken away once its grace runs out,
 /// its side told it was dismissed.
 #[test]
@@ -6036,7 +6199,12 @@ fn contexts_of_every_wall_and_panel_at_their_longest_are_told_a_page_at_a_time_w
             for parameter in ["a", "b", "c"] {
                 record
                     .stage
-                    .set_panel_context(&walls, target, parameter, Some(fixed(index % 16)))
+                    .set_panel_context(
+                        &walls,
+                        target,
+                        parameter,
+                        Some(fixed(index % tomori_environment::CONTEXT_CHOICES)),
+                    )
                     .unwrap();
             }
             record
@@ -6048,7 +6216,12 @@ fn contexts_of_every_wall_and_panel_at_their_longest_are_told_a_page_at_a_time_w
             for parameter in ["a", "b", "c"] {
                 record
                     .stage
-                    .set_wall_context(&walls, wall, parameter, Some(fixed(15)))
+                    .set_wall_context(
+                        &walls,
+                        wall,
+                        parameter,
+                        Some(fixed(tomori_environment::CONTEXT_CHOICES - 1)),
+                    )
                     .unwrap();
             }
             record
