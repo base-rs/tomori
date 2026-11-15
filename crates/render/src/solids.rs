@@ -245,17 +245,36 @@ impl Solids {
         (self.triangles, self.left_out)
     }
 
-    /// Draw the frame's solids with `pipeline`, the swarm's, whose camera is bound.
-    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+    /// Draw the frame's solids, the closed ones with `closed`, the swarm's pipeline already set on `pass`, without their
+    /// back faces, and an open one with `two_sided`, with both, leaving `closed` set.
+    pub(crate) fn draw(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        closed: &wgpu::RenderPipeline,
+        two_sided: &wgpu::RenderPipeline,
+    ) {
         if self.drawn.is_empty() {
             return;
         }
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.set_vertex_buffer(1, self.instances.slice(..));
         for (solid, range) in &self.drawn {
+            let open = !self::closed(Solid::ALL[*solid]);
+            if open {
+                pass.set_pipeline(two_sided);
+            }
             pass.draw(self.meshes[*solid].clone(), range.clone());
+            if open {
+                pass.set_pipeline(closed);
+            }
         }
     }
+}
+
+/// Whether `solid`'s mesh is closed, every edge shared by two of its triangles wound counterclockwise seen from outside,
+/// so that it is drawn without its back faces: all but the tube, open at its ends.
+pub(crate) fn closed(solid: Solid) -> bool {
+    solid != Solid::Tube
 }
 
 /// `solid`'s place in [`Solid::ALL`].

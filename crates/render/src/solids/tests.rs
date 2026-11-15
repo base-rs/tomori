@@ -35,6 +35,35 @@ fn each_solid_is_a_unit_mesh_of_few_triangles_lit_by_its_normals() {
     }
 }
 
+/// Every solid drawn without its back faces is closed, wound counterclockwise seen from outside, as Tomori's cube is,
+/// so that culling its back faces takes nothing away seen from outside it; the open tube is drawn with both, as the
+/// pipelines say.
+#[test]
+fn every_solid_culled_is_closed_and_wound_outwards_and_only_the_open_one_has_both_faces() {
+    // Corners a rounding apart, as the last side of a ring and its first, or a pole at 0 and -0, are one.
+    let closed = |vertices: &[crate::graphics::Vertex]| {
+        let positions = vertices
+            .iter()
+            .map(|vertex| (Vec3::from_array(vertex.position) * 1e5).round() / 1e5 + Vec3::ZERO)
+            .collect();
+        let indices = (0..vertices.len() as u32).collect();
+        tomori_assets::Primitive::new(positions, Vec::new(), indices).closed()
+    };
+    assert!(closed(&crate::graphics::cube()));
+    for solid in Solid::ALL {
+        assert_eq!(closed(&mesh(solid)), self::closed(solid), "{solid:?}");
+    }
+    assert_eq!(
+        crate::graphics::primitive(true).cull_mode,
+        Some(wgpu::Face::Back)
+    );
+    assert_eq!(
+        crate::graphics::primitive(true).front_face,
+        wgpu::FrontFace::Ccw
+    );
+    assert_eq!(crate::graphics::primitive(false).cull_mode, None);
+}
+
 /// A diagram at every bound: 64 spheres, 128 edges of four waypoints each, dashed, and twelve containers.
 fn largest() -> Diagram {
     let mut diagram = Diagram::default();
@@ -98,8 +127,23 @@ fn drawn(diagram: &Diagram, count: usize) -> Vec<Drawn> {
 fn a_frame_s_solids_are_drawn_within_the_budget_at_the_headset_s_limits() {
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let mut solids = Solids::new(&device);
-        // Sixteen typical volumes are drawn whole.
+        // Sixteen typical volumes are drawn whole, none of their solids mirrored, which would turn it inside out.
         solids.update(&queue, &drawn(&typical(), 16));
+        for diagram in [typical(), largest()] {
+            for volume in drawn(&diagram, 1) {
+                let mut instances = Vec::new();
+                volume.instances(&mut instances);
+                for solid in instances {
+                    let scale = solid.scale;
+                    // Never mirrored; a side of none, as an edge's tube of no length, draws nothing.
+                    assert!(
+                        solid.basis.determinant() * scale.x * scale.y * scale.z >= 0.0,
+                        "{:?} {scale}",
+                        solid.solid
+                    );
+                }
+            }
+        }
         let (triangles, left_out) = solids.counts();
         assert_eq!(left_out, 0);
         assert!(triangles < TRIANGLES / 2, "{triangles}");
