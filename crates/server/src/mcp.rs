@@ -1925,7 +1925,7 @@ async fn show_image(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Resul
 fn show_diagram_tool() -> Value {
     json!({
         "name": "show_diagram",
-        "description": "Show how a system is organised, in 3D, as a volume, a panel with depth, for everyone in your space: its parts as nodes, how they connect as edges, and groups of them, never coordinates, which Tomori lays out. Use it for organisation, flows and dependencies, keeping it under about thirty nodes. Give nodes, edges and groups, or source, the body of a diagram block. To point from a step at something in the space, such as the fire a recipe's first step needs, bind a short id to it in world, by its kind and the name your tools give it, and use that id as an edge's end: Tomori draws a line from the node to the thing, and place near references stands the diagram between whoever asked and those things. world in the answer says what each resolved to. Warnings come back at once: fix what they name by showing it again with the same id, which updates it where it is and keeps its layout as far as it can. Someone pointing at a node or an edge names it to you. Say in a sentence what it shows.",
+        "description": "Show how a system is organised, in 3D, as a volume, a panel with depth, for everyone in your space: its parts as nodes, how they connect as edges, and groups of them, never coordinates, which Tomori lays out. Use it for organisation, flows and dependencies, keeping it under about thirty nodes. Colour shows groups and shape shows kinds, with a legend of both: put related nodes in a group, at most eight at the top, and give each node its kind, rather than colours or shapes. Give nodes, edges and groups, or source, the body of a diagram block. To point from a step at something in the space, such as the fire a recipe's first step needs, bind a short id to it in world, by its kind and the name your tools give it, and use that id as an edge's end: Tomori draws a line from the node to the thing, and place near references stands the diagram between whoever asked and those things. world in the answer says what each resolved to. Warnings come back at once: fix what they name by showing it again with the same id, which updates it where it is and keeps its layout as far as it can. Someone pointing at a node or an edge names it to you. Say in a sentence what it shows.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1940,8 +1940,9 @@ fn show_diagram_tool() -> Value {
                         "properties": {
                             "id": { "type": "string", "maxLength": 32, "description": "Letters, digits, -, _ and ." },
                             "label": { "type": "string", "maxLength": 256, "description": "What it is called, at most 32 characters; <br> breaks it onto another line, at most three, and longer lines wrap. Nothing else is read as HTML." },
-                            "shape": { "type": "string", "enum": ["box", "sphere", "cylinder", "prism", "diamond", "card"] },
-                            "colour": { "type": "string", "maxLength": 16, "description": "teal, amber, blue, violet, green, red, yellow, grey or white." },
+                            "kind": { "type": "string", "maxLength": tomori_protocol::diagram::KIND_BYTES, "description": "What it is, which its shape shows and the legend names: module, a box, by default; store, a cylinder; external, a sphere; interface, a card; process, a hexagon; decision, a diamond; or a word of your own, a box." },
+                            "shape": { "type": "string", "enum": ["box", "sphere", "cylinder", "prism", "diamond", "card"], "description": "Only to override its kind's." },
+                            "colour": { "type": "string", "maxLength": 16, "description": "Only to override its group's, which colours it: teal, amber, blue, violet, green, red, yellow, grey or white." },
                             "size": { "type": "integer", "minimum": 1, "maximum": 5, "description": "How important it is, drawn as large; by default 1." },
                             "detail": { "type": "string", "maxLength": 1024, "description": "A line shown on pointing." },
                             "ref": { "type": "string", "maxLength": 256, "description": "Your pointer back to what it stands for, such as a path, told you when it is pointed at." },
@@ -1973,7 +1974,7 @@ fn show_diagram_tool() -> Value {
                         "properties": {
                             "id": { "type": "string", "maxLength": 32 },
                             "label": { "type": "string", "maxLength": 256 },
-                            "kind": { "type": "string", "enum": ["cluster", "layer", "container"] },
+                            "kind": { "type": "string", "enum": ["cluster", "layer", "container"], "description": "cluster, by default, its members in its own colour and nothing more; layer, a tier, with a floor; container, what holds its members, with a frame." },
                             "parent": { "type": "string", "maxLength": 32, "description": "The id of an earlier group it is in." },
                         },
                         "required": ["id"],
@@ -1996,7 +1997,7 @@ fn show_diagram_tool() -> Value {
                         "required": ["id", "kind"],
                     },
                 },
-                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges, groups and world, a diagram block's body, as a Mermaid flowchart's: a[Box], a[Two<br>lines], b((Sphere)), c[(Cylinder)], d{{Prism}}, e{Diamond}, f[[Card]], a --> b : label, -.-> dashed, ==> thick, ~~> flow, subgraph g [Label] … end, @{ size: 3, colour: teal, detail: \"…\" }, and fire := object farmyard:campsite/bonfire [The bonfire] to bind fire to a thing in the space." },
+                "source": { "type": "string", "maxLength": crate::stage::DIAGRAM_BYTES, "description": "Instead of nodes, edges, groups and world, a diagram block's body, as a Mermaid flowchart's: a[Label]:::store, a[Two<br>lines], with a kind as a class, module, store, external, interface, process or decision, each its own shape, or class a,b store, or classDef crate shape: prism for a kind of your own; a --> b : label, -.-> dashed, ==> thick, ~~> flow; subgraph g [Label] … end, a group, each in its own colour; @{ size: 3, detail: \"…\" }, and fire := object farmyard:campsite/bonfire [The bonfire] to bind fire to a thing in the space." },
             },
         },
         "annotations": {

@@ -9,7 +9,7 @@ use super::*;
 use serde_json::{Value, json};
 use tomori_protocol::{Limits, Panel};
 
-const BLOCK: &str = "Here is how it fits together.\n\n```diagram\ntitle: How a frame is drawn\nid: renderer\nlayout: layered down\nsource: the code\n---\nxr[client-quest]@{ colour: violet, detail: \"Locates both eyes\" }\nsubgraph scene [tomori-scene]\n  step((Frame step))@{ size: 4, ref: crates/scene/src/scene.rs }\n  faces[projection::faces]\nend\nxr --> step : eyes and input\nstep --> faces : panels changed\nstep --> renderer((Renderer))\nrenderer --> xr\n```\n";
+const BLOCK: &str = "Here is how it fits together.\n\n```diagram\ntitle: How a frame is drawn\nid: renderer\nlayout: layered down\nsource: the code\n---\nxr[client-quest]@{ colour: violet, detail: \"Locates both eyes\" }\nsubgraph scene [tomori-scene]\n  step((Frame step))@{ size: 4, ref: crates/scene/src/scene.rs }:::process\n  faces[projection::faces]\nend\nxr --> step : eyes and input\nstep --> faces : panels changed\nstep --> renderer((Renderer))\nrenderer --> xr\n```\n";
 
 impl Client {
     /// A client that reads what is projected and draws as many volumes, of as many nodes together, as `limits` say.
@@ -343,7 +343,7 @@ fn pointing_at_a_node_or_an_edge_names_it_to_the_agent_with_each_hand() {
         text.contains("[Pointing at node \"Frame step\" (id step) in diagram \"How a frame is drawn\" (id renderer, "),
         "{text}"
     );
-    assert!(prompt.text.contains("; sphere, in group \"tomori-scene\"; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{text}");
+    assert!(prompt.text.contains("; process, sphere, in group \"tomori-scene\"; edges: from client-quest \"eyes and input\", to projection::faces \"panels changed\", to Renderer; ref: \"crates/scene/src/scene.rs\""), "{text}");
     assert!(
         prompt.text.contains(
             "edge \"Frame step → projection::faces: panels changed\" (edge 1) in diagram"

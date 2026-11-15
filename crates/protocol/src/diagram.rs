@@ -41,6 +41,21 @@ pub const PAIR_EDGES: usize = 4;
 pub const EDGE_DRAFTS: usize = EDGES * PAIR_EDGES;
 /// The most waypoints of an edge, which a client curves it through.
 pub const WAYPOINTS: usize = 4;
+/// The longest kind of a node, in bytes of ASCII letters, digits, `-`, `_` and `.`.
+pub const KIND_BYTES: usize = 16;
+/// The kinds every diagram knows without a `classDef`, each with the shape a node of it takes unless it gives its own:
+/// the first, a module, a box, as a node of no kind is.
+pub const KINDS: [(&str, Shape); 6] = [
+    ("module", Shape::Box),
+    ("store", Shape::Cylinder),
+    ("external", Shape::Sphere),
+    ("interface", Shape::Card),
+    ("process", Shape::Prism),
+    ("decision", Shape::Diamond),
+];
+/// The most groups at the top a diagram tells apart by colour, one of the palette's each, in the order written: those
+/// past it, and their members, are drawn without one.
+pub const GROUP_COLOURS: usize = crate::chart::CHART_SERIES;
 /// The largest a node is and the heaviest an edge, from 1.
 pub const SIZES: u8 = 5;
 pub const WEIGHTS: u8 = 3;
@@ -220,8 +235,13 @@ pub struct Node {
     pub label: String,
     #[serde(default)]
     pub shape: Shape,
+    /// Its own colour, or, grey, the default, its group's.
     #[serde(default)]
     pub colour: Colour,
+    /// What it is, as a class names it, `store` or one a `classDef` declares, which its shape shows and the legend names;
+    /// empty for none. See [`KINDS`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
     /// How important it is, from 1 to [`SIZES`], drawn as large.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub size: u8,
@@ -247,6 +267,7 @@ impl Node {
             label: label.into(),
             shape: Shape::Box,
             colour: Colour::Grey,
+            kind: String::new(),
             size: 1,
             detail: String::new(),
             reference: String::new(),
@@ -421,6 +442,7 @@ pub struct Attributes {
     pub size: Option<u8>,
     pub detail: Option<String>,
     pub reference: Option<String>,
+    pub kind: Option<String>,
 }
 
 impl Attributes {
@@ -433,6 +455,7 @@ impl Attributes {
             size: self.size.or(other.size),
             detail: self.detail.or_else(|| other.detail.clone()),
             reference: self.reference.or_else(|| other.reference.clone()),
+            kind: self.kind.or_else(|| other.kind.clone()),
         }
     }
 
@@ -473,6 +496,19 @@ impl Attributes {
             "ref" | "reference" => {
                 self.reference.get_or_insert_with(|| value.to_owned());
             }
+            "kind" => {
+                if !valid_kind(value) {
+                    return Err(format!(
+                        "\"{}\" is not a kind: from 1 to {KIND_BYTES} letters, digits, -, _ and ., such as {}",
+                        clean(value),
+                        kind_names()
+                    ));
+                }
+                self.kind.get_or_insert_with(|| value.to_owned());
+            }
+            // Mermaid's styles, which Tomori leaves to the groups' colours and the kinds' shapes.
+            "fill" | "stroke" | "stroke-width" | "stroke-dasharray" | "font-size"
+            | "font-weight" | "font-family" | "font-style" => {}
             other => {
                 return Err(format!(
                     "\"{}\" is not an attribute of a node",
@@ -575,6 +611,35 @@ fn label_lines(text: &str, limit: usize) -> String {
 /// A label on one line, as text names it, its lines joined by spaces.
 pub fn one_line_label(label: &str) -> String {
     label.replace('\n', " ")
+}
+
+/// Whether `kind` is a node's kind: from 1 to [`KIND_BYTES`] ASCII letters, digits, `-`, `_` and `.`.
+pub fn valid_kind(kind: &str) -> bool {
+    kind.len() <= KIND_BYTES && valid_id(kind)
+}
+
+/// The shape a node of the kind `kind` takes, as [`KINDS`] has it; `None` for a kind of its own.
+///
+/// ```
+/// use tomori_protocol::diagram::{Shape, kind_shape};
+///
+/// assert_eq!(kind_shape("store"), Some(Shape::Cylinder));
+/// assert_eq!(kind_shape("crate"), None);
+/// ```
+pub fn kind_shape(kind: &str) -> Option<Shape> {
+    KINDS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(_, shape)| *shape)
+}
+
+/// The kinds of [`KINDS`], as a warning lists them.
+pub fn kind_names() -> String {
+    KINDS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The shape `text` names, in any case, with Mermaid's names for the same.
@@ -1038,7 +1103,11 @@ impl Builder {
                         node.label = label;
                     }
                 }
-                node.shape = attributes.shape.unwrap_or_default();
+                node.kind = attributes.kind.clone().unwrap_or_default();
+                node.shape = attributes
+                    .shape
+                    .or_else(|| kind_shape(&node.kind))
+                    .unwrap_or_default();
                 node.colour = attributes.colour.unwrap_or_default();
                 node.size = attributes.size.unwrap_or(1);
                 node.detail = attributes
@@ -1130,6 +1199,20 @@ impl Builder {
                     ),
                 });
             }
+        }
+        let tops: Vec<&Group> = groups
+            .iter()
+            .filter(|group| group.parent.is_none())
+            .collect();
+        if let Some(first) = tops.get(GROUP_COLOURS) {
+            warnings.push(Warning {
+                line: None,
+                text: format!(
+                    "{} groups at the top: \"{}\" and those after it are drawn without a colour, as the palette has {GROUP_COLOURS}; nest them, or use fewer",
+                    tops.len(),
+                    first.id
+                ),
+            });
         }
         let (world, world_edges) = self.world(&nodes, &mut warnings);
         (
@@ -1348,7 +1431,9 @@ impl Diagram {
         for node in list("nodes")? {
             let id = text(&node, "id").unwrap_or_default();
             let mut attributes = Attributes::default();
-            for key in ["label", "shape", "colour", "color", "size", "detail", "ref"] {
+            for key in [
+                "label", "shape", "colour", "color", "size", "detail", "ref", "kind",
+            ] {
                 if let Some(value) = text(&node, key)
                     && let Err(why) = attributes.set(key, &value)
                 {
@@ -1423,10 +1508,15 @@ impl Diagram {
     /// ```
     pub fn outline(&self) -> String {
         let item = |node: &Node| {
-            if node.detail.is_empty() {
-                format!("- {}", one_line_label(&node.label))
+            let kind = if node.kind.is_empty() {
+                String::new()
             } else {
-                format!("- {}: {}", one_line_label(&node.label), node.detail)
+                format!(" ({})", node.kind)
+            };
+            if node.detail.is_empty() {
+                format!("- {}{kind}", one_line_label(&node.label))
+            } else {
+                format!("- {}{kind}: {}", one_line_label(&node.label), node.detail)
             }
         };
         let mut sections: Vec<String> = Vec::new();
@@ -1504,6 +1594,9 @@ impl Diagram {
             node.group = node.group.filter(|group| usize::from(*group) < groups);
             node.label = label_lines(&node.label, LABEL_CHARS);
             node.detail = one_line(&node.detail, DETAIL_CHARS);
+            if !valid_kind(&node.kind) {
+                node.kind.clear();
+            }
         }
         let nodes = diagram.nodes.len();
         diagram.edges.retain(|edge| {

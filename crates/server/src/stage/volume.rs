@@ -152,8 +152,8 @@ const NODE_EDGES: usize = 8;
 
 /// The node `node`, by its id, or else the world edge at `world_edge` or the edge at `edge` of `diagram`, as the agent is
 /// told of one pointed at: what it is called, such as `node "Octree" (id octree)`, `world edge "1. Find the fire → The
-/// bonfire: here" (world edge 0)` or `edge "Renderer → Octree: queries" (edge 3)`, and what it says of it, its shape,
-/// group, edges, detail and reference, both ends of a world edge, as the agent named them, or an edge's style, every
+/// bonfire: here" (world edge 0)` or `edge "Renderer → Octree: queries" (edge 3)`, and what it says of it, its kind,
+/// shape, group, edges, detail and reference, both ends of a world edge, as the agent named them, or an edge's style, every
 /// piece of text in quotes and cleaned onto one line, as it is the agent's own and may be from what it read. `None`
 /// where it names none of them.
 pub(crate) fn part(
@@ -187,7 +187,12 @@ pub(crate) fn part(
             Shape::Card => "card",
             _ => "box",
         };
-        let mut about = format!("{shape}{}", group(found.group));
+        let kind = if found.kind.is_empty() {
+            String::new()
+        } else {
+            format!("{}, ", clean(&found.kind, 16))
+        };
+        let mut about = format!("{kind}{shape}{}", group(found.group));
         let edges: Vec<String> = diagram
             .edges
             .iter()

@@ -2244,6 +2244,8 @@ impl Projector {
             let Some(mesh) = self.meshes.get(&panel.id) else {
                 continue;
             };
+            let mut legend = Vec::new();
+            volume::legend_icons(panel, mesh, *fit, *model, &mut legend);
             let model = *model * volume::placed(panel, mesh.source(), *fit);
             let focus = self
                 .focus
@@ -2260,6 +2262,7 @@ impl Projector {
                 focus,
                 time,
                 viewer,
+                legend,
             });
         }
         // Pointing at a chart's plot with the right ray, not carrying a panel in that hand, its readout follows the ray,

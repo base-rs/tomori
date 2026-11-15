@@ -1,8 +1,8 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Volumes' solids: a handful of unit meshes, a box, a sphere, a cylinder, a hexagonal prism, a diamond, a cone and a
-//! tube, each drawn in one instanced draw for every volume in view, by the pipeline the swarm and the workers are drawn
+//! Volumes' solids: a handful of unit meshes, a box, a sphere, a cylinder, a hexagonal prism, a diamond, a cone, a
+//! tube and a narrowing tube, each drawn in one instanced draw for every volume in view, by the pipeline the swarm and the workers are drawn
 //! with, opaque and writing depth, lit from above. A frame's instances are written once, within a budget of triangles,
 //! beyond which the volumes last in the frame's order are drawn without their solids. See `design/diagrams.md`.
 use std::ops::Range;
@@ -29,6 +29,7 @@ pub(crate) fn mesh(solid: Solid) -> Vec<Vertex> {
         Solid::Cylinder => prism(12, true),
         Solid::Prism => prism(6, true),
         Solid::Tube => prism(6, false),
+        Solid::Taper => taper(6, tomori_scene::projection::volume::TAPER_RATIO),
         Solid::Diamond => diamond(),
         Solid::Cone => cone(8),
     }
@@ -99,6 +100,27 @@ fn prism(sides: usize, capped: bool) -> Vec<Vertex> {
             for corner in [down, a + down, b + down] {
                 vertices.push(vertex(corner, -glam::Vec3::Y));
             }
+        }
+    }
+    vertices
+}
+
+/// A tube of `sides` about its height, the Y axis, open at its ends, its top `step` as wide as its base.
+fn taper(sides: usize, step: f32) -> Vec<Vertex> {
+    let at = |side: usize, y: f32, radius: f32| {
+        let angle = std::f32::consts::TAU * side as f32 / sides as f32;
+        glam::Vec3::new(angle.cos() * radius, y, angle.sin() * radius)
+    };
+    // Its sides lean in by as much as it narrows, which its normals lean out by.
+    let lean = 0.5 * (1.0 - step);
+    let mut vertices = Vec::new();
+    for side in 0..sides {
+        let (a, b) = (at(side, -0.5, 0.5), at(side + 1, -0.5, 0.5));
+        let (c, d) = (at(side + 1, 0.5, 0.5 * step), at(side, 0.5, 0.5 * step));
+        let out = (a + b) / 2.0 * glam::Vec3::new(1.0, 0.0, 1.0);
+        let normal = out.normalize() + glam::Vec3::Y * lean;
+        for corner in [a, c, b, a, d, c] {
+            vertices.push(vertex(corner, normal));
         }
     }
     vertices
@@ -272,9 +294,9 @@ impl Solids {
 }
 
 /// Whether `solid`'s mesh is closed, every edge shared by two of its triangles wound counterclockwise seen from outside,
-/// so that it is drawn without its back faces: all but the tube, open at its ends.
+/// so that it is drawn without its back faces: all but the tubes, open at their ends.
 pub(crate) fn closed(solid: Solid) -> bool {
-    solid != Solid::Tube
+    !matches!(solid, Solid::Tube | Solid::Taper)
 }
 
 /// `solid`'s place in [`Solid::ALL`].
