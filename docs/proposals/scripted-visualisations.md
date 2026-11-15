@@ -608,9 +608,9 @@ The plan does not change: the Rust interface and hand-written prototypes come fi
 | --- | --- | --- | --- |
 | **Grammar of graphics** (ggplot2, Vega-Lite) | Marks, encodings (column → channel), scales, facets, layers; a chart is a mapping, not drawing code | Marks, `x`/`y`/`z`/`colour`/`size`/`shape`/`label` encodings, scales with domains and units, layers, facets as small multiples on a wall | Vega-Lite's JSON verbosity; its 2D-only marks (we add `point3d`, `bars3d`, `surface`, `graph`, `tree`, `timeline`); its browser-side interaction model |
 | **Pipeline query languages** (PRQL, Kusto/KQL, jq) | Data flows top to bottom through `|`; each step is one transform; readable and composable | `|` pipelines; `where`, `select`, `derive`, `join`, `group … aggregate`, `sort`, `take`, `top`; jq's terseness for nested JSON from `cargo metadata` | SQL's inside-out nesting; jq's cleverness where a step should be named |
-| **Notebooks and workbooks** (MATLAB, Jupyter, Observable) | A workbook of named steps, run top to bottom; results inspected step by step; **Observable's cells are reactive**: change one and its dependents rerun | Named cells, reactive dependents, per-cell previews and errors, several views from one data pipeline, notes between cells for a report | Jupyter's hidden mutable kernel state and out-of-order execution; MATLAB's imperative loops |
+| **Notebooks and workbooks** (MATLAB, Jupyter, Observable) | A workbook of named steps, run top to bottom; results inspected step by step; **Observable's cells are reactive**: change one and its dependents rerun | Named single definitions in any order, reactive dependents, per-definition previews and errors, several views from one data pipeline, notes between cells for a report | Jupyter's hidden mutable kernel state and out-of-order execution; MATLAB's imperative loops |
 | **PromQL** | Time series are first class; instant vs range; `rate`, `by`, `offset`; labels are the join keys | Series as tables with a time column and labels; `rate`, `window`, `resample`, `offset`; labels as columns; PromQL itself embedded verbatim for Prometheus sources | Re-implementing PromQL: the source evaluates it, the workbook reshapes the answer |
-| **Elm** | Views are pure functions of state; events update state; no side effects | Views pure in data, channels and local state; `on` handlers that only set state or channels | Elm's general-purpose type system and modules |
+| **Elm** | Views are pure functions of state; events update state; no side effects | Views pure in their inputs; `on` handlers that only write channels, never bindings | Elm's general-purpose type system and modules |
 
 **What a 3D, shared, live space adds.** Marks in depth (`point3d`, `bars3d`, `surface`, `graph`, `tree`, `timeline`), with a `z` encoding and a level of detail; interaction as grabbing and pointing rather than mouse brushing; channels as the inputs and outputs of cells, scoped to panels, walls and the space (section 1); one evaluation for everyone on the server, with participants' hovers evaluated on their own clients through declared bindings; and liveness: cells recompute as sources refresh, at the cadence the workbook declares and the caps allow.
 
@@ -618,20 +618,24 @@ The plan does not change: the Rust interface and hand-written prototypes come fi
 
 Not a specification; enough to judge. Lines starting `--` are comments.
 
-**Cells.** A workbook is a sequence of cells, each one of:
+**Definitions, decided by the maintainer.** A workbook is a **set of single definitions**, not a sequence of statements:
+
+- **`let NAME = EXPR`** binds an intermediate result (a table, a series, a graph, a scalar): `let pods = …`.
+- **`input NAME = channel CHANNEL`** binds a channel the workbook follows (section 1), such as `time` or `region`; **`input NAME: TYPE = DEFAULT`** binds a panel's own input, which the agent or a chip sets (what compiled kinds call parameters).
+- **Each name is defined once.** Defining a name again is an error, reported with the spans of both definitions (`"pods" is defined twice: line 8 and line 21`); there is no shadowing and no reassignment.
+- **No mutation.** Nothing in a workbook changes a binding after it is defined; there are no assignment statements and no local state. **Only inputs change, and only from outside**: a channel's value, a chip, the agent, a source refreshing. A handler does not change the workbook; it writes a channel (`on grab pod -> channel selection add pod`), and the workbook sees the change as an input, like any other.
+- **Any order.** Definitions may appear in any order: the workbook is a DAG of names, evaluated in dependency order, so a reader can put the view first and its data after. **A cycle is refused**, naming it (`cycle: data -> lat -> data`).
+
+The other declarations, each also defined once:
 
 - `uses SOURCE as NAME`: a declared source (section 5); nothing else can be read.
-- `input NAME = channel CHANNEL`: a channel followed (section 1), such as `time` or `region`.
-- `param NAME: TYPE = DEFAULT`: a parameter the agent or a chip sets.
-- `state NAME: TYPE = INITIAL`: local state, changed only by handlers.
-- `let NAME = EXPR`: a **data cell**, a named, reusable result.
-- `view NAME "TITLE" = EXPR`: a **view cell**, a visualisation that becomes a panel.
+- `view NAME "TITLE" = EXPR` (or `view MARK EXPR …`): a **view**, a visualisation that becomes a panel.
 - `note """…"""`: Markdown, shown in the workbook and in reports.
 - `refresh EVERY while viewed`: the workbook's own cadence, as `Next` is for compiled kinds.
 
 A query block may be written as a method (`prom.range(time, step) { … }`) or, more briefly, as the source's name with `over` a time channel (`prometheus { … } over window`); both mean the same.
 
-**Expressions.** Source calls (`prom.range(…)`, `cargo.packages()`); `|` pipelines of `where`, `select`, `derive`, `rename`, `join … on`, `group by … aggregate`, `sort`, `top N by … per …`, `rate`, `window`, `resample`, `offset`, `fit`; marks (`mark point3d`, `mark line`, `mark bars3d`, `mark surface`, `graph`, `tree`, `timeline`) with encodings and scales; `layer` to overlay; `facet by` for small multiples; `legend`, `rule`, `label`. Handlers: `on hover|grab|release|choose -> channel NAME = …` or `-> state NAME = …`. Source queries are written in the source's own language inside braces, `prom.range(time, step) { … }`, and **parsed, not passed as strings** (below); `$name` splices a value into the parsed query.
+**Expressions.** Source calls (`prom.range(…)`, `cargo.packages()`); `|` pipelines of `where`, `select`, `derive`, `rename`, `join … on`, `group by … aggregate`, `sort`, `top N by … per …`, `rate`, `window`, `resample`, `offset`, `fit`; marks (`mark point3d`, `mark line`, `mark bars3d`, `mark surface`, `graph`, `tree`, `timeline`) with encodings and scales; `layer` to overlay; `facet by` for small multiples; `legend`, `rule`, `label`. Handlers: `on hover|grab|release|choose ITEM -> channel NAME …` (set, add or remove a value), or a host action such as `pin`; never a binding. Source queries are written in the source's own language inside braces, `prom.range(time, step) { … }`, and **parsed, not passed as strings** (below); `$name` splices a value into the parsed query.
 
 **The lead example: traffic, latency and deploys, from two sources, in 3D.** The maintainer's own sketch, in this section's syntax, kept as close to it as the cell kinds allow:
 
@@ -690,8 +694,8 @@ workbook "Faster pods get more traffic" v1
 uses prometheus:observe as prom
 input time   = channel time          -- inherited from the wall, through the bridge
 input region = channel region
-param top: Int = 300
-state held: Keys = {}
+input held   = channel selection     -- the pods grabbed, a shared Keys channel this workbook also writes
+input top: Int = 300
 refresh 1m while viewed
 
 let step = auto_step(time, points: 240)
@@ -721,9 +725,9 @@ view scatter "Faster pods get more traffic" =
   layer pods | where pod in held
     | mark line3d  x: rps  y: p95  z: t  colour: revision  width: 2
   legend colour "deployment"
-  on hover   -> channel hovered_pod = key       -- evaluated on the hoverer's client
-  on grab    -> state held = held + key
-  on release -> state held = held - key
+  on hover pod   -> channel hovered_pod        -- evaluated on the hoverer's client
+  on grab pod    -> channel selection add pod  -- an outside change: `held` follows it
+  on release pod -> channel selection remove pod
 ```
 
 **Example 2: trial against control, the spread of per-pod intake (CV), two views from one pipeline.**
@@ -733,8 +737,8 @@ workbook "Trial vs control: per-pod intake spread" v1
 
 uses prometheus:observe as prom
 input time = channel time
-param trial:   Text = "web-rs-low-priority-trial"
-param control: Text = "web-rs-low-priority"
+input trial:   Text = "web-rs-low-priority-trial"
+input control: Text = "web-rs-low-priority"
 
 let intake(workload) =
   prom.range(time) { sum by (pod) (rate(root_admissions_total{workload=$workload}[2m])) }
@@ -749,7 +753,7 @@ note """The coefficient of variation of per-pod intake: lower means traffic is s
 view lines "Spread of per-pod intake (CV)" =
   spread | mark line  x: t  y: cv scale linear from 0  colour: arm
   rule y: 0.1 label "target"
-  on hover -> channel cursor.time = t
+  on hover t -> channel cursor.time
 
 view now "CV now" =
   spread | where t == last(t) | mark bar  x: arm  y: cv  colour: arm  label: format(cv, "0.00")
@@ -762,7 +766,7 @@ workbook "Tomori's crates" v1
 
 uses cargo:workspace as cargo
 input focus = channel crate
-param depth: Int = 2
+input depth: Int = 2
 refresh 10s while viewed                      -- recomputed only if Cargo.lock or a manifest changed
 
 let crates =
@@ -781,8 +785,8 @@ view crates "Tomori's crates" =
         edges: deps    from: from  to: to
         layout: force
   | neighbourhood of focus depth depth
-  on choose -> channel crate = key
-  on release inside -> pin key                 -- the client's springs moved it; the view keeps it
+  on choose name -> channel crate
+  on release inside name -> pin name           -- a host action on the layout; the workbook's bindings are untouched
 ```
 
 ### Source queries are typed embedded languages, parsed, not strings
@@ -814,8 +818,8 @@ let admitted =
 
 ### Semantics
 
-- **A reactive dataflow graph.** Each cell depends on the names it references. A cell is recomputed when a source it reads refreshes (at the workbook's `refresh`, within the caps), when a channel or parameter it reads changes, or when a cell it depends on changes; dependents are recomputed in topological order, each once per settle, as channels are (section 1). Cells may be written in any order; a cycle is refused, naming it. Views depend on `state`; data cells may not, so a handler never causes a query.
-- **Deterministic.** No clock but `now`, the evaluation's instant; no randomness; stable sorts and joins in input order; floating point as Rust's `f64`. The same sources' answers, channels, parameters and state give the same tables and scenes, which makes caching by input digest safe and tests golden.
+- **A reactive dataflow graph.** Each cell depends on the names it references. A cell is recomputed when a source it reads refreshes (at the workbook's `refresh`, within the caps), when a channel or parameter it reads changes, or when a cell it depends on changes; dependents are recomputed in topological order, each once per settle, as channels are (section 1). Definitions may be written in any order, each name once; a second definition is refused with both spans, and a cycle is refused, naming it. Handlers only write channels, so the workbook itself never changes; a handler causes a query only if a `let` that reads a source depends on the channel it wrote, which the graph shows.
+- **Deterministic.** No clock but `now`, the evaluation's instant; no randomness; stable sorts and joins in input order; floating point as Rust's `f64`. The same sources' answers and inputs give the same tables and scenes, which makes caching by input digest safe and tests golden.
 - **Types.** Scalars (numbers with **units**, text, booleans, instants, durations, time ranges), **tables** (typed columns; a **series** is a table with a time column `t` and label columns, as a Prometheus range answer is), **graphs** (nodes and edges tables with keys), **trees**, and views. Types are inferred; names, columns and units are checked before a cell runs where they are known, and when a source answers where they are not (a Prometheus answer's labels). Units are carried through arithmetic, converted where compatible (`s` to `ms`), refused where not (`ms + req/s`), and label axes.
 - **Errors per cell.** A failed cell reports its span, message and a suggestion (`no column "revison" in latency; did you mean "revision"?`); its dependents are marked blocked; views keep their last good scene, marked stale. Each cell's status, row count, schema, time and fuel used are kept for the agent and the back of the panel.
 
@@ -847,8 +851,8 @@ let admitted =
 
 | Phase | What | Days |
 | --- | --- | --- |
-| L1, spike | The parser and interpreter for a subset, including PromQL blocks parsed with `promql-parser` and `$region` spliced as a matcher (`uses`, `input`, `param`, `let`, `view`; `where`, `rename`, `join`, `top`, `derive`; `mark point3d` with encodings; `on hover -> channel`), with fuel and memory accounting, evaluating the faster-pods workbook through the core's interface. **Judged by:** its scene equals the hand-written Rust kind's golden scene from the same fixture, and the agent writes it from the example | about 8 |
-| L2, version 1 | Embedded PromQL on `promql-parser` with splicing, the guards as AST checks and static label sets (about 4 days), and bounded metadata reads in `tomori-prometheus` (about 2 days); types and units, every verb and mark (including `graph`, `tree`, `timeline`, `surface`, facets, layers), `state` and handlers, the reactive scheduler, per-cell errors, the tools, the highlighting grammar; the CV comparison and crate graph as workbooks. **Judged by:** in the headset, the agent builds and revises a two-view workbook during a conversation, fixing its own errors from the per-cell answers, including a misspelt metric caught before any query runs | about 26 |
+| L1, spike | The parser and interpreter for a subset, including PromQL blocks parsed with `promql-parser` and `$region` spliced as a matcher (`uses`, `input`, `let`, `view`, single definitions and the DAG; `where`, `rename`, `join`, `top`, `derive`; `mark point3d` with encodings; `on hover -> channel`), with fuel and memory accounting, evaluating the faster-pods workbook through the core's interface. **Judged by:** its scene equals the hand-written Rust kind's golden scene from the same fixture, and the agent writes it from the example | about 8 |
+| L2, version 1 | Embedded PromQL on `promql-parser` with splicing, the guards as AST checks and static label sets (about 4 days), and bounded metadata reads in `tomori-prometheus` (about 2 days); types and units, every verb and mark (including `graph`, `tree`, `timeline`, `surface`, facets, layers), handlers writing channels, the reactive scheduler, per-cell errors, the tools, the highlighting grammar; the CV comparison and crate graph as workbooks. **Judged by:** in the headset, the agent builds and revises a two-view workbook during a conversation, fixing its own errors from the per-cell answers, including a misspelt metric caught before any query runs | about 26 |
 | L3, reports | `note` cells, `create_report` from a workbook, frozen and live views with provenance | about 5, after the web phases |
 | L4, browser | The interpreter in WebAssembly for offline reports with frozen data | about 4 |
 
@@ -858,7 +862,7 @@ The language phases follow phase 1 and replace, if the maintainer agrees, the in
 
 1. **Name.** Candidates: *Lumen*, *Vista*, *Atlas*, or simply "Tomori workbooks". Checked against crates.io and existing languages before choosing.
 2. **File format and extension.** Proposed: plain UTF-8 text, one workbook per file, `.workbook` or a short extension after the name (`.lum`); stored in the session's directory and kept with the space.
-3. **Typed?** Proposed: typed with inference, units included, checked before running where schemas are known and on the source's answer otherwise; no type annotations required except on `param` and `state`.
+3. **Typed?** Proposed: typed with inference, units included, checked before running where schemas are known and on the source's answer otherwise; no type annotations required except on inputs that are not channels and `state`.
 4. **Embedded PromQL on `promql-parser`** (Apache-2.0, declared compatible with Prometheus 3.8), or a parser of our own if its error positions or coverage of the gateway's dialect fall short?
 5. **The only scripting route, or alongside dynamic Rust?** Proposed: the language is the agent's route; compiled Rust kinds stay for heavy or bespoke drawing and are usable from workbooks; dynamically loaded Rust modules only if rebuilding the server for a new compiled kind proves too slow in practice.
 
