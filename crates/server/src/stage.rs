@@ -53,6 +53,7 @@ pub use image::without_image;
 pub(crate) use layouts::{LAYOUT_WALLS, Planned};
 pub use placement::Placement;
 pub(crate) use published::Change;
+pub(crate) use published::MOST_COPIES;
 #[cfg(test)]
 pub(crate) use published::PUBLISHED;
 pub use published::Publishing;
@@ -789,6 +790,10 @@ pub struct Stage {
     /// Whether an owner locked the Tomori wall, in every environment.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     tomori_locked: bool,
+    /// The copies taken away to make room for their environment's own panels, by identity and title, until the hub
+    /// says so ([`Stage::take_evicted`]). Never written.
+    #[serde(skip)]
+    evicted: Vec<(String, String)>,
 }
 
 fn schema() -> u32 {
@@ -805,6 +810,7 @@ impl Default for Stage {
             notices: BTreeMap::new(),
             tomori_layout: None,
             tomori_locked: false,
+            evicted: Vec::new(),
         }
     }
 }

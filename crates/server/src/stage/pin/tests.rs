@@ -235,7 +235,7 @@ fn a_copy_that_cannot_go_where_it_is_pulled_is_taken_away_again() {
             .keys()
             .all(|id| !tomori_environment::is_instance(id))
     );
-    // Past the most copies, pulling it off is refused, saying why.
+    // Copies have no bound of their own: past the eight there once were, pulling it off still pins a copy.
     let to = Destination::Free(Pose::at([0.0, 1.5, -1.5]));
     for region in [
         "EU-WEST1",
@@ -259,8 +259,7 @@ fn a_copy_that_cannot_go_where_it_is_pulled_is_taken_away_again() {
     assert!(
         stage
             .place_pulled(&walls, &latency, floating(), None)
-            .unwrap_err()
-            .contains("at most 8")
+            .is_ok()
     );
 }
 

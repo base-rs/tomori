@@ -507,21 +507,32 @@ impl Hub {
             }
         };
         let pinned = settings.is_none();
-        let (copy, instance, settings) = match settings {
-            Some(settings) => {
-                let (copy, instance) = record
-                    .stage
-                    .copy_panel(&walls, &id, settings.clone(), &to)
-                    .map_err(str::to_owned)?;
-                (copy, instance, settings)
+        let made = match settings {
+            Some(settings) => record
+                .stage
+                .copy_panel(&walls, &id, settings.clone(), &to)
+                .map(|(copy, instance)| (copy, instance, settings)),
+            None => record
+                .stage
+                .pin_copy(&walls, &id, &to)
+                .map(|((copy, instance), pinned)| (copy, instance, pinned)),
+        };
+        let (copy, instance, settings) = match made {
+            Ok(made) => made,
+            // No room left for copies is said on the status wall too, so that everyone sees why none was made.
+            Err(error) if error == crate::stage::MOST_COPIES.as_str() => {
+                let title = crate::space::one_line(&title, 80);
+                let did = if pinned { "pin" } else { "copy" };
+                let content = notice(format!(
+                    "The agent could not {did} the panel \"{title}\": {error}"
+                ));
+                let now = crate::cards::unix_now();
+                record.stage.project_notice(&walls, NOTICE, content, now);
+                drop(environments);
+                state.touch_projection(&space);
+                return Err(error.to_owned());
             }
-            None => {
-                let ((copy, instance), pinned) = record
-                    .stage
-                    .pin_copy(&walls, &id, &to)
-                    .map_err(str::to_owned)?;
-                (copy, instance, pinned)
-            }
+            Err(error) => return Err(error.to_owned()),
         };
         let described: Vec<String> = settings
             .iter()
