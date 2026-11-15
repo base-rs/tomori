@@ -745,6 +745,69 @@ pub struct Panel {
     /// `design/panel-context.md`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context: Vec<crate::context::ContextChip>,
+    /// What makes it a face panel, if its environment's server side published it as one: the key naming the drawing its
+    /// environment's client crate registers, and the payload that drawing reads. Its body is the summary its side wrote,
+    /// which a client without that drawing, an older one included, draws as a text panel's, as the agent reads it. Part
+    /// of its version. See `design/panel-faces.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<Box<Face>>,
+}
+
+/// The longest key of a face panel's drawing ([`Face::key`]), in bytes, as a panel's id.
+pub const FACE_KEY_BYTES: usize = 32;
+
+/// The most bytes of a face panel's payload ([`Face::data`]), as its JSON is written, as an environment event's.
+pub const FACE_DATA_BYTES: usize = crate::MESSAGE_LIMIT;
+
+/// What makes a panel a face panel ([`Panel::face`]): the key of the drawing its environment's client crate registers
+/// for it, 1 to [`FACE_KEY_BYTES`] ASCII letters, digits, `-` and `_`, and the payload that drawing reads, the
+/// environment's own JSON, at most [`FACE_DATA_BYTES`] as written. See `design/panel-faces.md`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Face {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub data: serde_json::Value,
+    /// Its items, rows a participant points at and chooses as a list's, by which a client says which it points at and
+    /// which it chose, their places those of [`Panel::row_on`]. Sent here rather than as [`Panel::rows`], so that a
+    /// client that draws no face, an older one included, never takes a line of the face's summary for one of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<ListRow>,
+}
+
+impl Face {
+    /// The face drawn by the drawing `key`, from `data`, of no items.
+    pub fn new(key: impl Into<String>, data: serde_json::Value) -> Self {
+        Self {
+            key: key.into(),
+            data,
+            items: Vec::new(),
+        }
+    }
+
+    /// The face, with `items`.
+    pub fn with_items(mut self, items: Vec<ListRow>) -> Self {
+        self.items = items;
+        self
+    }
+}
+
+/// Whether `key` is one a face panel's drawing may be named by: 1 to [`FACE_KEY_BYTES`] ASCII letters, digits, `-` and
+/// `_`.
+///
+/// ```
+/// use tomori_protocol::valid_face_key;
+///
+/// assert!(valid_face_key("world-clock"));
+/// assert!(!valid_face_key(""));
+/// assert!(!valid_face_key("world clock"));
+/// assert!(!valid_face_key(&"a".repeat(33)));
+/// ```
+pub fn valid_face_key(key: &str) -> bool {
+    (1..=FACE_KEY_BYTES).contains(&key.len())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 /// How small and how large a floating panel is stretched, as a proportion of its own size ([`Panel::size`]): never so
@@ -974,6 +1037,7 @@ impl Panel {
             diagram: None,
             size: None,
             context: Vec::new(),
+            face: None,
         }
     }
 
@@ -1023,9 +1087,21 @@ impl Panel {
         self
     }
 
-    /// The row on `line` of its body, from 0, if it is a list panel with a row there.
+    /// The panel, a face panel drawn as `face` says, where a client has its drawing.
+    pub fn with_face(mut self, face: Option<Face>) -> Self {
+        self.face = face.map(Box::new);
+        self
+    }
+
+    /// The row on `line` of its body, from 0, if it is a list panel with a row there, or the item of a face panel at
+    /// that place among its items.
     pub fn row_on(&self, line: u32) -> Option<&ListRow> {
-        self.rows.get(line as usize)
+        self.listed().get(line as usize)
+    }
+
+    /// Its rows, a list's, or a face panel's items ([`Face::items`]), which are pointed at and chosen alike.
+    pub fn listed(&self) -> &[ListRow] {
+        self.face.as_ref().map_or(&self.rows, |face| &face.items)
     }
 
     /// The panel at `version`, the projection revision at which it last changed.
@@ -1041,7 +1117,7 @@ impl Panel {
     }
 
     /// Whether it and `other` are alike in everything its version covers but where they are: their identity, title,
-    /// metadata, kind, id, code, image, chart's structure, rows and columns, and, but for a chart panel, whose body is a summary of
+    /// metadata, kind, id, code, image, chart's structure, rows, columns and face, and, but for a chart panel, whose body is a summary of
     /// its live data, their body. See [`Panel::version`].
     pub fn same_structure(&self, other: &Panel) -> bool {
         let Panel {
@@ -1063,6 +1139,7 @@ impl Panel {
             diagram,
             size,
             context,
+            face,
         } = self;
         let charts = match (chart, &other.chart) {
             (None, None) => true,
@@ -1081,6 +1158,7 @@ impl Panel {
             && *diagram == other.diagram
             && *size == other.size
             && *context == other.context
+            && *face == other.face
             && charts
     }
 
@@ -2007,6 +2085,54 @@ mod tests {
         assert_eq!(text.row_on(0), None);
         assert!(!list.same_structure(&text));
         assert!(list.same_structure(&list.clone().with_age(9)));
+    }
+
+    #[test]
+    fn a_face_panel_s_face_is_sent_only_where_it_has_one_and_counts_in_its_version() {
+        let place = Place::Wall {
+            wall: "environment-0".into(),
+            slot: 0,
+        };
+        let text = Panel::new("panel-1", "Europe", "World clock Europe.", place);
+        let face = text.clone().with_face(Some(Face::new(
+            "world-clock",
+            serde_json::json!({"time": "13:20"}),
+        )));
+        let json = serde_json::to_value(&face).unwrap();
+        assert_eq!(
+            json["face"],
+            serde_json::json!({"key": "world-clock", "data": {"time": "13:20"}})
+        );
+        assert_eq!(serde_json::from_value::<Panel>(json.clone()).unwrap(), face);
+        // An older server sends none, and a panel that is not a face says none; a face of no payload sends none.
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("face");
+        assert_eq!(serde_json::from_value::<Panel>(older).unwrap().face, None);
+        assert!(serde_json::to_value(&text).unwrap().get("face").is_none());
+        let bare = text
+            .clone()
+            .with_face(Some(Face::new("world-clock", serde_json::Value::Null)));
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap()["face"],
+            serde_json::json!({"key": "world-clock"})
+        );
+        // Its face, its payload with it, is part of what its version covers, and what it shows.
+        assert!(!face.same_structure(&text));
+        assert!(!face.same_structure(&bare));
+        assert!(face.same_structure(&face.clone().with_age(9)));
+        // Its items go with its face, found by their places among them, as a list's rows are, and are part of it.
+        let items = text.clone().with_face(Some(
+            Face::new("world-clock", serde_json::Value::Null)
+                .with_items(vec![ListRow::new("dial", true)]),
+        ));
+        assert_eq!(
+            serde_json::to_value(&items).unwrap()["face"]["items"],
+            serde_json::json!([{"id": "dial", "choosable": true}])
+        );
+        assert_eq!(items.row_on(0).map(|row| row.id.as_str()), Some("dial"));
+        assert_eq!(items.listed().len(), 1);
+        assert!(items.rows.is_empty() && face.row_on(0).is_none());
+        assert!(!items.same_structure(&bare));
     }
 
     #[test]

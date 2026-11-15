@@ -32,6 +32,9 @@ pub(super) struct Published {
     pub(super) reference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) chart: Option<Chart>,
+    /// Its face, the key of its drawing and its payload, if it is a face panel. See `design/panel-faces.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) face: Option<tomori_protocol::Face>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) rows: Option<Vec<Row>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -523,6 +526,7 @@ pub struct Publishing {
     id: String,
     content: Content,
     chart: Option<Chart>,
+    face: Option<tomori_protocol::Face>,
     wall: u32,
     slot: Option<u32>,
     reference: Option<String>,
@@ -539,6 +543,7 @@ impl Publishing {
     /// body, for a chart panel, the chart's summary, and, for a list panel, its rows; or why it is refused. A reference
     /// that [`tomori_environment::valid_reference`] refuses is left out, as an object's is.
     pub fn new(panel: tomori_environment::Panel) -> Result<Self, String> {
+        let face = panel.face_spec().map(face).transpose()?;
         let listed = panel.rows().map(<[_]>::to_vec);
         let highlighted = panel.highlighted().map(str::to_owned);
         let declared = panel.columns().to_vec();
@@ -572,11 +577,16 @@ impl Publishing {
         let (body, rows, highlighted, columns) = match listed {
             Some(listed) => {
                 let Listed {
-                    body,
+                    body: written,
                     rows,
                     highlighted,
                     columns,
                 } = list(&listed, highlighted, &declared)?;
+                // A face's items are its rows, pointed at and chosen as a list's, but its body is its summary.
+                let body = match &face {
+                    Some(_) => blocks::clean_body(&body),
+                    None => written,
+                };
                 (body, Some(rows), highlighted, columns)
             }
             None if highlighted.is_some() => {
@@ -605,6 +615,7 @@ impl Publishing {
                 warnings: Vec::new(),
             },
             chart,
+            face,
             wall,
             slot,
             reference: reference.filter(|reference| tomori_environment::valid_reference(reference)),
@@ -618,15 +629,41 @@ impl Publishing {
         Ok(publishing)
     }
 
-    /// How many bytes of JSON its content and chart take.
+    /// How many bytes of JSON its content, chart and face take.
     pub fn bytes(&self) -> usize {
-        super::json_size(&self.content) + self.chart.as_ref().map_or(0, super::json_size)
+        super::json_size(&self.content)
+            + self.chart.as_ref().map_or(0, super::json_size)
+            + self.face.as_ref().map_or(0, super::json_size)
     }
 
     /// The environment's id for it.
     pub fn id(&self) -> &str {
         &self.id
     }
+}
+
+/// A face panel's face, as the side gave it, checked: its drawing's key, which [`tomori_environment::valid_face_key`]
+/// takes, and its payload, JSON within [`tomori_environment::FACE_DATA_LIMIT`] as written, none where it gave none; or
+/// why it is refused. See `design/panel-faces.md`.
+fn face(face: &tomori_environment::Face) -> Result<tomori_protocol::Face, String> {
+    if !tomori_environment::valid_face_key(face.key()) {
+        return Err(format!(
+            "A face's key is 1 to {} ASCII letters, digits, - and _.",
+            tomori_environment::FACE_KEY_BYTES
+        ));
+    }
+    let data = if face.data().trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(face.data()).map_err(|_| "A face's data is JSON.".to_owned())?
+    };
+    if super::json_size(&data) > tomori_environment::FACE_DATA_LIMIT {
+        return Err(format!(
+            "A face's data takes at most {} bytes of JSON.",
+            tomori_environment::FACE_DATA_LIMIT
+        ));
+    }
+    Ok(tomori_protocol::Face::new(face.key(), data))
 }
 
 /// Whether `kept`, a list's rows as kept, are `publishing`, as published, but for the revisions of their keys, which
@@ -745,6 +782,7 @@ impl Stage {
             id,
             content,
             chart,
+            face,
             wall: asked,
             slot,
             reference,
@@ -767,6 +805,7 @@ impl Stage {
             wall: asked,
             reference,
             chart,
+            face,
             rows,
             highlighted,
             columns,
@@ -888,6 +927,7 @@ impl Stage {
                 kept.published.as_ref().is_some_and(|published| {
                     published.id == publishing.id
                         && published.chart == publishing.chart
+                        && published.face == publishing.face
                         && published.reference == publishing.reference
                         && same_rows(published.rows.as_deref(), publishing.rows.as_deref())
                         && published.columns == publishing.columns

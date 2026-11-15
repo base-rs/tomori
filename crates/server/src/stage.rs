@@ -595,27 +595,41 @@ impl Kept {
             .as_ref()
             .and_then(|published| published.chart.clone())
             .map(Box::new);
+        let face = self
+            .published
+            .as_ref()
+            .and_then(|published| published.face.clone());
         // A list's rows, by which a client names the row it points at and the one it chooses, and draws each as a row:
         // the one highlighted on its bar, in its tone, with its value.
         if let Some(published) = &self.published
             && let Some(rows) = &published.rows
         {
             let highlighted = published.highlighted.as_deref();
-            panel = panel.with_rows(
-                rows.iter()
-                    .map(|row| {
-                        let mut sent = tomori_protocol::ListRow::new(row.id.clone(), row.choosable)
-                            .with_highlight(highlighted == Some(row.id.as_str()))
-                            .with_tone(row.tone)
-                            .with_cells(row.cells.clone());
-                        // The revision of its key, never the key, which stays with the server.
-                        sent.key = row.key;
-                        sent.value = row.value;
-                        sent
-                    })
-                    .collect(),
-            );
-            panel = panel.with_columns(published.columns.clone());
+            let rows: Vec<tomori_protocol::ListRow> = rows
+                .iter()
+                .map(|row| {
+                    let mut sent = tomori_protocol::ListRow::new(row.id.clone(), row.choosable)
+                        .with_highlight(highlighted == Some(row.id.as_str()))
+                        .with_tone(row.tone)
+                        .with_cells(row.cells.clone());
+                    // The revision of its key, never the key, which stays with the server.
+                    sent.key = row.key;
+                    sent.value = row.value;
+                    sent
+                })
+                .collect();
+            // A face's items go with its face, so that no client that draws no face takes its summary's lines for them.
+            match &face {
+                Some(_) => panel.face = face.clone().map(|face| Box::new(face.with_items(rows))),
+                None => {
+                    panel = panel
+                        .with_rows(rows)
+                        .with_columns(published.columns.clone())
+                }
+            }
+        }
+        if panel.face.is_none() {
+            panel.face = face.map(Box::new);
         }
         panel
     }
@@ -2170,6 +2184,8 @@ impl Stage {
         if let Some((rows, highlighted)) = self.rows(walls.environment, &panel.id) {
             let found = match row {
                 Some(id) => rows.iter().enumerate().find(|(_, row)| row.id == id),
+                // A face's items are named by their ids alone: a line is of its summary, never one of its items.
+                None if panel.face.is_some() => None,
                 None => line
                     .and_then(|line| usize::try_from(line).ok())
                     .and_then(|line| rows.get(line).map(|row| (line, row))),

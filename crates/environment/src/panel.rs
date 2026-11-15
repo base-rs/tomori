@@ -348,6 +348,82 @@ impl Row {
     }
 }
 
+/// The longest key of a face panel's drawing, in bytes, as a panel's id.
+pub const FACE_KEY_BYTES: usize = tomori_protocol::FACE_KEY_BYTES;
+
+/// The most bytes of a face panel's payload, as its JSON is written, as an event's: one with more is refused.
+pub const FACE_DATA_LIMIT: usize = tomori_protocol::FACE_DATA_BYTES;
+
+pub use tomori_protocol::valid_face_key;
+
+/// What makes a panel a face panel, [`Panel::face`]: the key of the drawing its environment's client crate registers,
+/// which draws the whole of the panel's frame, the payload that drawing reads, the environment's own JSON, at most
+/// [`FACE_DATA_LIMIT`], and the summary the server keeps as its body, which the agent reads, and which a client without
+/// the drawing, the spectator or an older one, shows; and, optionally, its items, [`Row`]s a participant points at and
+/// chooses as a list's. See `design/panel-faces.md`.
+///
+/// ```
+/// use tomori_environment::{Face, Panel, Row};
+///
+/// let face = Face::new("world-clock")
+///     .with_data(r#"{"area": "europe"}"#)
+///     .with_summary("World clock Europe (Paris): 13:00 local, day.")
+///     .with_items(vec![Row::new("traffic", "2.6k a minute").choosable()]);
+/// assert_eq!((face.key(), face.data()), ("world-clock", r#"{"area": "europe"}"#));
+/// let panel = Panel::face("clock-europe", "Europe", face);
+/// assert_eq!(panel.face_spec().map(Face::key), Some("world-clock"));
+/// assert_eq!(panel.body(), "World clock Europe (Paris): 13:00 local, day.");
+/// assert_eq!(panel.rows().map(<[_]>::len), Some(1));
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Face {
+    key: String,
+    data: String,
+    summary: String,
+    items: Option<Vec<Row>>,
+}
+
+impl Face {
+    /// The face drawn by the drawing `key`, with no payload, summary or items.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            data: String::new(),
+            summary: String::new(),
+            items: None,
+        }
+    }
+
+    /// The face, its drawing reading `data`, JSON of the environment's own.
+    pub fn with_data(mut self, data: impl Into<String>) -> Self {
+        self.data = data.into();
+        self
+    }
+
+    /// The face, its body, which the agent reads and a client without its drawing shows, `summary`.
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// The face, with `items` a participant points at and chooses, each a [`Row`], as a list's are.
+    pub fn with_items(mut self, items: Vec<Row>) -> Self {
+        self.items = Some(items);
+        self
+    }
+
+    /// The key of its drawing.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Its payload, as given: empty for none.
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+}
+
 /// A panel a side publishes onto one of its environment's own walls, by an id it chooses: a text panel, its body
 /// Markdown-lite text, drawn as text and never as HTML, a list panel, of [`Row`]s, one of which it may highlight, or a
 /// chart panel, with its [`Chart`]. It names the wall by its
@@ -380,6 +456,7 @@ pub struct Panel {
     columns: Vec<Column>,
     depends: Vec<String>,
     window: Option<(i64, i64)>,
+    face: Option<Face>,
 }
 
 impl Panel {
@@ -398,6 +475,7 @@ impl Panel {
             columns: Vec::new(),
             depends: Vec::new(),
             window: None,
+            face: None,
         }
     }
 
@@ -428,6 +506,23 @@ impl Panel {
             rows: Some(rows),
             ..Self::text(id, title, "")
         }
+    }
+
+    /// The face panel `id`, titled `title`, drawn as `face` says where a client has its drawing, its body its summary,
+    /// its items its rows. See [`Face`].
+    pub fn face(id: impl Into<String>, title: impl Into<String>, mut face: Face) -> Self {
+        let summary = std::mem::take(&mut face.summary);
+        let rows = face.items.take();
+        Self {
+            rows,
+            face: Some(face),
+            ..Self::text(id, title, summary)
+        }
+    }
+
+    /// What makes it a face panel, if it is one.
+    pub fn face_spec(&self) -> Option<&Face> {
+        self.face.as_ref()
     }
 
     /// The panel, which depends on each of the parameters `parameters`, by their ids, as the side declares them with

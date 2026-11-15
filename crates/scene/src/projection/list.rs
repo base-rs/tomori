@@ -77,7 +77,7 @@ impl RowMarks {
         let find = |mark: &Option<(String, String)>| {
             mark.as_ref()
                 .filter(|(shown, _)| *shown == panel.id)
-                .and_then(|(_, row)| panel.rows.iter().position(|listed| listed.id == *row))
+                .and_then(|(_, row)| panel.listed().iter().position(|listed| listed.id == *row))
         };
         Marked {
             hovered: find(&self.hovered),

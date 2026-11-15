@@ -237,6 +237,8 @@ impl Stage {
         panel.body = waiting;
         panel.rows.clear();
         panel.columns.clear();
+        // A face drawn from its live payload would show what is not of its window: it shows the body saying so.
+        panel.face = None;
         panel
     }
 }

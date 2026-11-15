@@ -40,16 +40,37 @@ pub struct Label {
     pub x: f32,
     pub y: f32,
     pub cells: Vec<Cell>,
+    /// How many times as large as the canvas's text it is drawn, from 1 to [`LABEL_SCALE`]: a face's large figures.
+    pub scale: f32,
 }
+
+/// The most times as large as a canvas's text a label is drawn ([`Label::scaled`]).
+pub const LABEL_SCALE: f32 = 4.0;
 
 impl Label {
     pub fn new(x: f32, y: f32, cells: Vec<Cell>) -> Self {
-        Self { x, y, cells }
+        Self {
+            x,
+            y,
+            cells,
+            scale: 1.0,
+        }
+    }
+
+    /// The label drawn `scale` times as large as the canvas's text, from its top-left corner, within 1 and
+    /// [`LABEL_SCALE`]; a scale that is not a number draws it at 1.
+    pub fn scaled(self, scale: f32) -> Self {
+        let scale = if scale.is_nan() {
+            1.0
+        } else {
+            scale.clamp(1.0, LABEL_SCALE)
+        };
+        Self { scale, ..self }
     }
 
     /// How wide it is, in font pixels.
     pub fn width(&self) -> f32 {
-        (self.cells.len() * CELL_WIDTH) as f32
+        (self.cells.len() * CELL_WIDTH) as f32 * self.scale
     }
 }
 
@@ -334,7 +355,11 @@ impl Canvas {
         }
         for label in &self.labels {
             let at = (left + label.x, top + label.y);
-            for (quad, style) in quads(&label.cells, at.0, at.1, height, |style| style.bold) {
+            for (mut quad, style) in quads(&label.cells, 0.0, 0.0, height, |style| style.bold) {
+                quad.x = at.0 + quad.x * label.scale;
+                quad.y = at.1 + quad.y * label.scale;
+                quad.width *= label.scale;
+                quad.height *= label.scale;
                 mesh.glyph(quad, style.color);
             }
         }
@@ -595,6 +620,42 @@ mod tests {
         assert!(mesh[empty..].iter().all(
             |vertex| vertex.position[0] >= left - margin && vertex.position[1] <= top + margin
         ));
+    }
+
+    #[test]
+    fn a_scaled_label_is_drawn_as_many_times_as_large_from_where_it_is_placed() {
+        let cells = crate::ui_text::cut(&[Span::new("13:20", Style::plain([1.0; 4]))], 10);
+        let label = Label::new(2.0, 3.0, cells);
+        assert_eq!(label.clone().scaled(0.5).scale, 1.0);
+        assert_eq!(label.clone().scaled(9.0).scale, LABEL_SCALE);
+        assert_eq!(label.clone().scaled(f32::NAN).scale, 1.0);
+        let double = label.clone().scaled(2.0);
+        assert_eq!(double.width(), 2.0 * label.width());
+        let extent = |label: &Label| {
+            let mut canvas = Canvas::new(20, 1.0);
+            canvas.padding = (0, 0);
+            canvas.rows = vec![Row::default(); 4];
+            canvas.background = [0.0; 4];
+            canvas.labels.push(label.clone());
+            // After its backing, the first quad.
+            let mesh = canvas.mesh().split_off(6);
+            let (width, height) = canvas.size_in_pixels();
+            let xs = mesh
+                .iter()
+                .map(|vertex| vertex.position[0] + width as f32 / 2.0);
+            let ys = mesh
+                .iter()
+                .map(|vertex| height as f32 / 2.0 - vertex.position[1]);
+            let (left, right) = xs.fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)));
+            let (top, bottom) = ys.fold((f32::MAX, f32::MIN), |(a, b), y| (a.min(y), b.max(y)));
+            (left, top, right - left, bottom - top)
+        };
+        let (left, top, width, height) = extent(&label);
+        let (left2, top2, width2, height2) = extent(&double);
+        assert!((width2 - 2.0 * width).abs() < 0.01 && (height2 - 2.0 * height).abs() < 0.01);
+        // From its corner: what lay a glyph's margin from it lies twice as far.
+        assert!((left2 - 2.0 - 2.0 * (left - 2.0)).abs() < 0.01);
+        assert!((top2 - 3.0 - 2.0 * (top - 3.0)).abs() < 0.01);
     }
 
     #[test]

@@ -2712,3 +2712,136 @@ fn a_row_is_chosen_only_on_its_environment_s_list_while_it_is_there_and_choosabl
         Ok(Change::Updated)
     );
 }
+
+/// Europe's world clock as a face panel, its dial its one item, choosable, inspected by its reference.
+fn clock(time: &str) -> Panel {
+    Panel::face(
+        "clock-europe",
+        "Europe",
+        tomori_environment::Face::new("world-clock")
+            .with_data(format!(r#"{{"area": "Europe", "time": "{time}"}}"#))
+            .with_summary(format!("World clock Europe (Paris): {time} local, day."))
+            .with_items(vec![
+                Row::new("dial", "The dial")
+                    .with_reference("clock/europe")
+                    .choosable(),
+            ]),
+    )
+}
+
+#[test]
+fn a_face_panel_reaches_clients_with_its_face_its_summary_as_its_body_and_its_items_as_rows() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    stage
+        .publish(&walls, publishing(clock("13:20")), 0)
+        .unwrap();
+    let view = stage.view("s", &walls, 0);
+    let panel = &view.panels[0];
+    let face = panel.face.as_deref().unwrap();
+    assert_eq!(face.key, "world-clock");
+    assert_eq!(face.data["time"], "13:20");
+    // Its summary is its body, what the agent reads and a client without its drawing shows, never its items' text.
+    assert_eq!(panel.body, "World clock Europe (Paris): 13:20 local, day.");
+    // Its items go with its face, never as rows a client without its drawing would take its summary's lines for.
+    assert!(panel.rows.is_empty());
+    assert_eq!(face.items, [tomori_protocol::ListRow::new("dial", true)]);
+    // Pointing at its item describes it from the server's copy, and its item is chosen as a list's row is.
+    let id = panel.id.clone();
+    let described = stage
+        .describe_at(
+            &walls,
+            &id,
+            crate::stage::Pointed {
+                line: Some(0),
+                row: Some("dial"),
+                ..crate::stage::Pointed::default()
+            },
+            0,
+        )
+        .unwrap();
+    assert!(
+        described.ends_with("; row 1 of 1, id yard:clock/europe: \"The dial\")"),
+        "{described}"
+    );
+    // A line alone, as of a client that draws no face, is of its summary, never one of its items.
+    let by_line = stage
+        .describe_at(
+            &walls,
+            &id,
+            crate::stage::Pointed {
+                line: Some(0),
+                ..crate::stage::Pointed::default()
+            },
+            0,
+        )
+        .unwrap();
+    assert!(!by_line.contains("row 1"), "{by_line}");
+    assert_eq!(
+        stage.chosen(&walls, &id, "dial"),
+        Ok(("clock-europe", "dial"))
+    );
+    // The same again changes nothing; a new payload updates it in place.
+    assert_eq!(
+        stage.publish(&walls, publishing(clock("13:20")), 0),
+        Ok(Change::Unchanged)
+    );
+    assert_eq!(
+        stage.publish(&walls, publishing(clock("13:21")), 0),
+        Ok(Change::Updated)
+    );
+    let view = stage.view("s", &walls, 0);
+    assert_eq!(
+        view.panels[0].face.as_deref().unwrap().data["time"],
+        "13:21"
+    );
+    // A face of no payload and no items is a face all the same.
+    let bare = Panel::face(
+        "bare",
+        "Bare",
+        tomori_environment::Face::new("world-clock").with_summary("Nothing yet."),
+    );
+    stage.publish(&walls, publishing(bare), 0).unwrap();
+    let view = stage.view("s", &walls, 0);
+    let bare = view
+        .panels
+        .iter()
+        .find(|panel| panel.title == "Bare")
+        .unwrap();
+    assert_eq!(bare.face.as_deref().unwrap().data, serde_json::Value::Null);
+    assert!(bare.rows.is_empty() && bare.face.as_deref().unwrap().items.is_empty());
+}
+
+#[test]
+fn a_face_is_refused_for_a_key_it_does_not_take_or_a_payload_that_is_not_json_within_its_bound() {
+    let refused =
+        |face: tomori_environment::Face| Publishing::new(Panel::face("f", "F", face)).unwrap_err();
+    assert_eq!(
+        refused(tomori_environment::Face::new("world clock")),
+        "A face's key is 1 to 32 ASCII letters, digits, - and _."
+    );
+    assert_eq!(
+        refused(tomori_environment::Face::new("clock").with_data("{not json")),
+        "A face's data is JSON."
+    );
+    let large = format!(
+        "\"{}\"",
+        "x".repeat(tomori_environment::FACE_DATA_LIMIT - 1)
+    );
+    assert_eq!(
+        refused(tomori_environment::Face::new("clock").with_data(large)),
+        "A face's data takes at most 4096 bytes of JSON."
+    );
+    let most = format!(
+        "\"{}\"",
+        "x".repeat(tomori_environment::FACE_DATA_LIMIT - 2)
+    );
+    let publishing = Publishing::new(Panel::face(
+        "f",
+        "F",
+        tomori_environment::Face::new("clock").with_data(most),
+    ))
+    .unwrap();
+    // Its payload counts towards the bytes its side publishes.
+    assert!(publishing.bytes() > tomori_environment::FACE_DATA_LIMIT);
+}

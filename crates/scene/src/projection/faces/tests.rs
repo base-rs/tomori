@@ -1767,3 +1767,244 @@ fn panels_arriving_together_stand_the_nearest_first() {
             .all(|panel| projector.faces.contains_key(&panel.id))
     );
 }
+
+/// A drawer that counts how many times it draws, drawing the world clock.
+struct Counted(std::sync::atomic::AtomicUsize);
+
+impl crate::face::Drawer for Counted {
+    fn draw(&self, input: &crate::face::Input<'_>) -> crate::face::Drawing {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::face::fixtures::Clock.draw(input)
+    }
+}
+
+/// The world clock as a face panel in `wall-1`'s first slot, its dial its one item.
+fn clock() -> Panel {
+    Panel::new(
+        "clock",
+        "Europe",
+        "World clock Europe (Paris): 13:20 local, day.",
+        on("wall-1", 0),
+    )
+    .with_face(Some(
+        tomori_protocol::Face::new("world-clock", crate::face::fixtures::europe())
+            .with_items(vec![tomori_protocol::ListRow::new("dial", true)]),
+    ))
+}
+
+#[test]
+fn a_face_panel_fills_its_frame_with_its_drawing_drawn_once_and_kept() {
+    let shown = projection(vec![clock()]);
+    let drawer = Arc::new(Counted(Default::default()));
+    let drawers: crate::face::Drawers = vec![(
+        crate::test_support::SKY,
+        "world-clock",
+        drawer.clone() as Arc<dyn crate::face::Drawer>,
+    )];
+    let mut projector = Projector::default();
+    projector.set_drawers(crate::test_support::SKY, &drawers);
+    projector.update(input(&shown, HOME, None));
+    let drawn = face(&projector, "clock");
+    assert_eq!(drawn.kind, Kind::PanelFace);
+    assert_eq!(drawn.background[3], 1.0, "opaque");
+    assert!(
+        drawn.rows.iter().all(|row| row.cells.is_empty()),
+        "no header of Tomori's"
+    );
+    assert!(drawn.labels.iter().any(|label| label.scale == 2.0));
+    // As large as a chart's face in the same slot, whatever it draws.
+    assert_eq!(
+        drawn.size(),
+        super::super::fitted_size(&clock(), super::super::Fit::SLOT)
+    );
+    let counted = counts();
+    for _ in 0..30 {
+        projector.update(input(&shown, HOME + Vec3::new(0.1, 0.0, 0.0), None));
+    }
+    assert_eq!(counts(), counted, "nothing laid out or drawn again");
+    assert!(Arc::ptr_eq(&face(&projector, "clock"), &drawn));
+    assert_eq!(drawer.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    // Registering the same drawers again changes nothing.
+    projector.set_drawers(crate::test_support::SKY, &drawers.clone());
+    projector.update(input(&shown, HOME, None));
+    assert!(Arc::ptr_eq(&face(&projector, "clock"), &drawn));
+    // A new payload, as the server sends a new version, draws it again.
+    let mut later = clock();
+    if let Some(face) = &mut later.face {
+        face.data["time"] = "13:21".into();
+    }
+    projector.update(input(&projection(vec![later]), HOME, None));
+    assert_eq!(drawer.0.load(std::sync::atomic::Ordering::Relaxed), 2);
+    // The same projector, the environment drawn another, shows its summary.
+    projector.set_drawers(crate::test_support::GITHUB, &drawers);
+    projector.update(input(&shown, HOME, None));
+    assert!(
+        face(&projector, "clock")
+            .plain()
+            .contains("World clock Europe")
+    );
+}
+
+#[test]
+fn a_face_panel_without_its_drawing_shows_its_title_and_summary_the_size_it_would_be() {
+    let shown = projection(vec![clock()]);
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let summary = face(&projector, "clock");
+    let text = summary.plain();
+    assert!(text.starts_with("Europe"), "{text}");
+    assert!(text.contains("World clock Europe (Paris):"), "{text}");
+    assert_eq!(
+        summary.size(),
+        super::super::fitted_size(&clock(), super::super::Fit::SLOT)
+    );
+    // One whose drawer panics shows it too.
+    struct Panics;
+    impl crate::face::Drawer for Panics {
+        fn draw(&self, _: &crate::face::Input<'_>) -> crate::face::Drawing {
+            panic!("a drawer that panics")
+        }
+    }
+    let drawers: crate::face::Drawers =
+        vec![(crate::test_support::SKY, "world-clock", Arc::new(Panics))];
+    projector.set_drawers(crate::test_support::SKY, &drawers);
+    projector.update(input(&shown, HOME, None));
+    assert!(
+        face(&projector, "clock")
+            .plain()
+            .contains("World clock Europe")
+    );
+}
+
+#[test]
+fn pointing_at_a_face_s_region_names_its_item_as_a_list_s_row() {
+    let shown = projection(vec![clock()]);
+    let drawers: crate::face::Drawers = vec![(
+        crate::test_support::SKY,
+        "world-clock",
+        Arc::new(crate::face::fixtures::Clock),
+    )];
+    let mut projector = Projector::default();
+    projector.set_drawers(crate::test_support::SKY, &drawers);
+    projector.update(input(&shown, HOME, None));
+    let (width, height) = face(&projector, "clock").size_in_pixels();
+    let (width, height) = (width as f32, height as f32);
+    let wall = shown.wall("wall-1").unwrap();
+    let slot = slot_frames(wall, model(&wall.frame()).unwrap())[0];
+    // A point of the face, in font pixels from its frame's corner.
+    let at = |x: f32, y: f32| {
+        slot.transform_point3(Vec3::new(
+            (x - width / 2.0) * super::super::PIXEL,
+            (height / 2.0 - y) * super::super::PIXEL,
+            0.0,
+        ))
+    };
+    // The dial, on the left of a wide face.
+    let ray = Ray::new(HOME, at(width / 4.0, height / 2.0 - 30.0) - HOME);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert_eq!(
+        output.pointed.as_ref().map(|(id, ..)| id.as_str()),
+        Some("clock")
+    );
+    assert_eq!(output.item, Some(0));
+    // Its words, on the right, name no item.
+    let ray = Ray::new(HOME, at(width * 0.8, height / 2.0) - HOME);
+    let output = projector.update(input(&shown, HOME, ray));
+    assert_eq!(output.item, None);
+    // Hovered, its region is outlined, the drawer not asked again.
+    projector.mark_rows(super::super::list::RowMarks {
+        hovered: Some(("clock".into(), "dial".into())),
+        ..Default::default()
+    });
+    projector.update(input(&shown, HOME, None));
+    let outlined = face(&projector, "clock");
+    assert!(outlined.shapes.iter().any(|shape| matches!(
+        shape,
+        crate::shapes::Shape::Rect {
+            outline: Some(_),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_face_is_drawn_alone_only_for_a_face_panel_whose_drawer_draws_it() {
+    use super::super::{Fit, drawn_face};
+    let drawn = drawn_face(
+        &clock(),
+        &crate::face::fixtures::Clock,
+        (true, false),
+        Fit::SLOT,
+    )
+    .unwrap();
+    assert_eq!(drawn.border, Some(HIGHLIGHT));
+    let text = Panel::new("text", "Notes", "Just text.", on("wall-1", 0));
+    assert!(
+        drawn_face(
+            &text,
+            &crate::face::fixtures::Clock,
+            (false, false),
+            Fit::SLOT
+        )
+        .is_none()
+    );
+    struct Panics;
+    impl crate::face::Drawer for Panics {
+        fn draw(&self, _: &crate::face::Input<'_>) -> crate::face::Drawing {
+            panic!("a drawer that panics")
+        }
+    }
+    assert!(drawn_face(&clock(), &Panics, (false, true), Fit::Text).is_none());
+}
+
+#[test]
+fn a_face_s_summary_shown_as_a_list_never_names_one_of_its_items() {
+    // Its summary a Markdown list, its items another: shown as its summary, none of its lines is an item.
+    let mut listed = clock();
+    listed.body = "- dial at noon\n- traffic rising\n- [ ] tick me".to_owned();
+    let shown = projection(vec![listed.clone()]);
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    assert!(face(&projector, "clock").plain().contains("dial at noon"));
+    let wall = shown.wall("wall-1").unwrap();
+    let slot = slot_frames(wall, model(&wall.frame()).unwrap())[0];
+    let (width, height) = face(&projector, "clock").size_in_pixels();
+    let (width, height) = (width as f32, height as f32);
+    for row in 0..6 {
+        let y = (super::super::PADDING.1 + (3 + row) * crate::ui_text::CELL_HEIGHT + 6) as f32;
+        let at = slot.transform_point3(Vec3::new(
+            (40.0 - width / 2.0) * super::super::PIXEL,
+            (height / 2.0 - y) * super::super::PIXEL,
+            0.0,
+        ));
+        let output = projector.update(input(&shown, HOME, Ray::new(HOME, at - HOME)));
+        assert_eq!(
+            output.pointed.as_ref().map(|(id, ..)| id.as_str()),
+            Some("clock")
+        );
+        assert_eq!(output.item, None, "row {row}");
+    }
+    // Its items are found by their places among its own, never among a list's rows it has none of.
+    assert!(listed.rows.is_empty());
+    assert_eq!(listed.row_on(0).map(|row| row.id.as_str()), Some("dial"));
+    assert_eq!(listed.row_on(1), None);
+    // A drawer that panics shows it so too, its lines naming nothing.
+    struct Panics;
+    impl crate::face::Drawer for Panics {
+        fn draw(&self, _: &crate::face::Input<'_>) -> crate::face::Drawing {
+            panic!("a drawer that panics")
+        }
+    }
+    let drawers: crate::face::Drawers =
+        vec![(crate::test_support::SKY, "world-clock", Arc::new(Panics))];
+    projector.set_drawers(crate::test_support::SKY, &drawers);
+    projector.update(input(&shown, HOME, None));
+    let y = (super::super::PADDING.1 + 3 * crate::ui_text::CELL_HEIGHT + 6) as f32;
+    let at = slot.transform_point3(Vec3::new(
+        (40.0 - width / 2.0) * super::super::PIXEL,
+        (height / 2.0 - y) * super::super::PIXEL,
+        0.0,
+    ));
+    let output = projector.update(input(&shown, HOME, Ray::new(HOME, at - HOME)));
+    assert_eq!(output.item, None);
+}

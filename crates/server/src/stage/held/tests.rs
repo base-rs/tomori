@@ -269,6 +269,59 @@ fn a_list_on_a_wall_fixed_to_a_window_waits_without_rows_until_published_for_it(
 }
 
 #[test]
+fn a_face_on_a_wall_fixed_to_a_window_waits_without_its_live_face_until_published_for_it() {
+    let walls = console();
+    let mut stage = Stage::default();
+    let clock = |window: Option<(i64, i64)>, time: &str| {
+        let panel = Panel::face(
+            "clock",
+            "Clock",
+            tomori_environment::Face::new("world-clock")
+                .with_data(format!(r#"{{"time": "{time}"}}"#))
+                .with_summary(format!("It is {time}."))
+                .with_items(vec![Row::new("dial", "The dial").choosable()]),
+        )
+        .depends_on(["time"])
+        .on_wall(1, None);
+        let panel = match window {
+            Some((from, to)) => panel.for_window(from, to),
+            None => panel,
+        };
+        Publishing::new(panel).unwrap()
+    };
+    stage.publish(&walls, clock(None, "13:20"), 0).unwrap();
+    let id = stage.view("s", &walls, 0).panels[0].id.clone();
+    assert!(
+        stage
+            .view("s", &walls, 0)
+            .panel(&id)
+            .unwrap()
+            .face
+            .is_some()
+    );
+    stage
+        .set_wall_context(&walls, "environment-1", "time", Some(WINDOW))
+        .unwrap();
+    // Held to a window it shows nothing of yet, it shows the body saying so, never its live payload, nor its items.
+    let panel = stage.view("s", &walls, 0).panel(&id).unwrap().clone();
+    assert_eq!(panel.face, None);
+    assert!(panel.rows.is_empty());
+    assert!(panel.body.starts_with(WAITING), "{}", panel.body);
+    assert_eq!(
+        stage.publish(&walls, clock(None, "13:21"), 1),
+        Ok(Change::Unchanged)
+    );
+    assert_eq!(stage.view("s", &walls, 0).panel(&id).unwrap().face, None);
+    // Published for its window, its face is that window's.
+    stage
+        .publish(&walls, clock(Some((FROM, TO)), "02:50"), 2)
+        .unwrap();
+    let panel = stage.view("s", &walls, 0).panel(&id).unwrap().clone();
+    assert_eq!(panel.face.as_deref().unwrap().data["time"], "02:50");
+    assert_eq!(panel.body, "It is 02:50.");
+}
+
+#[test]
 fn a_window_is_refused_where_it_does_not_end_after_it_begins_or_reaches_past_9999() {
     let refused = |from: i64, to: i64| {
         Publishing::new(Panel::text("pods", "Pods", "").for_window(from, to)).unwrap_err()

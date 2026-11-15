@@ -406,6 +406,8 @@ pub struct Conversation {
     panel_lod: crate::projection::PanelLod,
     /// The client sides this build registers, by environment. See `design/environments.md`.
     client_sides: Vec<(Environment, crate::client_side::Factory)>,
+    /// The face panels' drawings this build registers, by environment and key. See `design/panel-faces.md`.
+    faces: crate::face::Drawers,
     /// The ambiences this build registers, by environment. See `design/environments.md`.
     ambiences: Vec<(Environment, std::sync::Arc<crate::ambience::Ambience>)>,
     /// The worker placements this build registers, by environment. See `design/environments.md`.
@@ -610,6 +612,7 @@ impl Conversation {
             locomotion: Vec::new(),
             panel_lod: crate::projection::PanelLod::default(),
             client_sides: Vec::new(),
+            faces: Vec::new(),
             ambiences: Vec::new(),
             worker_placements: Vec::new(),
             avatars: Vec::new(),
@@ -2547,6 +2550,18 @@ impl Conversation {
         self.client_sides = client_sides;
     }
 
+    /// Draw each face panel of an environment `faces` names with the drawing it registers for the panel's key, in a space
+    /// bound to it whose scenery this build draws, and any other as its summary. See `design/panel-faces.md`.
+    pub fn set_faces(&mut self, faces: crate::face::Drawers) {
+        self.faces = faces;
+    }
+
+    /// The face panels' drawings this build registers, by environment and key, of which the projector draws those of
+    /// the environment drawn ([`Self::environment`]).
+    pub fn faces(&self) -> &crate::face::Drawers {
+        &self.faces
+    }
+
     /// The client side of the joined space's environment, as this build draws it, if the build registers one: the
     /// environment, at the version drawn, and what makes its client side.
     pub fn client_side(&self) -> Option<(Environment, crate::client_side::Factory)> {
@@ -3900,7 +3915,11 @@ impl Conversation {
         }
         let shown = self.projection()?.panel(panel)?;
         // An environment's list is chosen, never ticked, whatever its rows' text shows.
-        if shown.code.is_some() || shown.image.is_some() || !shown.rows.is_empty() {
+        if shown.code.is_some()
+            || shown.image.is_some()
+            || !shown.rows.is_empty()
+            || shown.face.is_some()
+        {
             return None;
         }
         tomori_protocol::checklist::items(&shown.body)
@@ -3963,7 +3982,7 @@ impl Conversation {
             .filter(|version| *version > 0);
         // The revision of the row's key as it was sent, so that the server hands its environment the key seen.
         let key = shown
-            .and_then(|shown| shown.rows.iter().find(|listed| listed.id == row))
+            .and_then(|shown| shown.listed().iter().find(|listed| listed.id == row))
             .and_then(|listed| listed.key);
         if !self.send(ClientMessage::ChoosePanelRow {
             panel: panel.clone(),

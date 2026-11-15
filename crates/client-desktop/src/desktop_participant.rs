@@ -102,6 +102,7 @@ impl Participant {
         conversation.set_over_grid(sceneries.over_grid());
         conversation.set_locomotion(sceneries.locomotion());
         conversation.set_client_sides(sceneries.client_sides());
+        conversation.set_faces(sceneries.faces());
         conversation.set_ambiences(sceneries.ambiences());
         conversation.set_worker_placements(sceneries.worker_placements());
         conversation.set_avatars(sceneries.avatars());

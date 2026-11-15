@@ -8470,6 +8470,31 @@ fn a_ticks_or_unticks_the_checklist_item_pointed_at_for_everyone_after_the_list_
     unprojected.point_item(Some(("panel-1".to_owned(), 2)));
     assert_eq!(unprojected.item_checked("panel-1", 2), None);
     assert!(unprojected.press_a(None));
+    // A face panel's summary is never ticked, whatever boxes it shows.
+    let mut faced = joined(|space| {
+        space.projection = true;
+        space.checks = true;
+    });
+    faced.apply(Event::Message(ServerMessage::Projection {
+        projection: Box::new(
+            tomori_protocol::Projection::new(SPACE, "sky").with_panels(vec![
+                tomori_protocol::Panel::new(
+                    "panel-1",
+                    "Clock",
+                    body,
+                    tomori_protocol::Place::Wall {
+                        wall: tomori_protocol::TOMORI_WALL.into(),
+                        slot: 0,
+                    },
+                )
+                .with_face(Some(tomori_protocol::Face::new(
+                    "world-clock",
+                    serde_json::Value::Null,
+                ))),
+            ]),
+        ),
+    }));
+    assert_eq!(faced.item_checked("panel-1", 2), None);
     // On an item with a box, it ticks it, showing it at once, and unticks it again.
     conversation.point_item(Some(("panel-1".to_owned(), 2)));
     assert_eq!(conversation.item_checked("panel-1", 2), Some(false));
