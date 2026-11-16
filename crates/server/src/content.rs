@@ -9,7 +9,10 @@
 //! the session ticket its offer gave it; anything else is answered as missing content is. See `design/content.md`.
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::time::{Duration, Instant};
+
+use base_scheduler::Cancellation;
 
 use tomori_assets::{AssetRef, Digest, Library};
 use tomori_protocol::{ContentKind, LICENCE_BYTES, OfferedAsset};
@@ -100,10 +103,25 @@ struct Inner {
     offers: Vec<Offer>,
 }
 
-/// The content the server serves by digest. See the [module documentation](self).
+/// The content the server serves by digest, and the responses sending it. See the [module documentation](self).
 #[derive(Default)]
 pub(crate) struct ContentStore {
     inner: RwLock<Inner>,
+    sending: Mutex<Vec<Weak<Progress>>>,
+}
+
+/// How a content response is getting on: when its client last took a piece of it, and what ends its HTTP connection, so
+/// that one its client stops reading does not hold the connection for ever.
+pub(crate) struct Progress {
+    taken: Mutex<Instant>,
+    cancellation: Cancellation,
+}
+
+impl Progress {
+    /// A piece was taken, now.
+    pub(crate) fn advanced(&self) {
+        *self.taken.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
 }
 
 /// Why a content request is refused.
@@ -123,6 +141,7 @@ pub(crate) struct Served {
     pub bytes: Arc<[u8]>,
     pub kind: ContentKind,
     pub permit: Permit,
+    pub progress: Arc<Progress>,
 }
 
 /// One of a connection's open content requests, counted until it is dropped.
@@ -144,6 +163,36 @@ impl Drop for Permit {
 }
 
 impl ContentStore {
+    /// Watch a response sent on the HTTP connection that `cancellation` ends, from now.
+    pub(crate) fn watch(&self, cancellation: Cancellation) -> Arc<Progress> {
+        let progress = Arc::new(Progress {
+            taken: Mutex::new(Instant::now()),
+            cancellation,
+        });
+        let mut sending = self.sending.lock().unwrap_or_else(PoisonError::into_inner);
+        sending.retain(|watched| watched.strong_count() > 0);
+        sending.push(Arc::downgrade(&progress));
+        progress
+    }
+
+    /// End the HTTP connection of each response whose client has taken nothing of it for `timeout` by `now`, as a
+    /// connection whose writes stall is ended. See `design/connection-liveness.md`.
+    pub(crate) fn sweep(&self, now: Instant, timeout: Duration) {
+        let sending = self.sending.lock().unwrap_or_else(PoisonError::into_inner);
+        for progress in sending.iter().filter_map(Weak::upgrade) {
+            let taken = *progress
+                .taken
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if now.saturating_duration_since(taken) >= timeout {
+                log::info!(
+                    "Ended a content response whose client took nothing of it for {timeout:?}."
+                );
+                progress.cancellation.cancel();
+            }
+        }
+    }
+
     /// Keep and offer the assets `environments` declare, read from `library`, in place of those before: an asset kept
     /// already is not read again, one no environment declares now is let go, and one that cannot be read as its digest,
     /// kind and bounds say is not offered, saying why in the log.

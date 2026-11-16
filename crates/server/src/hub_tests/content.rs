@@ -85,7 +85,12 @@ fn a_client_that_reads_content_is_given_a_ticket_and_the_assets_it_may_fetch_aft
     assert_eq!(assets.len(), 1);
     assert_eq!(assets[0].digest, Digest::of(lantern).to_string());
     let served = hub
-        .content(&holder("ada"), &ticket, &Digest::of(lantern))
+        .content(
+            &holder("ada"),
+            &ticket,
+            &Digest::of(lantern),
+            &Cancellation::new(),
+        )
         .unwrap();
     assert_eq!((&*served.bytes, served.kind), (lantern, ContentKind::Model));
     // Each connection's ticket is its own.
@@ -113,8 +118,13 @@ fn a_client_is_offered_only_the_assets_of_the_environments_it_presents() {
     let (ticket, assets) = offer(&sent).unwrap();
     assert!(assets.is_empty());
     assert_eq!(
-        hub.content(&holder("ada"), &ticket, &Digest::of(lantern))
-            .err(),
+        hub.content(
+            &holder("ada"),
+            &ticket,
+            &Digest::of(lantern),
+            &Cancellation::new()
+        )
+        .err(),
         Some(Refusal::Missing)
     );
     // Nor the garden at another version.
@@ -132,7 +142,10 @@ fn a_ticket_reads_only_for_its_own_principal_and_only_so_many_at_once_until_its_
     let digest = Digest::of(lantern);
     let (client, sent) = greeted(&hub, holder("ada"), "ada", None, true);
     let (ticket, _) = offer(&sent).unwrap();
-    let refused = |access: &Access, ticket: &str| hub.content(access, ticket, &digest).err();
+    let refused = |access: &Access, ticket: &str| {
+        hub.content(access, ticket, &digest, &Cancellation::new())
+            .err()
+    };
     assert_eq!(refused(&holder("grace"), &ticket), Some(Refusal::Unbound));
     assert_eq!(refused(&Access::visitor(), &ticket), Some(Refusal::Unbound));
     assert_eq!(
@@ -144,22 +157,66 @@ fn a_ticket_reads_only_for_its_own_principal_and_only_so_many_at_once_until_its_
         Some(Refusal::Unbound)
     );
     assert_eq!(
-        hub.content(&holder("ada"), &ticket, &Digest::of(b"never kept"))
-            .err(),
+        hub.content(
+            &holder("ada"),
+            &ticket,
+            &Digest::of(b"never kept"),
+            &Cancellation::new()
+        )
+        .err(),
         Some(Refusal::Missing)
     );
     let open: Vec<_> = (0..OPEN_REQUESTS)
-        .map(|_| hub.content(&holder("ada"), &ticket, &digest).unwrap())
+        .map(|_| {
+            hub.content(&holder("ada"), &ticket, &digest, &Cancellation::new())
+                .unwrap()
+        })
         .collect();
     assert_eq!(refused(&holder("ada"), &ticket), Some(Refusal::Busy));
     drop(open);
-    assert!(hub.content(&holder("ada"), &ticket, &digest).is_ok());
+    assert!(
+        hub.content(&holder("ada"), &ticket, &digest, &Cancellation::new())
+            .is_ok()
+    );
     // A visitor's ticket reads for a visitor, as its connection has no principal either.
     let (_visitor, sent) = greeted(&hub, Access::visitor(), "visitor", None, true);
     let (visiting, _) = offer(&sent).unwrap();
-    assert!(hub.content(&Access::visitor(), &visiting, &digest).is_ok());
+    assert!(
+        hub.content(&Access::visitor(), &visiting, &digest, &Cancellation::new())
+            .is_ok()
+    );
     assert_eq!(refused(&holder("ada"), &visiting), Some(Refusal::Unbound));
     // The ticket lasts as long as its connection.
     hub.disconnect(client.connection);
     assert_eq!(refused(&holder("ada"), &ticket), Some(Refusal::Unbound));
+}
+
+#[test]
+fn a_content_response_whose_client_takes_nothing_for_the_keepalive_timeout_is_ended() {
+    let (hub, lantern) = garden();
+    let (_client, sent) = greeted(&hub, holder("ada"), "ada", None, true);
+    let (ticket, _) = offer(&sent).unwrap();
+    let digest = Digest::of(lantern);
+    let [stalled, reading, finished] = [(); 3].map(|()| Cancellation::new());
+    let mut served: Vec<_> = [&stalled, &reading, &finished]
+        .map(|cancellation| {
+            hub.content(&holder("ada"), &ticket, &digest, cancellation)
+                .unwrap()
+        })
+        .into();
+    // A response that has gone is no longer watched.
+    drop(served.pop());
+    let keepalive = Keepalive::default();
+    let later = Instant::now() + keepalive.timeout;
+    hub.sweep(
+        later - Duration::from_millis(500),
+        &keepalive,
+        Duration::from_secs(10),
+    );
+    assert!(!stalled.is_cancelled() && !reading.is_cancelled());
+    std::thread::sleep(Duration::from_millis(1));
+    served[1].progress.advanced();
+    hub.sweep(later, &keepalive, Duration::from_secs(10));
+    assert!(stalled.is_cancelled());
+    assert!(!reading.is_cancelled() && !finished.is_cancelled());
 }

@@ -3064,6 +3064,7 @@ impl Hub {
         access: &Access,
         ticket: &str,
         digest: &tomori_assets::Digest,
+        cancellation: &Cancellation,
     ) -> Result<crate::content::Served, crate::content::Refusal> {
         use crate::content::{Permit, Refusal, Served};
         let presented = ContentSession::hash(ticket);
@@ -3094,6 +3095,8 @@ impl Hub {
             bytes,
             kind,
             permit,
+            // Watched as it is sent, so that the sweep ends one whose client stops reading it.
+            progress: self.content.watch(cancellation.clone()),
         })
     }
 
@@ -3184,6 +3187,7 @@ impl Hub {
 
     /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Release, in the same way, connections whose current write has made no progress for the keepalive timeout: a peer that does not read can receive neither audio nor state. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
     pub fn sweep(&self, now: Instant, keepalive: &Keepalive, hello_timeout: Duration) {
+        self.content.sweep(now, keepalive.timeout);
         let mut expired = Vec::new();
         let mut window_events = Vec::new();
         {

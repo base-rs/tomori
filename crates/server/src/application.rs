@@ -324,6 +324,7 @@ pub struct ContentBody {
     at: usize,
     end: usize,
     _permit: crate::content::Permit,
+    progress: Arc<crate::content::Progress>,
 }
 
 impl<B: ReadableBody> ResponseBody<B> {
@@ -382,6 +383,7 @@ impl<B: ReadableBody> ReadableBody for ResponseBody<B> {
             Self::Content(body) => Ok(if body.at >= body.end {
                 BodyFrame::End
             } else {
+                body.progress.advanced();
                 let until = body.end.min(body.at + crate::content::PIECE_BYTES);
                 let data = body.bytes[body.at..until].to_vec();
                 body.at = until;
@@ -472,6 +474,7 @@ impl Handler for Application {
                     &request,
                     &content[tomori_protocol::CONTENT_PATH.len()..],
                     head,
+                    cancellation,
                 ),
             pages::STATUS_PATH if get => self.status_page(&request.fields),
             pages::SIGN_IN_PATH if get => match self.door {
@@ -595,6 +598,7 @@ impl Application {
         request: &Request<B>,
         hex: &str,
         head: bool,
+        cancellation: &Cancellation,
     ) -> Response<ResponseBody<B>> {
         use crate::content::Range;
         let Some(digest) =
@@ -623,7 +627,7 @@ impl Application {
         let Some(ticket) = field(tomori_protocol::SESSION_FIELD) else {
             return unauthorized();
         };
-        let served = match self.hub.content(&access, ticket, &digest) {
+        let served = match self.hub.content(&access, ticket, &digest, cancellation) {
             Ok(served) => served,
             Err(refusal) => return refused(refusal),
         };
@@ -656,6 +660,7 @@ impl Application {
                 at: start as usize,
                 end: end as usize,
                 _permit: served.permit,
+                progress: served.progress,
             })
         };
         let mut answer = Response::new(Status::new(status).expect("valid status"), body);
@@ -726,6 +731,7 @@ mod tests {
     #[test]
     fn content_is_handed_out_in_pieces_until_its_end_and_ends_once_closed() {
         let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store = crate::content::ContentStore::default();
         let bytes: Arc<[u8]> = (0..crate::content::PIECE_BYTES * 2 + 10)
             .map(|index| index as u8)
             .collect();
@@ -735,6 +741,7 @@ mod tests {
                 at,
                 end,
                 _permit: crate::content::Permit::take(&open).unwrap(),
+                progress: store.watch(Cancellation::new()),
             })
         };
         let read = |body: &mut ResponseBody<Nothing>| {

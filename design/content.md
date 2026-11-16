@@ -27,7 +27,7 @@ Nothing executable or that a browser renders as a document, such as `text/html` 
 - a request with a body is answered 400, and a method other than `GET` or `HEAD` 405;
 - a connection has at most 4 content requests open at once, and another is answered 503.
 
-A response carries the content's `Content-Type`, `Content-Length`, `ETag` of the quoted digest, `Cache-Control: private, max-age=31536000, immutable`, `Accept-Ranges: bytes`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Cross-Origin-Resource-Policy: same-origin`. One range of bytes, `bytes=START-`, `START-END` or `-SUFFIX`, is answered 206 with its `Content-Range`, so that a transfer that stopped resumes where it left off; a range past the end 416; anything else, such as several ranges, whole. `If-None-Match` with the digest's tag, or `*`, is answered 304. The body is written in pieces of 64 KiB as the client reads them.
+A response carries the content's `Content-Type`, `Content-Length`, `ETag` of the quoted digest, `Cache-Control: private, max-age=31536000, immutable`, `Accept-Ranges: bytes`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Cross-Origin-Resource-Policy: same-origin`. One range of bytes, `bytes=START-`, `START-END` or `-SUFFIX`, is answered 206 with its `Content-Range`, so that a transfer that stopped resumes where it left off; a range past the end 416; anything else, such as several ranges, whole. `If-None-Match` with the digest's tag, or `*`, is answered 304. The body is written in pieces of 64 KiB as the client reads them, and a response whose client has taken nothing of it for the keepalive timeout, 15 s, has its connection ended by the keepalive sweep, as a connection whose writes stall is (see `connection-liveness.md`), so that a client that stops reading holds none of the server's connections.
 
 ## Rationale
 
@@ -40,5 +40,6 @@ The maintainer accepted the channels and content proposal in November 2026 and c
 ## Validation
 
 - Tests keep and offer the assets environments declare, once each, only to a connection presenting their environment at its version, and refuse one missing from the library, not its digest, larger than its kind's bound, not starting as its kind, with a name or licence too long, kept as another kind, or past the store's bound, each saying why.
+- Tests end a response whose client has taken nothing of it for the keepalive timeout, and no other.
 - Tests send a ticket and the offer only after the `Welcome` of a client that said `content`, never to one that did not or that only pairs; read only with a ticket of the same principal, a visitor's with a visitor's; refuse a fifth request open at once; and end the ticket with its connection.
 - Tests read an asset over HTTP whole, in part, past its end, conditionally and by `HEAD`, with every field above, and refuse a request without its credential or ticket, with another's ticket, for a digest not offered or not written as one, with a body, or of another method.
