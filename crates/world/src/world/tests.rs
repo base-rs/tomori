@@ -23,15 +23,16 @@ fn arrival() -> [Mat4; 2] {
 fn items_are_added_placed_and_removed_by_their_handles() {
     let mut world = World::default();
     let root = world.add_root();
+    let material = world.add_material(root, Material::new(crate::Shading::Unlit));
     let item = Item::new(root, Layer::Translucent, Mobility::Dynamic)
         .with_mesh(MeshId(3))
-        .with_material(MaterialId(7));
+        .with_material(material);
     let id = world.add(item);
     assert!(world.contains(id));
     assert_eq!(world.item(id), Some(&item));
     assert_eq!(
         (item.mesh, item.material, item.culled),
-        (Some(MeshId(3)), Some(MaterialId(7)), true)
+        (Some(MeshId(3)), Some(material), true)
     );
     assert!(!item.unculled().culled);
     // Nothing is placed until it is, and what is placed is seen until it is culled.

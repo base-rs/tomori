@@ -361,6 +361,33 @@ fn instances_are_drawn_together_and_hidden_nodes_and_what_lies_outside_the_revea
         assert!(lit(0.25, 0.45) && lit(0.85, 0.45) && lit(1.45, 0.45));
         // The second's lid is hidden.
         assert!(lit(0.05, 0.72) && !lit(0.65, 0.72) && lit(1.25, 0.72));
+        // Each piece's material, as a render world paints them: the squares' glow, the lids' plain white.
+        assert_eq!(
+            batch.materials(&gpu).collect::<Vec<_>>(),
+            [Some(0), Some(0), Some(0), None, None]
+        );
+        // Its material drawn as a render world says it: as it is, nothing is written, and another colour draws so.
+        let mut gpu = gpu;
+        assert!(!renderer.set_material(&queue, &mut gpu, 0, &model.materials[0]));
+        assert!(!renderer.set_material(&queue, &mut gpu, 1, &model.materials[0]));
+        let mut black = model.materials[0].clone();
+        black.base_color = Vec4::new(0.0, 0.0, 0.0, 1.0);
+        black.emissive = Vec3::ZERO;
+        assert!(renderer.set_material(&queue, &mut gpu, 0, &black));
+        let darkened = render(&device, &queue, 4, |pass| {
+            renderer.draw(pass, 0, &gpu, &batch)
+        });
+        let at = |pixels: &[u8], x: f32, y: f32| {
+            let (px, py) = projected(view_projection, Vec3::new(x, y, 0.0));
+            let at = ((py as u32).min(SIZE - 1) * SIZE + (px as u32).min(SIZE - 1)) as usize * 4;
+            pixels[at..at + 3].to_vec()
+        };
+        assert!(at(&darkened, 0.25, 0.45).iter().all(|channel| *channel < 8));
+        assert!(renderer.set_material(&queue, &mut gpu, 0, &model.materials[0]));
+        let again = render(&device, &queue, 4, |pass| {
+            renderer.draw(pass, 0, &gpu, &batch)
+        });
+        assert_eq!(again, pixels);
         // Revealed within a sphere about the first, only it is drawn.
         renderer.set_reveal(Some((Vec3::new(0.25, 0.45, 0.0), 0.4)));
         renderer.prepare(&queue, 0, view_projection, Vec3::new(1.0, 1.0, 5.0));

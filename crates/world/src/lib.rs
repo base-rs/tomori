@@ -8,8 +8,11 @@
 //!
 //! - **Roots:** the coordinates things are drawn in, each carried into the views' own by its transform: the space's, the
 //!   scene's within it, an environment's scenery carried into the scene, an avatar's. Only active roots are culled.
-//! - **Items:** something drawn, by a mesh and a material the backend names by opaque ids, in a [`Layer`], static or
-//!   dynamic, once or as many instances, each with its bounds in its root's coordinates, or none, never culled.
+//! - **Items:** something drawn, by a mesh the backend names by an opaque id, in a [`Layer`], static or dynamic, once or
+//!   as many instances, each with its bounds in its root's coordinates, or none, never culled.
+//! - **Materials:** how each item, or each of its instances, is shaded, as a [`Material`]: its shading model, base
+//!   colour, textures by digest, roughness and metalness, emission, alpha and whether it is hazed and lit by its root's
+//!   lights, which each render path reads at its own fidelity.
 //! - **Lights:** each with where it is, how far it reaches, its colour and falloff, and each root's environment light.
 //!   Each frame, each instance seen is lit by at most [`LIGHTS_PER_INSTANCE`] of its root's lights, of at most
 //!   [`LIGHTS`] the views may see, as [`assign`] chooses them, which a backend reads as [`World::lit`].
@@ -23,12 +26,15 @@
 //! `Aabb`, `Frustum`, `NoFrustumCulling` and `VisibleEntities`, each by name and meaning where they fit.
 mod bvh;
 mod light;
+mod material;
 mod view;
 mod world;
 
 pub use light::{
     EnvironmentLight, FADE, Falloff, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit, assign,
 };
+pub use material::{Alpha, Material, MaterialId, Shading};
+pub use tomori_assets::Digest;
 pub use tomori_assets::bounds::{Aabb, Frustum, Tally};
 pub use view::{EYES, Views, eye};
-pub use world::{Item, ItemId, Layer, MaterialId, MeshId, Mobility, RootId, World};
+pub use world::{Item, ItemId, Layer, MeshId, Mobility, RootId, World};

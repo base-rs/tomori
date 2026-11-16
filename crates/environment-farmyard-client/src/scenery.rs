@@ -24,7 +24,8 @@ use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
 use tomori_assets::{Instance, Library, Model};
 use tomori_render::scenery::{Scenery, Target, Views};
 use tomori_render::world::{
-    EnvironmentLight, Item, ItemId, Layer, Light, LightId, Mobility, RootId, World,
+    Alpha, EnvironmentLight, Item, ItemId, Layer, Light, LightId, Material, MaterialId, Mobility,
+    RootId, Shading, World,
 };
 use wgpu::util::DeviceExt;
 
@@ -60,6 +61,9 @@ const _: () = assert!(
     tomori_assets::gpu::LAMPS == tomori_render::world::LIGHTS
         && tomori_assets::gpu::PIECE_LAMPS == tomori_render::world::LIGHTS_PER_INSTANCE
 );
+
+/// How the ferns are shaded, in the render world: by the farmyard's own pipeline, lit by their own few lamps.
+const FERNS: Shading = Shading::Custom(0);
 
 /// How far across the ground, at most, each chunk of the farmyard's models is, so that each is culled and lit on its
 /// own: the yard, its meadow and pines 43 by 45 m, the foothills 72 m, the trail 22 m and the upper terrace 10 m are
@@ -357,11 +361,15 @@ fn lanterns() -> [Lamp; 3] {
 pub use tomori_render::scenery::eye;
 
 /// One model the farmyard draws, uploaded once, with its instances placed, and the item it is in the render world, once
-/// submitted.
+/// submitted, with its model's materials as the world describes them, those it keeps of them, by the model's index,
+/// which paint each piece, and how many times one was drawn otherwise than it was uploaded.
 struct Drawn {
     model: GpuModel,
     batch: Batch,
     item: Option<ItemId>,
+    materials: Vec<Material>,
+    painted: Vec<MaterialId>,
+    repainted: usize,
 }
 
 impl Drawn {
@@ -373,6 +381,18 @@ impl Drawn {
         placement: Mat4,
     ) -> Self {
         Self::placed(device, queue, renderer, model, &[placement])
+    }
+
+    /// `gpu`, uploaded from `model`, drawing `batch`.
+    fn of(gpu: GpuModel, batch: Batch, model: &Model) -> Self {
+        Self {
+            model: gpu,
+            batch,
+            item: None,
+            materials: model.materials.iter().map(Material::from).collect(),
+            painted: Vec::new(),
+            repainted: 0,
+        }
     }
 
     /// `model`, uploaded once, with an instance at each of `placements`, drawn together.
@@ -394,24 +414,49 @@ impl Drawn {
             })
             .collect();
         renderer.place(device, queue, &gpu, &mut batch, &instances);
-        Self {
-            model: gpu,
-            batch,
-            item: None,
-        }
+        Self::of(gpu, batch, model)
     }
 
-    /// Add it to `world`, in `root`, if it is not there, and place each piece of it where its batch has it: once, if it is
-    /// static, or each frame, if it is dynamic and placed anew as it moves.
+    /// Add it to `world`, in `root`, with its model's materials, if it is not there, and place each piece of it where its
+    /// batch has it, painted with its primitive's material: once, if it is static, or each frame, if it is dynamic and
+    /// placed anew as it moves.
     fn submit(&mut self, world: &mut World, root: RootId, mobility: Mobility) {
         let item = match self.item.filter(|item| world.contains(*item)) {
             Some(_) if mobility == Mobility::Static => return,
             Some(item) => item,
-            None => *self
-                .item
-                .insert(world.add(Item::new(root, Layer::Opaque, mobility))),
+            None => {
+                self.painted.clear();
+                self.painted.extend(
+                    self.materials
+                        .iter()
+                        .map(|material| world.add_material(root, *material)),
+                );
+                *self
+                    .item
+                    .insert(world.add(Item::new(root, Layer::Opaque, mobility)))
+            }
         };
         world.place(item, self.batch.bounds());
+        let painted = &self.painted;
+        world.paint(
+            item,
+            self.batch
+                .materials(&self.model)
+                .map(|material| material.map(|material| painted[material])),
+        );
+    }
+
+    /// Draw each of its model's materials as `world` says it, as the model pipeline draws it, writing only what changed.
+    fn paint(&mut self, queue: &wgpu::Queue, models: &Renderer, world: &World) {
+        for (index, material) in self.painted.iter().enumerate() {
+            if let Some(material) = world
+                .material(*material)
+                .and_then(tomori_render::materials::model)
+            {
+                self.repainted +=
+                    usize::from(models.set_material(queue, &mut self.model, index, &material));
+            }
+        }
     }
 
     /// Draw only what `views` says the eyes may see of it, as the world culled it, each piece lit by the lamps the world
@@ -424,6 +469,9 @@ impl Drawn {
         views: &Views<'_>,
         listed: bool,
     ) -> Tally {
+        if let Some((world, _)) = views.world() {
+            self.paint(queue, models, world);
+        }
         match self.item.zip(views.world()).filter(|_| listed) {
             Some((item, (world, _))) => models.light(
                 &mut self.batch,
@@ -804,12 +852,15 @@ impl Ferns {
         }
     }
 
-    /// Add them to `world`, in `root`, once, each an instance, where it may be drawn however it sways.
+    /// Add them to `world`, in `root`, once, each an instance, where it may be drawn however it sways, drawn by their own
+    /// pipeline, lit by their own few lamps.
     fn submit(&mut self, world: &mut World, root: RootId) {
         if self.item.is_some_and(|item| world.contains(item)) {
             return;
         }
-        let item = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+        let material = world.add_material(root, Material::new(FERNS).with_lamps(true));
+        let item =
+            world.add(Item::new(root, Layer::Opaque, Mobility::Static).with_material(material));
         world.place(item, self.bounds.iter().copied().map(Some));
         self.item = Some(item);
     }
@@ -1152,15 +1203,17 @@ impl Plaques {
         }
     }
 
-    /// Add them to `world`, in `root`, if they are not there, translucent, and place each where its text is now, each
-    /// frame, since its mesh grows as the glyphs it waits for are drawn.
+    /// Add them to `world`, in `root`, if they are not there, translucent, unlit, their text blended over their boards,
+    /// and place each where its text is now, each frame, since its mesh grows as the glyphs it waits for are drawn.
     fn submit(&mut self, world: &mut World, root: RootId) {
         let item = match self.item.filter(|item| world.contains(*item)) {
             Some(item) => item,
             None => {
-                *self
-                    .item
-                    .insert(world.add(Item::new(root, Layer::Translucent, Mobility::Dynamic)))
+                let material = world
+                    .add_material(root, Material::new(Shading::Unlit).with_alpha(Alpha::Blend));
+                *self.item.insert(world.add(
+                    Item::new(root, Layer::Translucent, Mobility::Dynamic).with_material(material),
+                ))
             }
         };
         world.place(
@@ -1567,10 +1620,12 @@ impl Scenery for Farmyard {
             return;
         };
         let models = &self.models;
-        let chickens = self.chickens.get_or_insert_with(|| Drawn {
-            model: models.upload(device, queue, first.model()),
-            batch: models.batch(device),
-            item: None,
+        let chickens = self.chickens.get_or_insert_with(|| {
+            Drawn::of(
+                models.upload(device, queue, first.model()),
+                models.batch(device),
+                first.model(),
+            )
         });
         models.place(
             device,

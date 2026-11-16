@@ -1,15 +1,15 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! A frame costs no allocation: once what is placed stops growing, giving the world its views, placing what moves,
-//! culling and lighting each instance allocate nothing, so that the indirection costs the headset's frame no time in
+//! A frame costs no allocation: once what is placed stops growing, giving the world its views, placing what moves and
+//! painting its parts, culling and lighting each instance by its material allocate nothing, so that the indirection costs the headset's frame no time in
 //! the allocator. Counted on the test's thread only, as the world uses no other, so that what the test harness
 //! allocates on its own threads meanwhile is not.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
 use glam::{Mat4, Quat, Vec3};
-use tomori_world::{Aabb, Item, Layer, Light, Mobility, World};
+use tomori_world::{Aabb, Item, Layer, Light, Material, Mobility, Shading, World};
 
 /// The system's allocator, counting what each thread allocates.
 struct Counting;
@@ -75,8 +75,14 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
             Some(Aabb::new(at - 0.4, at + 0.4))
         }),
     );
-    let hens = world.add(Item::new(scenery, Layer::Opaque, Mobility::Dynamic));
-    let cubes = world.add(Item::new(space, Layer::Opaque, Mobility::Dynamic));
+    // The hens' feathers and comb, their parts painted each frame as they are placed, and Tomori's cubes, which are lit
+    // by no lamp.
+    let feathers = world.add_material(scenery, Material::new(Shading::Stylised));
+    let comb = world.add_material(scenery, Material::new(Shading::Stylised));
+    let hens =
+        world.add(Item::new(scenery, Layer::Opaque, Mobility::Dynamic).with_material(feathers));
+    let own = world.add_material(space, Material::new(Shading::Own));
+    let cubes = world.add(Item::new(space, Layer::Opaque, Mobility::Dynamic).with_material(own));
     let lamp = world.add_light(Light::new(
         scenery,
         Vec3::new(0.0, 2.0, -3.0),
@@ -103,6 +109,7 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
                 Some(Aabb::new(at - 0.2, at + 0.2))
             }),
         );
+        world.paint(hens, (0..5).map(|hen| (hen % 2 == 0).then_some(comb)));
         world.place(
             cubes,
             (0..200).map(|cube| {
@@ -111,9 +118,11 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
             }),
         );
         world.light_mut(lamp).unwrap().intensity = 1.0 + turned.sin() * 0.1;
+        world.material_mut(comb).unwrap().emissive.x = turned.sin().abs();
         world.cull();
         world.seen(static_item).iter().filter(|seen| **seen).count()
             + world.lit(static_item).map(<[_]>::len).sum::<usize>()
+            + usize::from(world.instance_material(hens, 2).is_some())
     };
     // The first frames grow what the world keeps, and build the hierarchy.
     for step in 0..3 {
@@ -125,6 +134,7 @@ fn a_frame_allocates_nothing_once_what_is_placed_stops_growing() {
         world.lit(hens).map(<[_]>::len).max(),
         Some(tomori_world::LIGHTS_PER_INSTANCE)
     );
+    assert_eq!(world.lit(cubes).map(<[_]>::len).max(), Some(0));
     let before = ALLOCATED.with(Cell::get);
     let mut seen = 0;
     for step in 3..200 {

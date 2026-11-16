@@ -16,7 +16,7 @@ use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
 use crate::bounds::{self, Aabb, Extent, Frustum, Tally};
-use crate::{INFLUENCES, Instance, Model, Texture};
+use crate::{INFLUENCES, Instance, Material, Model, Texture};
 
 /// The most lamps a scenery's [`Lighting`] holds.
 pub const LAMPS: usize = 64;
@@ -201,10 +201,23 @@ impl From<&Lighting> for LightingUniform {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct MaterialUniform {
     base_color: [f32; 4],
     emissive: [f32; 4],
+}
+
+impl From<&Material> for MaterialUniform {
+    /// Its base colour, and its emission with whether it is masked.
+    fn from(material: &Material) -> Self {
+        Self {
+            base_color: material.base_color.to_array(),
+            emissive: material
+                .emissive
+                .extend(f32::from(u8::from(material.masked)))
+                .to_array(),
+        }
+    }
 }
 
 /// One piece as its shader reads it: where its node is; where its joint matrices begin and whether it is skinned; and
@@ -249,6 +262,8 @@ pub struct GpuModel {
     primitives: Vec<GpuPrimitive>,
     meshes: Vec<Range<usize>>,
     materials: Vec<wgpu::BindGroup>,
+    /// Each material's uniform, as last written, and its buffer.
+    uniforms: Vec<(MaterialUniform, wgpu::Buffer)>,
     plain: wgpu::BindGroup,
 }
 
@@ -298,6 +313,17 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// The material of each piece placed, by its index in the model `model` it was placed from, or none for the
+    /// model's plain white, in the order of [`Self::bounds`], as a render world paints them.
+    pub fn materials<'a>(
+        &'a self,
+        model: &'a GpuModel,
+    ) -> impl ExactSizeIterator<Item = Option<usize>> + 'a {
+        self.pieces
+            .iter()
+            .map(|piece| model.primitives[piece.primitive].material)
+    }
+
     /// Where each piece placed, each primitive of each instance, may be drawn in the scene, or none for anywhere, in the
     /// order [`Renderer::show`] takes which are seen in, as a render world culls them.
     pub fn bounds(&self) -> impl ExactSizeIterator<Item = Option<Aabb>> + '_ {
@@ -638,13 +664,13 @@ impl Renderer {
         device: &wgpu::Device,
         uniform: MaterialUniform,
         texture: &wgpu::TextureView,
-    ) -> wgpu::BindGroup {
+    ) -> (wgpu::BindGroup, wgpu::Buffer) {
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Model material"),
             contents: bytemuck::bytes_of(&uniform),
-            usage: wgpu::BufferUsages::UNIFORM,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Model material"),
             layout: &self.material_layout,
             entries: &[
@@ -661,7 +687,29 @@ impl Renderer {
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
-        })
+        });
+        (binding, buffer)
+    }
+
+    /// Draw `model`'s material `index` with the base colour, emission and mask of `material`, as a render world says it,
+    /// from the next pass, its texture still the model's own; writing nothing, and saying so, `false`, if it is drawn
+    /// so already or the model has no such material.
+    pub fn set_material(
+        &self,
+        queue: &wgpu::Queue,
+        model: &mut GpuModel,
+        index: usize,
+        material: &Material,
+    ) -> bool {
+        let uniform = MaterialUniform::from(material);
+        match model.uniforms.get_mut(index) {
+            Some((written, buffer)) if *written != uniform => {
+                queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+                *written = uniform;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Upload `model`, once, to draw any number of its instances.
@@ -671,23 +719,18 @@ impl Renderer {
             .iter()
             .map(|texture| upload_texture(device, queue, texture))
             .collect();
-        let materials = model
+        let (materials, uniforms) = model
             .materials
             .iter()
             .map(|material| {
-                let uniform = MaterialUniform {
-                    base_color: material.base_color.to_array(),
-                    emissive: material
-                        .emissive
-                        .extend(f32::from(u8::from(material.masked)))
-                        .to_array(),
-                };
+                let uniform = MaterialUniform::from(material);
                 let texture = material
                     .texture
                     .map_or(&self.white, |texture| &textures[texture]);
-                self.material(device, uniform, texture)
+                let (binding, buffer) = self.material(device, uniform, texture);
+                (binding, (uniform, buffer))
             })
-            .collect();
+            .unzip();
         let mut primitives = Vec::new();
         let (mut all_vertices, mut all_indices): (Vec<Vertex>, Vec<u32>) = (Vec::new(), Vec::new());
         let meshes = model
@@ -774,7 +817,8 @@ impl Renderer {
             primitives,
             meshes,
             materials,
-            plain: self.material(device, plain, &self.white),
+            uniforms,
+            plain: self.material(device, plain, &self.white).0,
         }
     }
 

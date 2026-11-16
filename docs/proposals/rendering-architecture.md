@@ -566,6 +566,7 @@ Stage 1 was worth doing before the render world, since it paid at once and its c
   - stage 3, each piece's own lamps (#475, #476);
   - stage 5, foveation (#405), which took the eyes from 8.32 ms to 6.72 ms.
 - **Under way:** stage 2's render world (#411, #413) and chunks (#481). Sorting, the rest of Tomori's own things and the environment registry remain.
+- **Stage 6 under way:** materials described in the render world, drawn by today's pipelines exactly as before, now in `design/rendering.md`; the tiers and loading textures by digest follow.
 - **Tried and closed:** stage 4.
   - LOD (#484) returns as a generic part of stage 9.
   - Multiview (#414) gave way to resolution with 2× MSAA (#527).
