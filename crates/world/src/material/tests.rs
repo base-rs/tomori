@@ -17,6 +17,10 @@ fn a_material_is_white_rough_opaque_and_hazed_until_said_otherwise() {
         (stylised.base_color_texture, stylised.normal_texture),
         (None, None)
     );
+    assert_eq!(
+        (stylised.flat_color, stylised.projection),
+        (Vec3::ONE, None)
+    );
     assert_eq!((stylised.emissive, stylised.glow), (Vec3::ZERO, 0.0));
     assert_eq!(stylised.alpha, Alpha::Opaque);
     // Only what is lit by its environment is lit by its root's lights by default.
@@ -33,6 +37,8 @@ fn a_material_is_white_rough_opaque_and_hazed_until_said_otherwise() {
     let painted = Material::new(Shading::Custom(1))
         .with_base_color(Vec4::new(0.5, 0.25, 0.125, 0.75))
         .with_base_color_texture(grain)
+        .with_flat_color(Vec3::new(0.2, 0.1, 0.05))
+        .with_projection(Projection::new(2.0).with_turn(0.5))
         .with_surface(0.4, 0.9)
         .with_normal_texture(bumps)
         .with_emissive(Vec3::new(1.0, 0.5, 0.0))
@@ -46,6 +52,11 @@ fn a_material_is_white_rough_opaque_and_hazed_until_said_otherwise() {
             shading: Shading::Custom(1),
             base_color: Vec4::new(0.5, 0.25, 0.125, 0.75),
             base_color_texture: Some(grain),
+            flat_color: Vec3::new(0.2, 0.1, 0.05),
+            projection: Some(Projection {
+                metres: 2.0,
+                turn: 0.5
+            }),
             roughness: 0.4,
             metalness: 0.9,
             normal_texture: Some(bumps),
@@ -54,6 +65,13 @@ fn a_material_is_white_rough_opaque_and_hazed_until_said_otherwise() {
             alpha: Alpha::Blend,
             hazed: false,
             lamps: true,
+        }
+    );
+    assert_eq!(
+        Projection::new(1.5),
+        Projection {
+            metres: 1.5,
+            turn: 0.0
         }
     );
 }

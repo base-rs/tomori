@@ -739,3 +739,246 @@ fn a_piece_s_lamps_are_packed_as_a_mask_with_a_byte_of_light_each() {
         lamps(&(0..64).map(|lamp| (lamp, 1.0)).collect::<Vec<_>>())
     );
 }
+
+/// A square a metre across, from `corner` along `across` and `down`, facing `normal`, as one model whose one material,
+/// white, a surface may be laid on.
+fn square(corner: Vec3, across: Vec3, down: Vec3, normal: Vec3) -> Arc<Model> {
+    let primitive = crate::Primitive::new(
+        vec![
+            corner,
+            corner + across,
+            corner + across + down,
+            corner + down,
+        ],
+        vec![normal; 4],
+        vec![0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2],
+    )
+    .with_material(0);
+    Arc::new(
+        Model::built(
+            vec![crate::Node::new("square", Transform::IDENTITY).with_mesh(0)],
+            vec![0],
+            vec![crate::Mesh::new("square", vec![primitive])],
+            vec![Material::new("plain", Vec4::ONE)],
+            &crate::Limits::default(),
+        )
+        .unwrap(),
+    )
+}
+
+/// A texture of `width` by `height` texels of linear RGBA, each `texel(x, y)`.
+fn texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    (width, height): (u32, u32),
+    texel: impl Fn(u32, u32) -> [u8; 4],
+) -> wgpu::TextureView {
+    let texels: Vec<u8> = (0..width * height)
+        .flat_map(|index| texel(index % width, index / width))
+        .collect();
+    device
+        .create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Model test surface"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &texels,
+        )
+        .create_view(&Default::default())
+}
+
+#[test]
+fn a_surface_is_laid_on_each_face_along_the_axis_its_normal_is_nearest() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 1);
+        renderer.set_back_faces_culled(false);
+        renderer.set_lighting(&queue, &even());
+        // Each texel's red and green its place across and down, so that what is drawn says where it was sampled.
+        let ramp = texture(&device, &queue, (16, 16), |x, y| {
+            [(x * 16 + 8) as u8, (y * 16 + 8) as u8, 0, 255]
+        });
+        let surface = Surface {
+            color: &ramp,
+            normal: None,
+            flat: Vec3::ONE,
+            metres: 2.0,
+            turn: 0.0,
+        };
+        // The ground, a wall facing along Z and one facing along X, each a metre square from the origin, seen square on
+        // through an orthographic eye, and where each point of it is sampled: on the ground along X and Z, on a wall
+        // along the ground's axis in its plane and down, so that it stands upright, two metres a tile.
+        type Sampled = fn(Vec3) -> (f32, f32);
+        let cases: [(Vec3, Vec3, Vec3, Vec3, Sampled); 3] = [
+            (Vec3::ZERO, Vec3::X, Vec3::Z, Vec3::Y, |at| {
+                (at.x / 2.0, at.z / 2.0)
+            }),
+            (Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z, |at| {
+                (at.x / 2.0, -at.y / 2.0)
+            }),
+            (Vec3::ZERO, Vec3::Z, Vec3::Y, Vec3::X, |at| {
+                (at.z / 2.0, -at.y / 2.0)
+            }),
+        ];
+        for (corner, across, down, normal, sampled) in cases {
+            let model = square(corner, across, down, normal);
+            let mut gpu = renderer.upload(&device, &queue, &model);
+            let mut batch = renderer.batch(&device);
+            renderer.place(
+                &device,
+                &queue,
+                &gpu,
+                &mut batch,
+                &[Instance::new(model.clone())],
+            );
+            let middle = corner + (across + down) * 0.5;
+            let view_projection =
+                glam::camera::rh::proj::directx::orthographic(-0.5, 0.5, -0.5, 0.5, 0.1, 10.0)
+                    * glam::camera::rh::view::look_at_mat4(
+                        middle + normal * 2.0,
+                        middle,
+                        if normal == Vec3::Y { -Vec3::Z } else { Vec3::Y },
+                    );
+            renderer.prepare(&queue, 0, view_projection, middle + normal * 2.0);
+            let draw = |renderer: &Renderer, gpu: &GpuModel| {
+                render(&device, &queue, 1, |pass| {
+                    renderer.draw(pass, 0, gpu, &batch)
+                })
+            };
+            // Without a surface, its faces' own white.
+            assert!(
+                draw(&renderer, &gpu)
+                    .chunks(4)
+                    .all(|pixel| pixel[..3] == [255; 3])
+            );
+            renderer.set_surface(&device, &queue, &mut gpu, 0, Some(surface));
+            let pixels = draw(&renderer, &gpu);
+            let inverse = view_projection.inverse();
+            let mut checked = 0;
+            for (index, pixel) in pixels.chunks(4).enumerate() {
+                let (x, y) = (index as u32 % SIZE, index as u32 / SIZE);
+                let ndc = Vec3::new(
+                    (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0,
+                    1.0 - (y as f32 + 0.5) / SIZE as f32 * 2.0,
+                    0.5,
+                );
+                let (u, v) = sampled(inverse.project_point3(ndc));
+                let (u, v) = (u.rem_euclid(1.0), v.rem_euclid(1.0));
+                // Away from the tile's edge, where the texels wrap.
+                if !(0.04..0.96).contains(&u) || !(0.04..0.96).contains(&v) {
+                    continue;
+                }
+                let read = (f32::from(pixel[0]) / 256.0, f32::from(pixel[1]) / 256.0);
+                assert!(
+                    (read.0 - u).abs() < 0.015 && (read.1 - v).abs() < 0.015,
+                    "{normal}: at {x}, {y}, {read:?} for {:?}",
+                    (u, v)
+                );
+                checked += 1;
+            }
+            assert!(checked > (SIZE * SIZE / 3) as usize, "{normal}: {checked}");
+            // Turned, each piece's is laid otherwise, though the same surface.
+            let turned = Surface {
+                turn: 1.0,
+                ..surface
+            };
+            renderer.set_surface(&device, &queue, &mut gpu, 0, Some(turned));
+            assert_ne!(draw(&renderer, &gpu), pixels);
+            // A new colour keeps the surface; and the surface taken away, it is white again.
+            assert!(!renderer.set_material(
+                &queue,
+                &mut gpu,
+                0,
+                &Material::new("plain", Vec4::ONE)
+            ));
+            assert!(renderer.set_material(
+                &queue,
+                &mut gpu,
+                0,
+                &Material::new("plain", Vec4::new(0.5, 0.5, 0.5, 1.0))
+            ));
+            assert!(
+                draw(&renderer, &gpu)
+                    .chunks(4)
+                    .any(|pixel| pixel[0] > 2 && pixel[0] < 125)
+            );
+            renderer.set_material(&queue, &mut gpu, 0, &Material::new("plain", Vec4::ONE));
+            renderer.set_surface(&device, &queue, &mut gpu, 0, None);
+            assert!(
+                draw(&renderer, &gpu)
+                    .chunks(4)
+                    .all(|pixel| pixel[..3] == [255; 3])
+            );
+            // A material it does not have is not set.
+            renderer.set_surface(&device, &queue, &mut gpu, 3, Some(surface));
+        }
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+#[test]
+fn a_surface_s_normal_map_bends_each_face_s_normal_within_it() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let renderer = Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8Unorm, 1);
+        // The moon low in the east, along the ground, with no other light: the ground facing up is unlit.
+        renderer.set_lighting(
+            &queue,
+            &Lighting::new(Vec3::X, Vec3::ONE, Vec3::ZERO, Vec3::ZERO),
+        );
+        let white = texture(&device, &queue, (1, 1), |_, _| [255; 4]);
+        // Normals leaning across the texture, towards growing `u`, which on the ground is east.
+        let leaning = texture(&device, &queue, (1, 1), |_, _| [218, 128, 218, 255]);
+        let model = square(Vec3::ZERO, Vec3::X, Vec3::Z, Vec3::Y);
+        let mut gpu = renderer.upload(&device, &queue, &model);
+        let mut batch = renderer.batch(&device);
+        renderer.place(
+            &device,
+            &queue,
+            &gpu,
+            &mut batch,
+            &[Instance::new(model.clone())],
+        );
+        let middle = Vec3::new(0.5, 0.0, 0.5);
+        let view_projection =
+            glam::camera::rh::proj::directx::orthographic(-0.5, 0.5, -0.5, 0.5, 0.1, 10.0)
+                * glam::camera::rh::view::look_at_mat4(middle + Vec3::Y * 2.0, middle, -Vec3::Z);
+        renderer.prepare(&queue, 0, view_projection, middle + Vec3::Y * 2.0);
+        let mean = |renderer: &Renderer, gpu: &GpuModel| {
+            let pixels = render(&device, &queue, 1, |pass| {
+                renderer.draw(pass, 0, gpu, &batch)
+            });
+            pixels
+                .chunks(4)
+                .map(|pixel| f32::from(pixel[0]))
+                .sum::<f32>()
+                / (SIZE * SIZE) as f32
+        };
+        let laid = |normal| Surface {
+            color: &white,
+            normal,
+            flat: Vec3::ONE,
+            metres: 1.0,
+            turn: 0.0,
+        };
+        renderer.set_surface(&device, &queue, &mut gpu, 0, Some(laid(None)));
+        assert!(mean(&renderer, &gpu) < 1.0);
+        renderer.set_surface(&device, &queue, &mut gpu, 0, Some(laid(Some(&leaning))));
+        // Leaning 45° east, it takes the moon's light by the cosine between.
+        let lit = mean(&renderer, &gpu);
+        assert!((lit - 255.0 * 0.707).abs() < 6.0, "{lit}");
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}

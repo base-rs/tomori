@@ -154,6 +154,11 @@ impl Stage {
         scenery.cull(queue, &Views::of(&self.world, self.root))
     }
 
+    /// Draw in `tier`, as a device's renderer draws in its own, from the next cull.
+    pub fn set_tier(&mut self, tier: tomori_world::Tier) {
+        self.world.set_tier(tier);
+    }
+
     /// The world, as last culled, and the scenery's coordinates in it.
     pub fn world(&self) -> (&tomori_world::World, tomori_world::RootId) {
         (&self.world, self.root)

@@ -243,5 +243,9 @@ fn views_without_a_world_say_nothing_of_items_and_a_stage_culls_a_scenery_alone(
         );
         let (world, root) = stage.world();
         assert_eq!(world.tally(root).drawn, 2);
+        // Drawn in the tier it is told, as a device draws in its own.
+        assert_eq!(world.tier(), tomori_world::Tier::High);
+        stage.set_tier(tomori_world::Tier::Low);
+        assert_eq!(stage.world().0.tier(), tomori_world::Tier::Low);
     });
 }
