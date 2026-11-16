@@ -182,7 +182,10 @@ mod tests {
         assert!(json.get("licence").is_none());
         let mut unknown = json.clone();
         unknown["type"] = "video/mp4".into();
-        let entries = serde_json::json!([json, unknown, 7]);
+        // Nor one whose type is not even text, read from a value rather than from text as the test above reads one.
+        let mut untyped = json.clone();
+        untyped["type"] = 7.into();
+        let entries = serde_json::json!([json, unknown, untyped, 7]);
         let read = readable_assets(entries).unwrap();
         assert_eq!(read, std::slice::from_ref(&asset));
         let many = serde_json::Value::Array(vec![json; ASSET_LIMIT + 3]);
