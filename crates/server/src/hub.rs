@@ -4455,7 +4455,8 @@ impl Hub {
                         stage.fit_slots(&environments.walls(&environment));
                     }
                     // The space's status panels take the status wall's free slots where it is now, as a space kept
-                    // before environments had status walls of their own does on first opening in one.
+                    // before environments had status walls of their own does on first opening in one, the oldest
+                    // expiring where they are more than fit.
                     stage.settle(&environments.walls(&model.environment));
                 }
                 state.spaces.push(SpaceRecord {

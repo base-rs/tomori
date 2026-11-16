@@ -8013,7 +8013,7 @@ fn farm_and_sky() -> Environments {
 }
 
 #[test]
-fn a_farm_s_notice_board_is_its_status_wall_its_status_panels_taking_its_free_slots_and_the_rest_waiting()
+fn a_farm_s_notice_board_is_its_status_wall_its_status_panels_taking_its_free_slots_and_the_oldest_expiring()
  {
     let (hub, _jobs) = hub();
     hub.serve_tools(tomori_backend::ToolServer::new(
@@ -8048,7 +8048,7 @@ fn a_farm_s_notice_board_is_its_status_wall_its_status_panels_taking_its_free_sl
         .collect();
     titles.sort_unstable();
     assert_eq!(titles, ["Three", "Two"]);
-    // `panels` says which are status panels, and which wait for a slot.
+    // `panels` says which are status panels, and none waits unseen: the oldest expired.
     let panels = hub.tool_panels("session", None, 0).unwrap();
     assert!(
         panels["panels"]
@@ -8057,7 +8057,7 @@ fn a_farm_s_notice_board_is_its_status_wall_its_status_panels_taking_its_free_sl
             .iter()
             .all(|panel| panel["status"] == true)
     );
-    assert_eq!(panels["waiting_for_a_slot"][0]["title"], "One");
+    assert!(panels.get("waiting_for_a_slot").is_none());
     // `presence` calls the board both, and says its panels are status panels.
     let presence = hub.tool_presence("session").unwrap();
     assert_eq!(
@@ -8065,12 +8065,12 @@ fn a_farm_s_notice_board_is_its_status_wall_its_status_panels_taking_its_free_sl
         "environment wall 1 (the status wall)"
     );
     assert_eq!(presence["walls"][0]["used"][0]["status"], true);
-    // Back in Sky, all three are on the Tomori wall.
+    // Back in Sky, the two that stayed are on the Tomori wall, and the one that expired does not return.
     ada.send(ClientMessage::SetEnvironment {
         environment: "sky".to_owned(),
     });
     let sky = ada.projection();
-    assert_eq!(sky.panels.len(), 3);
+    assert_eq!(sky.panels.len(), 2);
     assert!(sky.panels.iter().all(|panel| matches!(
         &panel.place,
         tomori_protocol::Place::Wall { wall, .. } if wall == tomori_protocol::TOMORI_WALL
@@ -8130,17 +8130,14 @@ fn a_record_of_spaces_kept_before_status_walls_loads_its_tomori_wall_s_panels_on
     let record = state.space("farmed").unwrap();
     let environments = hub.environments();
     let walls = environments.walls("farm");
-    // The newest two are on the board, which keeps its own layout; the third waits, kept.
+    // The newest two are on the board, which keeps its own layout; the third expired, as the oldest.
     let view = record.stage.view("farmed", &walls, 0);
     assert_eq!(view.walls.len(), 1);
     assert_eq!((view.walls[0].slots(), view.walls[0].tilt()), (2, 0.0));
     let mut shown: Vec<&str> = view.panels.iter().map(|panel| panel.id.as_str()).collect();
     shown.sort_unstable();
     assert_eq!(shown, ["panel-2", "panel-3"]);
-    assert_eq!(
-        record.stage.waiting(&walls),
-        [("panel-1".to_owned(), "Panel 1".to_owned())]
-    );
+    assert!(!record.stage.is_status("panel-1"));
     // In Sky, the Tomori wall's kept edits stand, as they did.
     let sky = record.stage.view("farmed", &environments.walls("sky"), 0);
     assert_eq!((sky.walls[0].slots(), sky.walls[0].tilt()), (3, -10.0));

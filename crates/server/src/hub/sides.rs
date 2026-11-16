@@ -453,7 +453,7 @@ impl Hub {
                     outlet.space
                 );
             }
-            // A status panel waiting for the slot it freed takes it.
+            // The status panels take the status wall's free slots, the oldest expiring if it has too few.
             record
                 .stage
                 .settle(&self.environments().walls(&outlet.environment));
@@ -644,7 +644,7 @@ impl Hub {
         // What the side published is no longer current, so it is shown no more until a side publishes it again.
         let environment = record.model.environment.clone();
         if record.stage.rest(&environment) {
-            // A status panel waiting for a slot it freed takes it.
+            // The status panels take the status wall's free slots, the oldest expiring if it has too few.
             record
                 .stage
                 .settle(&self.environments().walls(&environment));

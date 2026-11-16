@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The status wall: the Tomori wall, or an environment's own wall in the role, its slots shared with the environment's
-//! panels there, the full wall's order, status panels waiting for a slot, and what the space kept on the Tomori wall
+//! panels there, the full wall's order, the oldest status panel expiring rather than waiting, and what the space kept on the Tomori wall
 //! and of its edits, as an old record of spaces has them.
 use super::super::published::Change;
 use super::super::*;
@@ -69,6 +69,14 @@ fn shown(stage: &Stage, walls: &Walls<'_>) -> Vec<(String, Place)> {
     shown
 }
 
+/// Asserts that no status panel waits unseen: each is in a slot of the status wall in `walls`' environment.
+fn nothing_waits(stage: &Stage, walls: &Walls<'_>) {
+    let slots = stage.slots_of(walls, &walls.status_wall());
+    for kept in &stage.tomori {
+        assert!(stage.seated(walls, kept, slots), "{} waits", kept.id);
+    }
+}
+
 fn on(wall: &str, slot: u32) -> Place {
     Place::Wall {
         wall: wall.into(),
@@ -120,7 +128,7 @@ fn an_environment_s_own_wall_is_the_status_wall_its_notices_and_its_own_panels_s
         shown(&stage, &walls),
         [("B".into(), on(BOARD, 1)), ("C".into(), on(BOARD, 0))]
     );
-    assert!(stage.waiting(&walls).is_empty());
+    nothing_waits(&stage, &walls);
     // Arranged by a participant, a status panel stays; then the board's own nobody arranged leaves for a notice.
     let c = id(&stage, &walls, "C");
     assert_eq!(
@@ -198,13 +206,13 @@ fn grid(columns: u32, rows: u32) -> WallChange {
 }
 
 #[test]
-fn the_environment_s_own_panels_come_first_and_a_status_panel_they_displace_waits_for_a_slot() {
+fn the_environment_s_own_panels_come_first_and_a_status_panel_they_displace_expires() {
     let board = board();
     let walls = yard(&board);
     let mut stage = Stage::default();
     let a = stage.project_notice(&walls, "walls", content("A"), 0);
     let b = stage.project_notice(&walls, "workers", content("B"), 0);
-    // The environment publishes onto its board, full of status panels: the oldest gives up its slot and waits.
+    // The environment publishes onto its board, full of status panels: the oldest gives up its slot and expires.
     let publish = |stage: &mut Stage, id: &str| {
         stage.publish(
             &walls,
@@ -213,29 +221,26 @@ fn the_environment_s_own_panels_come_first_and_a_status_panel_they_displace_wait
         )
     };
     assert_eq!(publish(&mut stage, "p"), Ok(Change::Added));
-    assert_eq!(stage.waiting(&walls), [(a.clone(), "A".to_owned())]);
+    assert!(!stage.is_status(&a) && stage.is_status(&b));
+    nothing_waits(&stage, &walls);
     assert_eq!(publish(&mut stage, "q"), Ok(Change::Added));
-    assert_eq!(
-        stage.waiting(&walls),
-        [(b.clone(), "B".to_owned()), (a.clone(), "A".to_owned())]
-    );
+    assert!(!stage.is_status(&b));
+    assert!(stage.tomori.is_empty());
     // Full of its own, the board refuses another.
     assert_eq!(publish(&mut stage, "r"), Err("That wall is full."));
-    // A slot freed, the newest waiting takes it.
+    // A slot freed, nothing waits for it, and nothing is brought back.
     let q = id(&stage, &walls, "q");
     stage.dismiss(&walls, &q).unwrap();
-    assert_eq!(stage.waiting(&walls), [(a.clone(), "A".to_owned())]);
-    assert!(
-        shown(&stage, &walls)
-            .iter()
-            .any(|(title, place)| title == "B" && *place == on(BOARD, 1))
-    );
-    // Retracted, the environment's panel frees its slot too, which the hub then settles.
+    assert!(!stage.settle(&walls));
+    assert_eq!(shown(&stage, &walls).len(), 1);
+    // Retracted, the environment's panel frees its slot too.
     assert!(stage.retract("farmyard", "p"));
-    assert!(stage.settle(&walls));
-    assert!(stage.waiting(&walls).is_empty());
-    // A panel put on the board by hand, onto a board of status panels, takes the oldest's slot, which waits; and the
-    // board's own a participant arranged leaves only once no status panel is there to wait.
+    assert!(!stage.settle(&walls));
+    assert!(shown(&stage, &walls).is_empty());
+    // A panel put on the board by hand, onto a board of status panels, takes the oldest's slot, which expires; and the
+    // board's own a participant arranged leaves only once no status panel is there to expire.
+    stage.project_notice(&walls, "walls", content("A"), 0);
+    stage.project_notice(&walls, "workers", content("B"), 0);
     stage.project_to(
         &walls,
         content("Hay"),
@@ -248,7 +253,7 @@ fn the_environment_s_own_panels_come_first_and_a_status_panel_they_displace_wait
         Ok(true)
     );
     assert!(!stage.is_status(&hay));
-    assert_eq!(stage.waiting(&walls).len(), 1);
+    assert_eq!(stage.tomori.len(), 1);
     let corn = stage.project_to(
         &walls,
         content("Corn"),
@@ -259,7 +264,7 @@ fn the_environment_s_own_panels_come_first_and_a_status_panel_they_displace_wait
         stage.place(&walls, &corn, Target::Wall(BOARD.into())),
         Ok(true)
     );
-    assert_eq!(stage.waiting(&walls).len(), 2);
+    assert!(stage.tomori.is_empty());
     let oats = stage.project_to(
         &walls,
         content("Oats"),
@@ -277,11 +282,11 @@ fn the_environment_s_own_panels_come_first_and_a_status_panel_they_displace_wait
             .count(),
         2
     );
-    assert_eq!(stage.waiting(&walls).len(), 2);
+    nothing_waits(&stage, &walls);
 }
 
 #[test]
-fn the_environment_s_own_panel_takes_the_slot_it_names_or_rested_in_and_a_board_grown_again_seats_those_waiting()
+fn the_environment_s_own_panel_takes_the_slot_it_names_or_rested_in_and_a_board_grown_again_gives_a_notice_its_slot()
  {
     let board = board();
     let walls = yard(&board);
@@ -295,30 +300,30 @@ fn the_environment_s_own_panel_takes_the_slot_it_names_or_rested_in_and_a_board_
             0,
         )
     };
-    // Naming its slot 1, which B holds, it takes that slot, and B waits rather than A, the oldest.
+    // Naming its slot 1, which B holds, it takes that slot, and B expires rather than A, the oldest.
     assert_eq!(publish(&mut stage, "p", Some(1)), Ok(Change::Added));
     assert_eq!(
         shown(&stage, &walls),
         [("A".into(), on(BOARD, 0)), ("p".into(), on(BOARD, 1))]
     );
-    assert_eq!(stage.waiting(&walls), [(b.clone(), "B".to_owned())]);
-    // Its side gone, its panel rests and B takes its slot again; published again, it takes back the slot it rested in.
+    assert!(!stage.is_status(&b));
+    // Its side gone, its panel rests, and B does not return; published again, it takes back the slot it rested in.
     assert!(stage.rest("farmyard"));
-    assert!(stage.settle(&walls));
-    assert!(stage.waiting(&walls).is_empty());
+    assert!(!stage.settle(&walls));
     assert_eq!(publish(&mut stage, "p", None), Ok(Change::Added));
     assert_eq!(
         shown(&stage, &walls),
         [("A".into(), on(BOARD, 0)), ("p".into(), on(BOARD, 1))]
     );
-    assert_eq!(stage.waiting(&walls), [(b.clone(), "B".to_owned())]);
     assert!(stage.is_status(&a));
-    // Unlocked and grown, its new slot takes the status panel waiting.
+    // Unlocked and grown, its new slot takes the next notice, and A stays.
     assert_eq!(stage.lock_wall(&walls, BOARD, false, false), Ok(true));
     assert_eq!(stage.set_wall(&walls, BOARD, grid(3, 1)), Ok(true));
-    assert!(stage.waiting(&walls).is_empty());
+    nothing_waits(&stage, &walls);
+    let c = stage.project_notice(&walls, "context", content("C"), 0);
+    assert!(stage.is_status(&a));
     assert_eq!(
-        stage.view("s", &walls, 0).panel(&b).unwrap().place,
+        stage.view("s", &walls, 0).panel(&c).unwrap().place,
         on(BOARD, 2)
     );
 }
@@ -341,13 +346,14 @@ fn only_a_status_panel_in_the_slot_named_on_the_status_wall_gives_way_and_notice
             0,
         )
     };
-    // Onto another wall of its own, or a free slot of the board, nothing waits.
+    // Onto another wall of its own, or a free slot of the board, nothing expires.
     assert_eq!(publish(&mut stage, "o", 1, Some(0)), Ok(Change::Added));
     assert_eq!(publish(&mut stage, "p", 0, Some(1)), Ok(Change::Added));
-    assert!(stage.waiting(&walls).is_empty());
-    // Naming a slot one of the board's own holds, it goes where the full board makes room, the status panel waiting.
+    assert!(stage.is_status(&a));
+    nothing_waits(&stage, &walls);
+    // Naming a slot one of the board's own holds, it goes where the full board makes room, the status panel expiring.
     assert_eq!(publish(&mut stage, "q", 0, Some(1)), Ok(Change::Added));
-    assert_eq!(stage.waiting(&walls), [(a, "A".to_owned())]);
+    assert!(!stage.is_status(&a));
     let board: Vec<(String, Place)> = shown(&stage, &walls)
         .into_iter()
         .filter(|(_, place)| matches!(place, Place::Wall { wall, .. } if wall == BOARD))
@@ -465,13 +471,13 @@ const KEPT: &str = r#"{"version":1,"next":20,"tomori":[
 "tomori_layout":{"grid":[6,1],"scale":0.7,"radius":2.3,"tilt":-10.0}}"#;
 
 #[test]
-fn what_a_space_kept_on_the_tomori_wall_moves_into_the_board_s_free_slots_the_rest_waiting_and_comes_back()
+fn what_a_space_kept_on_the_tomori_wall_moves_into_the_board_s_free_slots_the_oldest_expiring_and_none_comes_back()
  {
     let board = board();
     let walls = yard(&board);
     let mut stage: Stage = serde_json::from_str(KEPT).unwrap();
-    // On first opening in the farmyard, the one a participant arranged takes the board's free slot; the rest wait,
-    // newest first, kept.
+    // On first opening in the farmyard, the one a participant arranged takes the board's free slot, and the newest
+    // takes the other; the four older expire, and none waits.
     assert!(stage.settle(&walls));
     assert_eq!(
         shown(&stage, &walls),
@@ -480,36 +486,25 @@ fn what_a_space_kept_on_the_tomori_wall_moves_into_the_board_s_free_slots_the_re
             ("Two".into(), on(BOARD, 0))
         ]
     );
-    let waiting: Vec<String> = stage
-        .waiting(&walls)
-        .into_iter()
-        .map(|(_, title)| title)
-        .collect();
-    assert_eq!(waiting, ["Six", "Five", "Four", "Three", "One"]);
-    assert_eq!(stage.tomori.len(), 6);
-    // Settled, it changes nothing again, nor across a restart, those waiting kept as they wait.
+    assert_eq!(stage.tomori.len(), 1);
+    nothing_waits(&stage, &walls);
+    // Settled, it changes nothing again, nor across a restart.
     assert!(!stage.settle(&walls));
     let mut stage: Stage = serde_json::from_str(&serde_json::to_string(&stage).unwrap()).unwrap();
     assert!(!stage.settle(&walls));
-    assert_eq!(stage.waiting(&walls).len(), 5);
-    assert_eq!(stage.tomori.len(), 6);
+    assert_eq!(stage.tomori.len(), 1);
     // The board's own edits stand: the Tomori wall's do not apply to it.
     let view = stage.view("s", &walls, 0);
     assert_eq!((view.walls[0].slots(), view.walls[0].tilt()), (2, 0.0));
-    // A slot freed, the newest waiting takes it.
+    // A slot freed, nothing waits for it.
     let hay = id(&stage, &walls, "Hay prices");
     stage.dismiss(&walls, &hay).unwrap();
-    assert!(
-        shown(&stage, &walls)
-            .iter()
-            .any(|(title, place)| title == "Six" && *place == on(BOARD, 1))
-    );
-    // Back in Sky, every one is on the Tomori wall, those that waited in the slots they had, the space's edits standing.
-    assert!(stage.settle(&SKY));
+    assert_eq!(shown(&stage, &walls), [("Two".into(), on(BOARD, 0))]);
+    // Back in Sky, what stayed is on the Tomori wall, the space's edits standing, and what expired does not return.
+    stage.settle(&SKY);
     let view = stage.view("s", &SKY, 0);
-    assert_eq!(view.panels.len(), 6);
-    assert_eq!(view.panel("panel-1").unwrap().place, on(TOMORI_WALL, 0));
-    assert_eq!(view.panel("panel-5").unwrap().place, on(TOMORI_WALL, 4));
+    assert_eq!(view.panels.len(), 1);
+    assert_eq!(view.panel("panel-2").unwrap().place, on(TOMORI_WALL, 0));
     assert_eq!((view.walls[0].slots(), view.walls[0].tilt()), (6, -10.0));
     assert!(view.walls[0].status);
 }
@@ -612,7 +607,7 @@ fn a_panel_named_onto_a_board_of_arranged_status_panels_or_the_environment_s_own
         wall: BOARD.into(),
         slot: None,
     };
-    // Every status panel there arranged by a participant: the oldest of them waits.
+    // Every status panel there arranged by a participant: the oldest of them expires.
     let mut stage = Stage::default();
     let a = stage.project_notice(&walls, "walls", content("A"), 0);
     let b = stage.project_notice(&walls, "workers", content("B"), 0);
@@ -623,7 +618,7 @@ fn a_panel_named_onto_a_board_of_arranged_status_panels_or_the_environment_s_own
         );
     }
     let x = stage.project_to(&walls, content("X"), &onto, 0);
-    assert_eq!(stage.waiting(&walls), [(a, "A".to_owned())]);
+    assert!(!stage.is_status(&a) && stage.is_status(&b));
     assert!(!stage.is_status(&x));
     // With the status panel left arranged, the wall's own nobody arranged leaves for the next.
     let z = stage.project_to(&walls, content("Z"), &onto, 0);
@@ -683,22 +678,85 @@ const CROWDED: &str = r#"{"version":1,"next":5,"tomori":[
 "rooms":{"farmyard":{"used":3,"panels":[{"id":"panel-3","title":"Hay","body":"x","meta":[],"created":100,"placed":3,"place":{"kind":"wall","wall":"environment-0","slot":1}}]}}}"#;
 
 #[test]
-fn of_two_status_panels_in_one_slot_the_older_waits() {
+fn of_two_status_panels_in_one_slot_the_older_expires() {
     let board = board();
     let walls = yard(&board);
     let mut stage: Stage = serde_json::from_str(CROWDED).unwrap();
     assert!(stage.settle(&walls));
-    assert_eq!(
-        stage.waiting(&walls),
-        [("panel-1".to_owned(), "Older".to_owned())]
-    );
+    assert!(!stage.is_status("panel-1") && stage.is_status("panel-2"));
     assert_eq!(
         shown(&stage, &walls),
         [("Hay".into(), on(BOARD, 1)), ("Newer".into(), on(BOARD, 0))]
     );
-    // Waiting, it takes the next slot that frees.
+    // Expired, it does not take the next slot that frees.
     stage.dismiss(&walls, "panel-3").unwrap();
-    assert!(stage.waiting(&walls).is_empty());
+    assert!(!stage.settle(&walls));
+    assert_eq!(shown(&stage, &walls), [("Newer".into(), on(BOARD, 0))]);
+}
+
+/// A farmyard's stage whose three status panels, as a space kept them waiting, are put at one moment, listed oldest
+/// last, with one on the board.
+const WAITED: &str = r#"{"version":1,"next":5,"tomori":[
+{"id":"panel-b","title":"B","body":"b","meta":[],"created":100,"placed":5,"place":{"kind":"wall","wall":"waiting","slot":0}},
+{"id":"panel-a","title":"A","body":"a","meta":[],"created":100,"placed":5,"place":{"kind":"wall","wall":"waiting","slot":0}},
+{"id":"panel-c","title":"C","body":"c","meta":[],"created":100,"placed":6,"place":{"kind":"wall","wall":"waiting","slot":0}}]}"#;
+
+#[test]
+fn a_queue_a_space_kept_waiting_keeps_what_fits_the_newest_and_drops_the_oldest_the_same_whatever_its_order()
+ {
+    let board = board();
+    let walls = yard(&board);
+    let mut stage: Stage = serde_json::from_str(WAITED).unwrap();
+    assert!(stage.settle(&walls));
+    nothing_waits(&stage, &walls);
+    // C, the newest, and of two put at once the one whose identity sorts later, B.
+    assert_eq!(
+        shown(&stage, &walls),
+        [("B".into(), on(BOARD, 1)), ("C".into(), on(BOARD, 0))]
+    );
+    assert!(!stage.is_status("panel-a"));
+    // Listed the other way round, the same remain, in the same slots.
+    let mut again: Stage = serde_json::from_str(WAITED).unwrap();
+    again.tomori.reverse();
+    assert!(again.settle(&walls));
+    assert_eq!(shown(&again, &walls), shown(&stage, &walls));
+}
+
+#[test]
+fn a_full_board_gives_up_its_oldest_notice_for_the_newest_and_never_one_a_participant_arranged_or_its_environment_published()
+ {
+    let board = board();
+    let walls = yard(&board);
+    let mut stage = Stage::default();
+    let a = stage.project_notice(&walls, "walls", content("A"), 0);
+    let b = stage.project_notice(&walls, "workers", content("B"), 0);
+    // The oldest expires for the newest, again and again, and nothing waits or builds up.
+    for (index, kind) in ["context", "actions", "moved", "copies"]
+        .into_iter()
+        .enumerate()
+    {
+        stage.project_notice(&walls, kind, content(&format!("N{index}")), 0);
+        assert_eq!(stage.tomori.len(), 2);
+        nothing_waits(&stage, &walls);
+    }
+    assert!(!stage.is_status(&a) && !stage.is_status(&b));
+    // Arranged by a participant, a notice is not given up for another notice, which floats instead, and none waits.
+    let mut stage = Stage::default();
+    let a = stage.project_notice(&walls, "walls", content("A"), 0);
+    let b = stage.project_notice(&walls, "workers", content("B"), 0);
+    for panel in [&a, &b] {
+        assert_eq!(
+            stage.place(&walls, panel, Target::Wall(BOARD.into())),
+            Ok(true)
+        );
+    }
+    let c = stage.project_notice(&walls, "context", content("C"), 0);
+    assert!(stage.is_status(&a) && stage.is_status(&b) && !stage.is_status(&c));
+    assert!(matches!(
+        stage.view("s", &walls, 0).panel(&c).unwrap().place,
+        Place::Free { .. }
+    ));
+    nothing_waits(&stage, &walls);
 }
 
 #[test]
