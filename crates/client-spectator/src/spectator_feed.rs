@@ -39,13 +39,14 @@ const NEUTRAL: Vec3 = tomori_scene::arrival::HOME;
 /// The spectator's vertical field of view, in radians.
 const FIELD_OF_VIEW: f32 = 1.4;
 
-/// A participant's latest presence report, as relayed by the server.
+/// A participant's latest presence report, as relayed by the server, and whether they asked not to be drawn.
 #[derive(Clone)]
 struct ParticipantPresence {
     head: tomori_protocol::Pose,
     left: Option<tomori_protocol::Pose>,
     right: Option<tomori_protocol::Pose>,
     hands: Option<[Option<Hand>; 2]>,
+    hidden: bool,
 }
 
 /// The options a spectator is started with: [`Self::new`]'s, none, changed field by field, so that options added later
@@ -179,6 +180,7 @@ impl Feed {
                 left,
                 right,
                 hands,
+                hidden,
                 ..
             } => {
                 hook.lock()
@@ -190,6 +192,7 @@ impl Feed {
                             left: *left,
                             right: *right,
                             hands: hands.as_deref().copied(),
+                            hidden: *hidden,
                         },
                     );
             }
@@ -304,7 +307,8 @@ impl Feed {
     }
 
     /// Pick the participant to follow: by name if given, else the first
-    /// available in the space's participant list.
+    /// available in the space's participant list, never one who asked not to
+    /// be drawn, whose view is theirs to keep (see `design/people.md`).
     fn update_following(&mut self, presence: &BTreeMap<u32, ParticipantPresence>) {
         let Some((space, _)) = self.conversation.joined_space() else {
             self.following = None;
@@ -313,10 +317,10 @@ impl Feed {
         };
 
         let target = self.follow.as_deref();
-        let participant = space
-            .participants
-            .iter()
-            .find(|p| target.is_none_or(|t| p.name == t) && presence.contains_key(&p.source));
+        let participant = space.participants.iter().find(|p| {
+            target.is_none_or(|t| p.name == t)
+                && presence.get(&p.source).is_some_and(|seen| !seen.hidden)
+        });
 
         match participant {
             Some(p) => {
@@ -666,6 +670,52 @@ mod tests {
             let target = target(&gpu, 64, 48);
             let mut view = crate::spectator_view::SpectatorView::new(feed);
             render(&gpu, &mut view, &mut renderer, &target);
+        });
+    }
+
+    #[test]
+    fn the_spectator_never_follows_someone_who_asked_not_to_be_drawn() {
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space),
+            follow: Some("Bea".into()),
+            token: None,
+            ..Default::default()
+        });
+        let asking = |hidden: bool| ClientMessage::Presence {
+            head: pose(0.5),
+            left: None,
+            right: None,
+            hands: None,
+            carrying: None,
+            carried: Vec::new(),
+            rays: None,
+            pointing: None,
+            hidden,
+        };
+        let heard = |feed: &Feed, hidden: bool| {
+            feed.presence
+                .lock()
+                .unwrap()
+                .values()
+                .any(|seen| seen.hidden == hidden)
+        };
+        // Bea chose that others see her name only: the spectator waits for her rather than seeing from her head.
+        until(&mut feed, |feed| feed.conversation.joined_space().is_some());
+        bea.send(asking(true));
+        let seen = until(&mut feed, |feed| heard(feed, true));
+        assert_eq!(feed.following, None);
+        assert_eq!(feed.following_name.as_deref(), Some("Bea"));
+        assert!(seen.eye().distance(Vec3::new(0.5, 1.6, 0.0)) > 0.1);
+        // Followed once she lets others see her, and no longer once she asks again.
+        bea.send(asking(false));
+        until(&mut feed, |feed| feed.following.is_some());
+        bea.send(asking(true));
+        until(&mut feed, |feed| {
+            heard(feed, true) && feed.following.is_none()
         });
     }
 
