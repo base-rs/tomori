@@ -8,7 +8,8 @@
 //! with no extrapolation; faded out where they were and in where they are when they jump, faded out once silent, faded
 //! where they last were as they leave, and fainter close to the eyes. Someone whose head faces this participant's warms
 //! their eyes, so that eye contact reads in conversation, and someone whose voice plays quickens the orbit about their
-//! head. See `design/people.md`.
+//! head. Their tracked hands are drawn as joints and bones, and controllers no hand tracks as small stylised ones
+//! (`hands`). See `design/people.md`.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use crate::client_side::Hand;
 use crate::delegation::Cube;
 use crate::relayed::{Between, Relayed};
 
+pub mod hands;
 pub mod swarm;
 
 /// How far someone's head moves between two updates, in metres, for it to be a jump, as a teleport is, faded out where
@@ -43,8 +45,9 @@ pub const GAZE_REACH: f32 = 8.0;
 pub const GLOW_RISE: f32 = 0.2;
 pub const GLOW_FALL: f32 = 0.4;
 
-/// How many cubes one person is drawn with at most: their swarm and two rays, each with the dot where it ends.
-pub const CUBES: usize = swarm::MOST + 4;
+/// How many cubes one person is drawn with at most: their swarm, their hands and controllers, and two rays, each with
+/// the dot where it ends.
+pub const CUBES: usize = swarm::MOST + hands::MOST + 4;
 
 /// A ray's colour, as this participant's own is drawn, meeting something or not, and a little fainter; and how thick
 /// it is, and how large the dot where it ends on what it meets.
@@ -211,7 +214,7 @@ pub struct Figure {
 
 /// Someone in the space as drawn: when their latest report arrived, how many had, when their track last cut and what was
 /// drawn before it, what was drawn last frame, how much, whether their head faces this participant's and how much their
-/// eyes glow, and their body.
+/// eyes glow, their body, and their hands and controllers.
 #[derive(Clone, Debug)]
 struct Known {
     reports: u64,
@@ -223,6 +226,7 @@ struct Known {
     gazing: bool,
     glow: f32,
     body: swarm::Body,
+    hands: hands::Hands,
 }
 
 /// Someone who left the space, fading where they last were.
@@ -234,6 +238,7 @@ struct Leaving {
     shown: f32,
     glow: f32,
     body: swarm::Body,
+    hands: hands::Hands,
 }
 
 /// The others in the space, as drawn each frame.
@@ -311,6 +316,7 @@ impl People {
                     shown: known.shown,
                     glow: known.glow,
                     body: known.body,
+                    hands: known.hands,
                 });
             }
             here
@@ -332,6 +338,7 @@ impl People {
                 gazing: false,
                 glow: 0.0,
                 body: swarm::Body::new(&present, eyes, source),
+                hands: hands::Hands::new(&present),
             });
             if known.reports != *reports {
                 known.reports = *reports;
@@ -369,6 +376,8 @@ impl People {
             known
                 .body
                 .follow(&shown, dt, eyes, self.voices.contains(&source));
+            known.hands.follow(&shown, dt);
+            known.body.clusters = known.hands.clusters();
             known.drawn = shown;
             known.shown = fade;
             self.drawn.push((source, shown));
@@ -377,7 +386,7 @@ impl People {
                 used,
                 source,
                 &shown,
-                &known.body,
+                (&known.body, &known.hands),
                 swarm::Cues {
                     // Everyone's colour alike, until people have colours of their own.
                     colour: swarm::COLOUR,
@@ -397,7 +406,7 @@ impl People {
                 used,
                 leaving.source,
                 &leaving.drawn,
-                &leaving.body,
+                (&leaving.body, &leaving.hands),
                 swarm::Cues {
                     // Everyone's colour alike, until people have colours of their own.
                     colour: swarm::COLOUR,
@@ -440,14 +449,15 @@ fn gazes(head: &Hand, eyes: Option<Vec3>, gazing: bool) -> bool {
     facing.dot(towards) >= within.to_radians().cos()
 }
 
-/// Draw `present`, of `source`, with `body`, into `figures` at `index`, as `cues` say, with their look unless theirs is
-/// the head a watcher sees from, `shown` false: saying how many figures it drew, none where nothing of it shows.
+/// Draw `present`, of `source`, with their body and hands, into `figures` at `index`, as `cues` say, with their look
+/// unless theirs is the head a watcher sees from, `shown` false: saying how many figures it drew, none where nothing of
+/// it shows.
 fn figure(
     figures: &mut Vec<Figure>,
     index: usize,
     source: u32,
     present: &Present,
-    body: &swarm::Body,
+    (body, hands): (&swarm::Body, &hands::Hands),
     cues: swarm::Cues,
     shown: bool,
 ) -> usize {
@@ -462,7 +472,11 @@ fn figure(
         return 0;
     }
     if figures.len() <= index {
-        figures.push(Figure::default());
+        // As many cubes as anyone is drawn with, so that drawing them never allocates again.
+        figures.push(Figure {
+            source,
+            cubes: Vec::with_capacity(CUBES),
+        });
     }
     let figure = &mut figures[index];
     figure.source = source;
@@ -474,6 +488,14 @@ fn figure(
             present,
             body,
             &swarm::Cues { fade, ..cues },
+        );
+        hands::draw(
+            &mut figure.cubes,
+            hands,
+            body.detail,
+            cues.colour,
+            fade,
+            cues.eyes,
         );
     }
     for ray in present.pointing.iter().flatten() {

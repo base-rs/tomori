@@ -681,10 +681,11 @@ fn wrapped(angle: f32) -> f32 {
     (angle + std::f32::consts::PI).rem_euclid(TAU) - std::f32::consts::PI
 }
 
-/// Where the hand on `side` is in `present`: a tracked hand's palm, or else its wrist, or else its controller's grip.
+/// Where the hand on `side` is in `present`: a tracked hand's wrist, where its joints are drawn from, or else its palm,
+/// or else its controller's grip.
 fn hand(present: &Present, side: usize) -> Option<Vec3> {
     present.joints[side]
-        .and_then(|joints| joints[0].or(joints[1]))
+        .and_then(|joints| joints[1].or(joints[0]))
         .map(|joint| joint.position)
         .or_else(|| present.controllers[side].map(|controller| controller.position))
 }
@@ -742,7 +743,8 @@ impl Blink {
 }
 
 /// Someone's body as drawn, kept from frame to frame: which way it faces about the vertical, its arms, how much of it is
-/// drawn, how much their voice plays, how far their orbit has turned, and their eyes' blinking.
+/// drawn, how much their voice plays, how far their orbit has turned, their eyes' blinking, and how much of each hand's
+/// cluster is drawn, left then right, which a tracked hand or a controller drawn there replaces (`super::hands`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Body {
     pub yaw: f32,
@@ -751,6 +753,7 @@ pub struct Body {
     pub speaking: f32,
     pub orbit: f32,
     pub blink: Blink,
+    pub clusters: [f32; 2],
 }
 
 /// Where the neck is, of the head `present` has.
@@ -772,6 +775,7 @@ impl Body {
             speaking: 0.0,
             orbit: 0.0,
             blink: Blink::new(who),
+            clusters: [1.0; 2],
         };
         body.follow(present, 0.0, eyes, false);
         for (side, arm) in body.arms.iter_mut().enumerate() {
@@ -986,13 +990,21 @@ pub fn look(cubes: &mut Vec<Cube>, present: &Present, body: &Body, cues: &Cues) 
     );
     let detail = body.detail;
     for mote in MOTES.iter().filter(|mote| mote.from <= detail) {
+        // A hand's cluster gives way to the tracked hand or controller drawn there.
+        let cluster = match mote.part {
+            Part::Hand(side) | Part::Gleam(side) => body.clusters[side],
+            _ => 1.0,
+        };
+        if cluster <= 0.0 {
+            continue;
+        }
         let wave = waves[mote.beat];
         let swing = wave[0] * mote.phase[1] + wave[1] * mote.phase[0];
         let wobble = mote.wobble * swing;
         let glint = glints[mote.shimmer];
         let bright =
             mote.tone * (1.0 + SHIMMER * (glint[0] * mote.glint[1] + glint[1] * mote.glint[0]));
-        let grow = mote.part.grow(detail) * cues.fade;
+        let grow = mote.part.grow(detail) * cues.fade * cluster;
         let mut size = mote.size * grow;
         // How bright and large a cube of the body is, as it is seen, its outside along `out` in the scene.
         let mut lit = |out: Vec3, towards: Vec3, rim: f32| {

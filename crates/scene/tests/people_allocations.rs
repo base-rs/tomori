@@ -2,7 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! A frame with others in the space allocates nothing once everyone is known: their presence heard, whose voices play,
-//! each drawn between their updates as a swarm with their rays, and their hands given to an environment's client side,
+//! each drawn between their updates as a swarm with their rays, their tracked hands' joints and bones and their
+//! controllers, cross-fading as one switches between them, and their hands given to an environment's client side,
 //! each into buffers kept from frame to frame, so that people cost the headset's frame no time in the allocator. Counted
 //! on the test's thread only, so that what the test harness allocates on its own threads meanwhile is not. See
 //! `design/people.md`.
@@ -13,10 +14,11 @@ use std::time::{Duration, Instant};
 use glam::{Quat, Vec3};
 use tomori_client::Event;
 use tomori_client::connection::{Report, Session};
-use tomori_protocol::{Hand, JOINT_COUNT, Joint, Participant, Pose, Ray, ServerMessage};
+use tomori_protocol::{Participant, Pose, Ray, ServerMessage};
 use tomori_scene::anchors::Anchor;
 use tomori_scene::conversation::Conversation;
 use tomori_scene::people::People;
+use tomori_scene::people::hands::{self, Gesture, posed};
 use tomori_scene::relayed::{Others, others};
 use tomori_scene::scene::fixtures::{joined, space};
 
@@ -56,27 +58,28 @@ fn allocated() -> usize {
     ALLOCATED.with(Cell::get)
 }
 
-/// The presence of `source` at `frame`, walking slowly along x, a controller in each hand but for the first, whose hands
-/// are tracked, and the second pointing at something.
+/// The presence of `source` at `frame`, walking slowly along x: the first with both hands tracked, one pointing and the
+/// other open, the third switching between its tracked hands and its controllers every 50 frames, and the others holding
+/// controllers, the second pointing at something.
 fn presence(source: u32, frame: usize) -> Event {
     let x = source as f32 - 3.0 + frame as f32 * 0.002;
     let head = Pose::upright_facing([x, 1.6, -2.0], [x, 1.6, 0.0]);
     let at = |dx: f32| Pose::at([x + dx, 1.2, -1.7]);
-    let tracked = source == 2;
-    let hand = |dx: f32| {
-        let mut joints = [None; JOINT_COUNT];
-        joints[0] = Some(Joint {
-            position: [x + dx, 1.25, -1.7],
-            radius: 0.02,
-        });
-        Hand { joints }
+    let tracked = source == 2 || (source == 4 && (frame / 50).is_multiple_of(2));
+    let hand = |side: usize, dx: f32| {
+        let gesture = if side == 1 {
+            Gesture::Point
+        } else {
+            Gesture::Open
+        };
+        posed(gesture, side, Vec3::new(x + dx, 1.2, -1.7), Quat::IDENTITY)
     };
     Event::Message(ServerMessage::Presence {
         source,
         head,
         left: (!tracked).then(|| at(-0.2)),
         right: (!tracked).then(|| at(0.2)),
-        hands: tracked.then(|| Box::new([Some(hand(-0.2)), Some(hand(0.2))])),
+        hands: tracked.then(|| Box::new([Some(hand(0, -0.2)), Some(hand(1, 0.2))])),
         pointing: (source == 3).then(|| {
             Box::new([
                 None,
@@ -153,8 +156,9 @@ fn a_frame_with_others_in_the_space_allocates_nothing_once_everyone_is_known() {
             assert_eq!(during, 0, "frame {frame} allocated");
         }
     }
-    // Everyone was drawn, in full, with their rays and hands.
+    // Everyone was drawn, in full, with their rays, their tracked hands and their controllers: the first and the third
+    // with both hands, the others with both controllers.
     assert_eq!(people.figures().len(), 4);
-    assert!(cubes > 4 * 250, "{cubes}");
-    assert_eq!((hands.0.len(), hands.1.len()), (3, 3));
+    assert!(cubes > 2 * (399 + hands::HAND) + 2 * 399, "{cubes}");
+    assert_eq!((hands.0.len(), hands.1.len()), (2, 2));
 }

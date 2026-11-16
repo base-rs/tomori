@@ -157,14 +157,24 @@ fn differing(image: &image::RgbaImage, without: &image::RgbaImage) -> (f32, usiz
     (sum / count.max(1) as f32, count)
 }
 
+/// Whether `pixel` is a soft, warm off-white, as the eyes are.
+fn is_off_white(pixel: &image::Rgba<u8>) -> bool {
+    let [r, g, b, _] = pixel.0.map(i32::from);
+    g > 200 && r - g < 30 && b > 170
+}
+
 /// How many of `image`'s pixels are a soft, warm off-white, as the eyes are.
 fn off_white(image: &image::RgbaImage) -> usize {
+    image.pixels().filter(|pixel| is_off_white(pixel)).count()
+}
+
+/// How many of `image`'s pixels are off-white where `without`'s are not: what the people drew so, rather than a lamp
+/// they stand before.
+fn off_white_over(image: &image::RgbaImage, without: &image::RgbaImage) -> usize {
     image
         .pixels()
-        .filter(|pixel| {
-            let [r, g, b, _] = pixel.0.map(i32::from);
-            g > 200 && r - g < 30 && b > 170
-        })
+        .zip(without.pixels())
+        .filter(|(pixel, without)| is_off_white(pixel) && !is_off_white(without))
         .count()
 }
 
@@ -335,19 +345,176 @@ fn the_others_glow_in_the_farmyard_at_dusk_their_eyes_warm_as_they_look_this_way
         let (dusk, _) = differing(&nobody, &image::RgbaImage::new(WIDTH, HEIGHT));
         assert!(count > 4_000, "{count}");
         assert!(lit > dusk * 3.0, "{lit} against {dusk}");
-        // Bob's eyes, a soft off-white, show as he looks this way, and not as he looks at the wall.
-        assert!(
-            off_white(&wide) > off_white(&away),
-            "{} {}",
-            off_white(&wide),
-            off_white(&away)
+        // Bob's eyes, a soft off-white, show as he looks this way, and not as he looks at the wall, whatever of the
+        // lamp behind him his head hides.
+        let (seen, unseen) = (
+            off_white_over(&wide, &nobody),
+            off_white_over(&away, &nobody),
         );
+        assert!(seen > unseen + 40, "{seen} {unseen}");
         assert!(
             off_white(&head) > off_white(&head_away) + 600,
             "{} {}",
             off_white(&head),
             off_white(&head_away)
         );
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// `hand` as the protocol carries it, from the scene's posing of a gesture.
+fn gesture(
+    gesture: tomori_scene::people::hands::Gesture,
+    side: usize,
+    wrist: Vec3,
+    turn: Quat,
+) -> Option<tomori_protocol::Hand> {
+    Some(tomori_scene::people::hands::posed(
+        gesture, side, wrist, turn,
+    ))
+}
+
+#[test]
+fn tracked_hands_are_their_joints_and_bones_and_controllers_small_stylised_ones() {
+    use tomori_scene::people::hands::{CONTROLLER, Gesture, HAND};
+    let wall = tomori_wall();
+    let middle = Vec3::from_array(wall.pose.position);
+    let out = (Quat::from_array(wall.pose.orientation) * Vec3::Z)
+        .with_y(0.0)
+        .normalize();
+    let across = Vec3::Y.cross(out).normalize();
+    let floor = tomori_scene::arrival::HOME.y - 1.6;
+    // Ada stands 3 m out from the wall, a little to Bob's side; Bob and Cleo stand at it, facing her.
+    let eye = (middle + out * 3.0 - across * 0.15).with_y(floor + 1.6);
+    let bob_head = (middle + out * 0.8 - across * 0.55).with_y(floor + 1.68);
+    let cleo_head = (middle + out * 0.75 + across * 0.6).with_y(floor + 1.56);
+    let bob_looking = looking(bob_head, eye);
+    let facing = (eye - bob_head).with_y(0.0).normalize();
+    // Bob points with his right hand out to his side, a little ahead and up, and holds his left up, its palm open
+    // towards Ada, as a wave.
+    let right = facing.cross(Vec3::Y);
+    let right_wrist = bob_head + right * 0.42 + facing * 0.22 - Vec3::Y * 0.22;
+    let pointing = Quat::from_rotation_arc(
+        Vec3::NEG_Z,
+        (right * 0.85 + facing * 0.35 + Vec3::Y * 0.2).normalize(),
+    ) * Quat::from_rotation_z(-0.4);
+    let left_wrist = bob_head + facing * 0.32 - right * 0.32 - Vec3::Y * 0.12;
+    // Fingers up, the palm towards Ada.
+    let (y, z) = (-facing, Vec3::NEG_Y);
+    let waving = Quat::from_mat3(&glam::Mat3::from_cols(y.cross(z), y, z));
+    let hands = [
+        gesture(Gesture::Open, 0, left_wrist, waving),
+        gesture(Gesture::Point, 1, right_wrist, pointing),
+    ];
+    let bob = |hands: Option<[Option<tomori_protocol::Hand>; 2]>| {
+        Event::Message(ServerMessage::Presence {
+            source: 2,
+            head: bob_looking,
+            left: None,
+            right: None,
+            hands: hands.map(Box::new),
+            pointing: None,
+        })
+    };
+    // Cleo holds her controllers out before her, a little turned, as at rest.
+    let cleo_looking = looking(cleo_head, eye);
+    let cleo = Event::Message(ServerMessage::Presence {
+        source: 3,
+        head: cleo_looking,
+        left: held(cleo_looking, Vec3::new(-0.22, -0.45, -0.32)),
+        right: held(cleo_looking, Vec3::new(0.24, -0.4, -0.36)),
+        hands: None,
+        pointing: None,
+    });
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("farmyard hands test eye"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let sceneries = tomori_client_spectator::app::sceneries();
+        let mut renderer =
+            Renderer::with_sceneries(&device, &queue, format, WIDTH, HEIGHT, 4, &sceneries);
+        let mut panels = Panels::new(&device, &renderer);
+        let now = Instant::now();
+        let at = ((bob_head + cleo_head) * 0.5).with_y(floor + 1.3);
+        let mut capture = |others: &[&Event]| {
+            let mut conversation = joined();
+            for event in others {
+                conversation.apply((*event).clone());
+            }
+            let head = glam::camera::rh::view::look_at_mat4(eye, at, Vec3::Y).inverse();
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: controller::Pose::from_transform(head),
+                viewer: Some(eye),
+                space_head: head,
+                trigger: Some(0.0),
+                ..Default::default()
+            };
+            let mut step = Step::default();
+            let mut feedback = Feedback::new(Settings::default());
+            let mut frame = step.update(&senses, &mut conversation, &mut feedback, now, 0.01);
+            for _ in 0..600 {
+                frame = step.update(&senses, &mut conversation, &mut feedback, now, 1.0 / 72.0);
+            }
+            let cubes: Vec<(u32, usize)> = frame
+                .people
+                .iter()
+                .map(|figure| (figure.source, figure.cubes.len()))
+                .collect();
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                0.7,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                80.0,
+            ) * glam::camera::rh::view::look_at_mat4(eye, at, Vec3::Y);
+            renderer.render(
+                &device,
+                &queue,
+                std::slice::from_ref(&view),
+                &[matrix],
+                Mat4::IDENTITY,
+                &panels.list(Mat4::IDENTITY),
+            );
+            (read_back(&device, &queue, &texture), cubes)
+        };
+        let (gesturing, cubes) = capture(&[&bob(Some(hands)), &cleo]);
+        let (hanging, bare) = capture(&[&bob(None), &cleo]);
+        if let Some(path) = std::env::var_os("TOMORI_PEOPLE_HANDS_PREVIEW") {
+            gesturing.save(path).expect("the preview is saved");
+        }
+        // Bob's hands are each its joints and bones, in place of the swarm's clusters at the ends of his arms, and
+        // Cleo's controllers each a small stylised one.
+        let swarm = tomori_scene::people::swarm::MOST;
+        let cluster = 13;
+        assert_eq!(
+            cubes,
+            [
+                (2, swarm - 2 * cluster + 2 * HAND),
+                (3, swarm - 2 * cluster + 2 * CONTROLLER)
+            ]
+        );
+        assert_eq!(bare[0], (2, swarm));
+        // They show: drawn where the hanging hands were not, and glowing against the evening.
+        let (lit, count) = differing(&gesturing, &hanging);
+        let (dusk, _) = differing(&hanging, &image::RgbaImage::new(WIDTH, HEIGHT));
+        assert!(count > 1_500, "{count}");
+        assert!(lit > dusk, "{lit} against {dusk}");
         assert!(pollster::block_on(scope.pop()).is_none());
     });
 }

@@ -332,7 +332,7 @@ fn a_watcher_leaves_out_the_head_it_sees_from_and_draws_the_rest_of_whom_it_foll
     }));
     let mut watcher = clocked();
     let start = Instant::now();
-    let head = crate::people::CUBES - 4;
+    let head = crate::people::swarm::MOST;
     let frame = watcher.watch(camera(), &mut conversation, &mut felt(), start, FRAME);
     assert_eq!(frame.people[0].cubes.len(), head + 1);
     // Following them, it sees from inside their head, which it leaves out, and draws their ray, close as their head is.

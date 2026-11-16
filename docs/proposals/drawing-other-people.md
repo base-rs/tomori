@@ -1,6 +1,6 @@
 # Proposal: Drawing Other People
 
-Status: **proposal, decided**, November 2026. The maintainer agreed with the recommendation and added a gaze cue (see **Decisions**). Nothing here is a requirement until a stage brings it into the design documents it changes (listed at the end), which take precedence.
+Status: **proposal, decided**, November 2026. The maintainer agreed with the recommendation and added a gaze cue (see **Decisions**). Stage 1 and stage 2's hands and controllers are built (`design/people.md`). Nothing here is a requirement until a stage brings it into the design documents it changes (listed at the end), which take precedence.
 
 It builds on presence as the protocol carries it (`design/spaces.md`, `design/clients.md`), the others' hands drawn between their updates for what they hold (#417, `tomori-scene`'s `relayed`, `design/physics.md`), the two rays and when each is shown (`docs/proposals/two-handed-pointing.md`, `design/interaction.md`), names and handles (`design/security.md`), the agent's `presence` tool (`design/mcp.md`), the render world and culling (`design/rendering.md`, `docs/proposals/rendering-architecture.md`), and the spectator's frame step (`design/spectator.md`).
 
@@ -177,6 +177,7 @@ Each stage keeps every test passing, is reviewable alone, and changes nothing fo
    - Tinted joints and bones, the stylised controller, cross-fades.
    - *Others see* in the hand menu, honoured by what is sent.
    - Tests: drawing chooses hand over controller; each setting sends what it says; head-only holding still passes reach checks.
+   - **Built**, after the maintainer, seeing the swarm on the headset, said "I'm also okay if we show people's hands, it's probably useful": a tracked hand is 51 cubes of joints, bones and a palm in the swarm's style, replacing the swarm's cluster, its arm ending at the wrist; a controller 13; cross-fades over 0.2 s, a lost hand dissolving over 0.15 s; and one cluster at the palm beyond 5 m and nothing beyond 15 m.
 3. **Colours, labels and handles.**
    - `Participant::tag`, the palette with deterministic collision, labels with handles where names collide, speaking, away, and the label's lift while someone looks at you.
    - Tests: every client gives every person the same colour for one participant list; an older server's state falls back to `source`; handles show only while shared.
