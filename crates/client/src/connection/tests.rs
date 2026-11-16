@@ -2012,8 +2012,26 @@ mod served {
         let mut bytes = b"glTF".to_vec();
         bytes.extend_from_slice(b"a lantern a connection fetches over TLS");
         let lantern: &'static [u8] = Box::leak(bytes.into_boxed_slice());
-        tomori_assets::Library::shared().add(tomori_assets::Embedded::new().with(lantern));
+        // A texture in both of its forms, of which a device sampling ASTC fetches only that.
+        let texture = |form: &str| -> &'static [u8] {
+            let mut bytes = b"\xabKTX 20\xbb\r\n\x1a\n".to_vec();
+            bytes.extend_from_slice(form.as_bytes());
+            Box::leak(bytes.into_boxed_slice())
+        };
+        let (astc, bc7) = (texture("moss in ASTC"), texture("moss in BC7"));
+        tomori_assets::Library::shared().add(
+            tomori_assets::Embedded::new()
+                .with(lantern)
+                .with(astc)
+                .with(bc7),
+        );
         let digest = tomori_assets::Digest::of(lantern);
+        let served = |name: &str, bytes: &[u8], kind| {
+            tomori_server::ServedAsset::new(
+                tomori_assets::AssetRef::new("garden", 1, name, tomori_assets::Digest::of(bytes)),
+                kind,
+            )
+        };
         let certificate = tomori_security::ServerCertificate::generate();
         let config = certificate
             .server_config()
@@ -2022,9 +2040,21 @@ mod served {
             server
                 .with_tls(config)
                 .with_environments([tomori_server::Environment::new("garden", "Garden")
-                    .with_asset(tomori_server::ServedAsset::new(
-                        tomori_assets::AssetRef::new("garden", 1, "lantern.glb", digest),
+                    // The form not sampled first, so that it would be kept before the rest were it fetched.
+                    .with_asset(served(
+                        "moss.bc7.ktx2",
+                        bc7,
+                        tomori_protocol::ContentKind::Texture,
+                    ))
+                    .with_asset(served(
+                        "lantern.glb",
+                        lantern,
                         tomori_protocol::ContentKind::Model,
+                    ))
+                    .with_asset(served(
+                        "moss.astc.ktx2",
+                        astc,
+                        tomori_protocol::ContentKind::Texture,
                     ))])
         });
         let token = server.issue("Ada", tomori_security::Grant::Owner).1;
@@ -2043,9 +2073,16 @@ mod served {
             Nowhere,
         );
         connection.keep_content_in(Some(root.clone()));
+        connection.sample_textures(Some("astc"));
         connecting(&mut session);
-        let kept = root.join(digest.to_string());
-        until(&mut connection, &mut session, |_, _| kept.exists());
+        let kept = |bytes: &[u8]| {
+            root.join(tomori_assets::Digest::of(bytes).to_string())
+                .exists()
+        };
+        until(&mut connection, &mut session, |_, _| {
+            kept(lantern) && kept(astc)
+        });
+        assert!(!kept(bc7));
         // The program's library reads it from there first.
         let asset = tomori_assets::AssetRef::new("garden", 1, "lantern.glb", digest);
         assert_eq!(

@@ -1,8 +1,9 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Textures decoded from KTX2, ASTC or RGBA, and PNG, with the levels they carry, refused where they are not what they
-//! say or the device cannot sample them, and loaded by digest from the cache onto the GPU.
+//! Textures decoded from KTX2, ASTC, BC7 or RGBA, and PNG, with the levels they carry or mipmaps made, refused where
+//! they are not what they say or the device cannot sample them, loaded by digest from the cache onto the GPU, and kept
+//! for a scenery as they arrive.
 use super::*;
 use crate::test_gpu;
 
@@ -119,19 +120,37 @@ fn png(width: u32, height: u32) -> (Vec<u8>, Vec<u8>) {
 }
 
 const ASTC: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_ASTC;
+const BC: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_BC;
 
 #[test]
-fn a_png_is_decoded_to_rgba_in_srgb_as_one_level() {
+fn a_png_is_decoded_to_rgba_in_srgb_with_its_mipmaps_made_in_linear_light() {
     let (bytes, texels) = png(3, 2);
+    let decoded = decode(&bytes, wgpu::Features::empty()).unwrap();
     assert_eq!(
-        decode(&bytes, wgpu::Features::empty()),
-        Ok(Decoded {
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            width: 3,
-            height: 2,
-            levels: vec![texels],
-        })
+        (decoded.format, decoded.width, decoded.height),
+        (wgpu::TextureFormat::Rgba8UnormSrgb, 3, 2)
     );
+    // Its own texels, then the mean of the four at its corner, as 3 by 2 halves to 1 by 1.
+    assert_eq!(decoded.levels.len(), 2);
+    assert_eq!(decoded.levels[0], texels);
+    assert_eq!(decoded.levels[1].len(), 4);
+    // Black and white average to a fifth of the way in sRGB's bytes, a half in light, and alpha as it is.
+    let checker = [
+        0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 0,
+    ]
+    .to_vec();
+    let levels = mipmaps(wgpu::TextureFormat::Rgba8UnormSrgb, 2, 2, checker.clone());
+    assert_eq!(levels[1], [188, 188, 188, 128]);
+    let levels = mipmaps(wgpu::TextureFormat::Rgba8Unorm, 2, 2, checker);
+    assert_eq!(levels[1], [128, 128, 128, 128]);
+    // A dark sRGB value, on the line near black, keeps its value.
+    let dark = mipmaps(
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        2,
+        1,
+        [5, 5, 5, 255, 5, 5, 5, 255].to_vec(),
+    );
+    assert_eq!(dark[1], [5, 5, 5, 255]);
     // One wider than a texture may be, and one that only begins as a PNG.
     assert_eq!(
         decode(&png(LARGEST + 1, 1).0, wgpu::Features::empty()),
@@ -160,16 +179,37 @@ fn a_ktx2_texture_of_rgba_or_astc_is_decoded_with_the_levels_it_carries() {
         );
         assert_eq!(decoded.levels, rgba(4, 2));
     }
-    // Asking for mipmaps to be made, by no levels, its one is drawn.
-    let mut made = Ktx2::new(37, 4, 2, vec![rgba(4, 2).remove(0)]);
+    // Asking for mipmaps to be made, by no levels, or giving one, they are made.
+    let first = vec![9; 4 * 2 * 4];
+    let made_levels = vec![first.clone(), vec![9; 2 * 4], vec![9; 4]];
+    let mut made = Ktx2::new(37, 4, 2, vec![first]);
+    assert_eq!(
+        decode(&made.bytes(), wgpu::Features::empty())
+            .unwrap()
+            .levels,
+        made_levels
+    );
     made.count = 0;
     assert_eq!(
         decode(&made.bytes(), wgpu::Features::empty())
             .unwrap()
-            .levels
-            .len(),
-        1
+            .levels,
+        made_levels
     );
+    // BC7, linear and sRGB, kept compressed for a device that samples it, refused by one that does not.
+    for (vk_format, format) in [
+        (145, wgpu::TextureFormat::Bc7RgbaUnorm),
+        (146, wgpu::TextureFormat::Bc7RgbaUnormSrgb),
+    ] {
+        let blocks = vec![vec![5; 64], vec![6; 16], vec![7; 16], vec![8; 16]];
+        let bc7 = Ktx2::new(vk_format, 8, 8, blocks.clone()).bytes();
+        let decoded = decode(&bc7, BC).unwrap();
+        assert_eq!((decoded.format, decoded.levels), (format, blocks));
+        assert!(matches!(decode(&bc7, ASTC), Err(Error::Unsupported(_))));
+    }
+    // One compressed level is drawn as it is: its mipmaps are not made.
+    let one = Ktx2::new(146, 8, 8, vec![vec![5; 64]]).bytes();
+    assert_eq!(decode(&one, BC).unwrap().levels.len(), 1);
     // ASTC's 4×4 blocks in sRGB, 8×8 texels and its levels, each block 16 bytes however small the level, kept
     // compressed for a device that samples them.
     let blocks = vec![vec![1; 64], vec![2; 16], vec![3; 16], vec![4; 16]];
@@ -211,6 +251,48 @@ fn a_ktx2_texture_of_rgba_or_astc_is_decoded_with_the_levels_it_carries() {
         })
     );
     assert_eq!(format(185), None);
+    // What the log says as each uploads.
+    let astc = Decoded {
+        format: wgpu::TextureFormat::Astc {
+            block: wgpu::AstcBlock::B4x4,
+            channel: wgpu::AstcChannel::UnormSrgb,
+        },
+        width: 8,
+        height: 8,
+        levels: blocks,
+    };
+    assert_eq!(
+        uploaded(&astc),
+        "Uploaded a texture of ASTC 4×4 in sRGB, 8×8, 4 mip levels, 112 bytes"
+    );
+    let bc7 = Decoded {
+        format: wgpu::TextureFormat::Bc7RgbaUnorm,
+        width: 4,
+        height: 4,
+        levels: vec![vec![0; 16]],
+    };
+    assert_eq!(
+        uploaded(&bc7),
+        "Uploaded a texture of BC7, 4×4, 1 mip levels, 16 bytes"
+    );
+    let rgba = Decoded {
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        ..bc7
+    };
+    assert!(uploaded(&rgba).starts_with("Uploaded a texture of Rgba8Unorm,"));
+}
+
+#[test]
+fn a_device_loads_the_compression_it_samples_astc_first() {
+    assert_eq!(Compression::sampled(ASTC | BC), Some(Compression::Astc));
+    assert_eq!(Compression::sampled(ASTC), Some(Compression::Astc));
+    assert_eq!(Compression::sampled(BC), Some(Compression::Bc7));
+    assert_eq!(Compression::sampled(wgpu::Features::empty()), None);
+    assert_eq!(
+        [Compression::Astc, Compression::Bc7].map(Compression::name),
+        ["astc", "bc7"]
+    );
+    assert!(FEATURES.contains(ASTC | BC));
 }
 
 #[test]
@@ -335,7 +417,7 @@ fn a_texture_is_loaded_by_its_digest_from_the_cache_with_its_levels() {
         assert_eq!(texture.mip_level_count(), 4);
         assert_eq!(texture.format(), wgpu::TextureFormat::Rgba8UnormSrgb);
         assert_eq!((texture.width(), texture.height()), (8, 4));
-        // A PNG, one level.
+        // A PNG, with its mipmaps made.
         let (png, _) = png(5, 3);
         let texture = load(
             &device,
@@ -344,7 +426,7 @@ fn a_texture_is_loaded_by_its_digest_from_the_cache_with_its_levels() {
             Digest::of(&png),
         )
         .unwrap();
-        assert_eq!((texture.mip_level_count(), texture.width()), (1, 5));
+        assert_eq!((texture.mip_level_count(), texture.width()), (3, 5));
         // ASTC, compressed, where the device samples it, as the headset's does, and refused where it does not.
         let astc = Ktx2::new(
             157,
@@ -381,5 +463,88 @@ fn a_texture_is_loaded_by_its_digest_from_the_cache_with_its_levels() {
             Error::TooLarge
         );
         assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}
+
+/// A source that holds what it is given, as a client's cache holds what it fetched once it has.
+#[derive(Default)]
+struct Arriving(std::sync::Mutex<Vec<Vec<u8>>>);
+
+impl Source for Arriving {
+    fn read(&self, asset: &AssetRef, limit: usize) -> Option<Vec<u8>> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|bytes| asset.matches(bytes))
+            .map(|bytes| bytes[..bytes.len().min(limit)].to_vec())
+    }
+}
+
+/// A source holding other bytes than the texture `impostor.ktx2` names.
+struct Impostor;
+
+impl Source for Impostor {
+    fn read(&self, asset: &AssetRef, _: usize) -> Option<Vec<u8>> {
+        (asset.name() == "impostor.ktx2").then(|| b"not the texture".to_vec())
+    }
+}
+
+#[test]
+fn a_scenery_s_textures_are_loaded_as_they_arrive_one_a_frame_and_one_refused_never_again() {
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let arriving = std::sync::Arc::new(Arriving::default());
+        let library = Library::default();
+        library.add(arriving.clone());
+        library.add(Impostor);
+        let ktx2 = |vk_format, fill| {
+            Ktx2::new(
+                vk_format,
+                4,
+                4,
+                vec![vec![fill; 64], vec![fill; 16], vec![fill; 4]],
+            )
+            .bytes()
+        };
+        let (first, second) = (ktx2(43, 1), ktx2(43, 2));
+        // Of a format no device samples, as it says.
+        let broken = Ktx2::new(100, 4, 4, vec![vec![3; 64]]).bytes();
+        let asset = |name: &str, bytes: &[u8]| AssetRef::new("garden", 1, name, Digest::of(bytes));
+        let mut resident = Resident::new([
+            asset("first.ktx2", &first),
+            asset("second.ktx2", &second),
+            asset("broken.ktx2", &broken),
+        ]);
+        // None is here: each is looked for once, in turn, then not until it is due again.
+        for _ in 0..3 {
+            assert!(!resident.poll(&device, &queue, &library));
+        }
+        assert!(!resident.settled());
+        arriving
+            .0
+            .lock()
+            .unwrap()
+            .extend([first.clone(), broken.clone()]);
+        for _ in 3..RETRY_FRAMES {
+            assert!(!resident.poll(&device, &queue, &library));
+        }
+        assert!(resident.get(Digest::of(&first)).is_none());
+        // Due again, one a frame: the first loads, the second is still missing, the broken one is refused.
+        assert!(resident.poll(&device, &queue, &library));
+        assert!(resident.get(Digest::of(&first)).is_some());
+        assert!(!resident.poll(&device, &queue, &library));
+        assert!(!resident.poll(&device, &queue, &library));
+        assert!(resident.get(Digest::of(&broken)).is_none());
+        arriving.0.lock().unwrap().push(second.clone());
+        let mut frames = 0;
+        while !resident.poll(&device, &queue, &library) {
+            frames += 1;
+            assert!(frames <= RETRY_FRAMES);
+        }
+        assert!(resident.get(Digest::of(&second)).is_some());
+        assert!(resident.settled());
+        // Settled, nothing more is looked for.
+        assert!(!resident.poll(&device, &queue, &library));
+        assert!(resident.get(Digest::of(b"never asked for")).is_none());
     });
 }

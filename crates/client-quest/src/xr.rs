@@ -304,6 +304,11 @@ pub fn run(
     );
     renderer.set_tier(tier.tier);
     log::info!("{}", tier.describe());
+    // Textures offered in several compressed forms are fetched only in the one this GPU samples, ASTC on a Quest.
+    connection.sample_textures(
+        tomori_render::textures::Compression::sampled(gpu.device.features())
+            .map(tomori_render::textures::Compression::name),
+    );
     log::info!(
         "Drawing each eye {width}x{height} at {resolution}x the runtime's recommendation, at most {}x{}, {samples}x multisampled, {foveation_summary}, {compositor_summary}",
         views

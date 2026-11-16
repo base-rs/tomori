@@ -2,13 +2,47 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! Textures loaded by digest, as materials name them, from the content store's cache on the device into the GPU: a
-//! KTX2 texture of ASTC blocks kept compressed on a device that samples ASTC, as the Quest's does, or of RGBA; and a
-//! PNG decoded to RGBA; each with the mipmaps it carries, and no others. Nothing samples them yet: the render paths to
-//! come will. See `design/rendering.md`.
-use tomori_assets::{AssetRef, Digest, Source};
+//! KTX2 texture of ASTC blocks kept compressed on a device that samples ASTC, as the Quest's does, of BC7 blocks on one
+//! that samples BC7, as desktops do, or of RGBA; and a PNG decoded to RGBA; each with the mipmaps it carries, or, for
+//! RGBA that carries one level, made from it in linear light as it is loaded. [`Resident`] keeps a scenery's textures
+//! as they arrive. See `design/rendering.md`.
+use tomori_assets::{AssetRef, Digest, Library, Source};
 
-/// The device features loading textures uses where the adapter has them: sampling ASTC, which the headset's GPU does.
-pub const FEATURES: wgpu::Features = wgpu::Features::TEXTURE_COMPRESSION_ASTC;
+/// The device features loading textures uses where the adapter has them: sampling ASTC, which the headset's GPU does,
+/// and BC7, which desktop GPUs do.
+pub const FEATURES: wgpu::Features =
+    wgpu::Features::TEXTURE_COMPRESSION_ASTC.union(wgpu::Features::TEXTURE_COMPRESSION_BC);
+
+/// A block-compressed form a texture is served in, of which a device loads the one it samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Compression {
+    /// ASTC's blocks, which the Quest's GPU samples, and most desktop GPUs do not.
+    Astc,
+    /// BC7, which desktop GPUs sample, and the Quest's does not.
+    Bc7,
+}
+
+impl Compression {
+    /// The form a device with `features` samples, ASTC first, as it is what a headset samples; none if it samples
+    /// neither.
+    pub fn sampled(features: wgpu::Features) -> Option<Self> {
+        if features.contains(wgpu::Features::TEXTURE_COMPRESSION_ASTC) {
+            Some(Self::Astc)
+        } else if features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+            Some(Self::Bc7)
+        } else {
+            None
+        }
+    }
+
+    /// Its name, as a texture's asset names it: `astc` or `bc7`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Astc => "astc",
+            Self::Bc7 => "bc7",
+        }
+    }
+}
 
 /// The most texels a side of a texture, as `tomori-assets` reads a model's.
 pub const LARGEST: u32 = 2048;
@@ -75,7 +109,7 @@ pub fn decode(bytes: &[u8], features: wgpu::Features) -> Result<Decoded, Error> 
     }
 }
 
-/// A PNG, as RGBA in sRGB, one level.
+/// A PNG, as RGBA in sRGB, with its mipmaps made from it.
 fn png(bytes: &[u8]) -> Result<Decoded, Error> {
     let mut reader =
         image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
@@ -88,15 +122,80 @@ fn png(bytes: &[u8]) -> Result<Decoded, Error> {
         error => Error::Invalid(error.to_string()),
     })?;
     let image = image.to_rgba8();
+    let (width, height) = image.dimensions();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     Ok(Decoded {
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        width: image.width(),
-        height: image.height(),
-        levels: vec![image.into_raw()],
+        format,
+        width,
+        height,
+        levels: mipmaps(format, width, height, image.into_raw()),
     })
 }
 
-/// The format of KTX2's `vk_format`, a Vulkan format: RGBA of eight bits a channel, or ASTC's blocks, in linear or sRGB.
+/// Every level of an RGBA texture of `format`, `width` by `height`, from its first, `texels`: each next half the last
+/// down to one texel, each texel the mean of up to four of the last in linear light, its alpha as it is, so that what is
+/// far away does not shimmer.
+pub fn mipmaps(
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    texels: Vec<u8>,
+) -> Vec<Vec<u8>> {
+    let srgb = format.is_srgb();
+    let linear: [f32; 256] = std::array::from_fn(|byte| {
+        let value = byte as f32 / 255.0;
+        if !srgb {
+            value
+        } else if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    let encode = |value: f32, channel: usize| {
+        let value = value.clamp(0.0, 1.0);
+        let encoded = if !srgb || channel == 3 {
+            value
+        } else if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        };
+        (encoded * 255.0).round() as u8
+    };
+    let mut levels = vec![texels];
+    let (mut width, mut height) = (width as usize, height as usize);
+    while width > 1 || height > 1 {
+        let last = levels.last().expect("the first level");
+        let (next_width, next_height) = ((width / 2).max(1), (height / 2).max(1));
+        let mut next = Vec::with_capacity(next_width * next_height * 4);
+        for y in 0..next_height {
+            for x in 0..next_width {
+                for channel in 0..4 {
+                    let mut sum = 0.0;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let at = ((y * 2 + dy).min(height - 1) * width
+                            + (x * 2 + dx).min(width - 1))
+                            * 4
+                            + channel;
+                        sum += if channel == 3 {
+                            f32::from(last[at]) / 255.0
+                        } else {
+                            linear[usize::from(last[at])]
+                        };
+                    }
+                    next.push(encode(sum / 4.0, channel));
+                }
+            }
+        }
+        levels.push(next);
+        (width, height) = (next_width, next_height);
+    }
+    levels
+}
+
+/// The format of KTX2's `vk_format`, a Vulkan format: RGBA of eight bits a channel, BC7's blocks, or ASTC's, in linear
+/// or sRGB.
 fn format(vk_format: u32) -> Option<wgpu::TextureFormat> {
     use wgpu::{AstcBlock, AstcChannel, TextureFormat};
     const BLOCKS: [AstcBlock; 14] = [
@@ -119,6 +218,9 @@ fn format(vk_format: u32) -> Option<wgpu::TextureFormat> {
         // VK_FORMAT_R8G8B8A8_UNORM and VK_FORMAT_R8G8B8A8_SRGB.
         37 => Some(TextureFormat::Rgba8Unorm),
         43 => Some(TextureFormat::Rgba8UnormSrgb),
+        // VK_FORMAT_BC7_UNORM_BLOCK and VK_FORMAT_BC7_SRGB_BLOCK.
+        145 => Some(TextureFormat::Bc7RgbaUnorm),
+        146 => Some(TextureFormat::Bc7RgbaUnormSrgb),
         // VK_FORMAT_ASTC_4x4_UNORM_BLOCK to VK_FORMAT_ASTC_12x12_SRGB_BLOCK, each block's linear then its sRGB.
         157..=184 => {
             let index = vk_format - 157;
@@ -146,7 +248,8 @@ pub fn layout(format: wgpu::TextureFormat, width: u32, height: u32) -> (u32, u32
 }
 
 /// A KTX2 texture: one 2D image, not supercompressed, of a [`format`] the device samples, with its levels as it gives
-/// them, each where it says and as long as its size makes it.
+/// them, each where it says and as long as its size makes it; RGBA of one level, asking for its mipmaps to be made or
+/// not, with them made.
 fn ktx2(bytes: &[u8], features: wgpu::Features) -> Result<Decoded, Error> {
     let invalid = |why: &str| Error::Invalid(why.into());
     // Its header, the identifier and 68 bytes after it, before its index of levels.
@@ -180,7 +283,7 @@ fn ktx2(bytes: &[u8], features: wgpu::Features) -> Result<Decoded, Error> {
             "the device cannot sample {format:?}"
         )));
     }
-    // Zero levels asks for mipmaps to be made, which loading does not: its one level is drawn.
+    // Zero levels asks for mipmaps to be made, which are made below for RGBA, as they are for one level of it.
     let count = count.max(1);
     if count > 32 - width.max(height).leading_zeros() {
         return Err(invalid("it has more levels than its size halves to"));
@@ -205,7 +308,11 @@ fn ktx2(bytes: &[u8], features: wgpu::Features) -> Result<Decoded, Error> {
                 .map(<[u8]>::to_vec)
                 .ok_or_else(|| invalid("a level lies outside it"))
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
+    let levels = match levels.as_slice() {
+        [level] if !format.is_compressed() => mipmaps(format, width, height, level.clone()),
+        _ => levels,
+    };
     Ok(Decoded {
         format,
         width,
@@ -214,7 +321,8 @@ fn ktx2(bytes: &[u8], features: wgpu::Features) -> Result<Decoded, Error> {
     })
 }
 
-/// Upload `decoded` as a texture to sample, with each of its levels.
+/// Upload `decoded` as a texture to sample, with each of its levels, saying so in the log for one that is compressed,
+/// so that a device's log shows what it uploaded as ASTC or BC7.
 pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, decoded: &Decoded) -> wgpu::Texture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Material texture"),
@@ -251,7 +359,34 @@ pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, decoded: &Decoded) -> 
             size.physical_size(decoded.format),
         );
     }
+    if decoded.format.is_compressed() {
+        log::info!("{}", uploaded(decoded));
+    }
     texture
+}
+
+/// What the log says of `decoded` as it is uploaded: its format, its size, its levels and its bytes.
+fn uploaded(decoded: &Decoded) -> String {
+    let (block_width, block_height) = decoded.format.block_dimensions();
+    let kind = match decoded.format {
+        wgpu::TextureFormat::Astc { .. } => format!("ASTC {block_width}×{block_height}"),
+        wgpu::TextureFormat::Bc7RgbaUnorm | wgpu::TextureFormat::Bc7RgbaUnormSrgb => {
+            "BC7".to_owned()
+        }
+        format => format!("{format:?}"),
+    };
+    format!(
+        "Uploaded a texture of {kind}{}, {}×{}, {} mip levels, {} bytes",
+        if decoded.format.is_srgb() {
+            " in sRGB"
+        } else {
+            ""
+        },
+        decoded.width,
+        decoded.height,
+        decoded.levels.len(),
+        decoded.levels.iter().map(Vec::len).sum::<usize>()
+    )
 }
 
 /// The texture `digest` names, read from `cache`, the content store's cache on the device, decoded for `device` and
@@ -268,6 +403,100 @@ pub fn load(
         .filter(|bytes| bytes.len() > BYTES || asset.matches(bytes))
         .ok_or(Error::Missing)?;
     Ok(upload(device, queue, &decode(&bytes, device.features())?))
+}
+
+/// How many frames a texture that no source has yet is looked for again after: two seconds at 72 Hz.
+pub const RETRY_FRAMES: u32 = 144;
+
+/// What became of one of a scenery's textures.
+#[derive(Debug)]
+enum State {
+    /// No source has it yet: looked for again in this many frames; and whether the log said so.
+    Waiting(u32, bool),
+    Loaded(wgpu::TextureView),
+    /// A source has it, but it cannot be loaded, as on a device that cannot sample its format: never looked for again.
+    Refused,
+}
+
+/// The textures a scenery draws, by asset, loaded from the program's library as they arrive in its sources, such as
+/// the client's cache of what its server serves: at most one a frame, each that no source has yet looked for again every
+/// [`RETRY_FRAMES`], and one that cannot be loaded never again. Until one is loaded, what it is for is drawn without it.
+/// A frame once each is loaded or refused, or with none due, allocates nothing.
+pub struct Resident {
+    textures: Vec<(AssetRef, State)>,
+}
+
+impl Resident {
+    /// `assets`, none loaded, each to be looked for at the next [`Self::poll`] in turn.
+    pub fn new(assets: impl IntoIterator<Item = AssetRef>) -> Self {
+        Self {
+            textures: assets
+                .into_iter()
+                .map(|asset| (asset, State::Waiting(0, false)))
+                .collect(),
+        }
+    }
+
+    /// Once a frame: look for the first texture due, in `library`, and load it for `device`, saying whether it loaded
+    /// one; refused, the log says why, and missing, the log says so once.
+    pub fn poll(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, library: &Library) -> bool {
+        let mut due = None;
+        for (index, (_, state)) in self.textures.iter_mut().enumerate() {
+            if let State::Waiting(frames, _) = state {
+                *frames = frames.saturating_sub(1);
+                if *frames == 0 && due.is_none() {
+                    due = Some(index);
+                }
+            }
+        }
+        let Some(index) = due else {
+            return false;
+        };
+        let (asset, state) = &mut self.textures[index];
+        let said = matches!(state, State::Waiting(_, true));
+        *state = match library.bytes(asset) {
+            Err(error) if error.kind() == tomori_assets::ErrorKind::Missing => {
+                if !said {
+                    log::info!(
+                        "Texture {} is not here yet, so what it is for is drawn without it until it is",
+                        asset.path()
+                    );
+                }
+                State::Waiting(RETRY_FRAMES, true)
+            }
+            Err(error) => {
+                log::warn!("Texture {} is not loaded: {error}", asset.path());
+                State::Refused
+            }
+            Ok(bytes) => match decode(&bytes, device.features()) {
+                Ok(decoded) => {
+                    let texture = upload(device, queue, &decoded);
+                    State::Loaded(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+                }
+                Err(error) => {
+                    log::warn!("Texture {} is not loaded: {error}", asset.path());
+                    State::Refused
+                }
+            },
+        };
+        matches!(self.textures[index].1, State::Loaded(_))
+    }
+
+    /// The texture `digest` names, if it is loaded.
+    pub fn get(&self, digest: Digest) -> Option<&wgpu::TextureView> {
+        self.textures.iter().find_map(|(asset, state)| match state {
+            State::Loaded(view) if asset.digest() == digest => Some(view),
+            _ => None,
+        })
+    }
+
+    /// Whether each texture is loaded or refused, so that none is looked for again.
+    pub fn settled(&self) -> bool {
+        !self
+            .textures
+            .iter()
+            .any(|(_, state)| matches!(state, State::Waiting(..)))
+    }
 }
 
 #[cfg(test)]

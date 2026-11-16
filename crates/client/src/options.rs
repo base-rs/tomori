@@ -183,6 +183,10 @@ pub struct Options {
     /// its asset library first, `tomori_assets::Library::shared().add_first(cache.clone())`, so that what it fetched is
     /// what it reads, and what it bundles is the fallback. See `design/clients.md`.
     pub content: Option<std::sync::Arc<tomori_assets::Cache>>,
+    /// The compressed form of texture the device samples, such as `astc` on a headset or `bc7` on a desktop, so that a
+    /// texture offered in several forms, each named for its form, `NAME.FORM.ktx2`, is fetched only in that one; or
+    /// `None`, the default, which fetches every form. See `design/content.md`.
+    pub textures: Option<&'static str>,
 }
 
 /// Written without the participant identity or the token, which are secrets, so that logging options cannot reveal them.
@@ -214,6 +218,7 @@ impl std::fmt::Debug for Options {
             .field("spawns", &self.spawns)
             .field("limits", &self.limits)
             .field("content", &self.content)
+            .field("textures", &self.textures)
             .finish()
     }
 }
@@ -246,6 +251,7 @@ impl Options {
             spawns: false,
             limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
             content: None,
+            textures: None,
         }
     }
 }
