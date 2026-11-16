@@ -5,7 +5,7 @@
 //!
 //! A real GPU is preferred, and a software adapter such as Mesa's lavapipe is used when there is none, as on CI runners. Where there is no adapter at all, the test is skipped with a message on standard error, unless `TOMORI_REQUIRE_GPU` is set to anything but `0` or the empty string, as CI sets it, so that a missing driver fails the tests rather than silently skipping them.
 //!
-//! Every test in a test binary shares one instance, adapter and device, which are created by the first test to ask and are never dropped. Tests run on parallel threads, and before version 1.4.346 the Vulkan loader looked up a device, when one thread named an object, without the lock that another thread held while creating or destroying a device, and so read freed memory. wgpu names objects through `VK_EXT_debug_utils` in debug builds, and Ubuntu 26.04's loader, 1.4.341, crashed CI's rendering tests with SIGSEGV this way about half of the time. See <https://github.com/KhronosGroup/Vulkan-Loader/issues/1863>, fixed by <https://github.com/KhronosGroup/Vulkan-Loader/pull/1866>. With one device, nothing creates or destroys a device while tests run, and nothing is torn down at process exit. Error scopes are per thread, so tests on the same device do not see each other's errors.
+//! Every test in a test binary shares one instance, adapter and device, which are created by the first test to ask and are never dropped. Tests run on parallel threads, and before version 1.4.346 the Vulkan loader looked up a device, when one thread named an object, without the lock that another thread held while creating or destroying a device, and so read freed memory. wgpu names objects through `VK_EXT_debug_utils` in debug builds, and Ubuntu 26.04's loader, 1.4.341, crashed CI's rendering tests with SIGSEGV this way about half of the time. See <https://github.com/KhronosGroup/Vulkan-Loader/issues/1863>, fixed by <https://github.com/KhronosGroup/Vulkan-Loader/pull/1866>. With one device, nothing creates or destroys a device while tests run, and nothing is torn down at process exit. [`with`] waits for the device to finish each test's work before returning, so that nothing is executing either as the process exits. Error scopes are per thread, so tests on the same device do not see each other's errors.
 use std::io::Write;
 use std::sync::OnceLock;
 
@@ -99,13 +99,28 @@ fn found(gpu: &Result<Gpu, String>, required: Option<&str>) -> Option<Gpu> {
     }
 }
 
-/// Runs `test` with the binary's shared GPU, as [`open`] gives it, and returns what it returns; or skips it, returning `None`, where there is no adapter.
+/// Waits, when dropped, until the device has finished all the work submitted to it, as [`with`] does after each test, whether it returned or panicked.
+struct Idle(wgpu::Device);
+
+impl Drop for Idle {
+    fn drop(&mut self) {
+        // Ignored rather than unwrapped, so that a test panicking with work in flight reports its own panic rather than aborting.
+        let _ = self.0.poll(wgpu::PollType::wait_indefinitely());
+    }
+}
+
+/// Runs `test` with the binary's shared GPU, as [`open`] gives it, and returns what it returns once the GPU has finished the work it submitted; or skips it, returning `None`, where there is no adapter.
+///
+/// A test may submit work and return without waiting for it, as one that only checks a frame draws without validation errors does. Under cargo-nextest each test is a process of its own, which exits as soon as the test returns; lavapipe executes submissions on a thread of its own, where llvmpipe compiles shaders with LLVM as it draws, and when the process exited with a draw still executing, the exit's static destructors tore down LLVM's state beneath that thread, which crashed with SIGSEGV after the test had passed (once on CI, in `tomori-assets`'s avatar test, and about once in a hundred runs locally under load, LLVM asserting `get() != pointer()` on its `MCSubtargetInfo` in `MCJIT::emitObject` while the main thread was in `exit`). Waiting for the device to be idle before returning leaves nothing executing as the test ends.
 ///
 /// # Panics
 ///
 /// As [`open`] does.
 pub fn with<T>(test: impl FnOnce(Gpu) -> T) -> Option<T> {
-    open().map(test)
+    open().map(|gpu| {
+        let _idle = Idle(gpu.device.clone());
+        test(gpu)
+    })
 }
 
 /// What `renderer`, made for targets of `width` by `height` in `format`, draws in each eye from `matrices`, carrying the
