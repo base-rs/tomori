@@ -19,6 +19,7 @@ fn heard(x: f32, reports: u64) -> Heard {
         hands: [None, None],
         pointing: [None, None],
         reports,
+        hidden: false,
     }
 }
 
@@ -557,4 +558,47 @@ fn a_ray_between_updates_turns_and_reaches_between_and_whatever_one_lacks_is_the
     assert!((left[0].unwrap().position.x - 0.5).abs() < 1e-6);
     assert!((left[0].unwrap().radius - 0.015).abs() < 1e-6);
     assert_eq!(right[1], None);
+}
+
+#[test]
+fn someone_who_asks_not_to_be_drawn_is_not_and_still_holds_what_they_hold() {
+    let start = Instant::now();
+    let mut people = People::default();
+    let (bob, mut ada) = (heard(1.0, 0), heard(-1.0, 0));
+    ada.hidden = true;
+    people.update(start, FRAME, 0, [(2, &bob), (3, &ada)], Some(AWAY), None);
+    // Bob is drawn, and nothing of Ada, who chose that others see her name only.
+    assert_eq!(shown(&people), [(2, 1.0)]);
+    // Her presence is still followed, for what an environment's client side draws her holding.
+    assert_eq!(
+        people
+            .drawn()
+            .iter()
+            .map(|(source, _)| *source)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert!(people.drawn()[1].1.hidden);
+    // Leaving, she is not drawn fading either.
+    people.update(
+        start + Duration::from_millis(20),
+        FRAME,
+        0,
+        [(2, &bob)],
+        Some(AWAY),
+        None,
+    );
+    assert_eq!(shown(&people), [(2, 1.0)]);
+    // Drawn again once she lets them.
+    ada.hidden = false;
+    ada.reports = 1;
+    people.update(
+        start + Duration::from_millis(40),
+        FRAME,
+        0,
+        [(2, &bob), (3, &ada)],
+        Some(AWAY),
+        None,
+    );
+    assert_eq!(shown(&people), [(2, 1.0), (3, 1.0)]);
 }

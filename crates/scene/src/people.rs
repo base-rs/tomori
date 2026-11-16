@@ -9,7 +9,7 @@
 //! where they last were as they leave, and fainter close to the eyes. Someone whose head faces this participant's warms
 //! their eyes, so that eye contact reads in conversation, and someone whose voice plays quickens the orbit about their
 //! head. Their tracked hands are drawn as joints and bones, and controllers no hand tracks as small stylised ones
-//! (`hands`). See `design/people.md`.
+//! (`hands`). Someone who asked not to be drawn, choosing *my name only*, is not. See `design/people.md`.
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -68,6 +68,8 @@ pub struct Heard {
     pub hands: [Option<tomori_protocol::Hand>; 2],
     /// Their rays drawn in full on their headset, left then right.
     pub pointing: tomori_protocol::Pointing,
+    /// They asked the others not to draw them, choosing *my name only*.
+    pub hidden: bool,
     pub reports: u64,
 }
 
@@ -100,13 +102,14 @@ impl Ray {
 }
 
 /// Someone's whole presence as it is drawn between its updates, in the space's scene coordinates: their head, their
-/// controllers, their tracked hands and their rays, each left then right.
+/// controllers, their tracked hands and their rays, each left then right, and whether they asked not to be drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Present {
     pub head: Hand,
     pub controllers: [Option<Hand>; 2],
     pub joints: [Option<Joints>; 2],
     pub pointing: [Option<Ray>; 2],
+    pub hidden: bool,
 }
 
 /// `pose` as it is drawn, if it is finite and within reach and has a rotation, made unit.
@@ -149,6 +152,7 @@ impl Present {
             controllers: heard.controllers.map(|pose| pose.as_ref().and_then(placed)),
             joints: [joints(&heard.hands[0]), joints(&heard.hands[1])],
             pointing: [ray(&heard.pointing[0]), ray(&heard.pointing[1])],
+            hidden: heard.hidden,
         })
     }
 }
@@ -196,6 +200,7 @@ impl Between for Present {
             pointing: std::array::from_fn(|index| {
                 either(self.pointing[index], will.pointing[index], ray)
             }),
+            hidden: will.hidden,
         }
     }
 
@@ -451,7 +456,7 @@ fn gazes(head: &Hand, eyes: Option<Vec3>, gazing: bool) -> bool {
 
 /// Draw `present`, of `source`, with their body and hands, into `figures` at `index`, as `cues` say, with their look
 /// unless theirs is the head a watcher sees from, `shown` false: saying how many figures it drew, none where nothing of
-/// it shows.
+/// it shows, as for someone who asked not to be drawn.
 fn figure(
     figures: &mut Vec<Figure>,
     index: usize,
@@ -461,6 +466,9 @@ fn figure(
     cues: swarm::Cues,
     shown: bool,
 ) -> usize {
+    if present.hidden {
+        return 0;
+    }
     let middle = present.head.position + present.head.orientation * swarm::MIDDLE;
     // Fainter close to the eyes, and not drawn at all closer still; but for the one a watcher sees from, whose look is
     // left out and whose rays are drawn whole, close as their head is to its eyes.

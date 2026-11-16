@@ -771,7 +771,7 @@ impl Connection {
         self.voice.request_permission()
     }
 
-    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them, the panels they are carrying, `carried`, one in each hand at most, so that the space's agent leaves them in their hands, which of their rays are shown, `rays`, left then right, and each drawn in full, `pointing`, from its aim, which the others draw and the space's agent is told what it points at from. `pointing` is sent whenever a ray is shown, so that the server knows it from an older client's. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays the poses to the other participants. Without a connection, nothing is sent.
+    /// Report this participant's head, controllers and hands to the server, so the others in the space can render them, the panels they are carrying, `carried`, one in each hand at most, so that the space's agent leaves them in their hands, which of their rays are shown, `rays`, left then right, and each drawn in full, `pointing`, from its aim, which the others draw and the space's agent is told what it points at from, and whether they ask the others not to draw them, `hidden`. `pointing` is sent whenever a ray is shown, so that the server knows it from an older client's. The poses are in the space's scene coordinates. The client coalesces these to the latest, and the server relays the poses to the other participants. Without a connection, nothing is sent.
     #[allow(clippy::too_many_arguments)]
     pub fn send_presence(
         &mut self,
@@ -782,6 +782,7 @@ impl Connection {
         carried: &[String],
         rays: [bool; 2],
         pointing: tomori_protocol::Pointing,
+        hidden: bool,
     ) {
         let Some(client) = &self.client else {
             return;
@@ -796,6 +797,7 @@ impl Connection {
             carried: carried.to_vec(),
             rays: Some(rays),
             pointing: rays.contains(&true).then(|| Box::new(pointing)),
+            hidden,
         };
         // The client is open while it is kept, and the server relays only the latest presence, so nothing is lost by a send that fails.
         let _ = client.send(message);

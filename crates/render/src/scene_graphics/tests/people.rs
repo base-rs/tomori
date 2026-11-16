@@ -42,6 +42,7 @@ impl Someone {
             right: self.controllers[1],
             hands: None,
             pointing: self.ray.map(|ray| Box::new([None, Some(ray)])),
+            hidden: false,
         })
     }
 

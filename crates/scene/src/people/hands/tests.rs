@@ -36,6 +36,7 @@ fn present(gesture: Option<Gesture>, controller: bool) -> Present {
             gesture.map(|gesture| joints(&posed(gesture, 1, WRIST_AT, Quat::IDENTITY))),
         ],
         pointing: [None, None],
+        hidden: false,
     }
 }
 
@@ -327,6 +328,7 @@ fn hands_are_drawn_in_the_swarm_of_someone_heard_tracking_them() {
             Some(posed(Gesture::Open, 1, WRIST_AT, Quat::IDENTITY)),
         ],
         pointing: [None, None],
+        hidden: false,
         reports: 0,
     };
     people.update(now, FRAME, 0, [(2, &heard)], EYES, None);

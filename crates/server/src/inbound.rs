@@ -251,6 +251,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         };
         let presence = Frame::client(&presence).payload.len();
         let audio = Frame::audio(&AudioFrame {

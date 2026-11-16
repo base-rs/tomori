@@ -170,6 +170,7 @@ fn a_ping_or_pong_changes_nothing_and_presence_keeps_only_the_others_right_hands
         right: Some(tomori_protocol::Pose::HOME),
         hands: None,
         pointing: None,
+        hidden: false,
     }));
     assert!(lobby.people.is_empty());
 }
@@ -4723,6 +4724,7 @@ fn the_sound_section_steps_and_keeps_the_feedback_setting() {
         vibration: Level::Reduced,
         mono: false,
         ambience: feedback::Ambience::Low,
+        others_see: Default::default(),
     };
     conversation.set_feedback(kept);
     assert_eq!(conversation.menu_model().feedback, kept);
@@ -4763,6 +4765,26 @@ fn the_sound_section_steps_and_keeps_the_feedback_setting() {
     assert_eq!(
         conversation.menu_model().feedback.ambience,
         feedback::Ambience::Medium
+    );
+    // What the others see steps from everything to the head only, the name only and back, and is kept each time.
+    let mut kept = Vec::new();
+    for _ in 0..3 {
+        conversation.choose_menu(crate::hand_menu::Choice::OthersSee);
+        kept.extend(conversation.take_actions());
+    }
+    let seeing = |others_see| {
+        Action::SetFeedback(Settings {
+            others_see,
+            ..medium
+        })
+    };
+    assert_eq!(
+        kept,
+        [
+            seeing(feedback::OthersSee::Head),
+            seeing(feedback::OthersSee::Name),
+            seeing(feedback::OthersSee::Everything),
+        ]
     );
 }
 

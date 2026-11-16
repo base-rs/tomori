@@ -282,6 +282,7 @@ fn main() {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         });
 
         // A periodic ping keeps the client side of the connection alive too.

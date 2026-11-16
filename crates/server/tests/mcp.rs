@@ -1508,6 +1508,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let bob_head = [1.5, 1.7, 1.5];
     bob.send(&ClientMessage::Presence {
@@ -1519,6 +1520,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     // A visitor's presence is refused, and reaches nobody.
     vic.send(&ClientMessage::Presence {
@@ -1530,6 +1532,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     assert!(!vic.error().is_empty());
     bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
@@ -1589,6 +1592,7 @@ fn presence_says_where_everyone_in_the_space_is_and_what_they_look_at_to_its_age
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let looked = eventually(|| {
         let seen = presence(&session);
@@ -1660,6 +1664,7 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     // Ada's report reaches the hub over her own connection, apart from the agent's calls, so wait until the agent is told where she looks before asking it to move anything there.
     eventually(|| {
@@ -1851,6 +1856,7 @@ fn the_agent_moves_a_panel_near_someone_or_where_they_look_even_one_put_by_hand_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     };
     ada.send(&carrying(Some(&build)));
     let refused = eventually(|| {
@@ -2072,6 +2078,7 @@ fn the_agent_floats_panels_and_images_beside_someone_by_their_name_or_handle() {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let presence =
         || call(&server, &token, caller, "presence", json!({}))["structuredContent"].clone();
@@ -2221,6 +2228,7 @@ fn the_agent_adds_changes_and_removes_walls_for_everyone_naming_this_wall_by_whe
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let tool =
         |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
@@ -2430,6 +2438,7 @@ fn the_agent_snaps_a_wall_beside_another_into_a_group_and_takes_it_out_again() {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let tool =
         |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
@@ -2572,6 +2581,7 @@ fn the_agent_builds_a_layout_of_walls_in_one_step_fills_its_slots_and_takes_it_d
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let tool =
         |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
@@ -2822,6 +2832,7 @@ fn the_agent_gives_a_wall_slots_of_any_shape_by_their_aspect_or_their_size_in_me
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let tool =
         |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
@@ -3028,6 +3039,7 @@ fn the_wall_tools_refuse_arguments_they_cannot_take_and_sessions_bound_to_no_spa
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let tool =
         |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);
@@ -3202,6 +3214,7 @@ fn the_agent_tilts_a_wall_someone_looks_at_and_makes_a_big_wall_stand_as_far_as_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     let tool =
         |name: &str, arguments: Value| call(&server, &token, Some(&session), name, arguments);

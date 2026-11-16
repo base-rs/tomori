@@ -623,6 +623,7 @@ mod tests {
             right: None,
             hands: None,
             pointing: None,
+            hidden: false,
         }
     }
 

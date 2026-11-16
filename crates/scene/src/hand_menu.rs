@@ -14,7 +14,7 @@ use crate::controller;
 use crate::hands::Hand;
 use crate::panel::{Area, Plane, Rect};
 use crate::ui_text::{CELL_WIDTH, Span, Style, clip, cut, drawn, lines, plain};
-use tomori_client::feedback::Hand as Side;
+use tomori_client::feedback::{Hand as Side, OthersSee};
 
 /// Shown after a visitor's display name wherever others see it, as on a knock: the name is the one their device suggested or they chose, with no token behind it, so nothing vouches for it. See `design/security.md`.
 pub const VISITOR: &str = " (visitor)";
@@ -262,6 +262,8 @@ pub enum MenuKey {
     Mono,
     /// Step the ambience's level to the next.
     Ambience,
+    /// Step what the others in a space see of this participant to the next.
+    OthersSee,
     /// A row that is only read, by its place.
     Text(usize),
     /// The cue on the wrist.
@@ -455,6 +457,8 @@ pub enum Choice {
     Mono,
     /// Step the ambience's level to the next.
     Ambience,
+    /// Step what the others in a space see of this participant to the next: everything, the head only or the name only.
+    OthersSee,
 }
 
 /// One row of the menu.
@@ -1066,6 +1070,23 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     },
                 );
             }
+            // What the others see of this participant, on this device, and in a line what that means; one row each,
+            // whichever it is, so that choosing it moves no row. See `design/people.md`.
+            button(
+                &mut items,
+                MenuKey::OthersSee,
+                format!("Others see: {}", model.feedback.others_see.label()),
+            );
+            text(
+                &mut items,
+                MenuKind::Text,
+                match model.feedback.others_see {
+                    OthersSee::Everything => "Your head, hands and rays",
+                    OthersSee::Head => "Your head; not your hands or rays",
+                    OthersSee::Name => "Hides you from view, not the server",
+                }
+                .into(),
+            );
             if model.in_space {
                 if model.people.is_empty() {
                     let here = if model.participants.is_empty() {
@@ -1251,6 +1272,7 @@ impl HandMenu {
             MenuKey::Vibration => Some(Choice::Vibration),
             MenuKey::Mono => Some(Choice::Mono),
             MenuKey::Ambience => Some(Choice::Ambience),
+            MenuKey::OthersSee => Some(Choice::OthersSee),
             MenuKey::Knock => Some(Choice::Knock),
             MenuKey::Admit(id) => Some(Choice::Admit(id.clone())),
             MenuKey::Decline(id) => Some(Choice::Decline(id.clone())),

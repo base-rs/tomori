@@ -360,6 +360,7 @@ fn an_update_by_the_tool_moves_a_panel_only_where_place_says_and_never_one_put_b
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     };
     ada.send(&carrying(Some(&todo.id)));
     let held = eventually(|| {

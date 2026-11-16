@@ -628,6 +628,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         }
     }
 
@@ -723,6 +724,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         });
         // Cy travelled to stand 1 m in front of her, as she now faces.
         let ahead = head + Quat::from_array(orientation) * -Vec3::Z;
@@ -738,6 +740,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         });
         let seen = until(&mut feed, |feed| {
             feed.following.is_some() && feed.connection.placed().position(cy_source).is_some()

@@ -159,6 +159,8 @@ pub struct Presence {
     /// Each ray drawn in full, left then right, from its aim, which the others draw and the space's agent is told what
     /// it points at from: never a stub, the hand menu's ray or a teleport's aim. See `design/people.md`.
     pub pointing: tomori_protocol::Pointing,
+    /// They ask the others not to draw them, having chosen that others see their name only.
+    pub hidden: bool,
 }
 
 impl Presence {
@@ -172,6 +174,7 @@ impl Presence {
             &self.carried,
             self.rays,
             self.pointing,
+            self.hidden,
         );
     }
 }
@@ -2942,21 +2945,28 @@ impl Step {
                 .filter(|beam| !own && (beam.hit || self.hands[side].full))
                 .and_then(|beam| beam.sent())
         });
-        // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates, and the server alone the panels they carry and which rays they show. Visitors send no presence; see `design/security.md`.
+        // The others in a space see this participant's head, controllers and hands, in the space's scene coordinates, and the server alone the panels they carry and which rays they show. Visitors send no presence; see `design/security.md`. Choosing that the others see their head only, or their name only, sends their head alone, with no controllers, hands or rays, so that what they hold follows their head, as for a client with no hands; their name only also asks the others not to draw them. See `design/people.md`.
+        let others_see = conversation.feedback().others_see;
+        let hands = others_see.hands();
         let presence = senses
             .head_pose
             .filter(|_| conversation.role().participates())
             .map(|head| Presence {
                 head,
-                left: senses.controllers[crate::controller::LEFT],
-                right: senses.controllers[crate::controller::RIGHT],
-                hands: senses.hands,
+                left: senses.controllers[crate::controller::LEFT].filter(|_| hands),
+                right: senses.controllers[crate::controller::RIGHT].filter(|_| hands),
+                hands: if hands { senses.hands } else { [None, None] },
                 carried: Side::BOTH
                     .into_iter()
                     .filter_map(|side| self.projector.held_in(side).map(str::to_owned))
                     .collect(),
-                rays: [ray_shown.left, ray_shown.right],
-                pointing: [pointing.left, pointing.right],
+                rays: [ray_shown.left && hands, ray_shown.right && hands],
+                pointing: if hands {
+                    [pointing.left, pointing.right]
+                } else {
+                    [None, None]
+                },
+                hidden: others_see.hidden(),
             });
         // Arrival hides the panel; entering a space places it in front of the participant again.
         if in_arrival {

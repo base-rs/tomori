@@ -284,6 +284,46 @@ fn a_stick_let_go_falls_and_comes_to_rest_where_it_lies_as_toasted_as_it_was() {
     );
 }
 
+#[test]
+fn someone_who_lets_others_see_their_head_only_takes_holds_and_lets_go_within_reach_of_it() {
+    // A headset whose participant chose that others see their head only sends no controllers, hands or rays (see
+    // `design/people.md`): the side sees their head alone, as from the desktop, and checks reach from it.
+    let now = Instant::now();
+    let mut sticks = Sticks::new(now);
+    let handle = at_handle(&sticks, 0);
+    let head_only = |head: Vec3, at| {
+        Presence::new(
+            3,
+            tomori_protocol::Pose::at(head.to_array()),
+            None,
+            None,
+            at,
+        )
+    };
+    let beside = handle.position + Vec3::new(0.0, 0.5, 0.4);
+    let epoch = sticks.world().epoch(campsite::body(0)).unwrap();
+    // Not from across the clearing.
+    let far = head_only(beside + Vec3::X * 6.0, now);
+    sticks.ask(3, &take(0, epoch), std::slice::from_ref(&far));
+    assert_eq!(sticks.world().held(campsite::body(0)), None);
+    // From beside it, as their hand reaches, taken.
+    let ada = head_only(beside, now);
+    assert!(sticks.ask(3, &take(0, epoch), std::slice::from_ref(&ada)));
+    assert_eq!(
+        sticks.world().held(campsite::body(0)).map(|held| held.by),
+        Some(3)
+    );
+    // Held before their head, as the side draws it for a client with no hands, and let go within reach of it.
+    let (_, later) = run(&mut sticks, std::slice::from_ref(&ada), now, 0.5);
+    let at = Placement::at(beside + Vec3::new(0.0, -0.4, -0.5));
+    assert!(sticks.ask(
+        3,
+        &let_go(0, epoch + 1, at, [0.5, 0.0, 0.0]),
+        &[head_only(beside, later)]
+    ));
+    assert_eq!(sticks.world().held(campsite::body(0)), None);
+}
+
 /// Move `sticks` on from `now`, the farmyard's clock at `clock`, by `seconds`, in steps of the side's tick, with
 /// `presence`: every event it said, and when, and at what clock, it ends.
 fn burn(

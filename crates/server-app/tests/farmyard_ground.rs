@@ -97,6 +97,7 @@ fn called_to_someone_on_the_upper_terrace_the_agent_stands_on_it_and_goes_there_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     ada.send(&ClientMessage::CallAgent);
     let state = ada.space(|state| state.away.is_some());
@@ -133,6 +134,7 @@ fn called_to_someone_on_the_upper_terrace_the_agent_stands_on_it_and_goes_there_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     ada.send(&ClientMessage::CallAgent);
     let state = ada.space(|state| state.away.is_some_and(|at| at.position != spot));

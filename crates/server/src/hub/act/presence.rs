@@ -25,6 +25,7 @@ impl Hub {
                 carried,
                 rays,
                 pointing,
+                hidden,
             } => {
                 let Some(id) = space.filter(|space| state.space(space).is_some()) else {
                     return;
@@ -57,6 +58,7 @@ impl Hub {
                                 right,
                                 hands: hands.clone(),
                                 pointing: pointing.clone(),
+                                hidden,
                             },
                         );
                     }

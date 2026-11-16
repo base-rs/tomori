@@ -74,6 +74,7 @@ fn participant_identities_are_never_sent_to_other_clients() {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         });
     }
 
@@ -2260,6 +2261,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         carried: Vec::new(),
         rays: Some([true, true]),
         pointing: Some(Box::new([Some(broken), Some(aimed)])),
+        hidden: false,
     });
 
     bob.wait_for(|message| match message {
@@ -2270,6 +2272,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
             right,
             hands,
             pointing,
+            hidden: _,
         } => {
             assert_eq!(*source, ada_source);
             assert_eq!(*relayed_head, head);
@@ -2299,6 +2302,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         carried: Vec::new(),
         rays: Some([true, true]),
         pointing: Some(Box::new([None, None])),
+        hidden: false,
     });
     bob.wait_for(|message| match message {
         ServerMessage::Presence { pointing, left, .. } if left.is_none() => {
@@ -2319,6 +2323,7 @@ fn presence_is_relayed_to_the_other_participants_in_the_space() {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     bob.wait_for(|message| matches!(message, ServerMessage::Presence { .. }).then_some(()));
     while let Some(message) = carol.next_message(TIMEOUT) {

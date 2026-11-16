@@ -129,7 +129,69 @@ impl Ambience {
     }
 }
 
-/// The participant's Feedback setting, kept on the device rather than in the space.
+/// What the others in a space see of this participant, as chosen on this device: everything, the default; their head
+/// only, this headset sending neither its controllers, its tracked hands nor its rays; or their name only, sending its
+/// head alone, for their voice to be placed and the agent to follow them by, and asking the others not to draw them.
+/// It hides them from view, not from the server. See `design/people.md`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OthersSee {
+    #[default]
+    Everything,
+    Head,
+    Name,
+}
+
+impl OthersSee {
+    /// The next, as choosing the setting steps through them: from everything to the head only, the name only and back.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Everything => Self::Head,
+            Self::Head => Self::Name,
+            Self::Name => Self::Everything,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Everything => "everything",
+            Self::Head => "head only",
+            Self::Name => "my name only",
+        }
+    }
+
+    /// The setting named `word`, as the console takes it: `everything`, `head` or `name`.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "everything" => Some(Self::Everything),
+            "head" => Some(Self::Head),
+            "name" => Some(Self::Name),
+            _ => None,
+        }
+    }
+
+    /// Whether this headset sends its controllers, its tracked hands and its rays.
+    pub fn hands(self) -> bool {
+        self == Self::Everything
+    }
+
+    /// Whether it asks the others not to draw it.
+    pub fn hidden(self) -> bool {
+        self == Self::Name
+    }
+}
+
+/// One a later version keeps, which this one does not know, reads as everything, rather than losing the rest of the
+/// settings kept beside it.
+impl<'de> Deserialize<'de> for OthersSee {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        Ok(Self::parse(&word).unwrap_or_default())
+    }
+}
+
+/// The participant's settings kept on this device rather than in the space: Feedback, how sound plays and what the
+/// others see of them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -142,6 +204,13 @@ pub struct Settings {
     /// How loud an environment's ambience plays here.
     #[serde(default)]
     pub ambience: Ambience,
+    /// What the others in a space see of this participant.
+    #[serde(default, skip_serializing_if = "is_everything")]
+    pub others_see: OthersSee,
+}
+
+fn is_everything(others_see: &OthersSee) -> bool {
+    *others_see == OthersSee::Everything
 }
 
 /// Something that changed, which the participant hears and feels. See `design/feedback.md` for exactly when each happens.
@@ -908,6 +977,7 @@ mod tests {
                 vibration,
                 mono: false,
                 ambience: Ambience::Low,
+                others_see: Default::default(),
             });
             feedback.emit(event, now);
             assert_eq!(
@@ -926,7 +996,8 @@ mod tests {
                     sounds,
                     vibration,
                     mono: false,
-                    ambience: Ambience::Low
+                    ambience: Ambience::Low,
+                    others_see: Default::default(),
                 }
             );
         }
@@ -1001,6 +1072,53 @@ mod tests {
     }
 
     #[test]
+    fn what_the_others_see_steps_parses_says_what_it_sends_and_is_kept_with_the_setting() {
+        assert_eq!(Settings::default().others_see, OthersSee::Everything);
+        let mut others_see = OthersSee::Everything;
+        let mut said = Vec::new();
+        for word in ["everything", "head", "name"] {
+            assert_eq!(OthersSee::parse(word), Some(others_see));
+            said.push((others_see.label(), others_see.hands(), others_see.hidden()));
+            others_see = others_see.next();
+        }
+        assert_eq!(others_see, OthersSee::Everything);
+        assert_eq!(
+            said,
+            [
+                ("everything", true, false),
+                ("head only", false, false),
+                ("my name only", false, true),
+            ]
+        );
+        assert_eq!(OthersSee::parse("all"), None);
+        // Kept as a word, left out while it is everything, and one this version does not know read as everything
+        // rather than losing the rest of the settings.
+        let kept = serde_json::to_string(&Settings {
+            others_see: OthersSee::Name,
+            ..Settings::default()
+        })
+        .unwrap();
+        assert!(kept.contains(r#""others_see":"name""#), "{kept}");
+        assert_eq!(
+            serde_json::from_str::<Settings>(&kept).unwrap().others_see,
+            OthersSee::Name
+        );
+        assert!(
+            !serde_json::to_string(&Settings::default())
+                .unwrap()
+                .contains("others_see")
+        );
+        let later: Settings =
+            serde_json::from_str(r#"{"sounds":"off","vibration":"off","others_see":"silhouette"}"#)
+                .unwrap();
+        assert_eq!(
+            (later.sounds, later.others_see),
+            (Level::Off, OthersSee::Everything)
+        );
+        assert!(serde_json::from_str::<Settings>(r#"{"others_see":3}"#).is_err());
+    }
+
+    #[test]
     fn the_ambience_is_handed_on_once_each_time_it_changes_and_only_while_heard() {
         use crate::playback::ambience::{Ambience as Sounds, Bed, Slot};
         use std::sync::Arc;
@@ -1072,6 +1190,7 @@ mod tests {
                 vibration: Level::Full,
                 mono: false,
                 ambience: Ambience::Low,
+                others_see: Default::default(),
             }
         );
         assert_eq!(
@@ -1153,6 +1272,7 @@ mod tests {
             vibration: Level::Reduced,
             mono: false,
             ambience: Ambience::Low,
+            others_see: Default::default(),
         });
         // The knock's second tap, which is essential, remains; the live microphone's does not.
         let due = feedback.haptics(now + ms(500));
@@ -1196,6 +1316,7 @@ mod tests {
             vibration: Level::Off,
             mono: false,
             ambience: Ambience::Low,
+            others_see: Default::default(),
         });
         assert!(feedback.haptics(now + ms(500)).is_empty());
     }
@@ -1280,6 +1401,7 @@ mod tests {
             vibration: Level::Reduced,
             mono: false,
             ambience: Ambience::Low,
+            others_see: Default::default(),
         });
         feedback.hold_to_leave(Some(0.3));
         assert!(feedback.haptics(now).is_empty());

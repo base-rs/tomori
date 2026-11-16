@@ -155,6 +155,7 @@ fn furnished(role: ConnectionRole) -> Conversation {
         right: Some(tomori_protocol::Pose::HOME),
         hands: None,
         pointing: None,
+        hidden: false,
     }));
     conversation.take_actions();
     conversation
@@ -329,6 +330,7 @@ fn a_watcher_leaves_out_the_head_it_sees_from_and_draws_the_rest_of_whom_it_foll
                 meets: false,
             }),
         ])),
+        hidden: false,
     }));
     let mut watcher = clocked();
     let start = Instant::now();
@@ -484,6 +486,7 @@ fn a_watcher_runs_the_client_side_of_the_environment_it_draws_and_tells_it_nothi
         right: Some(tomori_protocol::Pose::HOME),
         hands: None,
         pointing: None,
+        hidden: false,
     }));
     step.watch(camera, &mut conversation, &mut felt(), now, FRAME);
     {
