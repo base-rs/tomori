@@ -4,14 +4,14 @@
 //! Sky as a scenery that `tomori-render` draws in each eye's pass, and its registration with a client's sceneries at Sky's identifier and version. See `design/environments.md`.
 use glam::{Mat4, Vec3};
 use tomori_render::scenery::{Sceneries, Scenery, Target, Views};
-use tomori_render::world::{Item, Layer, Material, Mobility, RootId, Shading, Tally, World};
+use tomori_render::world::{Alpha, Item, Layer, Material, Mobility, RootId, Shading, Tally, World};
 
 use crate::Sky;
 
 /// How Sky's platform and shrine are shaded, in the render world: by its own pipeline, lit by the light baked into them.
 pub(crate) const PLATFORM: Shading = Shading::Custom(0);
 
-/// How its clouds are: ray-marched by its own passes.
+/// How its clouds are: ray-marched by its own passes and blended over the sky.
 pub(crate) const CLOUDS: Shading = Shading::Custom(1);
 
 impl Scenery for Sky {
@@ -25,7 +25,7 @@ impl Scenery for Sky {
             return;
         }
         let baked = world.add_material(root, Material::new(PLATFORM));
-        let marched = world.add_material(root, Material::new(CLOUDS));
+        let marched = world.add_material(root, Material::new(CLOUDS).with_alpha(Alpha::Blend));
         let platform =
             world.add(Item::new(root, Layer::Opaque, Mobility::Static).with_material(baked));
         world.place(platform, [Some(self.bounds)]);
@@ -199,12 +199,15 @@ mod tests {
                 (0, 1, 0, 0)
             );
             assert!(!sky.shown);
-            // Each is drawn by Sky's own pipeline for it, as its material says, lit by no lamp.
+            // Each is drawn by Sky's own pipeline for it, as its material says, lit by no lamp, the clouds blended.
             let (world, _) = stage.world();
             let (platform, clouds) = sky.items.unwrap();
-            for (item, shading) in [(platform, super::PLATFORM), (clouds, super::CLOUDS)] {
+            for (item, shading, alpha) in [
+                (platform, super::PLATFORM, super::Alpha::Opaque),
+                (clouds, super::CLOUDS, super::Alpha::Blend),
+            ] {
                 let material = world.instance_material(item, 0).unwrap();
-                assert_eq!(material.shading, shading);
+                assert_eq!((material.shading, material.alpha), (shading, alpha));
                 assert!(matches!(
                     tomori_render::materials::pipeline(material),
                     Some(tomori_render::materials::Pipeline::Custom(_))
