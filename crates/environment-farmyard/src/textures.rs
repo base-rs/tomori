@@ -244,6 +244,7 @@ mod tests {
     #[cfg(feature = "side")]
     #[test]
     fn the_textures_generated_are_those_their_digests_name() {
+        log::set_max_level(log::LevelFilter::Trace);
         let mut found = Vec::new();
         for surface in &SURFACES {
             let (textures, flat) = generated::generate(surface);
