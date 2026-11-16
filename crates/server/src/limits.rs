@@ -118,6 +118,19 @@ pub fn name(name: &str) -> Result<String, String> {
     tomori_protocol::text::display_name(name).map_err(|error| error.to_string())
 }
 
+/// A display name already kept, as [`name`] makes it but without refusing the agent's own, which a token may have kept from before it was reserved. See [`presented`].
+pub fn kept_name(name: &str) -> Result<String, String> {
+    tomori_protocol::text::kept_name(name).map_err(|error| error.to_string())
+}
+
+/// `name` as the server shows it: a kept name that is the agent's, from before it was reserved, takes its holder's tag as a handle, `Tomori#23`, so that it never passes for the agent; any other name as it is.
+pub fn presented(name: String, tag: Option<u32>) -> String {
+    match tag {
+        Some(tag) if tomori_protocol::text::is_reserved(&name) => format!("{name}#{tag}"),
+        _ => name,
+    }
+}
+
 /// The display name a device suggests in `Hello`, by the same rules as [`name`], but cut to [`tomori_protocol::text::NAME_CHARS`] characters rather than refused for them, since a device's own name is not one a person chose to fit. A client cuts it to [`NAME_BYTES`] before sending it, so a longer one is refused.
 pub fn suggested_name(name: &str) -> Result<String, String> {
     check(name, NAME_BYTES, "name")?;

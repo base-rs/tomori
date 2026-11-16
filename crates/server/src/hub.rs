@@ -2996,7 +2996,7 @@ impl Hub {
             .filter_map(|record| {
                 let principal = record.principal.as_deref()?;
                 let name = kept(principal)?;
-                let name = limits::name(&name).ok()?;
+                let name = limits::presented(limits::kept_name(&name).ok()?, record.tag);
                 (name != record.name).then(|| (principal.to_owned(), name))
             })
             .collect();
@@ -3448,7 +3448,7 @@ impl Hub {
         let kept = access
             .name
             .as_deref()
-            .and_then(|kept| limits::name(kept).ok());
+            .and_then(|kept| limits::kept_name(kept).ok());
         if kept.is_none()
             && let Some(principal) = &access.principal
             && let Some(tokens) = self.token_store()
@@ -3504,7 +3504,7 @@ impl Hub {
             .participants
             .get_mut(&participant)
             .expect("inserted above");
-        record.name = name;
+        record.name = limits::presented(name, tag);
         record.tag = tag;
         record.departed = None;
         // A new connection may be from a client that reports nothing, which stays at the live edge, and from another device.
