@@ -207,6 +207,7 @@ fn the_others_glow_in_the_farmyard_at_dusk_their_eyes_warm_as_they_look_this_way
             right: controllers[1],
             hands: None,
             pointing: ray.map(|ray| Box::new([None, Some(ray)])),
+            hidden: false,
         })
     };
     let bob = |looking_at: Vec3| {
@@ -414,6 +415,7 @@ fn tracked_hands_are_their_joints_and_bones_and_controllers_small_stylised_ones(
             right: None,
             hands: hands.map(Box::new),
             pointing: None,
+            hidden: false,
         })
     };
     // Cleo holds her controllers out before her, a little turned, as at rest.
@@ -425,6 +427,7 @@ fn tracked_hands_are_their_joints_and_bones_and_controllers_small_stylised_ones(
         right: held(cleo_looking, Vec3::new(0.24, -0.4, -0.36)),
         hands: None,
         pointing: None,
+        hidden: false,
     });
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);

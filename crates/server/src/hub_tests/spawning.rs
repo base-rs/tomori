@@ -54,6 +54,7 @@ impl Client {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         });
     }
 }

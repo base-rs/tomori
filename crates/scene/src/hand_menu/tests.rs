@@ -279,6 +279,7 @@ fn the_sound_section_steps_the_feedback_setting_in_and_out_of_a_space() {
             vibration: Level::Full,
             mono: false,
             ambience: Ambience::Medium,
+            others_see: Default::default(),
         },
         ..Default::default()
     };
@@ -309,6 +310,44 @@ fn the_sound_section_steps_the_feedback_setting_in_and_out_of_a_space() {
 }
 
 #[test]
+fn people_and_security_says_what_the_others_see_in_one_row_whichever_it_is() {
+    use tomori_client::feedback::{OthersSee, Settings};
+    let model = |others_see| Model {
+        name: "Ada".into(),
+        role: ConnectionRole::Owner,
+        feedback: Settings {
+            others_see,
+            ..Settings::default()
+        },
+        ..Default::default()
+    };
+    let mut rows = Vec::new();
+    for (others_see, said) in [
+        (OthersSee::Everything, "Your head, hands and rays"),
+        (OthersSee::Head, "Your head; not your hands or rays"),
+        (OthersSee::Name, "Hides you from view, not the server"),
+    ] {
+        let items = items(Some(Section::PeopleAndSecurity), &model(others_see));
+        let at = items
+            .iter()
+            .position(|item| item.key == MenuKey::OthersSee)
+            .expect("the setting");
+        assert_eq!(
+            items[at].text,
+            format!("Others see: {}", others_see.label())
+        );
+        assert_eq!(items[at + 1].text, said);
+        assert_eq!(items[at + 1].kind, MenuKind::Text);
+        rows.push(items.len());
+    }
+    // Choosing it moves no row.
+    assert!(rows.windows(2).all(|pair| pair[0] == pair[1]));
+    let mut menu = HandMenu::default();
+    menu.choose(&MenuKey::Section(Section::PeopleAndSecurity));
+    assert_eq!(menu.choose(&MenuKey::OthersSee), Some(Choice::OthersSee));
+}
+
+#[test]
 fn people_and_security_holds_requests_apart_from_roles() {
     let owner = Model {
         name: "Ada".into(),
@@ -332,6 +371,8 @@ fn people_and_security_holds_requests_apart_from_roles() {
             "Turn Vic (visitor) away",
             "Roles & security",
             "You: Ada (owner)",
+            "Others see: everything",
+            "Your head, hands and rays",
             "Here: Ada, Bob",
             "Visitors watching: 2",
         ]
@@ -359,6 +400,8 @@ fn people_and_security_holds_requests_apart_from_roles() {
             "Pair",
             "Roles & security",
             "You: Vic (visitor)",
+            "Others see: everything",
+            "Your head, hands and rays",
             "Here: nobody",
             "Visitors watching: 0",
             "This server's identity has changed.",

@@ -773,6 +773,12 @@ pub enum ClientMessage {
         /// older clients. See `design/people.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pointing: Option<Box<crate::presence::Pointing>>,
+        /// This participant asks the others not to draw them, having chosen that others see their name only: their
+        /// head is still sent, since their voice is placed there and the agent follows them by it, and nothing else of
+        /// them. It hides them from view, not from the server. Relayed. Absent while they may be drawn, and from older
+        /// clients. See `design/people.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hidden: bool,
     },
     /// Turn speaker attribution on or off for the current space.
     SetAttribution {
@@ -1230,6 +1236,10 @@ pub enum ServerMessage {
         /// the others draw. Absent while none is, and from older servers. See `design/people.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pointing: Option<Box<crate::presence::Pointing>>,
+        /// The participant asks not to be drawn, as their presence said: the others draw nothing of them. Absent while
+        /// they may be drawn, and from older servers. See `design/people.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hidden: bool,
     },
     /// A request could not be completed. The connection stays open.
     Error {
@@ -1939,6 +1949,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         };
         let client_json =
             serde_json::json!({"type": "presence", "head": head_json, "hands": hands_json});
@@ -1955,6 +1966,7 @@ mod tests {
             right: None,
             hands: Some(Box::new(hands)),
             pointing: None,
+            hidden: false,
         };
         let server_json = serde_json::json!({"type": "presence", "source": 3, "head": head_json, "hands": hands_json});
         assert_eq!(serde_json::to_value(&server).unwrap(), server_json);
@@ -1973,6 +1985,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         };
         assert_eq!(
             serde_json::to_value(&bare).unwrap(),
@@ -1988,6 +2001,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         };
         let carrying_json =
             serde_json::json!({"type": "presence", "head": head_json, "carrying": "panel-3"});
@@ -2007,6 +2021,7 @@ mod tests {
             carried: vec!["panel-3".into(), "panel-4".into()],
             rays: Some([false, true]),
             pointing: None,
+            hidden: false,
         };
         let both_json = serde_json::json!({
             "type": "presence",
@@ -2044,6 +2059,7 @@ mod tests {
             carried: Vec::new(),
             rays: Some([true, true]),
             pointing: Some(Box::new([None, Some(ray)])),
+            hidden: false,
         };
         let aimed_json = serde_json::json!({
             "type": "presence",
@@ -2063,6 +2079,7 @@ mod tests {
             right: None,
             hands: None,
             pointing: Some(Box::new([Some(ray), None])),
+            hidden: false,
         };
         let relayed_json = serde_json::json!({
             "type": "presence",
@@ -2082,6 +2099,41 @@ mod tests {
             unreachable!("presence reads as presence")
         };
         assert!(pointing.is_none());
+        // Asking not to be drawn, which older peers ignore; without it, as from older clients and servers, they may be.
+        let hidden = ClientMessage::Presence {
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            carrying: None,
+            carried: Vec::new(),
+            rays: None,
+            pointing: None,
+            hidden: true,
+        };
+        let hidden_json =
+            serde_json::json!({"type": "presence", "head": head_json, "hidden": true});
+        assert_eq!(serde_json::to_value(&hidden).unwrap(), hidden_json);
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(hidden_json).unwrap(),
+            hidden
+        );
+        let relayed = ServerMessage::Presence {
+            source: 3,
+            head,
+            left: None,
+            right: None,
+            hands: None,
+            pointing: None,
+            hidden: true,
+        };
+        let relayed_json =
+            serde_json::json!({"type": "presence", "source": 3, "head": head_json, "hidden": true});
+        assert_eq!(serde_json::to_value(&relayed).unwrap(), relayed_json);
+        assert_eq!(
+            serde_json::from_value::<ServerMessage>(relayed_json).unwrap(),
+            relayed
+        );
     }
 
     #[test]

@@ -1367,6 +1367,7 @@ impl Conversation {
                 right,
                 hands,
                 pointing,
+                hidden,
             } => {
                 if self.space.is_some() {
                     let reports = self
@@ -1380,6 +1381,7 @@ impl Conversation {
                             controllers: [left, right],
                             hands: hands.map_or([None, None], |hands| *hands),
                             pointing: pointing.map_or([None, None], |pointing| *pointing),
+                            hidden,
                             reports,
                         },
                     );
@@ -1634,6 +1636,20 @@ impl Conversation {
         });
     }
 
+    /// This device's settings, as kept on it.
+    pub fn feedback(&self) -> feedback::Settings {
+        self.feedback
+    }
+
+    /// Have the others in a space see `others_see` of this participant, which the next presence sent says, and keep it.
+    /// See `design/people.md`.
+    pub fn set_others_see(&mut self, others_see: feedback::OthersSee) {
+        self.keep_feedback(feedback::Settings {
+            others_see,
+            ..self.feedback
+        });
+    }
+
     /// Play an environment's ambience at `level` on this device, and keep it. See `design/spatial-audio.md`.
     pub fn set_ambience(&mut self, level: feedback::Ambience) {
         self.keep_feedback(feedback::Settings {
@@ -1644,11 +1660,12 @@ impl Conversation {
 
     fn keep_feedback(&mut self, settings: feedback::Settings) {
         log::info!(
-            "Feedback: sounds {}, vibration {}, {}, ambience {}",
+            "Feedback: sounds {}, vibration {}, {}, ambience {}, others see {}",
             settings.sounds.label(),
             settings.vibration.label(),
             if settings.mono { "mono" } else { "stereo" },
-            settings.ambience.label()
+            settings.ambience.label(),
+            settings.others_see.label()
         );
         self.feedback = settings;
         self.actions.push(Action::SetFeedback(settings));
@@ -2263,6 +2280,9 @@ impl Conversation {
             }
             crate::hand_menu::Choice::Mono => self.set_mono(!self.feedback.mono),
             crate::hand_menu::Choice::Ambience => self.set_ambience(self.feedback.ambience.next()),
+            crate::hand_menu::Choice::OthersSee => {
+                self.set_others_see(self.feedback.others_see.next())
+            }
             // The next press of X says the new name; choosing again changes nothing after all.
             crate::hand_menu::Choice::Rename => {
                 self.naming = !self.naming && self.renames();

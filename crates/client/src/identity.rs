@@ -572,6 +572,7 @@ mod tests {
             vibration: Level::Off,
             mono: false,
             ambience: Ambience::High,
+            others_see: Default::default(),
         };
         store.remember_feedback(settings);
         assert_eq!(Store::new(Some(directory.clone())).feedback(), settings);

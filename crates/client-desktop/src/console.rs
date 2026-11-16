@@ -19,7 +19,7 @@ macro_rules! say {
     };
 }
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, the hand menu's Spoken replies row), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), feedback ambience off|low|medium|high (how loud an environment's ambience plays), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, the hand menu's Spoken replies row), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), feedback ambience off|low|medium|high (how loud an environment's ambience plays), others (show what the others in a space see of you), others everything|head|name (let them see everything, your head only, or your name only, which hides you from view, not from the server), q (quit).";
 
 /// `delete` says what deleting the joined space does, as the hand menu asks before deleting it; `delete space` deletes it for everyone in it, keeping its agent session, and `delete space and session` deletes its session too, the words themselves asking explicitly, as the menu's second question does. See `design/hand-menu.md`.
 fn delete(conversation: &mut Conversation, argument: &str, out: &mut Out) {
@@ -100,6 +100,26 @@ fn feedback(conversation: &mut Conversation, argument: &str, out: &mut Out) {
         if settings.mono { "on" } else { "off" },
         settings.ambience.label()
     );
+}
+
+/// `others` shows what the others in a space see of this participant, and `others everything`, `others head` or `others
+/// name` changes it, as the hand menu's People & security section does. See `design/people.md`.
+fn others(conversation: &mut Conversation, argument: &str, out: &mut Out) {
+    match argument.trim() {
+        "" => {}
+        word => match crate::feedback::OthersSee::parse(word) {
+            Some(others_see) => conversation.set_others_see(others_see),
+            None => {
+                say!(out, "(others everything|head|name)");
+                return;
+            }
+        },
+    }
+    let others_see = conversation.feedback().others_see;
+    say!(out, "  Others see: {}", others_see.label());
+    if others_see.hidden() {
+        say!(out, "  (This hides you from view, not from the server.)");
+    }
 }
 
 /// `point` lists the space's workers by number, `point N` points at the `N`th until another `point`, and `point off`
@@ -242,6 +262,13 @@ fn serve(
                     && (rest.is_empty() || rest.starts_with(char::is_whitespace))
                 {
                     feedback(conversation, rest, out);
+                    continue;
+                }
+                // What the others see of this participant; the rest of the line says what, if it changes.
+                if let Some(rest) = line.trim_start().strip_prefix("others")
+                    && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+                {
+                    others(conversation, rest, out);
                     continue;
                 }
                 // Pointing at a worker, as the headset's ray does; the rest of the line is its number.
@@ -581,6 +608,42 @@ mod tests {
         );
         // A word that only starts with it is not the command.
         let (out, _) = session(&mut conversation, &["feedbacks"]);
+        assert_eq!(out.matches(HELP).count(), 2);
+    }
+
+    #[test]
+    fn what_the_others_see_is_shown_and_changed() {
+        let mut conversation = joined();
+        let (out, _) = session(
+            &mut conversation,
+            &[
+                "others",
+                "others head",
+                "others name",
+                "others all",
+                "others everything",
+            ],
+        );
+        assert!(out.contains("  Others see: everything\n"), "{out}");
+        assert!(out.contains("  Others see: head only\n"), "{out}");
+        assert!(
+            out.contains(
+                "  Others see: my name only\n  (This hides you from view, not from the server.)"
+            ),
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("(others everything|head|name)").count(),
+            1,
+            "{out}"
+        );
+        assert_eq!(out.matches("  Others see: everything").count(), 2, "{out}");
+        assert_eq!(
+            conversation.feedback().others_see,
+            crate::feedback::OthersSee::Everything
+        );
+        // A word that only starts with it is not the command.
+        let (out, _) = session(&mut conversation, &["otherwise"]);
         assert_eq!(out.matches(HELP).count(), 2);
     }
 

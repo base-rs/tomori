@@ -242,6 +242,7 @@ mod tests {
                 carried: Vec::new(),
                 rays: None,
                 pointing: None,
+                hidden: false,
             },
             ClientMessage::SetAttribution { enabled: true },
             ClientMessage::SetMode {

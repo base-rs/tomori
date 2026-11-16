@@ -2089,6 +2089,90 @@ mod tests {
     }
 
     #[test]
+    fn what_the_others_see_is_what_presence_sends() {
+        use tomori_client::feedback::OthersSee;
+        let mut rig = Rig::new(joined());
+        let left = Pose {
+            position: [-0.2, 1.1, -0.35],
+            orientation: Quat::IDENTITY.to_array(),
+        };
+        // Both controllers held ahead, the right's trigger pulled, so that its ray is drawn in full, and the left hand
+        // tracked too.
+        let controls = Controls {
+            controller: Some(Vec3::from_array(grip(Quat::IDENTITY).position)),
+            controller_poses: [Some(left), Some(grip(Quat::IDENTITY))],
+            aim: Some(grip(Quat::IDENTITY)),
+            trigger: Some(1.0),
+            ..Controls::default()
+        };
+        let wrist = Vec3::new(-0.2, 1.1, -0.3);
+        let mut joints = [Joint::default(); hands::JOINT_COUNT];
+        for (index, joint) in joints.iter_mut().enumerate() {
+            *joint = Joint {
+                position: wrist + Vec3::new(0.0, 0.01 * index as f32, 0.0),
+                radius: 0.01,
+                position_valid: true,
+            };
+        }
+        let mut at = Duration::ZERO;
+        let mut sent = |rig: &mut Rig, others_see| {
+            rig.conversation.set_others_see(others_see);
+            at += Duration::from_millis(20);
+            rig.frame(&controls, [Some(joints), None], at)
+                .frame
+                .presence
+                .expect("a participant")
+        };
+        // Everything, by default: the head, both controllers, the hand and the ray drawn in full.
+        assert_eq!(
+            rig.conversation.feedback().others_see,
+            OthersSee::Everything
+        );
+        let everything = sent(&mut rig, OthersSee::Everything);
+        assert!(everything.left.is_some() && everything.right.is_some());
+        assert!(everything.hands[controller::LEFT].is_some());
+        assert!(everything.rays[controller::RIGHT]);
+        assert!(everything.pointing[controller::RIGHT].is_some());
+        assert!(!everything.hidden);
+        // The head only: neither controllers, hands nor rays, so that what they hold follows their head; still drawn.
+        let head = sent(&mut rig, OthersSee::Head);
+        assert_eq!(head.head, everything.head);
+        assert_eq!((head.left, head.right), (None, None));
+        assert_eq!(head.hands, [None, None]);
+        assert_eq!(head.rays, [false, false]);
+        assert_eq!(head.pointing, [None, None]);
+        assert!(!head.hidden);
+        // The name only: the head alone, for their voice and for following, asking not to be drawn.
+        let name = sent(&mut rig, OthersSee::Name);
+        assert_eq!(name.head, everything.head);
+        assert_eq!(
+            (name.left, name.right, name.hands),
+            (None, None, [None, None])
+        );
+        assert_eq!((name.rays, name.pointing), ([false, false], [None, None]));
+        assert!(name.hidden);
+        // And back.
+        let again = sent(&mut rig, OthersSee::Everything);
+        assert!(again.right.is_some() && again.hands[controller::LEFT].is_some() && !again.hidden);
+        // Each is kept on the device, with its other settings.
+        let kept = |others_see| {
+            tomori_client::connection::Action::SetFeedback(Settings {
+                others_see,
+                ..Settings::default()
+            })
+        };
+        assert_eq!(
+            rig.conversation.take_actions(),
+            [
+                kept(OthersSee::Everything),
+                kept(OthersSee::Head),
+                kept(OthersSee::Name),
+                kept(OthersSee::Everything)
+            ]
+        );
+    }
+
+    #[test]
     fn a_pinned_menu_needs_somewhere_to_face_from() {
         let mut rig = Rig::new(joined());
         // The left controller holds the menu's spot exactly at the middle of the head, so it has no way to face.

@@ -634,6 +634,7 @@ fn without_a_connection_nothing_is_sent_and_the_participant_is_told() {
         &[],
         [false, true],
         [None, None],
+        false,
     );
     let mut placed = false;
     connection.listen([2], |_, _| placed = true);
@@ -730,6 +731,7 @@ fn the_feedback_setting_is_applied_and_kept_on_the_device() {
         vibration: Level::Reduced,
         mono: true,
         ambience: crate::feedback::Ambience::Off,
+        others_see: Default::default(),
     };
     session.push(Action::SetFeedback(quiet));
     connection.poll(true, &mut session);
@@ -1285,6 +1287,7 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
         right: None,
         hands: None,
         pointing: None,
+        hidden: false,
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(*watched.lock().unwrap(), [2]);
@@ -1352,6 +1355,7 @@ fn a_microphone_failure_is_reported_whenever_it_happens() {
         right: None,
         hands: None,
         pointing: None,
+        hidden: false,
     };
     peer.say(presence, &mut connection, &mut session);
     assert_eq!(
@@ -2213,7 +2217,7 @@ mod served {
     }
 
     #[test]
-    fn presence_carries_the_controllers() {
+    fn presence_carries_the_controllers_and_asking_not_to_be_drawn() {
         let server = Server::start();
         let mut session = Script::default();
         let (bea, mut connection) = in_space(&server, &mut session, Scripted::default());
@@ -2232,19 +2236,23 @@ mod served {
                     meets: true,
                 }),
             ],
+            true,
         );
-        let (left, right, pointing) = bea.wait_for(
+        let (left, right, pointing, hidden) = bea.wait_for(
             || connection.poll(true, &mut session),
             |message| match message {
                 ServerMessage::Presence {
                     left,
                     right,
                     pointing,
+                    hidden,
                     ..
-                } => Some((*left, *right, pointing.as_deref().copied())),
+                } => Some((*left, *right, pointing.as_deref().copied(), *hidden)),
                 _ => None,
             },
         );
+        // Asking not to be drawn is relayed with the rest.
+        assert!(hidden);
         assert_eq!(left.map(|pose| pose.position[0]), Some(-0.2));
         assert_eq!(right.map(|pose| pose.position[0]), Some(0.2));
         // The right ray, drawn in full, is relayed from its aim.

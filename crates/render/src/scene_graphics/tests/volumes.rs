@@ -61,6 +61,7 @@ fn projected(reply: &str) -> (tomori_protocol::Projection, Wall) {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     client.say("u1", "how does Tomori fit together?");
     let session = tomori_server::test_support::eventually(|| {

@@ -584,6 +584,7 @@ fn what_needs_a_space_is_refused_in_the_lobby() {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     client.send(ClientMessage::StopReplay);
     assert!(client.read().is_empty());
@@ -6646,6 +6647,7 @@ fn standing(at: [f32; 3]) -> ClientMessage {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     }
 }
 
@@ -6668,6 +6670,7 @@ fn looking(at: [f32; 3], target: [f32; 3]) -> ClientMessage {
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     }
 }
 
@@ -9374,6 +9377,7 @@ fn a_side_is_told_where_its_participants_are_in_its_own_coordinates_but_not_its_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     vic.send(standing([1.0, 1.6, 0.0]));
     eventually_in("Ada, where she is", || seen.lock().unwrap().len() == 1);
@@ -9411,6 +9415,7 @@ fn a_side_is_told_where_its_participants_are_in_its_own_coordinates_but_not_its_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     eventually_in("Ada, without her hands", || {
         seen.lock().unwrap()[0].right.is_none()
@@ -9426,6 +9431,7 @@ fn a_side_is_told_where_its_participants_are_in_its_own_coordinates_but_not_its_
         carried: Vec::new(),
         rays: None,
         pointing: None,
+        hidden: false,
     });
     std::thread::sleep(tomori_environment::PRESENCE_INTERVAL * 4);
     let presence = seen.lock().unwrap()[0];

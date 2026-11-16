@@ -16,6 +16,7 @@ fn present(eyes: Vec3, turn: Quat, controllers: [Option<Vec3>; 2]) -> Present {
         controllers: controllers.map(|at| at.map(|at| Hand::new(at, Quat::IDENTITY))),
         joints: [None, None],
         pointing: [None, None],
+        hidden: false,
     }
 }
 

@@ -434,6 +434,7 @@ fn a_client_side_is_given_the_others_right_hands_in_the_space_but_never_its_own(
             }),
             hands: None,
             pointing: None,
+            hidden: false,
         })
     };
     // Bea's, and Ada's own never, nor that of Cy, whom the space does not list.
@@ -725,6 +726,7 @@ fn a_client_side_is_given_the_others_left_hands_too() {
             right: None,
             hands: None,
             pointing: None,
+            hidden: false,
         }));
     rig.frame();
     let (_, left_hands) = rig.left.lock().unwrap().last().unwrap().clone();

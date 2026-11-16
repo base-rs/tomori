@@ -1499,6 +1499,7 @@ mod tests {
             carried: Vec::new(),
             rays: None,
             pointing: None,
+            hidden: false,
         });
         client.say("u1", "show me the build status");
         let session = tomori_server::test_support::eventually(|| {

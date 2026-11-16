@@ -90,6 +90,7 @@ fn presence(source: u32, frame: usize) -> Event {
                 }),
             ])
         }),
+        hidden: false,
     })
 }
 
