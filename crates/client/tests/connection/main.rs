@@ -951,7 +951,7 @@ fn what_is_offered_by_digest_is_fetched_once_into_the_cache_resumed_where_it_sto
     )));
     // Connected again, it fetches only what it does not keep.
     client.send(kick()).unwrap();
-    wait_until(|| fetches(&server).len() == offered.len() + 6);
+    wait_until(|| fetches(&server).len() == offered.len() + 7);
     let again: Vec<String> = fetches(&server)[offered.len()..]
         .iter()
         .map(|(name, _)| name.clone())
@@ -964,7 +964,8 @@ fn what_is_offered_by_digest_is_fetched_once_into_the_cache_resumed_where_it_sto
             "missing.glb",
             "other.glb",
             "ranged.glb",
-            "cut.glb"
+            "cut.glb",
+            "unsigned.glb"
         ]
     );
     client.close();

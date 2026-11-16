@@ -4,8 +4,9 @@
 //! Fetching content by digest beside the connection: each of the environments' assets the server offers that the
 //! cache does not keep, one at a time, with `GET /content/DIGEST` on a connection of its own from the client's pool,
 //! presenting the connection's credential and its session ticket; resumed where a download that stopped left off, and
-//! fetched again whole, once, if what it resumed was not the asset; refused unless it is of the type offered and no
-//! longer than offered; and kept only once it is what its digest says. See `design/clients.md`.
+//! fetched again whole, once, if what it resumed was not the asset; refused unless it is of the type offered, no
+//! longer than offered and starts as its kind must; and kept only once it is what its digest says. See
+//! `design/clients.md`.
 use std::path::PathBuf;
 
 use base_http::body::{BodyFrame, ReadableBody};
@@ -160,6 +161,10 @@ impl Fetching<'_, '_> {
             if end {
                 break;
             }
+        }
+        // Its digest is the server's word for what it is, and its signature checked too, as the server checks it.
+        if !self.asset.kind.recognises(writer.head()) {
+            return Err(format!("it does not start as {content_type} must"));
         }
         writer.finish().map_err(text)
     }

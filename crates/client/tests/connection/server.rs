@@ -56,6 +56,8 @@ pub enum Answer {
     WrongRange,
     /// Its head saying more bytes than its body has, so that its body ends early.
     Cut,
+    /// As it should, but its bytes, which its digest names, do not start as a model's must.
+    Unsigned,
 }
 
 /// An asset the mini server offers: its name, its bytes, and how it answers for it.
@@ -75,8 +77,12 @@ impl Offered {
 /// resume and one whose kept part is not its own among them, then each way of answering wrongly, and last a sentinel,
 /// fetched once everything before it is done.
 pub fn offered() -> Vec<Offered> {
-    let model = |tag: &str| {
-        let mut bytes = b"glTF".to_vec();
+    let model = |tag: &str, answer| {
+        let mut bytes = if answer == Answer::Unsigned {
+            b"<svg".to_vec()
+        } else {
+            b"glTF".to_vec()
+        };
         bytes.extend(tag.bytes().cycle().take(3000));
         bytes
     };
@@ -90,12 +96,13 @@ pub fn offered() -> Vec<Offered> {
         ("other.glb", Answer::Other),
         ("ranged.glb", Answer::WrongRange),
         ("cut.glb", Answer::Cut),
+        ("unsigned.glb", Answer::Unsigned),
         ("sentinel.glb", Answer::Whole),
     ]
     .into_iter()
     .map(|(name, answer)| Offered {
         name,
-        bytes: model(name),
+        bytes: model(name, answer),
         answer,
     })
     .collect()

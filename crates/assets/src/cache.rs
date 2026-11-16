@@ -40,6 +40,9 @@ use crate::{AssetRef, Digest, Source};
 /// The suffix of a download being written.
 const PARTIAL: &str = ".part";
 
+/// How many of a download's first bytes its [`Writer`] keeps, enough to tell its kind by its signature.
+const HEAD_BYTES: usize = 16;
+
 /// An asset kept: its length, and when it was last used, as an order.
 struct Entry {
     length: u64,
@@ -85,11 +88,17 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// The cache in the folder `root`, made if it is not there, keeping at most `most` bytes, with what it kept before:
-    /// each file named by a digest, the least recently used first let go of if together they are more.
+    /// The cache in the folder `root`, made if it is not there, readable only by its user where the system has
+    /// permissions, keeping at most `most` bytes, with what it kept before: each file named by a digest, the least
+    /// recently used first let go of if together they are more.
     pub fn open(root: impl Into<PathBuf>, most: u64) -> io::Result<Self> {
         let root = root.into();
-        let mut found: Vec<(SystemTime, Digest, u64)> = fs::create_dir_all(&root)
+        let mut folder = fs::DirBuilder::new();
+        folder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut folder, 0o700);
+        let mut found: Vec<(SystemTime, Digest, u64)> = folder
+            .create(&root)
             .and_then(|()| fs::read_dir(&root))?
             .filter_map(Result::ok)
             .filter_map(|entry| {
@@ -151,7 +160,7 @@ impl Cache {
     pub fn writer(&self, digest: &Digest, offset: u64) -> io::Result<Writer<'_>> {
         let path = self.partial_path(digest);
         let mut hasher = Sha256::new();
-        let file = fs::read_dir(&self.root)
+        let (file, head) = fs::read_dir(&self.root)
             .map(|entries| {
                 for other in entries.filter_map(Result::ok).map(|entry| entry.path()) {
                     if other != path && other.to_string_lossy().ends_with(PARTIAL) {
@@ -175,7 +184,7 @@ impl Cache {
                     .read_to_end(&mut kept)
                     .map(|_| (file, kept))
             })
-            .and_then(|(mut file, kept)| {
+            .and_then(|(mut file, mut kept)| {
                 if (kept.len() as u64) < offset {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -183,9 +192,10 @@ impl Cache {
                     ));
                 }
                 hasher.update(&kept);
+                kept.truncate(HEAD_BYTES);
                 file.set_len(offset)
                     .and_then(|()| file.seek(io::SeekFrom::End(0)))
-                    .map(|_| file)
+                    .map(|_| (file, kept))
             })?;
         Ok(Writer {
             cache: self,
@@ -194,6 +204,7 @@ impl Cache {
             file,
             hasher,
             written: offset,
+            head,
         })
     }
 
@@ -297,6 +308,8 @@ pub struct Writer<'a> {
     file: File,
     hasher: Sha256,
     written: u64,
+    /// Its first bytes, at most [`HEAD_BYTES`].
+    head: Vec<u8>,
 }
 
 impl Writer<'_> {
@@ -306,7 +319,14 @@ impl Writer<'_> {
         written.map(|()| {
             self.hasher.update(bytes);
             self.written += bytes.len() as u64;
+            let room = HEAD_BYTES.saturating_sub(self.head.len());
+            self.head.extend(bytes.iter().take(room));
         })
+    }
+
+    /// Its first bytes, those kept from before included, at most 16: enough to check that it starts as its kind must.
+    pub fn head(&self) -> &[u8] {
+        &self.head
     }
 
     /// How many bytes of it are written, those kept from before included.

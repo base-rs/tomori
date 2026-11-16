@@ -34,6 +34,13 @@ fn an_asset_written_whole_is_kept_and_read_again_after_a_restart() {
         (cache.root(), cache.most(), cache.total()),
         (root.as_path(), 1000, 0)
     );
+    // Its folder is its user's alone.
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&fs::metadata(&root).unwrap().permissions())
+            & 0o777,
+        0o700
+    );
     let lantern = b"a lantern";
     assert!(!cache.contains(&Digest::of(lantern)));
     assert_eq!(cache.read(&asset(lantern), 100), None);
@@ -111,7 +118,10 @@ fn a_download_that_stopped_resumes_where_it_left_off() {
     );
     let mut writer = cache.writer(&digest, 10).unwrap();
     assert_eq!(writer.written(), 10);
+    // Its head is what was kept of it, and then what follows, up to a signature's worth.
+    assert_eq!(writer.head(), &lantern[..10]);
     writer.write(&lantern[10..]).unwrap();
+    assert_eq!(writer.head(), &lantern[..HEAD_BYTES]);
     writer.finish().unwrap();
     assert_eq!(cache.read(&asset(lantern), 100).unwrap(), lantern);
     assert_eq!(cache.partial(&digest), 0);
