@@ -361,31 +361,43 @@ pub struct Renderer {
 }
 
 /// What the renderer itself submits to its world: the scene's coordinates within the space's, the cubes', and the
-/// avatar's, which is cleared when its scenery is dropped; and its two items, the cubes and the panels, in the space's
-/// coordinates, each instance one cube or panel.
+/// avatar's, which is cleared when its scenery is dropped; its two items, the cubes and the panels, in the space's
+/// coordinates, each instance one cube or panel; and the materials they and the others' cubes are drawn with.
 struct Submitted {
     scene: tomori_world::RootId,
     avatar: tomori_world::RootId,
     cubes: tomori_world::ItemId,
     panels: tomori_world::ItemId,
+    /// The others' cubes, which glow (see `design/people.md`).
+    people: tomori_world::MaterialId,
 }
 
 impl Submitted {
-    /// Its roots, and its items, in `world`, which also holds a root for each of `sceneries`.
+    /// Its roots, its materials and its items, in `world`, which also holds a root for each of `sceneries`.
     fn new(world: &mut tomori_world::World, sceneries: usize) -> (Self, Vec<tomori_world::RootId>) {
-        use tomori_world::{Item, Layer, Mobility};
+        use tomori_world::{Alpha, Item, Layer, Material, Mobility, Shading};
         let space = world.add_root();
         let scene = world.add_root();
         let avatar = world.add_root();
         let roots = (0..sceneries).map(|_| world.add_root()).collect();
-        let cubes = world.add(Item::new(scene, Layer::Opaque, Mobility::Dynamic));
-        let panels = world.add(Item::new(space, Layer::Translucent, Mobility::Dynamic));
+        let own = world.add_material(scene, Material::new(Shading::Own));
+        let people = world.add_material(scene, Material::new(Shading::Own).with_glow(PEOPLE_GLOW));
+        // Each panel's text and shapes are blended over its face.
+        let surfaces = world.add_material(
+            space,
+            Material::new(Shading::Unlit).with_alpha(Alpha::Blend),
+        );
+        let cubes =
+            world.add(Item::new(scene, Layer::Opaque, Mobility::Dynamic).with_material(own));
+        let panels = world
+            .add(Item::new(space, Layer::Translucent, Mobility::Dynamic).with_material(surfaces));
         (
             Self {
                 scene,
                 avatar,
                 cubes,
                 panels,
+                people,
             },
             roots,
         )
@@ -633,6 +645,12 @@ impl Renderer {
         use tomori_world::{Item, Layer, Mobility};
         self.people.clear();
         let finite = |values: &[f32]| values.iter().all(|value| value.is_finite());
+        // As their material, which the world keeps for as long as the renderer, says.
+        let glow = self
+            .world
+            .material(self.submitted.people)
+            .and_then(crate::materials::glow)
+            .unwrap_or(PEOPLE_GLOW);
         for (index, figure) in figures.iter().take(MOST_PEOPLE).enumerate() {
             let start = self.people.len();
             self.people.extend(
@@ -654,18 +672,17 @@ impl Renderer {
                             glam::Quat::from_array(cube.orientation).normalize(),
                         )
                         .to_cols_array_2d(),
-                        glow: PEOPLE_GLOW,
+                        glow,
                     }),
             );
             let range = start..self.people.len();
             match self.figures.get_mut(index) {
                 Some((_, kept)) => *kept = range,
                 None => {
-                    let item = self.world.add(Item::new(
-                        self.submitted.scene,
-                        Layer::Opaque,
-                        Mobility::Dynamic,
-                    ));
+                    let item = self.world.add(
+                        Item::new(self.submitted.scene, Layer::Opaque, Mobility::Dynamic)
+                            .with_material(self.submitted.people),
+                    );
                     self.figures.push((item, range));
                 }
             }
@@ -1955,6 +1972,43 @@ mod tests {
         test_gpu::validate_wgsl("swarm.wgsl, oriented", &oriented_shader());
         // And the blink, written here.
         test_gpu::validate_wgsl("blink", BLINK_SHADER);
+    }
+
+    #[test]
+    fn tomori_s_own_things_are_submitted_with_the_materials_today_s_pipelines_draw_them_by() {
+        use crate::materials::{Pipeline, glow, pipeline};
+        test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+            let mut renderer =
+                Renderer::new(&device, &queue, wgpu::TextureFormat::Rgba8UnormSrgb, 16, 16);
+            renderer.set_people(&[tomori_scene::people::Figure {
+                source: 1,
+                cubes: vec![tomori_scene::delegation::Cube {
+                    position: [0.0, 1.6, -2.0],
+                    scale: [0.1; 3],
+                    color: [0.5; 3],
+                    orientation: [0.0, 0.0, 0.0, 1.0],
+                }],
+            }]);
+            let world = renderer.world();
+            let material = |item| {
+                let material = world.item(item).and_then(|item| item.material);
+                *world
+                    .material(material.expect("it names a material"))
+                    .unwrap()
+            };
+            // Tomori's cubes are drawn by the swarm's pipeline, without a glow of their own.
+            let cubes = material(renderer.submitted.cubes);
+            assert_eq!(pipeline(&cubes), Some(Pipeline::Cubes));
+            assert_eq!(glow(&cubes), Some(0.0));
+            // The others' glow as they always have, by their material.
+            let people = material(renderer.figures[0].0);
+            assert_eq!(glow(&people), Some(PEOPLE_GLOW));
+            assert!(renderer.people.iter().all(|cube| cube.glow == PEOPLE_GLOW));
+            // The panels, unlit, their text blended over their faces.
+            let panels = material(renderer.submitted.panels);
+            assert_eq!(pipeline(&panels), Some(Pipeline::Surfaces));
+            assert_eq!(panels.alpha, tomori_world::Alpha::Blend);
+        });
     }
 
     #[test]

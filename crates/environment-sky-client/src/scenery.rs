@@ -4,13 +4,19 @@
 //! Sky as a scenery that `tomori-render` draws in each eye's pass, and its registration with a client's sceneries at Sky's identifier and version. See `design/environments.md`.
 use glam::{Mat4, Vec3};
 use tomori_render::scenery::{Sceneries, Scenery, Target, Views};
-use tomori_render::world::{Item, Layer, Mobility, RootId, Tally, World};
+use tomori_render::world::{Item, Layer, Material, Mobility, RootId, Shading, Tally, World};
 
 use crate::Sky;
 
+/// How Sky's platform and shrine are shaded, in the render world: by its own pipeline, lit by the light baked into them.
+pub(crate) const PLATFORM: Shading = Shading::Custom(0);
+
+/// How its clouds are: ray-marched by its own passes.
+pub(crate) const CLOUDS: Shading = Shading::Custom(1);
+
 impl Scenery for Sky {
     /// Its platform and shrine, one static item, with the box about them, and its clouds, ray-marched in passes of their
-    /// own, an item in the sky's layer that is never culled.
+    /// own, an item in the sky's layer that is never culled, each drawn by its own pipeline.
     fn submit(&mut self, world: &mut World, root: RootId) {
         if self
             .items
@@ -18,9 +24,16 @@ impl Scenery for Sky {
         {
             return;
         }
-        let platform = world.add(Item::new(root, Layer::Opaque, Mobility::Static));
+        let baked = world.add_material(root, Material::new(PLATFORM));
+        let marched = world.add_material(root, Material::new(CLOUDS));
+        let platform =
+            world.add(Item::new(root, Layer::Opaque, Mobility::Static).with_material(baked));
         world.place(platform, [Some(self.bounds)]);
-        let clouds = world.add(Item::new(root, Layer::Sky, Mobility::Static).unculled());
+        let clouds = world.add(
+            Item::new(root, Layer::Sky, Mobility::Static)
+                .unculled()
+                .with_material(marched),
+        );
         world.place(clouds, [None]);
         self.items = Some((platform, clouds));
     }
@@ -186,6 +199,18 @@ mod tests {
                 (0, 1, 0, 0)
             );
             assert!(!sky.shown);
+            // Each is drawn by Sky's own pipeline for it, as its material says, lit by no lamp.
+            let (world, _) = stage.world();
+            let (platform, clouds) = sky.items.unwrap();
+            for (item, shading) in [(platform, super::PLATFORM), (clouds, super::CLOUDS)] {
+                let material = world.instance_material(item, 0).unwrap();
+                assert_eq!(material.shading, shading);
+                assert!(matches!(
+                    tomori_render::materials::pipeline(material),
+                    Some(tomori_render::materials::Pipeline::Custom(_))
+                ));
+                assert!(!material.lamps);
+            }
             // It is drawn so, the sky without the platform.
             let texture = |format, usage| {
                 gpu.device

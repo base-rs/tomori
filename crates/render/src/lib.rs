@@ -25,6 +25,7 @@ pub mod controller;
 pub mod controller_graphics;
 pub mod glyphs;
 pub mod graphics;
+pub mod materials;
 pub mod occlusion;
 pub mod panel_images;
 pub mod profiler;

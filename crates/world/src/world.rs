@@ -7,15 +7,12 @@ use glam::{Mat4, Vec3};
 
 use crate::bvh::{Bvh, Leaf};
 use crate::light::{self, EnvironmentLight, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit};
+use crate::material::{Material, MaterialId};
 use crate::{Aabb, Tally, Views};
 
 /// A mesh, as the backend that uploaded it names it: the world never reads its vertices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshId(pub u32);
-
-/// A material, as the backend names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MaterialId(pub u32);
 
 /// Coordinates that items are drawn in, carried into the views' by their root's transform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -53,8 +50,9 @@ pub enum Mobility {
     Dynamic,
 }
 
-/// Something drawn: in which root, in which layer, static or dynamic, with which mesh and material if the backend names
-/// them, and whether it is culled, as it is unless it opts out, as Bevy's `NoFrustumCulling` does.
+/// Something drawn: in which root, in which layer, static or dynamic, with which mesh if the backend names one, with
+/// which of the world's materials, unless each instance is painted with its own ([`World::paint`]), and whether it is
+/// culled, as it is unless it opts out, as Bevy's `NoFrustumCulling` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Item {
     pub root: RootId,
@@ -86,7 +84,7 @@ impl Item {
         }
     }
 
-    /// Drawn with `material`.
+    /// Drawn with the world's `material`, but for any instance painted otherwise.
     pub fn with_material(self, material: MaterialId) -> Self {
         Self {
             material: Some(material),
@@ -104,11 +102,13 @@ impl Item {
 }
 
 /// An item with its instances: where each may be drawn, or none for anywhere, the box about them all, or none if one
-/// may be anywhere, which the views may see, and the lights each is lit by, its range of `lit`, as last culled.
+/// may be anywhere, the material each is painted with, if not the item's, which the views may see, and the lights each
+/// is lit by, its range of `lit`, as last culled.
 #[derive(Debug)]
 struct Entry {
     item: Item,
     bounds: Vec<Option<Aabb>>,
+    painted: Vec<Option<MaterialId>>,
     about: Option<Aabb>,
     seen: Vec<bool>,
     lists: Vec<[u32; 2]>,
@@ -210,6 +210,7 @@ pub struct World {
     roots: Vec<Root>,
     items: Slots<Entry>,
     lights: Slots<(Light, bool)>,
+    materials: Slots<(RootId, Material)>,
     views: Views,
     culling: bool,
 }
@@ -227,6 +228,7 @@ impl World {
             roots: Vec::new(),
             items: Slots::default(),
             lights: Slots::default(),
+            materials: Slots::default(),
             views: Views::default(),
             culling: true,
         }
@@ -268,7 +270,7 @@ impl World {
         self.roots[root.0 as usize].environment.as_ref()
     }
 
-    /// Remove every item and light of `root`, and its environment light, as when what drew them is dropped.
+    /// Remove every item, light and material of `root`, and its environment light, as when what drew them is dropped.
     pub fn clear(&mut self, root: RootId) {
         for index in 0..self.items.slots.len() as u32 {
             if matches!(&self.items.slots[index as usize].1, Some(entry) if entry.item.root == root)
@@ -282,6 +284,12 @@ impl World {
                 self.lights.remove_at(index);
             }
         }
+        for index in 0..self.materials.slots.len() as u32 {
+            if matches!(&self.materials.slots[index as usize].1, Some((owner, _)) if *owner == root)
+            {
+                self.materials.remove_at(index);
+            }
+        }
         let root = &mut self.roots[root.0 as usize];
         root.environment = None;
         root.built = false;
@@ -293,6 +301,7 @@ impl World {
         ItemId(self.items.insert(Entry {
             item,
             bounds: Vec::new(),
+            painted: Vec::new(),
             about: Some(Aabb::EMPTY),
             seen: Vec::new(),
             lists: Vec::new(),
@@ -356,6 +365,55 @@ impl World {
     /// How many instances `item` has, or none if it is not here.
     pub fn instances(&self, item: ItemId) -> usize {
         self.items.get(item.0).map_or(0, |entry| entry.bounds.len())
+    }
+
+    /// Paint `item`'s instances, in the order they were placed, each with its material, or the item's for none, as the
+    /// parts of a model each have their own; those beyond are drawn with the item's. Painting is kept until it is painted
+    /// again, however it is placed, so that an item placed anew each frame is painted each frame too; painting as many
+    /// as before allocates nothing.
+    ///
+    /// # Panics
+    ///
+    /// If `item` is not here.
+    pub fn paint(&mut self, item: ItemId, materials: impl IntoIterator<Item = Option<MaterialId>>) {
+        let entry = self.items.get_mut(item.0).expect("an item painted is here");
+        entry.painted.clear();
+        entry.painted.extend(materials);
+    }
+
+    /// The material `item`'s instance `instance` is drawn with: its own, if it is painted with one, or the item's; none
+    /// if it names none, or one no longer here, or the item is not.
+    pub fn instance_material(&self, item: ItemId, instance: usize) -> Option<&Material> {
+        let entry = self.items.get(item.0)?;
+        let id = entry
+            .painted
+            .get(instance)
+            .copied()
+            .flatten()
+            .or(entry.item.material)?;
+        self.material(id)
+    }
+
+    /// Add `material`, kept with `root`'s items until it is removed or the root cleared.
+    pub fn add_material(&mut self, root: RootId, material: Material) -> MaterialId {
+        MaterialId(self.materials.insert((root, material)))
+    }
+
+    /// `material`, if it is here.
+    pub fn material(&self, material: MaterialId) -> Option<&Material> {
+        self.materials.get(material.0).map(|(_, material)| material)
+    }
+
+    /// `material`, to change it, if it is here: what it draws is drawn so from the next frame.
+    pub fn material_mut(&mut self, material: MaterialId) -> Option<&mut Material> {
+        self.materials
+            .get_mut(material.0)
+            .map(|(_, material)| material)
+    }
+
+    /// Remove `material`, if it is here: what names it is drawn as though it named none.
+    pub fn remove_material(&mut self, material: MaterialId) -> bool {
+        self.materials.remove(material.0).is_some()
     }
 
     /// Add `light`.
@@ -547,10 +605,18 @@ impl World {
                 }
             }));
         }
+        let materials = &self.materials;
+        // Whether a material, if it is here, is lit by its root's lights, as one that is not here is taken to be.
+        let lamps = |material: Option<MaterialId>| {
+            material
+                .and_then(|material| materials.get(material.0))
+                .is_none_or(|(_, material)| material.lamps)
+        };
         for (_, entry) in self.items.slots.iter_mut() {
             let Some(Entry {
                 item,
                 bounds,
+                painted,
                 seen,
                 lists,
                 lit,
@@ -564,9 +630,15 @@ impl World {
                 continue;
             }
             lit.clear();
-            for ((list, seen), bounds) in lists.iter_mut().zip(seen.iter()).zip(bounds.iter()) {
+            for (instance, ((list, seen), bounds)) in lists
+                .iter_mut()
+                .zip(seen.iter())
+                .zip(bounds.iter())
+                .enumerate()
+            {
                 let start = lit.len();
-                if *seen {
+                let material = painted.get(instance).copied().flatten().or(item.material);
+                if *seen && lamps(material) {
                     light::assign(&root.lit, bounds.as_ref(), lit);
                 }
                 *list = [start as u32, (lit.len() - start) as u32];
