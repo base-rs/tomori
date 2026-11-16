@@ -93,7 +93,7 @@ impl Identity {
             .as_deref()
             .and_then(name)
             .or_else(|| device.and_then(name))
-            .unwrap_or_else(|| "Tomori".into());
+            .unwrap_or_else(|| "Guest".into());
         Self {
             participant: store.participant(),
             name,
@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(identity.server, None);
         assert_eq!(identity.token, None);
         let identity = Identity::new(&store, Some(""), overrides);
-        assert_eq!(identity.name, "Tomori");
+        assert_eq!(identity.name, "Guest");
     }
 
     #[test]
