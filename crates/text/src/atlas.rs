@@ -173,6 +173,8 @@ pub struct Stats {
     pub bytes: usize,
     /// The time spent rasterising glyphs and computing their fields, in all.
     pub rasterising: Duration,
+    /// How many glyphs were rasterised, in all: one that was refused for want of room costs none.
+    pub rasterised: u64,
 }
 
 /// What drawing new glyphs into the atlas may cost a thread in one frame: it draws while it has spent less than both.
@@ -273,6 +275,7 @@ pub struct Atlas {
     replacement: Option<Glyph>,
     revision: u64,
     rasterising: Duration,
+    rasterised: u64,
 }
 
 impl Default for Atlas {
@@ -293,6 +296,7 @@ impl Atlas {
             replacement: None,
             revision: 0,
             rasterising: Duration::ZERO,
+            rasterised: 0,
         };
         let solid = vec![255; 16];
         atlas.place(4, 4, &solid);
@@ -393,6 +397,7 @@ impl Atlas {
         if self.spot(width, height).is_none() {
             return Drawn::Full;
         }
+        self.rasterised += 1;
         let mut coverage = vec![0.0; (width * height) as usize];
         outlined.draw(|x, y, alpha| {
             coverage[((y + pad) * width + x + pad) as usize] = alpha;
@@ -487,6 +492,7 @@ impl Atlas {
             height: self.height,
             bytes: self.pixels.len(),
             rasterising: self.rasterising,
+            rasterised: self.rasterised,
         }
     }
 }
@@ -775,22 +781,23 @@ mod tests {
 
     #[test]
     fn a_full_atlas_does_not_draw_a_glyph_it_cannot_place() {
-        // What drawing one kanji costs here.
-        let mut fresh = Atlas::default();
-        let rasterising = fresh.stats().rasterising;
-        fresh.glyph('語').unwrap();
-        let one = fresh.stats().rasterising - rasterising;
         let mut atlas = Atlas::new(START_HEIGHT);
         let full = ('\u{4e00}'..'\u{9fa0}')
             .filter(|ch| fonts::covers(*ch))
             .find(|ch| atlas.glyph(*ch) == atlas.replacement)
             .expect("the atlas filled");
-        // Asked for again and again, it is found not to fit before it is rasterised, each time costing a small part of drawing it.
-        let rasterising = atlas.stats().rasterising;
+        // Asked for again and again, it is found not to fit before it is rasterised, so none is rasterised.
+        let (rasterised, glyphs) = (atlas.stats().rasterised, atlas.stats().glyphs);
         for _ in 0..100 {
             assert_eq!(atlas.glyph(full), atlas.replacement);
         }
-        assert!(atlas.stats().rasterising - rasterising < one * 20);
+        assert_eq!(atlas.stats().rasterised, rasterised);
+        assert_eq!(atlas.stats().glyphs, glyphs);
+        // A glyph that fits is rasterised, so the count does count.
+        let mut fresh = Atlas::default();
+        let before = fresh.stats().rasterised;
+        fresh.glyph('語').unwrap();
+        assert_eq!(fresh.stats().rasterised, before + 1);
     }
 
     #[test]
