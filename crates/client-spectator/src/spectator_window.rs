@@ -62,7 +62,7 @@ impl SpectatorWindow {
         } else {
             (gpu.width, gpu.height)
         };
-        let renderer = Renderer::with_sceneries(
+        let mut renderer = Renderer::with_sceneries(
             &gpu.device,
             &gpu.queue,
             render_format,
@@ -71,6 +71,7 @@ impl SpectatorWindow {
             samples,
             feed.sceneries(),
         );
+        renderer.set_tier(crate::tier().tier);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
             gpu.adapter.get_info().name,

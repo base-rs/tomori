@@ -106,6 +106,83 @@ pub fn with<T>(test: impl FnOnce(Gpu) -> T) -> Option<T> {
     open().map(test)
 }
 
+/// What `renderer`, made for targets of `width` by `height` in `format`, draws in each eye from `matrices`, carrying the
+/// scene into the space by `scene_to_space`, with `panels`, read back as RGBA row by row, one image for each eye; for
+/// tests that compare what is drawn, as in each tier.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_eyes(
+    gpu: &Gpu,
+    renderer: &mut crate::graphics::Renderer,
+    (width, height): (u32, u32),
+    format: wgpu::TextureFormat,
+    matrices: &[glam::Mat4],
+    scene_to_space: glam::Mat4,
+    panels: &[(&crate::ui_panel::Panel, glam::Mat4)],
+) -> Vec<Vec<u8>> {
+    let Gpu { device, queue, .. } = gpu;
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let textures: Vec<wgpu::Texture> = matrices
+        .iter()
+        .map(|_| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Test eye"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        })
+        .collect();
+    let views: Vec<wgpu::TextureView> = textures
+        .iter()
+        .map(|texture| texture.create_view(&Default::default()))
+        .collect();
+    renderer.render(device, queue, &views, matrices, scene_to_space, panels);
+    let stride = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    textures
+        .iter()
+        .map(|texture| {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Test eye read back"),
+                size: u64::from(stride * height),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_texture_to_buffer(
+                texture.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(stride),
+                        rows_per_image: Some(height),
+                    },
+                },
+                size,
+            );
+            queue.submit([encoder.finish()]);
+            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("the eye is read back");
+            let data = buffer.slice(..).get_mapped_range().unwrap();
+            data.chunks(stride as usize)
+                .flat_map(|row| &row[..(width * 4) as usize])
+                .copied()
+                .collect()
+        })
+        .collect()
+}
+
 /// The `.wgsl` files directly in `directory`, by file name and in name order, with their source.
 pub fn wgsl_files(directory: impl AsRef<std::path::Path>) -> Vec<(String, String)> {
     let mut files: Vec<_> = std::fs::read_dir(directory)

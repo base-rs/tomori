@@ -112,7 +112,7 @@ impl Participant {
             std::env::var("TOMORI_PANEL_LOD").ok().as_deref(),
         ));
         let samples = gpu.samples(gpu.format);
-        let renderer = Renderer::with_sceneries(
+        let mut renderer = Renderer::with_sceneries(
             &gpu.device,
             &gpu.queue,
             gpu.format,
@@ -121,6 +121,13 @@ impl Participant {
             samples,
             sceneries,
         );
+        // `TOMORI_TIER`, as the headset's `tomori.tier`: `low`, `high` or `ultra`, Ultra on a desktop GPU otherwise.
+        let tier = tomori_render::tiers::choose(
+            tomori_render::tiers::Device::Desktop,
+            std::env::var("TOMORI_TIER").ok().as_deref(),
+            "TOMORI_TIER",
+        );
+        renderer.set_tier(tier.tier);
         let panels = Panels::new(&gpu.device, &renderer);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
@@ -128,6 +135,7 @@ impl Participant {
             gpu.width,
             gpu.height
         );
+        log::info!("{}", tier.describe());
         log::info!("{CONTROLS}");
         log::info!("{}", conversation.panel_lod().describe());
         let mut frame_times = FrameTimes::default();

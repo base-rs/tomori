@@ -16,6 +16,7 @@
 //! - **Lights:** each with where it is, how far it reaches, its colour and falloff, and each root's environment light.
 //!   Each frame, each instance seen is lit by at most [`LIGHTS_PER_INSTANCE`] of its root's lights, of at most
 //!   [`LIGHTS`] the views may see, as [`assign`] chooses them, which a backend reads as [`World::lit`].
+//! - **The tier:** how finely the device draws it, [`Tier`], which every render path is chosen by and reads.
 //! - **Views:** this frame's eyes, two on the headset and one on the desktop window and the spectator, and one frustum
 //!   enclosing them all.
 //!
@@ -27,6 +28,7 @@
 mod bvh;
 mod light;
 mod material;
+mod tier;
 mod view;
 mod world;
 
@@ -34,6 +36,7 @@ pub use light::{
     EnvironmentLight, FADE, Falloff, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit, assign,
 };
 pub use material::{Alpha, Material, MaterialId, Shading};
+pub use tier::Tier;
 pub use tomori_assets::Digest;
 pub use tomori_assets::bounds::{Aabb, Frustum, Tally};
 pub use view::{EYES, Views, eye};

@@ -698,6 +698,23 @@ impl Renderer {
         self.culling = culling;
     }
 
+    /// Draw in `tier`, by its render path, from the next frame; [`crate::tiers::Tier::High`] until told otherwise. Every
+    /// tier is drawn by today's renderer for now, so that each draws exactly what was drawn before tiers. See
+    /// `design/rendering.md`.
+    pub fn set_tier(&mut self, tier: crate::tiers::Tier) {
+        self.world.set_tier(tier);
+    }
+
+    /// The tier it draws in.
+    pub fn tier(&self) -> crate::tiers::Tier {
+        self.world.tier()
+    }
+
+    /// The render path it draws its tier by.
+    pub fn path(&self) -> crate::tiers::RenderPath {
+        crate::tiers::path(self.tier())
+    }
+
     /// The world the last frame was culled in.
     #[cfg(test)]
     pub(crate) fn world(&self) -> &tomori_world::World {

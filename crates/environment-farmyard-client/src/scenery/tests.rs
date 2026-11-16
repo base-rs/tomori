@@ -25,6 +25,7 @@ mod culling;
 mod lamps;
 mod light_painting;
 mod materials;
+mod tiers;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 200;

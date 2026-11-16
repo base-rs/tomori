@@ -216,6 +216,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
             let foveation = android_foveation(&android);
             let resolution = android_resolution(&android, defaults.resolution);
             let compositor_filter = android_compositor_filter(&android);
+            let tier = android_tier(&android);
             let panel_lod = android_panel_lod(&android);
             let (mut conversation, connection) = android_connection(android);
             conversation.set_panel_lod(panel_lod);
@@ -234,6 +235,7 @@ fn run_android(app: AndroidApp, sceneries: &tomori_render::scenery::Sceneries) {
                 foveation,
                 resolution,
                 compositor_filter,
+                tier,
                 || pump.poll(Duration::ZERO),
                 conversation,
                 connection,
@@ -268,6 +270,24 @@ fn android_eye_defaults(android: &android::Android) -> xr_types::EyeDefaults {
         defaults.rule
     );
     defaults
+}
+
+/// The quality tier the headset draws in: the intent extra `tomori.tier`, as with `am start -e tomori.tier low`, `low`, `high` or `ultra`, and when absent High on a model measured there and Low on any other, as `tomori_render::tiers::choose` says; see `design/rendering.md`.
+#[cfg(target_os = "android")]
+fn android_tier(android: &android::Android) -> tomori_render::tiers::Choice {
+    let model = android.device_name().unwrap_or_else(|error| {
+        log::warn!("Cannot read the device's model: {error:#}");
+        None
+    });
+    let value = android.intent_extra("tomori.tier").unwrap_or_else(|error| {
+        log::warn!("Cannot read the tomori.tier intent extra: {error:#}");
+        None
+    });
+    tomori_render::tiers::choose(
+        tomori_render::tiers::Device::Headset(model.as_deref()),
+        value.as_deref(),
+        "tomori.tier",
+    )
 }
 
 /// The samples per pixel the headset draws with: the intent extra `tomori.msaa`, as with `am start -e tomori.msaa 4`, `1` or `off` for none, and `default` when absent, as `android_eye_defaults` says; see `design/rendering.md`.

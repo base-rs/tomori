@@ -35,6 +35,18 @@ use spectator_window::SpectatorWindow;
 use tomori_client_desktop::desktop_window;
 use tomori_render::scenery::Sceneries;
 
+/// The tier the spectator draws in, logged: `TOMORI_TIER`, `low`, `high` or `ultra`, as the desktop window's, and Ultra,
+/// on a desktop GPU, otherwise. See `design/rendering.md`.
+fn tier() -> tomori_render::tiers::Choice {
+    let tier = tomori_render::tiers::choose(
+        tomori_render::tiers::Device::Desktop,
+        std::env::var("TOMORI_TIER").ok().as_deref(),
+        "TOMORI_TIER",
+    );
+    log::info!("{}", tier.describe());
+    tier
+}
+
 /// Render a read-only, participant-following view of a live space, in a decorated window, or a borderless one if `options.borderless`, drawing `sceneries` and the grid.
 pub fn run_window(options: SpectatorOptions, sceneries: Sceneries) -> anyhow::Result<()> {
     desktop_window::show(
@@ -61,4 +73,19 @@ pub fn run_pipewire_preview(options: SpectatorOptions, sceneries: Sceneries) -> 
             Some(Producer::command()),
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_spectator_draws_in_ultra_on_a_desktop_gpu_unless_told_otherwise() {
+        log::set_max_level(log::LevelFilter::Trace);
+        let tier = super::tier();
+        // Unless whoever runs the tests says otherwise.
+        assert!(
+            std::env::var_os("TOMORI_TIER").is_some()
+                || tier.tier == tomori_render::tiers::Tier::Ultra,
+            "{tier:?}"
+        );
+    }
 }
