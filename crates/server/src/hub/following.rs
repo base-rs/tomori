@@ -207,6 +207,8 @@ pub(crate) struct Following {
     /// The waypoint its glide passes through, and whether it streams, as clients are told.
     pub(super) via: Option<[f32; 3]>,
     pub(super) stream: bool,
+    /// How many times it has jumped, rather than fly over the ground between, as clients are told.
+    pub(super) jumps: u32,
     /// When whether it goes home is next checked.
     poll: Option<Instant>,
     /// Until when the agent speaks, from the last frame of its speech sent.
@@ -1344,6 +1346,7 @@ impl HubState {
             Route::Via(_) => "gliding by a waypoint",
             Route::Stream(None) => "streaming",
             Route::Stream(Some(_)) => "streaming over the ground",
+            Route::Jump => "jumping",
         };
         log::info!(
             "The agent of space {space} followed {with}, as {reason}, {:.1} m from them, {how} to ({x:.2}, {y:.2}, {z:.2}), {:.1} m from them, facing them.",
@@ -1366,20 +1369,30 @@ impl HubState {
         };
         let terrain = record.following.terrain.take();
         // Over the ground, where the straight way home passes below it, as from a deck down to home beneath it.
-        let homeway = match (record.away, &terrain) {
-            (None, _) => record.following.homeway,
-            (Some(_), Some((ground, home))) => homing.and_then(|(from, _)| {
-                follow::over_ground(from, home.position, Some(ground))
-                    .map(|via| (via, home.position))
-            }),
-            (Some(_), None) => None,
+        let over = match (record.away, &terrain) {
+            (Some(_), Some((ground, home))) => {
+                homing.map(|(from, _)| follow::over_ground(from, home.position, Some(ground)))
+            }
+            _ => None,
         };
+        // Or, where no arc over it is low and short enough, it jumps home, appearing there at once.
+        let jumped = over == Some(follow::Over::Jump);
+        let homing = homing.filter(|_| !jumped);
+        let homeway = match (record.away, over) {
+            (None, _) => record.following.homeway,
+            (Some(_), Some(follow::Over::Via(via))) => Some(via)
+                .zip(terrain.as_ref())
+                .map(|(via, (_, home))| (via, home.position)),
+            (Some(_), _) => None,
+        };
+        let jumps = record.following.jumps + u32::from(jumped);
         let via = homeway.map(|(via, _)| via);
         record.following = Following {
             homing,
             homeway,
             via,
             terrain,
+            jumps,
             // Home, it still knows whom it talks with.
             partner: record.following.partner.take(),
             talked: record.following.talked,
@@ -1751,6 +1764,8 @@ impl Following {
             Route::Via(via) => (vec![via, to], GLIDE),
             Route::Stream(None) => (vec![to], STREAMING),
             Route::Stream(Some(via)) => (vec![via, to], STREAMING),
+            // It appears where it goes at once, as clients are told, and glides nowhere.
+            Route::Jump => (Vec::new(), GLIDE),
         };
         self.via = match route {
             Route::Via(via) | Route::Stream(Some(via)) => Some(via),
@@ -1759,6 +1774,11 @@ impl Following {
         self.stream = matches!(route, Route::Stream(_));
         self.homing = None;
         self.homeway = None;
+        if route == Route::Jump {
+            self.jumps += 1;
+            self.glide = None;
+            return;
+        }
         self.glide = Some(Glide {
             from,
             was,

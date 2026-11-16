@@ -1039,3 +1039,62 @@ fn everyone_is_told_while_its_speech_is_still_to_come_through_a_tool_call_and_af
     hub.speech_unqueued(&space);
     assert!(!told(&ada).1);
 }
+
+#[test]
+fn where_the_flight_over_the_ground_would_be_too_high_it_jumps_there_and_home_and_clients_are_told()
+{
+    use tomori_environment::navmesh::{Navmesh, Obstacle};
+    // A terrace 12 m above the yard, reached only by teleport: more than the 8 m it climbs.
+    let corner = |x: f32, y: f32, z: f32| glam::Vec3::new(x, y, z);
+    let square = |a: f32, b: f32, y: f32| {
+        [
+            [corner(a, y, a), corner(b, y, a), corner(b, y, b)],
+            [corner(a, y, a), corner(b, y, b), corner(a, y, b)],
+        ]
+    };
+    let mut triangles = square(-15.0, 15.0, 0.0).to_vec();
+    triangles.extend([
+        [
+            corner(4.0, 12.0, -10.0),
+            corner(10.0, 12.0, -10.0),
+            corner(10.0, 12.0, -4.0),
+        ],
+        [
+            corner(4.0, 12.0, -10.0),
+            corner(10.0, 12.0, -4.0),
+            corner(4.0, 12.0, -4.0),
+        ],
+    ]);
+    let rock = Obstacle::cuboid(corner(4.0, 0.0, -10.0), corner(10.0, 12.0, -4.0));
+    let (hub, _jobs, space, _commands, client) = following(Some(90));
+    let sky =
+        crate::Environment::new("sky", "Sky").with_navmesh(Navmesh::derive(triangles, &[rock]));
+    hub.set_environments(Environments::new([sky]));
+    let ada = [9.0, 13.6, -9.0];
+    client.send(looking(ada, [9.0, 13.6, -12.0]));
+    press(&client, "u1");
+    let start = Instant::now() + COMMIT;
+    hub.flush_snapshots(start);
+    // It stands at her level at once, flying nowhere: nothing to glide, no waypoint, and clients are told it jumped.
+    let spot = agent(&hub, &space).0.expect("gone to her");
+    assert!((spot.position[1] - 13.7).abs() < 1e-4, "{spot:?}");
+    let state = last_state(&client).expect("told");
+    assert_eq!((state.via, state.stream, state.jumps), (None, false, 1));
+    {
+        let state = hub.lock();
+        let following = &state.space(&space).unwrap().following;
+        assert!(!following.moving(
+            Some(spot),
+            crate::hub::agent_home(&Default::default()),
+            start
+        ));
+    }
+    // Home again, it jumps back, the count kept as the rest of how it goes is reset.
+    let later = start + Duration::from_secs(30);
+    hub.flush_snapshots(later);
+    hub.lock().agent_home(&space, "it was sent home", later);
+    hub.flush_snapshots(later);
+    assert_eq!(agent(&hub, &space).0, None);
+    let state = last_state(&client).expect("told");
+    assert_eq!((state.via, state.stream, state.jumps), (None, false, 2));
+}

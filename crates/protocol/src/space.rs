@@ -419,6 +419,11 @@ pub struct SpaceState {
     /// away, or where no way there is clear. See `design/environments.md`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stream: bool,
+    /// How many times the agent has jumped, rising by one each time it goes where no way over the ground is short and
+    /// low enough to fly, so that a client shows it appearing where it stands rather than flying through the rock
+    /// between. Absent before it first has, and from older servers, which fly it there. See `design/agent-movement.md`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub jumps: u32,
     /// The avatar that represents the space's agent, as its backend names it, by identifier: none for the swarm, from
     /// older servers, and when the server no longer offers the backend. A client shows the swarm for one its build
     /// lacks, and says so. See `design/avatars.md`.
@@ -966,6 +971,10 @@ pub struct Participant {
     pub engagement: Option<Engagement>,
 }
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1510,6 +1519,7 @@ mod tests {
             facing: Some([1.0, 1.6, 2.0]),
             via: Some([0.0, 2.5, -1.0]),
             stream: true,
+            jumps: 3,
             ..SpaceState::default()
         };
         let json = serde_json::to_value(&state).unwrap();
@@ -1530,7 +1540,7 @@ mod tests {
         // From an older server, none of it, and none of it is written.
         let plain = serde_json::to_value(SpaceState::default()).unwrap();
         for field in [
-            "movement", "pinned", "pins", "walks", "walking", "facing", "via", "stream",
+            "movement", "pinned", "pins", "walks", "walking", "facing", "via", "stream", "jumps",
         ] {
             assert!(plain.get(field).is_none(), "{field}");
         }

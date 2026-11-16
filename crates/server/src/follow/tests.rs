@@ -514,6 +514,7 @@ fn along(from: [f32; 3], route: Route, to: [f32; 3]) -> Vec<[f32; 3]> {
     match route {
         Route::Via(via) | Route::Stream(Some(via)) => corners.push(via),
         Route::Straight | Route::Stream(None) => {}
+        Route::Jump => return vec![to],
     }
     corners.push(to);
     corners
@@ -771,15 +772,18 @@ fn over_the_ground_no_waypoint_is_needed_where_the_way_is_clear_nor_where_there_
     let ground = ground::tests::terrace();
     assert_eq!(
         over_ground([0.0, 1.7, 0.0], [3.0, 1.7, 0.0], Some(&ground)),
-        None
+        Over::Open
     );
-    assert_eq!(over_ground([0.0, 1.7, 0.0], [7.0, 5.7, -7.0], None), None);
+    assert_eq!(
+        over_ground([0.0, 1.7, 0.0], [7.0, 5.7, -7.0], None),
+        Over::Open
+    );
     // Up onto the terrace from the yard, it rises first.
     assert_eq!(
         over_ground([0.0, 1.7, 0.0], [7.0, 5.7, -7.0], Some(&ground)),
-        Some([0.0, 5.7, 0.0])
+        Over::Via([0.0, 5.7, 0.0])
     );
-    // Walled in beneath the deck's floor and the yard's, with no way out, the highest, over the middle.
+    // Walled in beneath the deck's floor and the yard's, with no way out, it jumps.
     let shut = Ground::new(
         std::sync::Arc::new(tomori_environment::navmesh::Navmesh::from_triangles(
             [-0.3f32, 0.3]
@@ -803,10 +807,146 @@ fn over_the_ground_no_waypoint_is_needed_where_the_way_is_clear_nor_where_there_
         )),
         None,
     );
-    let last = lifts([0.0, 0.0, 0.0], [2.0, 0.0, 0.0]).last();
     assert_eq!(
         over_ground([0.0, 0.0, 0.0], [2.0, 0.0, 0.0], Some(&shut)),
-        last
+        Over::Jump
+    );
+}
+
+/// A yard 200 m across with a plateau `height` high, from `low` to `high` along X, 6 m across, reached only by teleport.
+fn plateau(low: f32, high: f32, height: f32) -> Ground {
+    use tomori_environment::navmesh::{Navmesh, Obstacle};
+    let rock = Obstacle::cuboid(
+        glam::Vec3::new(low, 0.0, -3.0),
+        glam::Vec3::new(high, height, 3.0),
+    );
+    let square = |a: f32, b: f32, y: f32, z: f32| {
+        let corner = |x: f32, z: f32| glam::Vec3::new(x, y, z);
+        [
+            [corner(a, -z), corner(b, -z), corner(b, z)],
+            [corner(a, -z), corner(b, z), corner(a, z)],
+        ]
+    };
+    let mut triangles = square(-100.0, 100.0, 0.0, 100.0).to_vec();
+    triangles.extend(square(low, high, height, 3.0));
+    Ground::new(
+        std::sync::Arc::new(Navmesh::derive(triangles, &[rock])),
+        None,
+    )
+}
+
+/// Whether `point` is inside the terrace's rock, from the yard's floor to its top.
+fn in_rock(point: [f32; 3]) -> bool {
+    let (low, high, top) = ground::tests::TERRACE;
+    (low[0]..high[0]).contains(&point[0]) && (low[1]..high[1]).contains(&point[2]) && point[1] < top
+}
+
+#[test]
+fn between_the_yard_and_the_terrace_it_flies_over_the_rock_and_never_through_it() {
+    let scene = levels(&[]);
+    // From the yard's edge by the cliff up onto the terrace, from beside it, and from further off; and back down.
+    let trips = [
+        ([3.0, 1.7, -7.0], [7.0, 5.7, -7.0]),
+        ([0.0, 1.7, 0.0], [7.0, 5.7, -7.0]),
+        ([11.0, 1.7, -2.0], [6.0, 5.7, -8.0]),
+        ([3.0, 1.7, -3.0], [9.0, 5.7, -9.0]),
+        ([7.0, 5.7, -7.0], [3.0, 1.7, -7.0]),
+        ([7.0, 5.7, -7.0], [0.0, 1.7, 0.0]),
+        ([6.0, 5.7, -8.0], [11.0, 1.7, -2.0]),
+    ];
+    for (from, to) in trips {
+        let route = route(from, to, &scene);
+        assert!(
+            matches!(route, Route::Via(_) | Route::Stream(Some(_))),
+            "{from:?} to {to:?}: {route:?}"
+        );
+        let way = along(from, route, to);
+        assert!(
+            way.iter().all(|point| !in_rock(*point)),
+            "{from:?} to {to:?}: {route:?}"
+        );
+        // Clear of the terrace's top by the swarm's reach and the margin where it passes over the edge.
+        let ground = scene.ground.as_ref().unwrap();
+        assert!(way.iter().all(|point| ground.clear_of(*point)), "{route:?}");
+        let (Route::Via(via) | Route::Stream(Some(via))) = route else {
+            unreachable!()
+        };
+        assert!(
+            via[1] >= 4.0 + ground::GROUND + ARC - 1e-4 || via[1] >= from[1].max(to[1]),
+            "{via:?}"
+        );
+    }
+}
+
+#[test]
+fn the_arc_clears_the_highest_floor_along_the_way_by_the_swarm_s_reach_and_the_margin() {
+    // A wall of rock 6 m high between the yard and where it goes beyond, which the agent leaves from the yard's floor 1.7 m up
+    // and goes to the other side of, at the same height.
+    let scene = open(&[]).on(Some(plateau(-0.5, 0.5, 6.0)));
+    let (from, to) = ([-6.0, 1.7, 0.0], [6.0, 1.7, 0.0]);
+    let route = route(from, to, &scene);
+    let (Route::Via(via) | Route::Stream(Some(via))) = route else {
+        panic!("flies: {route:?}")
+    };
+    assert!(via[1] >= 6.0 + ground::GROUND + ARC - 1e-4, "{via:?}");
+    assert!(via[1] <= 6.0 + ground::GROUND + ARC + 1.0, "{via:?}");
+    let way = along(from, route, to);
+    let ground = scene.ground.as_ref().unwrap();
+    assert!(way.iter().all(|point| ground.clear_of(*point)));
+    assert!(way.iter().all(|point| {
+        !((-0.5..0.5).contains(&point[0]) && point[2].abs() < 3.0 && point[1] < 6.0)
+    }));
+}
+
+#[test]
+fn it_jumps_rather_than_flies_where_the_climb_is_too_high_or_the_way_too_long() {
+    // Too high: a wall of rock more than 8 m above where it is.
+    let high = open(&[]).on(Some(plateau(-0.5, 0.5, 12.0)));
+    assert_eq!(route([-6.0, 1.7, 0.0], [6.0, 1.7, 0.0], &high), Route::Jump);
+    // Too long: over a plateau 85 m away, by an arc of more than 40 m.
+    let far = open(&[]).on(Some(plateau(40.0, 46.0, 4.0)));
+    assert_eq!(
+        route([-45.0, 1.7, 0.0], [60.0, 1.7, 0.0], &far),
+        Route::Jump
+    );
+    // Within both, it flies, and where the way is open it is unchanged, however long.
+    let low = open(&[]).on(Some(plateau(-0.5, 0.5, 4.0)));
+    assert!(matches!(
+        route([-6.0, 1.7, 0.0], [6.0, 1.7, 0.0], &low),
+        Route::Stream(Some(_))
+    ));
+    assert!(matches!(
+        route([-3.0, 1.7, 8.0], [1.0, 1.7, 8.0], &low),
+        Route::Straight
+    ));
+    assert_eq!(
+        route([-45.0, 1.7, 5.0], [-30.0, 1.7, 5.0], &low),
+        Route::Stream(None)
+    );
+    assert_eq!(
+        route([-90.0, 1.7, 5.0], [-30.0, 1.7, 5.0], &low),
+        Route::Stream(None)
+    );
+    assert_eq!(
+        over_ground([-6.0, 1.7, 0.0], [6.0, 1.7, 0.0], high.ground.as_ref()),
+        Over::Jump
+    );
+}
+
+#[test]
+fn the_ceiling_is_the_highest_floor_along_the_way_below_a_limit() {
+    let ground = ground::tests::terrace();
+    assert_eq!(
+        ground.ceiling([0.0, 1.7, 0.0], [7.0, 5.7, -7.0], 20.0),
+        Some(4.0)
+    );
+    assert_eq!(
+        ground.ceiling([0.0, 1.7, 0.0], [7.0, 5.7, -7.0], 3.0),
+        Some(0.0)
+    );
+    assert_eq!(
+        ground.ceiling([30.0, 1.7, 0.0], [40.0, 1.7, 0.0], 3.0),
+        None
     );
 }
 

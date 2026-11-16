@@ -598,6 +598,9 @@ pub struct Step {
     /// The agent's home as the swarm last stood at it: when it changes, as a space opens or changes environment, the
     /// swarm appears at the new one rather than gliding. See `design/environments.md`.
     agent_home: crate::anchors::Anchor,
+    /// How many times the server had jumped the agent as the swarm last stood: when it rises, the swarm appears where the
+    /// agent now stands, rather than flying through what lies between.
+    agent_jumps: u32,
     /// This client's clock, which the timers' dials count down by, reckoned from the instants each frame is given and
     /// read again from the system's clock as they drift apart, and the system's clock, unless a test gives another. See
     /// `design/timers.md`.
@@ -787,6 +790,7 @@ impl Default for Step {
             #[cfg(test)]
             last_grab: None,
             agent_home: crate::anchors::Anchor::AGENT,
+            agent_jumps: 0,
             clock: crate::dials::Clock::default(),
             system: None,
             placed: Rig::default(),
@@ -1843,8 +1847,10 @@ impl Step {
         });
         let carriage = departure.map_or(arrangement.carriage, |(carriage, _)| carriage);
         let flying = joining || leaving;
-        let appear = flying || arrangement.home != self.agent_home;
+        let appear =
+            flying || arrangement.home != self.agent_home || arrangement.jumps != self.agent_jumps;
         self.agent_home = arrangement.home;
+        self.agent_jumps = arrangement.jumps;
         let anchor = arrangement.agent;
         // The ring on the floor stays at home, wherever the agent goes, and with the environment as it shrinks away.
         let home_ring = departure.map_or(arrangement.home_ring(), |(_, ring)| ring);

@@ -6707,6 +6707,35 @@ fn the_agent_glides_where_it_goes_by_its_waypoint_turning_to_face_whoever_it_tur
 }
 
 #[test]
+fn the_agent_appears_where_the_server_jumped_it_rather_than_flying_through_what_lies_between() {
+    let now = Instant::now();
+    let mut conversation = lobby(ConnectionRole::Owner);
+    conversation.apply(space(|state| {
+        state.movement = Some(tomori_protocol::AgentMovement::default());
+    }));
+    let mut step = Step::default();
+    for _ in 0..10 {
+        step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+    }
+    // Sent 12 m up, it stands there on the next frame as the server's jump counts, where otherwise it would glide.
+    let to = tomori_protocol::Pose::at([2.0, 13.4, -2.3]).facing_towards([0.0, 13.6, 0.0]);
+    conversation.apply(space(|state| {
+        state.movement = Some(tomori_protocol::AgentMovement::default());
+        state.away = Some(to);
+        state.jumps = 1;
+    }));
+    let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+    assert_eq!(frame.swarm.anchor().position, Vec3::new(2.0, 13.4, -2.3));
+    // And another jump home, again at once; without one it glides.
+    conversation.apply(space(|state| {
+        state.movement = Some(tomori_protocol::AgentMovement::default());
+        state.jumps = 2;
+    }));
+    let frame = step.update(&senses(), &mut conversation, &mut felt(), now, FRAME);
+    assert!(frame.swarm.anchor().position.y < 3.0);
+}
+
+#[test]
 fn the_swarm_s_agents_keep_up_with_the_agent_as_it_glides() {
     let now = Instant::now();
     let mut conversation = lobby(ConnectionRole::Owner);

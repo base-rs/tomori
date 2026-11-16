@@ -146,6 +146,31 @@ impl Ground {
         })
     }
 
+    /// The highest floor along the way from `from` to `to`, there or [`ABOUT`] from it along either axis, sampled every
+    /// [`SAMPLE`], that stands no higher than `limit`; none where there is no floor along it. A raised level's edge, the
+    /// highest point an arc over it must clear.
+    pub(crate) fn ceiling(&self, from: [f32; 3], to: [f32; 3], limit: f32) -> Option<f32> {
+        let along: [f32; 3] = std::array::from_fn(|axis| to[axis] - from[axis]);
+        let length = along.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let steps = (length / SAMPLE).ceil().max(1.0) as usize;
+        (0..=steps)
+            .flat_map(|step| {
+                let share = step as f32 / steps as f32;
+                let (x, z) = (from[0] + along[0] * share, from[2] + along[2] * share);
+                [
+                    (0.0, 0.0),
+                    (ABOUT, 0.0),
+                    (-ABOUT, 0.0),
+                    (0.0, ABOUT),
+                    (0.0, -ABOUT),
+                ]
+                .into_iter()
+                .flat_map(move |(dx, dz)| self.floors(x + dx, z + dz))
+            })
+            .filter(|floor| *floor <= limit)
+            .reduce(f32::max)
+    }
+
     /// Whether the segment from `from` to `to` passes through one of its floors, from above or below.
     pub(crate) fn crosses(&self, from: [f32; 3], to: [f32; 3]) -> bool {
         let start = self.local(from);

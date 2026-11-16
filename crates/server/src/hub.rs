@@ -5238,6 +5238,7 @@ impl Hub {
                 state.partner = space.partner;
                 state.via = space.following.via;
                 state.stream = space.following.stream;
+                state.jumps = space.following.jumps;
                 // Whether its speech is still to come, so that clients show it speaking through the gaps in it.
                 state.speech_to_come = space.following.to_come();
                 // What it is doing, as its state machine found it when everyone was last told of a change.
