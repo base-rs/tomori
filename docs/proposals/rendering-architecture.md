@@ -1,6 +1,12 @@
 # Proposal: A Render World, Visibility, More Lights and Room for Realism
 
-Status: **approved by the maintainer**, November 2026, with one change: the new GPU-free crate is named `tomori-world`, which this text now follows. **What *realistic* means is decided** (section 7): high quality, more than solid geometry and flat surfaces. This proposal's plan for it, physically based, textured materials with ambient and image-based light and baked light on the Quest, real-time extras on the desktop, and Tomori's own interface kept stylised and emissive, revises the stages still to come (section 10). **Stage 1 is built**: bounds, frustum culling against both eyes, back-face culling of closed parts, the sky after the opaque scene, the GPU's frame log and the farmyard's census, now in `design/rendering.md`, which takes precedence; it found closed parts from their triangles rather than from a flag, and bounded skinned meshes by their joints' boxes, and its census is a GPU test of what the renderer culls rather than a count of triangles in view. **Stage 5, fixed foveation, is built and measured**: the runtime's density map, or Tomori's own where it gives none, as the Quest 3's runtime gave none, attached to the eyes' pass by wrapping the device's render pass and framebuffer functions rather than patching wgpu, at high by default, which took the eyes' GPU time from 8.32 ms to 6.72 ms, in `design/rendering.md`. **Stage 2 is under way**: its GPU-free crate, `tomori-world`, holds the render world's roots, items with their instances' bounds, layers, lights and views, and culls them against both eyes' frustum, static instances through a bounding volume hierarchy, without allocating each frame; the renderer reads from it through a thin adapter, its pipelines unchanged, and Tomori's cubes and panels, the farmyard's models, ferns, plaques and lamps, and Sky's platform and clouds, submit to it. Static meshes are chunked: the farmyard's yard, foothills, trail and upper terrace, split as its scenery uploads them into chunks at most 7 m across of their own triangles, each culled and lit on its own. Sorting the draw lists, the rest of Tomori's own things and moving the environment registry out of `Sceneries` are still to come. **Stage 3 is built**: the world chooses the lights of each instance the eyes may see, at most 8 of at most 64 a root, by one function, ranking by brightness at the bounds' centre rather than the item's centre alone and fading at the cut by brightness rather than by reach; the models' and ferns' pipelines read each piece's lamps as a mask with a byte of light each, beside where it is placed, rather than a range of a storage buffer, which cost each pixel more than the lamps it saved, in `design/rendering.md`. With the farmyard's four lamps the scenery is 7% quicker on the trail, 2% at the campsite and 2% slower at the arrival, and with 32 lamps each piece's own cost a half to a sixth less than every lamp, though the yard's ground, trail and foothills, each one piece met by 10 to 27 of them, were then lit by 8, until they were drawn in chunks, each reached by at most 9; of more than 64 lights, those at the cut fade as those at an instance's do. **Stage 4's LOD was tried and closed** (#484): the gain was too small for its complexity, to be revisited, if at all, as coarse levels built in code without the fade; its multiview is a draft (#414). Stages 6 to 9 are proposals still; each becomes a requirement as it brings itself into the design documents it changes (listed at the end). It was written against `origin/main` at `1aa32a71` (#371), measured on that commit on the desktop and, read-only, on the maintainer's Quest 3 as they used it.
+Status: **approved by the maintainer**, November 2026, with one change: the new GPU-free crate is named `tomori-world`, which this text now follows. **What *realistic* means is decided** (section 7): high quality, more than solid geometry and flat surfaces. This proposal's plan for it, physically based, textured materials with ambient and image-based light and baked light on the Quest, real-time extras on the desktop, and Tomori's own interface kept stylised and emissive, revises the stages still to come (section 11). **Stage 1 is built**: bounds, frustum culling against both eyes, back-face culling of closed parts, the sky after the opaque scene, the GPU's frame log and the farmyard's census, now in `design/rendering.md`, which takes precedence; it found closed parts from their triangles rather than from a flag, and bounded skinned meshes by their joints' boxes, and its census is a GPU test of what the renderer culls rather than a count of triangles in view. **Stage 5, fixed foveation, is built and measured**: the runtime's density map, or Tomori's own where it gives none, as the Quest 3's runtime gave none, attached to the eyes' pass by wrapping the device's render pass and framebuffer functions rather than patching wgpu, at high by default, which took the eyes' GPU time from 8.32 ms to 6.72 ms, in `design/rendering.md`. **Stage 2 is under way**: its GPU-free crate, `tomori-world`, holds the render world's roots, items with their instances' bounds, layers, lights and views, and culls them against both eyes' frustum, static instances through a bounding volume hierarchy, without allocating each frame; the renderer reads from it through a thin adapter, its pipelines unchanged, and Tomori's cubes and panels, the farmyard's models, ferns, plaques and lamps, and Sky's platform and clouds, submit to it. Static meshes are chunked: the farmyard's yard, foothills, trail and upper terrace, split as its scenery uploads them into chunks at most 7 m across of their own triangles, each culled and lit on its own. Sorting the draw lists, the rest of Tomori's own things and moving the environment registry out of `Sceneries` are still to come. **Stage 3 is built**: the world chooses the lights of each instance the eyes may see, at most 8 of at most 64 a root, by one function, ranking by brightness at the bounds' centre rather than the item's centre alone and fading at the cut by brightness rather than by reach; the models' and ferns' pipelines read each piece's lamps as a mask with a byte of light each, beside where it is placed, rather than a range of a storage buffer, which cost each pixel more than the lamps it saved, in `design/rendering.md`. With the farmyard's four lamps the scenery is 7% quicker on the trail, 2% at the campsite and 2% slower at the arrival, and with 32 lamps each piece's own cost a half to a sixth less than every lamp, though the yard's ground, trail and foothills, each one piece met by 10 to 27 of them, were then lit by 8, until they were drawn in chunks, each reached by at most 9; of more than 64 lights, those at the cut fade as those at an instance's do. **Stage 4 was tried and closed.** Its LOD (#484) gained too little for its complexity; a generic version may come back later, with coarse levels built in code and no fade. Its multiview (#414) saved the CPU a little but cost the Quest 3's GPU more at the samples Tomori draws, and twice the recommended size with 2× MSAA (#527) was the better answer. **The maintainer has since decided three more things**, recorded in section 7 and the new section 8:
+
+- textures come from three sources: tiling materials generated offline by code in the repository, hero objects authored offline, and shader detail made on the device;
+- the faceted, low-poly look stays, with textures and materials added to it;
+- one scene description feeds interchangeable render paths, Low, High and Ultra, chosen for each device.
+
+Reverse-Z is not needed now (#533). Stages 6 to 11 are proposals still; each becomes a requirement as it brings itself into the design documents it changes (listed at the end). It was written against `origin/main` at `1aa32a71` (#371), measured on that commit on the desktop and, read-only, on the maintainer's Quest 3 as they used it.
 
 It builds on the rendering order and the panels kept across frames (`design/rendering.md`, #284, #286), the frame timing the headset and desktop log (`tomori_scene::frame_timing`), environments' client crates and their sceneries (`design/environments.md`, `design/clients.md`), assets drawn with `tomori-assets` (`design/assets.md`), the farmyard and its triangle budgets (`design/farmyard.md`), Sky's baked lightmap and moon shadow map, and the content store accepted in `channels-and-content.md` (#283), which is not built yet.
 
@@ -10,7 +16,7 @@ Spoken by the maintainer from the headset, in the farmyard, November 2026:
 
 > I think we're at the point where we need to implement a proper rendering system. The graphics are amazing and I love the style, but we're missing an opportunity to do forward rendering with more lights, and the more geometry we have, the more costly it gets to render. I suspect what we need is a better querying mechanism for rendering; frustum culling might be a good first step. And then maybe putting this all into a crate (do we have a render crate already?), something that helps us grow into the next evolution of this project.
 
-The low-poly, flat-shaded look of the farmyard and Sky was to be kept; the maintainer's later decision on realism (section 7) supersedes that for environments' scenery. Three additions followed:
+The low-poly, flat-shaded look of the farmyard and Sky was to be kept. The maintainer's later decisions (section 7) keep its faceted shapes and add textured, physically based materials to them. Three additions followed:
 
 - **Look to Bevy** for inspiration: its render world and extract phase, its visibility and frustum culling, clustered forward lighting, PBR materials and its renderer's crates. Say what to borrow, and whether to depend on any of it.
 - **Don't let the style hold us back:** "It would be nice if we had the ability to do high-quality rendering, whatever the latest is in Unreal Engine-style rendering. I like this style, but it shouldn't hold us back from more realistic rendering. We might need to decide what that is."
@@ -21,21 +27,33 @@ The low-poly, flat-shaded look of the farmyard and Sky was to be kept; the maint
 - **Measure first, and the measurements say the headset's GPU leads.** On the Quest 3, over 20 minutes of the maintainer's session, the GPU took 9.5 ms of each 13.9 ms frame at 72 Hz (77% busy, at 456 to 545 MHz of the Adreno 740's 690). The CPU's frame thread did about 6 to 9 ms of work, 2.2 to 2.9 ms of it encoding the two eyes. Frames were on time: 0.7 a second were shown stale. At 90 Hz the same GPU work would fill about 86% of an 11.1 ms frame at today's clocks.
 - **Most of the farmyard is off-screen, but its cost is mostly pixels.** From the arrival, the workbench, the trail and the campsite, 14 to 44% of the scenery's model triangles lie in either eye's view when looking at the scene's subject, and 27 to 29% averaged over all headings. Culling whole objects as they are built today keeps 41 to 70%, because the yard, the foothills and the trail are one mesh each. On the desktop, though, 85 to 90% of the scenery's GPU time scales with pixels, not with geometry. The biggest single GPU saving measured was ordering, not culling: drawing the sky after the opaque scene rather than before it saves 12 to 16% of the scenery's GPU time.
 - **A render world, GPU-free, in a new crate `tomori-world`.** Each frame the renderer knows every mesh, instance batch, material, light and view with its bounds. Environments and Tomori's own things (panels, walls, signs, the swarm, workers, rays) submit items to it rather than drawing opaque blocks of commands. `tomori-render` stays the wgpu backend that draws it. The server can link the world crate without wgpu, to bake light from the same description.
-- **Visibility:** bounds for every item and instance batch; frustum culling against both eyes, as one combined test; static meshes split into chunks of about 8 m; a BVH over static scenery, rebuilt when the environment changes; dynamic items tested directly; back-face culling where glTF's `doubleSided` or a mesh's own flag says the mesh is closed; LOD by distance with a dithered cross-fade; occlusion culling not planned.
+- **Visibility:** bounds for every item and instance batch; frustum culling against both eyes, as one combined test; static meshes split into chunks of about 8 m; a BVH over static scenery, rebuilt when the environment changes; dynamic items tested directly; back-face culling where a mesh is closed; occlusion culling not planned. LOD returns as part of the Low tier (section 8), with coarse levels built in code.
 - **Lighting:** a light list for each item, nearest-N with a budget, before clustered forward (Forward+). Use 64 lights in a scene and at most 8 for each item, culled by the frustum and by reach. The farmyard's four lamps today fill the shader's fixed `LAMPS = 4`, and every model pixel loops over all four wherever it is: 7 to 13% of the scenery's GPU time on the desktop. Clustering pays for itself only with dozens of lights overlapping in view, as a data centre's racks might have. The style is kept: per-face normals, the stylised `(1 − d/r)²` falloff and its wrap term, the evening palette, now as one shading model among others.
-- **Room for realism:** a material says its shading model: `Stylised`, as today, or `Pbr`, glTF's metallic-roughness with normal maps, image-based light from an environment map and tone mapping in the same pass; or it is `Custom`, an environment's own pipeline, as the water, fire and ferns are. What the Quest 3 can do at 72 to 90 Hz in stereo is what shipping Quest titles do: PBR with a handful of real-time lights, baked lighting and probes, and no post-processing chain. Real-time global illumination and Nanite- or Lumen-like systems are out of reach there. The desktop and spectator can do more. **The maintainer has chosen high quality** (section 7). In this proposal's plan for it, environments' scenery gets physically based, textured materials (albedo, normal, occlusion, roughness and metalness, emissive) lit by ambient and image-based light, with light baked for the Quest and real-time extras on the desktop. Tomori's own swarm, panels and signs keep their stylised, emissive look.
+- **Room for realism:** a material says its shading model: `Stylised`, as today, or `Pbr`, glTF's metallic-roughness with normal maps, image-based light from an environment map and tone mapping in the same pass; or it is `Custom`, an environment's own pipeline, as the water, fire and ferns are. What the Quest 3 can do at 72 to 90 Hz in stereo is what shipping Quest titles do: PBR with a handful of real-time lights, baked lighting and probes, and no post-processing chain. Real-time global illumination and Nanite- or Lumen-like systems are out of reach there. The desktop and spectator can do more. **The maintainer has chosen high quality** (section 7). Environments' scenery keeps its faceted, low-poly shapes and gains physically based, textured materials (albedo, normal, occlusion, roughness and metalness, emissive), lit by ambient and image-based light, with light baked for the Quest. Tomori's own swarm, panels and signs keep their stylised, emissive look.
+- **Textures from three sources** (section 7):
+  - tiling surface materials generated offline by code in the repository, compressed to ASTC with mips and served from the content store;
+  - hero objects authored offline, with provenance and licence tracked;
+  - shader detail and animation made on the device, with no stored texture.
+- **Render tiers** (section 8): one scene description, the render world, feeds interchangeable render paths chosen for each device and setting:
+  - **Low:** static or few lights, simple materials, coarser LOD;
+  - **High:** the Quest 3's target, as above;
+  - **Ultra:** the desktop's, with ray-traced or hybrid shadows, reflections and GI where the GPU allows.
+
+  Materials are authored once, and each path reads them at its own fidelity.
 - **Server-side baking fits Tomori well.** The server already links every environment's models, built in code without a GPU, and Sky already bakes its lightmap at build time. Bake per-face irradiance for the stylised path, needing no lightmap UVs, about 0.2 MB for the farmyard. For PBR, bake lightmap atlases, and for everything that moves, a probe grid. Each light that can switch keeps a layer of its own, so the campfire's flicker scales its layer live. Results are addressed by the hash of what they were baked from, served from the content store and shared by everyone in the space.
 - **Don't build on Bevy's render crates.** `bevy_render` 0.20 is on wgpu 30 and glam 0.33, as Tomori is, so versions are not what stops it. Every one of its render crates brings Bevy's ECS, app, asset system and schedules, and a desktop-shaped pipeline of extra passes. Borrow its designs instead: extract, then prepare, then queue; `Aabb`, `VisibleEntities` and `VisibilityRange`; the split of `bevy_camera` and `bevy_light` from the GPU crates; its clustering layout for later; and its PBR formulas.
-- **Nine stages, each shippable** (section 10, revised after the decision):
+- **Eleven stages, each shippable** (section 11, revised after the decisions):
   1. bounds, frustum culling, back-face culling, the sky drawn last and a profiler with budgets in CI (built);
   2. the render world, chunked static scenery and its BVH (under way);
   3. light lists and a light budget (built);
-  4. multiview (a draft); LOD was tried and closed;
+  4. LOD and multiview (both tried and closed);
   5. foveation (built);
-  6. materials and textures in the render world;
-  7. PBR shading with ambient and image-based light;
-  8. baked light from the server, after the content store's stage 1;
-  9. desktop extras.
+  6. materials in the render world, and the tier abstraction;
+  7. the procedural texture generator, and delivery from the content store;
+  8. PBR shading in High;
+  9. Low's fallbacks and generic LOD;
+  10. baked light;
+  11. Ultra.
 
 ## Measurements
 
@@ -175,7 +193,7 @@ A `RenderWorld`, retained across frames and changed by what changes, holds:
 - **Meshes:** vertex and index data with their bounds, uploaded once and named by a handle. Static meshes are split into chunks when they are added (section 2).
 - **Materials:**
   - their shading model, `Stylised`, `Pbr` or `Custom(pipeline)`;
-  - their parameters;
+  - their parameters, authored once, which each tier's render path reads at its own fidelity (section 8);
   - whether they are double-sided, cut out or blended;
   - for a custom one, its pipeline, made by the environment, and the vertex layout it reads.
 - **Items:** a mesh drawn with a material, one or many instances, each with its transform.
@@ -192,7 +210,7 @@ Each frame, the renderer runs Bevy's phases in its own way:
 1. **Extract:** take what changed from the frame and the sceneries.
 2. **Prepare:** move dynamic items, then cull against the views, choose each item's LOD and assign each item its lights.
 3. **Queue:** make sorted draw lists: opaque by pipeline, material and distance; translucent back to front, by the rules `rendering.md` sets.
-4. **Draw:** encode the lists once for each eye, or once for both with multiview.
+4. **Draw:** encode the lists once for each eye, by the device's render path (section 8).
 
 The renderer then counts what it drew.
 
@@ -207,7 +225,7 @@ The renderer then counts what it drew.
 | Crate | Holds | Depends on |
 | --- | --- | --- |
 | **`tomori-world`**, new, in `crates/world` | the render world's types; bounds, frustums and views, the combined stereo frustum, the BVH, LOD selection, light assignment and budgets, draw-list sorting, the census of what is in view; no GPU code | `glam`, `tomori-assets` without its `gpu` feature |
-| `tomori-render` | the wgpu backend: pipelines and shaders for the stylised and PBR shading models, the draw lists encoded, multiview, the profiler's GPU queries, Tomori's own surfaces, the `Scenery` trait, which now submits to the world | `tomori-world`, wgpu |
+| `tomori-render` | the wgpu backend: pipelines and shaders for the stylised and PBR shading models, a render path for each tier (section 8), the draw lists encoded, the profiler's GPU queries, Tomori's own surfaces, the `Scenery` trait, which now submits to the world | `tomori-world`, wgpu |
 | `tomori-assets` | models, glTF, materials, gaining PBR's textures and `doubleSided`; its `gpu` drawing moves into `tomori-render`'s backend as one pipeline among others | |
 | `tomori-scene` | gains the environment registry moved out of `Sceneries` | |
 | `tomori-lighting`, later, in `crates/lighting` | the baker: per-face irradiance, lightmaps, probes, on the CPU and, optionally, with wgpu compute | `tomori-world` |
@@ -232,6 +250,8 @@ A crate apart makes sense because the server needs the world without wgpu, to ba
   - the backdrop, whose far plants could become cards.
 
   The style makes LOD cheap, since a low-poly model's farther detail is the same model with fewer facets.
+
+  **Tried and closed** (#484): simplifying models at startup, choosing by pixels of error with a dithered fade, gained too little for its complexity, about 3,300 lines. Its review asked that a later version build coarse levels in code with the models, switch at a pixel with hysteresis and no fade, and measure ferns from their heart. Section 8 brings it back that way, as part of the Low tier.
 - **Occlusion culling: not planned.** The farmyard is open, and the coop and fence hide little. Hardware occlusion queries cost a round trip and a pass on a tiler, and GPU hierarchical-Z culling needs compute passes the Quest can ill afford. It is worth revisiting only for an indoor environment, with portals or cells, which are cheap and CPU-side.
 - **The reveal sphere.** While a scenery grows through the reveal sphere, items wholly outside it are culled too.
 
@@ -247,7 +267,7 @@ A crate apart makes sense because the server needs the world without wgpu, to ba
 
 ### Keeping the style
 
-Stylised stays the shading model of Tomori's own things, and the farmyard's and Sky's until stage 7 gives their scenery physically based materials (section 7):
+Stylised stays the shading model of Tomori's own things, and the farmyard's and Sky's until stage 8 gives their scenery physically based materials (section 7):
 
 - normals from each face, as models built in code give them and as the shader derives them where a mesh has none;
 - light falloff `(1 − d/r)²` with the wrap term `0.35 + 0.65 N·L`, so that lamplight reaches round the sides of facets;
@@ -273,8 +293,9 @@ The light list changes which lamps a pixel loops over, not how each lamp looks. 
 
 - **The frame:** 13.9 ms at 72 Hz, 11.1 ms at 90 Hz, 8.3 ms at 120 Hz, for the CPU and the GPU each, since they overlap (`rendering.md`). Today's GPU 9.5 ms fits 72 Hz with headroom and 90 Hz only at higher clocks. So the plan's GPU savings go first to headroom, then to features, and to 90 Hz if the maintainer wants it (open questions).
 - **No extra passes.** On a tiled GPU, each pass writes its tiles to memory and the next reads them back. Tone mapping, fog and colour grading go in each material's fragment shader, writing straight to the sRGB swapchain. There is no HDR target, no separate post-processing, no depth prepass and no screen-space effects. This is the main reason Bevy's default 3D pipeline does not suit the headset as it is.
-- **MSAA stays 4×,** resolved in the pass into the swapchain, with transient multisampled colour and depth discarded at its end, as now.
-- **Multiview.** Draw both eyes in one pass, from a two-layer target, with the eye chosen by `@builtin(view_index)`. It halves the CPU's encoding, today 2.2 to 2.9 ms, and lets the driver share work between the views. wgpu 30 exposes it, with `multiview_mask` on the pass and the pipeline's multiview. It changes every shader, including environments' custom ones, and the `Scenery` interface, since uniforms for each eye become arrays, so it belongs after the render world, which owns the encoding.
+- **Resolution and MSAA:** resolved in the pass into the swapchain, with transient multisampled colour and depth discarded at its end. A Quest 3 now draws each eye at twice the recommended size with 2× MSAA (#527, `rendering.md`), and other devices at the recommended size with 4×.
+- **Multiview: tried and closed** (#414). Drawing both eyes in one pass saved the CPU a little, but on the Quest 3 it cost the GPU more at the samples Tomori draws, since its tiles shrink under MSAA: in Observe, 7.0 ms for multiview at 2× against 5.8 ms for each eye at 2×. Resolution with 2× MSAA was the better answer. The branch is kept, to reopen if a scene turns out to be CPU-bound.
+- **Depth: reverse-Z is not needed now** (#533). A 32-bit float depth buffer with normal Z is precise enough at every distance Tomori draws, about 1 mm at 30 m and 5 cm at 200 m (#397). It is worth revisiting, with an infinite far plane, for the Ultra tier's shadow maps (section 8) or a far plane much beyond 2 km.
 - **Fixed foveated rendering.** The runtime reports `Fov=0`, so it is off. `XR_FB_foveation` lowers the shading rate towards the edges of the view, which typically saves 10 to 25% of fragment work, and fragment work is most of the GPU's. On Vulkan it needs the runtime's fragment density map attached to the render pass (`VK_EXT_fragment_density_map`), which wgpu does not expose. It needs either a small patch to wgpu's Vulkan backend, carried as a `[patch]` in the workspace until upstream has something like it, or the pass begun through wgpu-hal. This is the largest GPU saving on the headset that does not touch content, and the riskiest to build.
 - **Thermal headroom.** The runtime set the GPU at levels 2 to 4, not 5, for 9.5 ms at 77% busy. Tomori never sets `XR_EXT_performance_settings` (`rendering.md`'s open question). Lower GPU time lets the runtime stay at lower levels for longer sessions. The profiler's log should keep the runtime's levels beside Tomori's own times.
 - **Later:** depth submitted for reprojection (`XR_KHR_composition_layer_depth`), and Application SpaceWarp, which needs motion vectors. Neither is needed while frames are on time.
@@ -333,7 +354,13 @@ The maintainer decided, in November 2026:
 
 > Realistic rendering should be high quality — we should aim for more than just solid geometry and flat surfaces.
 
-The rest of this section is this proposal's plan for it, not the maintainer's words. It reads the decision as option 3 below, textured rather than faceted, since the maintainer asked for more than flat surfaces: every device gets the same scenes and materials, the headset draws them as shipping Quest titles do, and the desktop and spectator add what only they can afford. This replaces the earlier recommendation, which was option 1 for the farmyard and Sky.
+Then, reviewing this plan:
+
+- **The look:** keep the current faceted, low-poly style, adding textures and materials to it, rather than moving to smooth geometry.
+- **Where textures come from:** the hybrid below ("seems okay").
+- **Weaker devices:** "A weaker renderer should fall back to static / less expensive lights; low-poly shapes also okay, perhaps tied into a LOD system… ideally in a way that supports different rendering pipelines, e.g. high quality vs low quality vs ray traced. Open to ideas." Section 8 proposes the tiers.
+
+The rest of this section is this proposal's plan, not the maintainer's words. It reads the decision as option 3 below: every device gets the same scenes and materials, the Quest 3 draws them as shipping Quest titles do in the High tier, and the desktop and spectator add what only they can afford in Ultra. This replaces the earlier recommendation, which was option 1 for the farmyard and Sky.
 
 ### The plan: what high quality means
 
@@ -343,58 +370,59 @@ The rest of this section is this proposal's plan for it, not the maintainer's wo
   - occlusion, roughness and metalness, packed into one texture (ORM);
   - emissive.
 
-  Surfaces get their detail from textures and normal maps rather than from facets and colours varied face by face. Silhouettes stay modest in triangles, and normals are smoothed where a surface is meant to be smooth.
+  **The shapes stay faceted.** Each face keeps its own normal, and its texture and normal map add grain, wear and detail within it, so a facet catches the light as one plane with texture on it, not as a smoothed curve. Geometry is added only where a silhouette shows it, as low-poly as before.
 - **Ambient and image-based light.** Each environment's sky is captured into a small environment map: a prefiltered 128² cube, its mips running from smooth reflection to rough, and its irradiance as spherical harmonics. Every surface is then lit and reflected by its own sky and ground, by its roughness and Fresnel. The occlusion map also dims reflections, keeping crevices dark.
 - **Baked light on the Quest** (section 6): indirect light and occlusion for static scenery in lightmaps, one for each light layer; probes for what moves; and reflection probes where something is shiny or wet. Direct light comes in real time from the moon and each piece's own lamps, at most 8, as stage 3 chooses them.
 - **Tone mapping and exposure** in each material's own shader, with an exposure set by each environment. The headset gets no extra passes (section 5).
-- **Real-time extras on the desktop and spectator:**
-  - an HDR target with bloom;
-  - cascaded shadows from the moon or sun;
-  - more lights, by clustered forward;
-  - SSAO, and SSR for water;
-  - optionally, ray-traced GI.
-
-  A participant at the desktop and one in the headset see the same things, the desktop's more finely lit.
+- **Real-time extras on the desktop and spectator,** the Ultra tier (section 8): an HDR target with bloom, ray-traced or hybrid shadows, reflections and GI where the GPU allows, and more lights by clustered forward. A participant at the desktop and one in the headset see the same things, the desktop's more finely lit.
 - **Tomori's own things keep their look.** The swarm and its workers, panels, walls, signs, labels, the hand menu, the pill, rays and rings stay stylised and emissive, under the shared haze (`rendering.md`). They are the interface, and they stay legible against any scenery because they give their own light. Only what gains from it changes: the controllers, a real object in the hand and already textured glTF, can take PBR. Open question 5, whether the swarm is lit by the environment, stands.
 
 ### What it means for each environment
 
 | The farmyard's | Today | High quality |
 | --- | --- | --- |
-| Ground: the yard's packed earth, the meadow and pasture, the trail, the terrace's moss and stone, the beach's shingle | flat faces, each colour varied a little | tiling sets of earth, grass, gravel, moss and shingle, blended by a mask in vertex colour; normals smoothed across the ground, with detail normal maps; darker and glossier where wet |
-| Plants: the bush, pines, tree ferns, flax and ferns | low-poly leaves, coloured on both sides | leaf and frond cards cut out from an atlas, with alpha to coverage under the 4× MSAA; two-sided, with a cheap transmission term so light from behind shows through; normal-mapped bark; the breeze kept. Cut-outs cost overdraw on a tiled GPU, so the census budgets their layers over each pixel |
-| Wood: the fence, the coop, the workbench, the ramp, the logs | flat colour | grain and weathering: grey, rough posts; the coop's red paint and white trim worn through to wood at the edges; the bench oiled and smoother |
-| Water: the river, the pool, the waterfall | a custom pipeline | still custom, now physically based: Fresnel reflection of the environment map, scrolling normal-mapped ripples, colour absorbed by depth taken from the bed's geometry rather than read from the depth buffer, and foam where the fall lands. SSR or a planar reflection on the desktop |
-| Stone: the river's stones, the fire ring, the waterfall rock and cliff | flat faces | base colour, normal and roughness; darker and smoother where wet |
-| Fire, embers, lanterns, marshmallows | emissive | emissive as now, their light baked as layers, with bloom on the desktop |
-| The hens | their author's model | as their author made them, with physically based textures if their author adds them |
+| Ground: the yard's packed earth, the meadow and pasture, the trail, the terrace's moss and stone, the beach's shingle | flat faces, each colour varied a little | the same facets, textured with generated tiling sets of earth, grass, gravel, moss and shingle, blended by a mask in vertex colour and by slope in the shader, with detail normal maps; darker and glossier where wet |
+| Plants: the bush, pines, tree ferns, flax and ferns | low-poly leaves, coloured on both sides | the same low-poly leaves and fronds, with generated colour and vein variation; two-sided, with a cheap transmission term so light from behind shows through; generated bark; the breeze kept. Cut-out cards, whose overdraw a tiled GPU pays in full, only where the census's layers over each pixel allow |
+| Wood: the fence, the coop, the workbench, the ramp, the logs | flat colour | generated grain on the fence, ramp and logs: grey, rough posts. The coop and the workbench authored as hero objects: the coop's red paint and white trim worn through to wood at the edges; the bench oiled and smoother |
+| Water: the river, the pool, the waterfall | a custom pipeline | still custom, now physically based: Fresnel reflection of the environment map, ripples made in the shader on a generated normal map, colour absorbed by depth taken from the bed's geometry rather than read from the depth buffer, and foam where the fall lands. Ray-traced or planar reflection in Ultra |
+| Stone: the river's stones, the fire ring, the waterfall rock and cliff | flat faces | generated base colour, normal and roughness; darker and smoother where wet |
+| Fire, embers, lanterns, marshmallows | emissive | emissive as now, flickering in the shader, their light baked as layers, with bloom in Ultra |
+| The hens | their author's model, by Hinoki Maple Williams under CC BY 4.0 | as their author made them, with physically based textures if their author adds them |
 
-**Sky:** its platform and shrine take stone and wood materials, and its night sky becomes its environment map, with the moon as its direct light. Its build-time bake of occlusion and lantern light becomes lightmaps in stage 8, and stays as it is until then. The moon's shadow map stays, and the volumetric clouds stay a custom pipeline. **Environments still to come**, such as a data centre, start physically based.
+**Sky:** its platform and shrine take stone and wood materials, and its night sky becomes its environment map, with the moon as its direct light. Its build-time bake of occlusion and lantern light becomes lightmaps in stage 10, and stays as it is until then. The moon's shadow map stays, and the volumetric clouds stay a custom pipeline. **Environments still to come**, such as a data centre, start physically based.
 
 ### Where textures and materials come from
 
-- **Authored** in Blender and exported as `.glb` with their textures, as the hens are. Tiling sets of ground, wood, stone and bark come from CC0 libraries such as ambientCG and Poly Haven, and are listed with a build's licences, as the hens' credit is.
-- **Generated:** tiling textures by an image model, props by image-to-3D, on the maintainer's own GPU. Generation is uneven, so each one is checked by eye for seams and repeats.
-- **Procedural:** masks, noise and wear, made in code at build time from fixed seeds, as the farmyard's geometry is, so that every build and the server's baker agree.
-- **One format: KTX2 with Basis Universal.** Its mips are made offline: UASTC for normal maps, ETC1S where size matters more. It is transcoded at load, to ASTC on the Quest and BC7 on the desktop. `tomori-render` already transcodes the controllers' KTX2 with `basisu`; that moves into `tomori-assets`, under its reader's limits for untrusted input. The reader also gains glTF's normal, occlusion, metallic-roughness and emissive textures, a second set of texture coordinates (`TEXCOORD_1`), and tangents, made with MikkTSpace where a file has none.
-- **Distributed** embedded in the build and the APK, as models are now (`assets.md`), until the content store's stage 1. After that, textures are served by hash as `image/ktx2`, with a size bound like the store's other kinds. They are fetched as an environment is entered, smallest mips first, and each surface is drawn with its constant factors until its textures arrive.
+**Decided: a hybrid of three sources,** each for what it suits.
+
+| Source | For | How |
+| --- | --- | --- |
+| **Generated offline, by code** | tiling surface materials: ground, grass, gravel, stone, bark, wood grain, and normal maps for water and rock | A generator in the repository, from fixed seeds, makes each set's base colour, normal and ORM, tiling without seams, as the farmyard's geometry is made in code. Its output is compressed offline into KTX2 with mips, ASTC for the Quest and BC7 for desktops without ASTC, and shipped from the content store by hash. Changing a material is a change to code, reviewed as code; the same seed gives the same bytes, so every build and the server's baker agree |
+| **Authored offline** | distinctive hero objects, and anything looked at up close: the coop, the workbench, the hens, an environment's own signs and plaques (workers' signs stay Tomori's, stylised) | Made in the asset studio or Blender, as models with painted UV maps, exported as `.glb` with their textures. Each records its provenance and licence, listed with a build's licences, as the hens' credit already is: by Hinoki Maple Williams, under CC BY 4.0 |
+| **Procedural on the device** | detail and animation with no stored texture: water's ripples, embers' flicker, variation that breaks up tiling, blending by slope | Made in the material's shader from its parameters, at each tier's fidelity (section 8) |
+
+- **A size budget for each environment:** proposed at 32 MB of textures shipped, all tiers together, and 64 MiB resident on the Quest (below). Each environment's tests check it, as they check their triangle budgets.
+- **The reader:** `tomori-assets` gains glTF's normal, occlusion, metallic-roughness and emissive textures, a second set of texture coordinates (`TEXCOORD_1`) for lightmaps, tangents made with MikkTSpace where a file has none, and KTX2. Authored files with Basis Universal textures are transcoded at load, as the controllers' are now; that moves from `tomori-render` into `tomori-assets`, under its reader's limits for untrusted input.
+- **Delivery:** embedded in the build and the APK, as models are now (`assets.md`), until the content store's stage 1. After that, textures are served by hash as `image/ktx2`, with a size bound like the store's other kinds, fetched as an environment is entered, smallest mips first; each surface is drawn with its constant factors until its textures arrive.
 
 ### The Quest's budget
 
 - **Texture memory:** proposed at 64 MiB of textures resident for each environment. Base colour and ORM use ASTC 6×6, 3.56 bits a texel; normals use ASTC 4×4, 8 bits a texel. One 1,024² set of all three, with mips, is then about 2.7 MB, where uncompressed it would be 17 MB, so twenty such sets come to about 53 MB. The reader keeps its limit of 2,048 texels a side.
 - **Mipmaps everywhere,** filtered trilinearly. Besides removing shimmer, they cut the memory bandwidth of distant pixels, which is the dearest thing on a tiled GPU.
-- **Shader cost per pixel:** the PBR shader is estimated at two to four times the stylised one's, which has not yet been measured. The eyes take 6.72 ms of the GPU's 13.9 ms frame at foveation high. Each of these offsets part of it:
+- **Shader cost per pixel:** the PBR shader is estimated at two to four times the stylised one's, which has not yet been measured. At the recommended size with 4× MSAA the eyes took 6.72 ms of the GPU's 13.9 ms frame at foveation high; at #527's twice the size with 2× they took 10.75 ms on average in Observe, 11.45 ms at the 95th percentile. So the headroom #527 spent on sharper text is what High's PBR must share. Each of these offsets part of it:
   - **Foveation** already took the eyes from 8.32 ms to 6.72 ms, 19%. Towards the edges of each eye it shades one fragment for every two to sixteen pixels, so most of PBR's cost per fragment is spent where each eye looks straight ahead.
-  - **Multiview** (#414) halves the CPU's encoding, 2.2 to 2.9 ms, and shares vertex and binning work between the eyes. It does not reduce pixel work.
+  - **Each tier's resolution** (section 8): High may draw at less than twice the recommended size where its materials need the time, a setting the maintainer chooses by eye, as #527's was.
   - **Light masks** from stage 3 keep each pixel's loop to its own lamps, at most 8.
   - **Baked light** stands in for real-time indirect light.
   - **Cheaper arithmetic:** half precision where it suffices; one ORM fetch for three parameters; and a cheaper variant, with fewer texture reads, for distant pixels that the haze mostly hides.
 
   If a stage misses its gate, texture reads and precision are cut before features are.
-- **The gate for each stage**, measured on the Quest at 72 Hz with foveation at high, from the census's viewpoints:
-  - the eyes' GPU time at most 9.5 ms on average and 11.5 ms at the 95th percentile (9.5 ms is the whole GPU frame the headset kept on time with before any of this work, so the eyes alone are held to no more);
+- **The gate for each stage**, measured on the Quest 3 at 72 Hz in High, at its default resolution and samples with foveation at high, from the census's viewpoints:
+  - the eyes' GPU time at most 11.5 ms at the 95th percentile, the rule by which `rendering.md` admits a device's defaults (the 9.5 ms on average first proposed here predates #527, whose sharper eyes already take 10.75 ms in Observe);
   - no more missed refreshes than before the stage;
   - the runtime's GPU level no higher than it chose before stage 6.
+
+  Low and Ultra have gates of their own (section 8).
 
 ### What the Quest 3 can do
 
@@ -429,9 +457,61 @@ The desktop window and the spectator have one view and a desktop GPU many times 
    - The cost is two quality tiers to keep and test, and scenes that look different between devices, which matters when a participant on the desktop and one in a headset talk about the same thing.
 4. **Fully realistic everywhere.** Not achievable on the Quest at 72 to 90 Hz in stereo today. Choosing it would mean streaming frames rendered elsewhere to the headset, a different product.
 
-The proposal had recommended building for options 2 and 3, keeping option 1 for the farmyard and Sky. The plan reads the decision as option 3, textured, for every environment. The shading model still belongs to each material, and the lighting setup to each environment, so Tomori's own stylised things and physically based scenery share one frame. Stage 6 brings textured materials, stage 7 PBR shading for the Quest's budget, stage 8 baked light, and stage 9 the desktop's extras.
+The proposal had recommended building for options 2 and 3, keeping option 1 for the farmyard and Sky. The plan reads the decisions as option 3 for every environment, with option 2's faceted models kept faceted and textured, and option 3's two tiers grown into section 8's three, with Low for weaker devices. The shading model still belongs to each material, and the lighting setup to each environment, so Tomori's own stylised things and physically based scenery share one frame.
 
-## 8. Bevy, compared
+## 8. Render tiers: one scene, several paths
+
+The maintainer asked that a weaker renderer fall back to static or cheaper lights and coarser shapes, perhaps through LOD, "ideally in a way that supports different rendering pipelines, e.g. high quality vs low quality vs ray traced. Open to ideas." This is the proposal for it.
+
+### One scene description, interchangeable render paths
+
+- **The scene is described once, in the render world.** Environments and Tomori's own things submit instances, meshes, materials, lights, environment light and bakes to `tomori-world`, as they do now, and never learn which path draws them. Culling, light assignment, sorting and LOD selection stay in the world, shared by every tier.
+- **A render path draws it.** `tomori-render` gains a `RenderPath` for each tier. Each takes the world's prepared, culled and sorted lists and encodes the eyes' passes. A path chooses its pipelines for each shading model, its light budget, its shadows and indirect light, its LOD bias, its resolution and samples, and any passes of its own. Only Ultra adds passes; Low and High keep section 5's single pass.
+- **Tomori's own things are drawn alike in every tier.** The panels, walls, text, signs, swarm, rays and labels keep `rendering.md`'s contracts in every path, by the same pipelines. Only the scenery's look changes with the tier.
+- **Materials are authored once.** A material in `tomori-world` holds:
+  - its shading model;
+  - its constant factors;
+  - its texture slots;
+  - its procedural parameters (ripple, flicker, anti-tiling, slope blend);
+  - its alpha mode and sidedness;
+  - a flat colour, the mean of its base colour, computed offline.
+
+  Each path reads what it can afford. Low may draw a ground material by its flat colour or its smallest mips; High draws every slot; Ultra adds ray-traced reflection by the same roughness. An environment's custom pipeline, such as the water, the fire, the ferns or Sky's clouds, gives a variant for each tier it cares about, and is drawn by its one pipeline in the rest.
+
+| | **Low** | **High** | **Ultra** |
+| --- | --- | --- | --- |
+| For | weaker headsets (a Quest 3S, a Quest 2), a web client, a device over its budget | the Quest 3, the target | the desktop window and the spectator on a desktop GPU |
+| Lights | baked or static light where a bake exists, with each switchable layer still scaled live; otherwise today's sky and ground ambient. At most 2 real-time lights an item | baked light and probes, the sky's ambient and image-based light, at most 8 real-time lights an item (stage 3) | as High, with more lights by clustered forward |
+| Materials | the stylised shading model over the faceted shapes: base colour from the flat colour or the smallest mips, no normal or ORM reads | `Pbr`, every texture slot, procedural detail in the shader | as High |
+| Shadows | baked, and a blob under what moves | baked, and a blob under what moves | ray-traced or hybrid where the GPU has ray queries, cascaded shadow maps otherwise |
+| Reflections and GI | none beyond the sky's ambient | the prefiltered environment map, reflection probes | ray-traced reflections, or screen-space or planar ones, and ray-traced GI where the GPU allows |
+| Geometry | coarser LOD levels, switched nearer | the levels as built, at a pixel of error | the finest levels, switched farther |
+| Resolution and samples | the recommended size, 4× or 2× | the device's measured default, on a Quest 3 twice the size with 2× (#527) | the window's size, an HDR target with bloom and tone mapping |
+
+- **Ray tracing through wgpu.** wgpu 30's ray queries (`Features::EXPERIMENTAL_RAY_QUERY`) are experimental and on Vulkan alone, so Ultra asks for them where the adapter has them and falls back to shadow maps and screen-space reflection where it does not, as on Metal. The server's baker can use the same queries (section 6).
+- **LOD as part of the tier,** generic, as #484's review asked. An item may name coarser meshes of the same model, built in code with the model, as procedural models are, or at build time for authored ones, never at startup. The world chooses one level for both eyes by pixels of error, with hysteresis and no fade, measuring ferns from their heart. #484's selection, `Levels` with its hysteresis, can merge with this consumer. Each tier sets the bias, from Ultra's finest to Low's coarsest. The faceted style makes a coarser level the same model with fewer facets.
+
+### How a device picks its tier
+
+1. **Its capabilities, at startup.** A desktop adapter that is not a tiled GPU, with ray queries, takes Ultra; without them, Ultra's fallbacks. A headset takes High only where its model has been measured holding its frames there, as `xr_types::MEASURED` admits a Quest 3's eyes by default today. Any other headset, or a device short of a feature High needs (such as ASTC or BC7 textures), takes Low.
+2. **A setting** overrides it: `-e tomori.tier low|high|ultra` on the headset, `TOMORI_TIER` for `tomori --xr`, and the desktop's and spectator's options. The log says at startup which rule chose the tier, as it does for the eyes' size.
+3. **Measured frame time.** If the eyes' GPU time stays over the frame's budget, 11.5 ms at the 95th percentile at 72 Hz, for 10 seconds, the device steps down: first its resolution, then one tier. Each step is logged, and none is taken back within the session, so that it never oscillates. A pinned setting turns this off. Switching changes pipelines and the textures' resident mips, not the scene.
+
+### How the tiers are tested
+
+- **Pixels for each tier.** The render tests draw the census's viewpoints on lavapipe in each tier and check each tier's look on its own: surfaces within their material's range of luminance, and LOD changing pixels only where a level switches. Across tiers, they check what must agree:
+  - culling and order are the same;
+  - Tomori's own things are the same pixel for pixel;
+  - each surface's mean luminance is within a set fraction between tiers, so that a desktop and a headset look like the same place.
+
+  Ray-traced paths are tested on lavapipe where it offers ray queries, and their fallback always.
+- **Frame budgets for each tier,** on its reference device, by the profiler's `GPU over` line:
+  - Low: within 11.5 ms at the 95th percentile on a Quest 3S at 72 Hz, and well under High on a Quest 3;
+  - High: section 7's gate on a Quest 3;
+  - Ultra: within the window's refresh at its size, timed by `scenery_frames` with each extra on and off.
+- **The census for each tier:** triangles in view after LOD, and lights for each item, within the tier's budgets, on CI without a GPU.
+
+## 9. Bevy, compared
 
 | Bevy (0.20) | Tomori today | What to borrow |
 | --- | --- | --- |
@@ -452,7 +532,7 @@ The proposal had recommended building for options 2 and 3, keeping option 1 for 
 
 Using wgpu directly, as now, keeps Tomori's renderer small and its contracts its own, while its designs come from Bevy.
 
-## 9. Profiling and budgets
+## 10. Profiling and budgets
 
 - **A frame profiler, logged and shown.**
   - **GPU:** timestamp queries at the start and end of each eye's pass, and on the desktop, within passes, around each layer: sky, opaque scenery, Tomori's opaque, translucent panels and signs, labels.
@@ -462,9 +542,9 @@ Using wgpu directly, as now, keeps Tomori's renderer small and its contracts its
 - **The census as a test.** `tomori-world`'s census runs each environment's static scene from the viewpoints it declares, the arrival, its stations and anchors, and asserts budgets: triangles and draw calls in view, lights for each item, and back-facing share for closed meshes. It needs no GPU, so it runs on CI, beside the triangle budgets the environments already keep.
 - **A GPU benchmark,** like `panel_frames`, drawing each environment's scenery at the headset's size: run by hand and before releases, not a CI gate, since CI's lavapipe is not a GPU to time.
 
-## 10. A staged plan
+## 11. A staged plan
 
-The plan as approved, before the decision on realism:
+The plan as approved, before the decisions on realism and tiers:
 
 | Stage | What | Expected wins, from the measurements | Size |
 | --- | --- | --- | --- |
@@ -473,63 +553,72 @@ The plan as approved, before the decision on realism:
 | **3. Light lists and a light budget** | Nearest-N with a budget of 64 a scene and 8 an item, culled by reach and frustum, fading at the cut; the shader looping over the item's list; `LAMPS` gone | Most of the 8 to 13% the four lamps cost now; more lamps in the farmyard, the trail, the coop, without each pixel paying for all of them | M: 2 PRs |
 | **4. LOD and multiview** | Visibility ranges with dithered fades; the hens, bush and ferns given far meshes; multiview for every pipeline, sceneries' uniforms by view | The hens' 6,300 triangles to under 1,500 beyond 6 m; the CPU's encoding, 2.2 to 2.9 ms on the headset, about halved | M to L: 3 PRs |
 | **5. Fixed foveation** | `XR_FB_foveation` with the runtime's fragment density map, through a patch to wgpu's Vulkan backend | Typically 10 to 25% of fragment work, the GPU's largest share; to be measured | M, risky |
-| **6. PBR** | Split into stages 6 and 7 below, after the decision on realism | | |
-| **7. Baked light from the server** | Now stage 8 below | | |
-| **8. Desktop extras** | Now stage 9 below | | |
+| **6. PBR** | Now stages 6 to 9 below, after the decisions on realism and tiers | | |
+| **7. Baked light from the server** | Now stage 10 below | | |
+| **8. Desktop extras** | Now stage 11 below, Ultra | | |
 
 Stage 1 was worth doing before the render world, since it paid at once and its census and profiler tell the later stages what each buys. The crate split came in stage 2, with the world itself.
 
-### Where it stands, and the stages after the decision
+### Where it stands, and the stages after the decisions
 
 - **Built:**
   - stage 1, culling, the sky's order and the profiler (#380);
   - stage 3, each piece's own lamps (#475, #476);
   - stage 5, foveation (#405), which took the eyes from 8.32 ms to 6.72 ms.
-- **Under way:**
-  - stage 2's render world (#411, #413) and chunks (#481). Sorting, the rest of Tomori's own things and the environment registry remain.
-  - Stage 4's multiview is a draft (#414). It should land before stage 7, whose cost it helps to offset.
-- **Set aside:** LOD, tried and closed (#484).
+- **Under way:** stage 2's render world (#411, #413) and chunks (#481). Sorting, the rest of Tomori's own things and the environment registry remain.
+- **Tried and closed:** stage 4.
+  - LOD (#484) returns as a generic part of stage 9.
+  - Multiview (#414) gave way to resolution with 2× MSAA (#527).
 
-Section 7's decision asks for four more stages. Each ships on its own and must pass section 7's gate on the Quest, measured by the profiler's `GPU over` line from the census's viewpoints, before the next begins.
+The decisions in sections 7 and 8 ask for six more stages. Each ships on its own and must pass its gate before the next begins. High's gate is section 7's, on a Quest 3, measured by the profiler's `GPU over` line from the census's viewpoints. Low's and Ultra's gates are in section 8. Low is today's renderer from the start: when stage 8 makes High physically based, weaker devices keep today's look rather than losing support.
 
-| Stage | What | Gate besides section 7's, and what it buys | Size |
+| Stage | What | Gate, and what it buys | Size |
 | --- | --- | --- | --- |
-| **6. Materials and textures in the render world** | `tomori-world` describes materials as data: shading model, constant factors, texture slots (base colour, normal, ORM, emissive), alpha mode and two-sidedness. `tomori-assets` reads glTF's full metallic-roughness material, `TEXCOORD_1`, tangents (MikkTSpace where missing) and KTX2, transcoded to ASTC or BC7 with its mips. A texture cache with a memory budget loads the smallest mips first. Normal mapping and smoothed normals reach the stylised shader too, so this stage ships before PBR does. Pilot: the yard's earth and the fence's wood | Textures within 64 MiB; the eyes' GPU time within 5% of before at the same viewpoints. Surfaces get detail at little shading cost | M to L: 3 PRs |
-| **7. PBR shading with ambient and image-based light** | A `Pbr` shading model on Filament's mobile BRDF: GGX, Schlick's Fresnel, split-sum image-based light from each environment's sky captured into a 128² prefiltered cube with irradiance as spherical harmonics, occlusion that also dims reflections, emissive, and exposure and tone mapping inline. The farmyard's and Sky's scenery change over material by material, ground first, then wood and stone, plants and water. Tomori's own things stay stylised | Section 7's gate at every viewpoint; render tests check that each surface lies within its material's expected range of luminance. The look the maintainer asked for, on the headset | L: 3 to 4 PRs |
-| **8. Baked light** | `tomori-lighting`, as section 6 describes: lightmaps for each light layer, L1 probes for what moves, reflection probes for what is wet or shiny, and per-face irradiance for anything still stylised. Baked by the server's core, stored and served by hash. Until then a build-time bake, as Sky's is, can bring light to the farmyard's static scenery | Lightmaps at most 4 MB an environment; sampling them costs at most 0.3 ms of the eyes' GPU time. Bounce and occlusion, shared by everyone in the space | L: 3 to 4 PRs; needs the content store's stage 1 |
-| **9. Desktop extras** | For the desktop and spectator: an HDR target with bloom, cascaded shadows, more lights by clustered forward, SSAO, SSR for water, and optionally ray-traced GI. Each can be turned off, and none changes the headset | Timed by `scenery_frames` at the desktop's window size, each extra on and off. Recordings and the spectator at their best | M to L: 3 PRs |
+| **6. Materials in the render world, and the tiers** | `tomori-world` describes materials as data, as section 8 lists. `tomori-render` gains `RenderPath`, with today's renderer as its first path, drawing both Low and High for now, Ultra falling back to it. The tier is chosen at startup by capabilities and setting, and logged. Each item's light budget is the tier's. `tomori-assets` reads glTF's full metallic-roughness material, `TEXCOORD_1`, tangents and KTX2, with a texture cache under a memory budget, smallest mips first. Normal maps reach the stylised shader, within each face | Today's render tests unchanged in every tier; the eyes' GPU time within 2% of before. The abstraction every later stage plugs into | M to L: 3 PRs |
+| **7. The texture generator, and delivery** | The offline generator in the repository (section 7): tiling sets of earth, grass, gravel, stone, bark and wood grain, normal maps for water and rock, compressed to KTX2 with mips, ASTC and BC7. Its output's hashes are committed, and CI regenerates them to check that code and output agree. The bytes are embedded in the build until the content store's stage 1, then served from it by hash. Each environment's texture budget is checked in its tests. Pilot: the farmyard's ground and fence, textured on its facets in today's shading | Tiling without seams, checked at each set's edges; the same bytes from the same seed; within 32 MB shipped and 64 MiB resident; the eyes within 5% of before. Detail on the faceted surfaces, visible before PBR | M: 2 to 3 PRs |
+| **8. PBR shading in High** | A `Pbr` shading model on Filament's mobile BRDF: GGX, Schlick's Fresnel, split-sum image-based light from each environment's sky captured into a 128² prefiltered cube with irradiance as spherical harmonics, occlusion that also dims reflections, emissive, and exposure and tone mapping inline. Procedural detail on the device: water's ripples, embers' flicker, anti-tiling, slope blending. Hero objects authored, the coop and the workbench first, with provenance and licences. The farmyard's and Sky's scenery change over material by material: ground, wood and stone, plants, then water. Tomori's own things stay stylised | Section 7's gate at every viewpoint; each surface within its material's range of luminance. The look the maintainer asked for, on the Quest 3 | L: 3 to 4 PRs |
+| **9. Low's fallbacks and generic LOD** | Low reads materials by their flat colour or smallest mips, at most 2 real-time lights an item, and static light where a bake exists. Generic LOD in `tomori-world` (section 8): coarser levels built in code with the farmyard's models, at build time for the hens, chosen by pixels of error with hysteresis, the tier's bias, ferns from their heart. Measured on a Quest 3S, which then joins `MEASURED` at its tier. A device over its budget steps down | Low within 11.5 ms at the 95th percentile on a Quest 3S at 72 Hz, and its eyes well under High's on a Quest 3; LOD changing pixels only where a level switches. Weaker devices supported, with coarser shapes where they don't show | M to L: 3 PRs |
+| **10. Baked light** | `tomori-lighting`, as section 6 describes: lightmaps for each light layer, L1 probes for what moves, reflection probes for what is wet or shiny, and per-face irradiance for Low. Baked by the server's core, stored and served by hash. Until then a build-time bake, as Sky's is, can light the farmyard's static scenery | Lightmaps at most 4 MB an environment; sampling them at most 0.3 ms of the eyes' GPU time in High, less in Low. Bounce and occlusion in every tier, shared by everyone in the space | L: 3 to 4 PRs; needs the content store's stage 1 |
+| **11. Ultra** | For the desktop and spectator: an HDR target with bloom; clustered forward lights; ray-traced or hybrid shadows and reflections by wgpu's ray queries where the adapter has them, with cascaded shadow maps and screen-space or planar reflection otherwise; ray-traced GI where the GPU allows. Reverse-Z with an infinite far plane is reconsidered for its shadow maps. Each extra can be turned off, and none changes the headset | Within the window's refresh, timed by `scenery_frames` at the window's size, each extra on and off; each surface's luminance within the set fraction of High's. Recordings and the spectator at their best | L: 3 to 4 PRs |
 
 ## Risks
 
 - **The headset's GPU time is not yet divided.** The measurements say how much the farmyard's scenery costs on a desktop, and that pixels dominate there. They do not say how much of the Quest's 9.5 ms is the scenery, the panels, the walls or the swarm. If the walls' translucent boards dominate, culling the scenery will save less than its numbers suggest, and the panels' overdraw becomes the work. Stage 1's profiler answers this before stage 2 begins.
 - **Downstream sceneries.** `Scenery` is public, and environments outside this repository implement it. The render world changes how they draw. `Scenery::draw` stays as an escape hatch for a release, and the change is announced in the release notes, by a `Breaking:` paragraph in its pull request's description.
 - **The translucency contract.** Culling must not change which surface is in front. Only whole surfaces outside both eyes are dropped, and the order of the rest is the frame step's; `rendering.md`'s render tests check this.
-- **Multiview and foveation through wgpu.** Multiview on the Quest's Vulkan driver through wgpu needs testing on the device. Foveation needs Vulkan's fragment density map, which wgpu does not expose, and a patch may need carrying until upstream accepts something like it.
+- **Foveation through wgpu.** It wraps the device's Vulkan render pass and framebuffer functions, since wgpu does not expose density maps, so each wgpu upgrade must be checked on the device. Ultra's ray queries are experimental in wgpu and may change.
+- **Three paths to keep.** Each tier is code to maintain and a look to test. The paths share the scene, culling, lights, sorting and Tomori's own surfaces, and differ only in pipelines and parameters; every tier is drawn by CI's render tests, with the cross-tier checks of section 8, so a change cannot silently break the tier nobody is wearing.
 - **PBR's assets.** Textures cost memory and download, and need KTX2 and ASTC on the Quest. Imported models need tangents. The fragment cost must be held to a budget per environment, the gate in section 7. Cut-out foliage is the likeliest to miss it, since its overdraw is paid in full on a tiled GPU.
 - **Baking.** It depends on the content store, not yet built. Bakes must be deterministic to be cached, and bounded in time on the server. Light must never visibly lag what someone just did.
 
 ## Open questions for the maintainer
 
-1. **What should realistic mean?** Decided: high quality (section 7). These questions remain:
-   - **Where should the farmyard's textures come from?** The recommendation is CC0 tiling sets for the ground, wood, stone and bark, procedural masks and wear made in code, and authored or generated textures for its few hero props: the coop, the workbench and the campsite.
-   - **Should a stylised fallback be kept for low-end devices,** such as a Quest 2 or a web client? Each environment would keep its stylised materials as a second tier, at the cost of a second look to test. Without the fallback, there is one look, and devices below the Quest 3 are not supported.
-   - **How low-poly do the farmyard's silhouettes stay?** The recommendation is that they stay modest, with detail from normal maps, and that geometry is added only where a silhouette shows it, such as the tree ferns' crowns and the fence's posts.
-2. **72 Hz or 90 Hz?** Should the savings buy 90 Hz, or stay at 72 Hz for cooler, longer sessions and more content?
-3. **Light budgets:** 64 a scene and 8 an item, or a different balance?
-4. **The crate split:** in stage 2 with the render world, as recommended, or first?
-5. **Should Tomori's own things be lit by the environment?** The swarm and its cubes today are lit by a fixed light of their own and fogged to the background, not lit by the lanterns or the moon. Lit by the environment, the agent would glow warm by the campfire, but might lose the clarity that its own light gives it.
+**Decided, and moved into the text:**
+- what realistic means (section 7);
+- where textures come from, the hybrid of three sources (section 7);
+- the fallback for weaker devices, the Low tier (section 8);
+- how low-poly the shapes stay: faceted, as now (section 7);
+- whether the desktop may look better, Ultra (section 8);
+- the crate split, `tomori-world` first, in stage 2.
+
+**Still open:**
+
+1. **72 Hz or 90 Hz?** Should the savings buy 90 Hz, or stay at 72 Hz for cooler, longer sessions and more content? Section 8's budgets assume 72 Hz.
+2. **Light budgets:** Low's 2 an item, High's 8 an item and 64 a scene, or another balance?
+3. **Low's reference device:** a Quest 3S, as stage 9 assumes, or a Quest 2? And should a web client be a target at all?
+4. **Stepping down by itself:** should a device over its budget drop a tier during a session, as section 8 proposes, or change only at startup and by setting?
+5. **Should Tomori's own things be lit by the environment?** The swarm and its cubes are lit by a fixed light of their own and hazed with the scene, not lit by the lanterns or the moon. Lit by the environment, the agent would glow warm by the campfire, but might lose the clarity that its own light gives it.
 6. **Baking:** server-side for environments that change, and at build time, as Sky does, for those that don't?
-7. **The desktop and spectator:** may they look better than the headset (option 3), or should every device look the same? Section 7's plan assumes they may, with the same scenes and materials and real-time extras of their own; still for the maintainer to confirm.
 
 ## Design changes this would make
 
 As each stage is built:
 
-- `rendering.md` gains visibility, the light budget, the sky's order, multiview and foveation, and the profiler's log;
+- `rendering.md` gains visibility, the light budget, the sky's order, foveation, the profiler's log, and the render tiers: how a device picks one, and what each must keep;
 - `environments.md` gains what a scenery submits;
 - `crates.md` gains `tomori-world` and, later, `tomori-lighting`;
 - `clients.md` gains the environment registry's move to `tomori-scene`;
-- `assets.md` gains PBR materials, their textures, KTX2 and `doubleSided`;
+- `assets.md` gains PBR materials, their textures, KTX2, LOD levels, the texture generator and each texture's provenance and licence;
 - `farmyard.md` gains its viewpoints' budgets, and its look changes from flat faces to textured, physically based materials;
 - `channels-and-content.md`'s content kinds gain baked light and KTX2 textures.
 
