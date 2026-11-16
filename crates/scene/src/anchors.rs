@@ -358,6 +358,8 @@ pub struct Arrangement {
     pub carriage: Anchor,
     pub via: Option<Vec3>,
     pub stream: bool,
+    /// How many times the server has jumped the agent, as it says: when it rises, the agent appears where it stands.
+    pub jumps: u32,
     pub partner: Option<Vec3>,
     /// The joined space's cluster anchors other than `home`, in the space's coordinates, and how the server lays out
     /// each cluster a worker stands in, by `tomori_protocol::cluster`: empty from an older server, whose workers stand
@@ -478,6 +480,7 @@ impl Default for Arrangement {
             carriage: Anchor::HOME,
             via: None,
             stream: false,
+            jumps: 0,
             partner: None,
             clusters: Vec::new(),
             layouts: Vec::new(),

@@ -111,6 +111,18 @@ pub(crate) const HUDDLE_RISE: f32 = 1.5;
 pub(crate) const LIFT: f32 = 0.5;
 pub(crate) const LIFTS: usize = 12;
 
+/// How much higher, in metres, an arc over the ground rises above the clearance [`ground::GROUND`] already keeps from
+/// the highest floor along its way, so that it flies over a cliff's edge with its swarm's whole reach to spare.
+pub(crate) const ARC: f32 = 0.75;
+
+/// How high, in metres, an arc over the ground climbs at most, above the lower of where it goes from and to; beyond it
+/// the agent jumps rather than flying.
+pub(crate) const CLIMB: f32 = 8.0;
+
+/// How long, in metres, an arc over the ground is at most, from where it goes to where it ends; beyond it the agent
+/// jumps rather than flying.
+pub(crate) const FLIGHT: f32 = 40.0;
+
 /// Someone the agent is talking with, as they began speaking, or as they last stood still: where their head was.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Speaker {
@@ -284,6 +296,19 @@ pub(crate) enum Route {
     /// Streaming there as a flock, which needs no way clear of the scenery, through the waypoint, where it has one,
     /// that keeps it above the ground.
     Stream(Option<[f32; 3]>),
+    /// Jumping there, appearing where it goes at once, as the flight over the ground between is too high or too long.
+    Jump,
+}
+
+/// How the agent's way keeps above the ground.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Over {
+    /// The straight way keeps clear of it, or there is none.
+    Open,
+    /// Through this waypoint, the top of an arc over it.
+    Via([f32; 3]),
+    /// No arc is low and short enough: it jumps.
+    Jump,
 }
 
 /// The way `head` faces, level, as a unit `(x, z)`.
@@ -632,7 +657,14 @@ pub(crate) fn sees(agent: &Pose, eyes: [f32; 3], scene: &Scene) -> bool {
 /// Streaming needs no way clear of the scenery, but keeps above the ground as well, by [`over_ground`]'s waypoint.
 pub(crate) fn route(from: [f32; 3], to: [f32; 3], scene: &Scene) -> Route {
     let along = sub(to, from);
-    let streamed = || Route::Stream(over_ground(from, to, scene.ground.as_ref()));
+    let over = over_ground(from, to, scene.ground.as_ref());
+    if over == Over::Jump {
+        return Route::Jump;
+    }
+    let streamed = || match over {
+        Over::Via(via) => Route::Stream(Some(via)),
+        _ => Route::Stream(None),
+    };
     if (0..3).map(|axis| along[axis].powi(2)).sum::<f32>().sqrt() > STREAM {
         return streamed();
     }
@@ -656,10 +688,10 @@ pub(crate) fn route(from: [f32; 3], to: [f32; 3], scene: &Scene) -> Route {
         .fold(middle[1], f32::max);
     let length = level(along).max(1e-3);
     let (across_x, across_z) = (-along[2] / length, along[0] / length);
-    let over = scene
+    let lifted = scene
         .ground
         .iter()
-        .flat_map(|_| lifts(from, to))
+        .flat_map(|_| lifts(from, to, scene.ground.as_ref()))
         .collect::<Vec<_>>();
     [
         [middle[0], tallest + OVER, middle[2]],
@@ -675,7 +707,7 @@ pub(crate) fn route(from: [f32; 3], to: [f32; 3], scene: &Scene) -> Route {
         ],
     ]
     .into_iter()
-    .chain(over)
+    .chain(lifted)
     .find(|via| open(from, *via) && open(*via, to))
     .map_or_else(streamed, Route::Via)
 }
@@ -687,11 +719,21 @@ fn raised(floor: f32) -> bool {
     floor > cluster::FLOOR + ground::LEVEL
 }
 
-/// The waypoints over the ground tried between `from` and `to`, in order: above where it sets off, so that it rises
-/// first, then above where it goes, so that it travels then descends, then above the middle of the way; at the higher
-/// of the two, then [`LIFT`] higher each time, [`LIFTS`] times.
-fn lifts(from: [f32; 3], to: [f32; 3]) -> impl Iterator<Item = [f32; 3]> {
+/// The height of the top of an arc over the ground from `from` to `to`: [`ground::GROUND`] and [`ARC`] above the
+/// highest floor along the way that stands no higher than [`CLIMB`] above the higher end, or the higher end itself where
+/// that is higher.
+fn crest(from: [f32; 3], to: [f32; 3], ground: &Ground) -> f32 {
     let top = from[1].max(to[1]);
+    ground
+        .ceiling(from, to, top + CLIMB)
+        .map_or(top, |floor| top.max(floor + ground::GROUND + ARC))
+}
+
+/// The waypoints over the ground tried between `from` and `to`, in order: above where it sets off, so that it rises
+/// first, then above where it goes, so that it travels then descends, then above the middle of the way; at the
+/// [`crest`] of the way, then [`LIFT`] higher each time, [`LIFTS`] times.
+fn lifts(from: [f32; 3], to: [f32; 3], ground: Option<&Ground>) -> impl Iterator<Item = [f32; 3]> {
+    let top = ground.map_or(from[1].max(to[1]), |ground| crest(from, to, ground));
     (0..=LIFTS).flat_map(move |lift| {
         let y = top + lift as f32 * LIFT;
         [0.0, 1.0, 0.5].map(|share: f32| {
@@ -704,22 +746,24 @@ fn lifts(from: [f32; 3], to: [f32; 3]) -> impl Iterator<Item = [f32; 3]> {
     })
 }
 
-/// The waypoint by which the agent's way from `from` to `to` keeps above `ground`, where the straight way does not,
-/// as when it passes below a deck or through a raised level's edge: the first of [`lifts`] by which both halves keep
-/// clear of it, or else the highest, over the middle of the way; none where the straight way keeps clear, or there is
-/// no ground.
-pub(crate) fn over_ground(
-    from: [f32; 3],
-    to: [f32; 3],
-    ground: Option<&Ground>,
-) -> Option<[f32; 3]> {
-    let ground = ground?;
+/// How the agent's way from `from` to `to` keeps above `ground`: [`Over::Open`] where the straight way keeps clear of
+/// it, or there is no ground; else an arc, through the first of [`lifts`], rising from the [`crest`] of the way, by
+/// which both halves keep clear of it, easing up and then down over a cliff's edge rather than through it; else, where
+/// the arc climbs more than [`CLIMB`] above the lower end or is longer than [`FLIGHT`], or none keeps clear, a jump.
+pub(crate) fn over_ground(from: [f32; 3], to: [f32; 3], ground: Option<&Ground>) -> Over {
+    let Some(ground) = ground else {
+        return Over::Open;
+    };
     if ground.open(from, to) {
-        return None;
+        return Over::Open;
     }
-    lifts(from, to)
+    lifts(from, to, Some(ground))
         .find(|via| ground.open(from, *via) && ground.open(*via, to))
-        .or_else(|| lifts(from, to).last())
+        .filter(|via| {
+            via[1] - from[1].min(to[1]) <= CLIMB
+                && distance(from, *via) + distance(*via, to) <= FLIGHT
+        })
+        .map_or(Over::Jump, Over::Via)
 }
 
 /// How near `point` comes to the segment from `from` to `to`.

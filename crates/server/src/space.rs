@@ -2650,6 +2650,7 @@ impl SpaceModel {
             partner: None,
             via: None,
             stream: false,
+            jumps: 0,
             // Set by the hub, which knows the backends.
             avatar: None,
             clusters: Vec::new(),

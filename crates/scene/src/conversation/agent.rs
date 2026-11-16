@@ -120,6 +120,7 @@ impl Conversation {
             .map(glam::Vec3::from_array)
             .filter(|via| crate::anchors::within(*via, crate::anchors::REACH));
         arrangement.stream = space.stream;
+        arrangement.jumps = space.jumps;
         // Away, it draws in near whoever it stands for, or whoever it turned to.
         arrangement.partner = space
             .away
