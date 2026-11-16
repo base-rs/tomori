@@ -22,6 +22,8 @@ pub enum NameError {
     Delimiter,
     /// The name is longer than [`NAME_CHARS`] characters or [`NAME_BYTES`] bytes.
     TooLong,
+    /// The name is the agent's, [`AGENT_NAME`], or only that with decoration: see [`is_reserved`].
+    Reserved,
 }
 
 impl std::fmt::Display for NameError {
@@ -32,6 +34,9 @@ impl std::fmt::Display for NameError {
             Self::Delimiter => {
                 formatter.write_str("A name must not contain \":\", \"[\" or \"]\".")
             }
+            Self::Reserved => {
+                formatter.write_str("That name is the agent's; please choose another.")
+            }
             Self::TooLong => write!(
                 formatter,
                 "A name is at most {NAME_CHARS} characters and {NAME_BYTES} bytes."
@@ -41,6 +46,23 @@ impl std::fmt::Display for NameError {
 }
 
 impl std::error::Error for NameError {}
+
+/// The agent's own name, which no participant may take, so that "Tomori said" is never about a person.
+pub const AGENT_NAME: &str = "Tomori";
+
+/// Whether `name` is [`AGENT_NAME`], or only that with decoration, so that it would pass for the agent: compared in any case and in Unicode's compatibility form (NFKC), so that full-width and other look-alike forms count, ignoring punctuation and symbols around it and a trailing `#` and digits, as in `Tomori#23`. A name that merely contains it, such as "Tomoriko", is not.
+pub fn is_reserved(name: &str) -> bool {
+    let folded: String = clean_name(name).nfkc().collect::<String>().to_lowercase();
+    let around = |c: char| !c.is_alphanumeric();
+    let mut core = folded.trim_matches(around);
+    if let Some((head, tag)) = core.rsplit_once('#')
+        && !tag.is_empty()
+        && tag.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        core = head.trim_matches(around);
+    }
+    core == AGENT_NAME.to_lowercase()
+}
 
 /// Whether `c` is a format character, of Unicode's general category Cf, as of Unicode 16: such as bidirectional overrides and isolates, zero-width characters, the byte order mark and tags, which reorder or hide text.
 pub fn is_format(c: char) -> bool {
@@ -112,6 +134,15 @@ fn allowed(name: &str) -> Result<(), NameError> {
 
 /// `name` as a display name, cleaned by [`clean_name`], or why it is refused: it must not be empty, start with `/`, or contain `:`, `[` or `]`, and it is at most [`NAME_CHARS`] characters and [`NAME_BYTES`] bytes. So a name is on one line, and in `Name: words` ends at the first colon. The same rules apply to every name the server shows, chosen in a rename or kept with a token. See `design/security.md`.
 pub fn display_name(name: &str) -> Result<String, NameError> {
+    let name = kept_name(name)?;
+    if is_reserved(&name) {
+        return Err(NameError::Reserved);
+    }
+    Ok(name)
+}
+
+/// `name` as [`display_name`] checks it, except that the agent's name is not refused: for a name already kept, from before it was reserved, which the server shows with its handle (see [`is_reserved`]).
+pub fn kept_name(name: &str) -> Result<String, NameError> {
     let name = clean_name(name);
     allowed(&name)?;
     if name.chars().count() > NAME_CHARS || name.len() > NAME_BYTES {
@@ -132,6 +163,9 @@ pub fn suggested_name(name: &str) -> Result<String, NameError> {
     }
     let name = name[..end].trim_end();
     allowed(name)?;
+    if is_reserved(name) {
+        return Err(NameError::Reserved);
+    }
     Ok(name.to_owned())
 }
 
@@ -296,6 +330,51 @@ mod tests {
         assert_eq!(
             NameError::TooLong.to_string(),
             "A name is at most 32 characters and 64 bytes."
+        );
+    }
+
+    #[test]
+    fn the_agents_name_is_reserved_in_any_form() {
+        for reserved in [
+            "Tomori",
+            "tomori",
+            "TOMORI",
+            "  tOmOrI ",
+            "Ｔｏｍｏｒｉ",
+            "Tomori\u{200B}",
+            "\"Tomori\"",
+            "*Tomori*",
+            "Tomori#23",
+            "tomori #7",
+            "(Tomori)",
+        ] {
+            assert_eq!(
+                display_name(reserved),
+                Err(NameError::Reserved),
+                "{reserved:?}"
+            );
+            assert_eq!(
+                suggested_name(reserved),
+                Err(NameError::Reserved),
+                "{reserved:?}"
+            );
+            assert!(is_reserved(reserved), "{reserved:?}");
+            assert!(kept_name(reserved).is_ok(), "{reserved:?}");
+        }
+        for fine in [
+            "Tomoriko",
+            "Tomori Ko",
+            "Not Tomori",
+            "Tomor",
+            "Tomori2",
+            "Tοmori",
+        ] {
+            assert!(display_name(fine).is_ok(), "{fine:?}");
+            assert!(!is_reserved(fine), "{fine:?}");
+        }
+        assert_eq!(
+            NameError::Reserved.to_string(),
+            "That name is the agent's; please choose another."
         );
     }
 }

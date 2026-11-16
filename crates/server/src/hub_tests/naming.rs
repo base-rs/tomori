@@ -362,3 +362,70 @@ fn a_name_that_cannot_be_kept_changes_nothing() {
     give(&hub, &space, "Samuel", Duration::ZERO);
     assert_eq!(called(&hub, &id), "Samuel");
 }
+
+const AGENTS: &str = "That name is the agent's; please choose another.";
+
+#[test]
+fn the_agents_name_is_refused_by_every_path_and_ordinary_names_are_not() {
+    let store = Store::new("agent-name-reserved");
+    let (hub, _jobs, space, quest, id, _token) = headset(&store);
+    quest.read();
+    for taken in [
+        "Tomori",
+        "  tomori ",
+        "ＴＯＭＯＲＩ",
+        "Tomori#23",
+        "\"Tomori\"",
+    ] {
+        // The message the console and the hand menu send.
+        quest.send(ClientMessage::SetName {
+            name: taken.to_owned(),
+        });
+        assert_eq!(
+            quest.errors(),
+            [format!("Name not changed: {AGENTS}")],
+            "{taken:?}"
+        );
+        // A name said aloud.
+        assert_eq!(
+            finished(&say_name(&hub, &quest, &format!("{taken}."))),
+            Some(Err(AGENTS.to_owned())),
+            "{taken:?}"
+        );
+        // The agent's tool, which tells the agent so that it can say so aloud.
+        give(&hub, &space, "Samuel", Duration::ZERO);
+        assert_eq!(
+            hub.agent_set_my_name("session", taken, Some("Samuel"))
+                .unwrap_err(),
+            format!("Name not changed: {AGENTS}"),
+            "{taken:?}"
+        );
+        assert_eq!(store.tokens.entry(&id).unwrap().name, "Samuel");
+    }
+    // A name only containing it is theirs to take.
+    quest.send(ClientMessage::SetName {
+        name: "Tomoriko".to_owned(),
+    });
+    assert!(quest.errors().is_empty());
+    assert_eq!(store.tokens.entry(&id).unwrap().name, "Tomoriko");
+}
+
+#[test]
+fn a_kept_name_that_is_the_agents_is_shown_with_its_handle() {
+    let store = Store::new("agent-name-kept");
+    let (_, token) = store
+        .tokens
+        .issue("Tomori", tomori_security::Grant::Owner)
+        .unwrap();
+    let (hub, _jobs, space) = served();
+    hub.set_tokens(store.tokens.clone());
+    let quest = Client::connect(&hub, admitted(&store.tokens, &token));
+    hello_as(&quest, "quest", "Quest 3", true);
+    quest.join(&space);
+    assert_eq!(hub.status().spaces[0].participants[0].0, "Tomori#10");
+    quest.read();
+    // Still theirs on the token, and a refresh keeps what is shown.
+    assert_eq!(store.tokens.entries()[0].name, "Tomori");
+    hub.refresh_names(|_| Some("Tomori".to_owned()));
+    assert!(quest.read().is_empty());
+}

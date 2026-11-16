@@ -118,9 +118,29 @@ pub fn name(name: &str) -> Result<String, String> {
     tomori_protocol::text::display_name(name).map_err(|error| error.to_string())
 }
 
+/// What a device that suggests the agent's name is called instead.
+pub const GUEST: &str = "Guest";
+
+/// A display name already kept, as [`name`] makes it but without refusing the agent's own, which a token may have kept from before it was reserved. See [`presented`].
+pub fn kept_name(name: &str) -> Result<String, String> {
+    tomori_protocol::text::kept_name(name).map_err(|error| error.to_string())
+}
+
+/// `name` as the server shows it: a kept name that is the agent's, from before it was reserved, takes its holder's tag as a handle, `Tomori#23`, so that it never passes for the agent; any other name as it is.
+pub fn presented(name: String, tag: Option<u32>) -> String {
+    match tag {
+        Some(tag) if tomori_protocol::text::is_reserved(&name) => format!("{name}#{tag}"),
+        _ => name,
+    }
+}
+
 /// The display name a device suggests in `Hello`, by the same rules as [`name`], but cut to [`tomori_protocol::text::NAME_CHARS`] characters rather than refused for them, since a device's own name is not one a person chose to fit. A client cuts it to [`NAME_BYTES`] before sending it, so a longer one is refused.
 pub fn suggested_name(name: &str) -> Result<String, String> {
     check(name, NAME_BYTES, "name")?;
+    // An older client's fallback was the agent's name; it is called a guest rather than turned away.
+    if tomori_protocol::text::is_reserved(name) {
+        return Ok(GUEST.to_owned());
+    }
     tomori_protocol::text::suggested_name(name).map_err(|error| error.to_string())
 }
 
@@ -582,6 +602,17 @@ mod tests {
         assert!(!error.contains("secret"));
         assert_eq!(name("  Ada  "), Ok("Ada".to_owned()));
         assert_eq!(name(" \t"), Err("A name is required.".to_owned()));
+        // The agent's name is refused, or for a device's suggestion replaced; one already kept shows its handle.
+        assert_eq!(
+            name("Tomori"),
+            Err("That name is the agent's; please choose another.".to_owned())
+        );
+        assert_eq!(suggested_name("tomori"), Ok(GUEST.to_owned()));
+        assert_eq!(kept_name("Tomori"), Ok("Tomori".to_owned()));
+        assert_eq!(kept_name(""), Err("A name is required.".to_owned()));
+        assert_eq!(presented("Tomori".to_owned(), Some(23)), "Tomori#23");
+        assert_eq!(presented("Tomori".to_owned(), None), "Tomori");
+        assert_eq!(presented("Ada".to_owned(), Some(23)), "Ada");
         assert_eq!(
             suggested_name(&format!("{} ", "a".repeat(40))),
             Ok("a".repeat(32))
