@@ -25,6 +25,12 @@ pub(super) struct Renames(HashMap<String, VecDeque<Instant>>);
 impl Renames {
     /// Count a rename of `who` at `now`, if they have had fewer than [`RENAME_LIMIT`] in the [`RENAME_WINDOW`] before it, forgetting every rename older than that, so that what is kept stays bounded by the renames of the last minute.
     fn admit(&mut self, who: &str, now: Instant) -> bool {
+        self.admit_up_to(who, now, RENAME_LIMIT)
+    }
+
+    /// Count a change of `who` at `now`, if they have had fewer than `limit` in the [`RENAME_WINDOW`] before it, as
+    /// [`Self::admit`] does for renames; a participant's choices of colour are counted so too.
+    pub(super) fn admit_up_to(&mut self, who: &str, now: Instant, limit: usize) -> bool {
         self.0.retain(|_, times| {
             while times
                 .front()
@@ -35,7 +41,7 @@ impl Renames {
             !times.is_empty()
         });
         let times = self.0.entry(who.to_owned()).or_default();
-        if times.len() >= RENAME_LIMIT {
+        if times.len() >= limit {
             return false;
         }
         times.push_back(now);

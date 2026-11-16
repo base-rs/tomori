@@ -25,11 +25,13 @@ fn space() -> SpaceState {
                 name: "Ada".into(),
                 source: 1,
                 engagement: None,
+                colour: None,
             },
             Participant {
                 name: "Bob".into(),
                 source: 2,
                 engagement: None,
+                colour: None,
             },
         ],
         messages: vec![

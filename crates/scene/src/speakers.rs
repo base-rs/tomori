@@ -83,7 +83,7 @@ impl Known {
             space
                 .participants
                 .iter()
-                .map(|participant| (participant.name.as_str(), None)),
+                .map(|participant| (participant.name.as_str(), participant.colour)),
             &mut self.resolved,
         );
         self.hues.clear();
@@ -165,11 +165,13 @@ mod tests {
                     name: "Ada".into(),
                     source: 1,
                     engagement: None,
+                    colour: None,
                 },
                 Participant {
                     name: "Bob".into(),
                     source: 2,
                     engagement: None,
+                    colour: None,
                 },
             ],
             ..Default::default()
@@ -194,12 +196,23 @@ mod tests {
             name: "Ada".into(),
             source: 3,
             engagement: None,
+            colour: None,
         });
         known.learn(&space);
         assert_eq!(known.hue(1, "Ada"), ada);
         assert_ne!(known.hue(3, "Ada"), ada);
         // Someone no longer here is in their name's colour.
         assert_eq!(known.hue(9, "Ada"), ada);
+        // A colour chosen wins, and the defaults move aside from it: Bob chose the first Ada's.
+        space.participants[1].colour = Some(ada);
+        known.learn(&space);
+        assert_eq!(known.hue(2, "Bob"), ada);
+        assert_ne!(known.hue(1, "Ada"), ada);
+        assert!(tomori_protocol::hue::distance(known.hue(1, "Ada"), ada) >= 30);
+        // Cleared, it is his name's again.
+        space.participants[1].colour = None;
+        known.learn(&space);
+        assert_eq!(known.hue(2, "Bob"), bob);
     }
 
     #[test]

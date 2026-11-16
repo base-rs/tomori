@@ -81,6 +81,7 @@ fn joined() -> Conversation {
                 name: "Ada".into(),
                 source: 1,
                 engagement: None,
+                colour: None,
             }],
             anchors: Anchors::new()
                 .with_arrival(tomori_server_app::farmyard_arrival())

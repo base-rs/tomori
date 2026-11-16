@@ -25,6 +25,14 @@ impl Hub {
                 }
                 Err(error) => state.error(participant, format!("Name not changed: {error}")),
             },
+            ClientMessage::SetColour { colour } => {
+                match colour.map(tomori_protocol::hue::check).transpose() {
+                    Ok(colour) => {
+                        state.recolour_request(participant, colour, self.token_store(), deferred)
+                    }
+                    Err(error) => state.error(participant, format!("Colour not changed: {error}")),
+                }
+            }
             ClientMessage::CreateSpace {
                 title,
                 backend,

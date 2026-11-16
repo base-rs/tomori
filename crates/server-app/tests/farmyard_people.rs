@@ -5,7 +5,8 @@
 //! work above it, Bob looking this way as he speaks and Cleo pointing at a panel, each a swarm of cubes glowing in their
 //! colour against the evening, hazed as everything is, drawn by Tomori's own spectator's sceneries, as the app draws
 //! them. Set `TOMORI_FARMYARD_PEOPLE_PREVIEW` to a path to save `at-the-wall.png`, `near.png`, `head.png` and
-//! `head-away.png` after it.
+//! `head-away.png` after it. And four people before the wall, each in their own colour, one of them in the colour she
+//! chose; set `TOMORI_PEOPLE_COLOURS_PREVIEW` to a PNG path to save it.
 //! See `design/people.md`.
 use std::time::Instant;
 
@@ -55,8 +56,27 @@ fn tomori_wall() -> Wall {
     .with_shape(WallShape::Arc { radius: 2.3 })
 }
 
+/// Someone in the space, in the colour they chose, if any.
+fn participant(name: &str, source: u32, colour: Option<u16>) -> Participant {
+    Participant {
+        name: name.into(),
+        source,
+        engagement: None,
+        colour,
+    }
+}
+
 /// Joined to a farmyard space as an owner, with Bob and Cleo, the agent at work and a panel on the Tomori wall.
 fn joined() -> Conversation {
+    joined_with(vec![
+        participant("Ada", 1, None),
+        participant("Bob", 2, None),
+        participant("Cleo", 3, None),
+    ])
+}
+
+/// Joined to a farmyard space as Ada, an owner, with `participants`, the agent at work and a panel on the Tomori wall.
+fn joined_with(participants: Vec<Participant>) -> Conversation {
     let farmyard = Environment::new(tomori_environment_farmyard::ID)
         .with_version(tomori_environment_farmyard::VERSION);
     let mut conversation = Conversation::new("Ada");
@@ -77,11 +97,6 @@ fn joined() -> Conversation {
         utterance_limit: None,
         name: None,
     }));
-    let participant = |name: &str, source| Participant {
-        name: name.into(),
-        source,
-        engagement: None,
-    };
     conversation.apply(Event::Message(ServerMessage::Space {
         state: Box::new(SpaceState {
             id: SPACE.into(),
@@ -90,11 +105,7 @@ fn joined() -> Conversation {
             directory: "/work/farm".into(),
             environment: farmyard.id().into(),
             environment_version: Some(farmyard.version()),
-            participants: vec![
-                participant("Ada", 1),
-                participant("Bob", 2),
-                participant("Cleo", 3),
-            ],
+            participants,
             anchors: Anchors::new()
                 .with_arrival(tomori_server_app::farmyard_arrival())
                 .with_agent(carried(tomori_server_app::farmyard_agent())),
@@ -560,4 +571,146 @@ fn read_back(
     let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
     buffer.unmap();
     image::RgbaImage::from_raw(WIDTH, HEIGHT, data).unwrap()
+}
+
+/// How many of `image`'s pixels are near `colour`, a linear colour, dimmed as a swarm's outline is.
+fn near(image: &image::RgbaImage, colour: [f32; 3]) -> usize {
+    let [red, green, blue] =
+        colour.map(|channel| ((1.055 * (channel * 0.75).powf(1.0 / 2.4) - 0.055) * 255.0) as i32);
+    image
+        .pixels()
+        .filter(|pixel| {
+            let [r, g, b, _] = pixel.0.map(i32::from);
+            (r - red).abs() < 30 && (g - green).abs() < 30 && (b - blue).abs() < 30
+        })
+        .count()
+}
+
+#[test]
+fn four_people_are_each_in_their_own_colour_one_in_the_colour_she_chose() {
+    let wall = tomori_wall();
+    let middle = Vec3::from_array(wall.pose.position);
+    let out = (Quat::from_array(wall.pose.orientation) * Vec3::Z)
+        .with_y(0.0)
+        .normalize();
+    let across = Vec3::Y.cross(out).normalize();
+    let floor = tomori_scene::arrival::HOME.y - 1.6;
+    let eye = (middle + out * 3.8).with_y(floor + 1.6);
+    // Bob, Cleo and Dan in their names' colours, Dan's moved aside from Ada's, which is near it, and Eve in the coral
+    // she chose.
+    let participants = vec![
+        participant("Ada", 1, None),
+        participant("Bob", 2, None),
+        participant("Cleo", 3, None),
+        participant("Dan", 4, None),
+        participant("Eve", 5, Some(20)),
+    ];
+    let mut hues = Vec::new();
+    tomori_protocol::hue::resolve(
+        participants
+            .iter()
+            .map(|participant| (participant.name.as_str(), participant.colour)),
+        &mut hues,
+    );
+    assert_eq!(hues[1], tomori_protocol::hue::default("Bob"));
+    assert_eq!(hues[2], tomori_protocol::hue::default("Cleo"));
+    assert_ne!(hues[3], tomori_protocol::hue::default("Dan"));
+    assert_eq!(hues[4], 20);
+    let people: Vec<Event> = (0..4)
+        .map(|index| {
+            let along = (index as f32 - 1.5) * 0.75;
+            let head =
+                (middle + out * 1.7 + across * along).with_y(floor + 1.62 - 0.04 * index as f32);
+            let head = looking(head, eye);
+            Event::Message(ServerMessage::Presence {
+                source: index + 2,
+                head,
+                left: held(head, Vec3::new(-0.24, -0.5, -0.3)),
+                right: held(head, Vec3::new(0.26, -0.45 + 0.1 * index as f32, -0.34)),
+                hands: None,
+                pointing: None,
+                hidden: false,
+            })
+        })
+        .collect();
+    test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("farmyard people colours test eye"),
+            size: wgpu::Extent3d {
+                width: WIDTH,
+                height: HEIGHT,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let sceneries = tomori_client_spectator::app::sceneries();
+        let mut renderer =
+            Renderer::with_sceneries(&device, &queue, format, WIDTH, HEIGHT, 4, &sceneries);
+        let mut panels = Panels::new(&device, &renderer);
+        let now = Instant::now();
+        let mut capture = |others: &[Event]| {
+            let mut conversation = joined_with(participants.clone());
+            for event in others {
+                conversation.apply(event.clone());
+            }
+            let at = (middle + out * 1.7).with_y(floor + 1.3);
+            let head = glam::camera::rh::view::look_at_mat4(eye, at, Vec3::Y).inverse();
+            let senses = Senses {
+                focused: true,
+                head: Some(head),
+                head_pose: controller::Pose::from_transform(head),
+                viewer: Some(eye),
+                space_head: head,
+                trigger: Some(0.0),
+                ..Default::default()
+            };
+            let mut step = Step::default();
+            let mut feedback = Feedback::new(Settings::default());
+            let mut frame = step.update(&senses, &mut conversation, &mut feedback, now, 0.01);
+            for _ in 0..600 {
+                frame = step.update(&senses, &mut conversation, &mut feedback, now, 1.0 / 72.0);
+            }
+            assert_eq!(frame.people.len(), others.len());
+            draw(&mut renderer, &device, &queue, &mut panels, &frame);
+            let matrix = glam::camera::rh::proj::directx::perspective(
+                0.8,
+                WIDTH as f32 / HEIGHT as f32,
+                0.05,
+                80.0,
+            ) * glam::camera::rh::view::look_at_mat4(eye, at, Vec3::Y);
+            renderer.render(
+                &device,
+                &queue,
+                std::slice::from_ref(&view),
+                &[matrix],
+                Mat4::IDENTITY,
+                &panels.list(Mat4::IDENTITY),
+            );
+            read_back(&device, &queue, &texture)
+        };
+        let nobody = capture(&[]);
+        let four = capture(&people);
+        if let Some(path) = std::env::var_os("TOMORI_PEOPLE_COLOURS_PREVIEW") {
+            four.save(path).expect("the preview is saved");
+        }
+        // Each glows in their own colour, as nothing in the farmyard does without them.
+        for hue in &hues[1..] {
+            let colour = tomori_protocol::hue::rgb(*hue);
+            assert!(
+                near(&four, colour) > near(&nobody, colour) + 400,
+                "{hue}: {} {}",
+                near(&four, colour),
+                near(&nobody, colour)
+            );
+        }
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
 }

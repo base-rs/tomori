@@ -46,6 +46,7 @@ impl Hub {
             }
             message @ (ClientMessage::ListSpaces
             | ClientMessage::SetName { .. }
+            | ClientMessage::SetColour { .. }
             | ClientMessage::CreateSpace { .. }
             | ClientMessage::ListSessions { .. }
             | ClientMessage::Join { .. }

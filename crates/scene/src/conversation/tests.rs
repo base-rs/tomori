@@ -87,6 +87,7 @@ fn space(change: impl FnOnce(&mut SpaceState)) -> Event {
             name: "Ada".into(),
             source: 1,
             engagement: None,
+            colour: None,
         }],
         ..Default::default()
     };
@@ -4942,6 +4943,7 @@ fn participants_who_are_away_are_counted_apart() {
             name: "Bob".into(),
             source: 2,
             engagement: Some(Engagement::Away),
+            colour: None,
         });
     });
     assert!(conversation.text().contains("1 here, 1 away"));
@@ -5922,6 +5924,7 @@ fn the_space_section_switches_mode_and_speech_and_leaves_once_confirmed() {
             name: "Bob".into(),
             source: 2,
             engagement: Some(Engagement::Away),
+            colour: None,
         });
     });
     let model = conversation.menu_model();

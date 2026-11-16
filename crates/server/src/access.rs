@@ -93,6 +93,7 @@ pub fn refusal(role: ConnectionRole, message: &ClientMessage) -> Option<&'static
         | ClientMessage::Leave
         | ClientMessage::Knock
         | ClientMessage::SetName { .. }
+        | ClientMessage::SetColour { .. }
         // Visitors see image panels as they see every panel, and are sent its patches. See `design/projection.md`.
         | ClientMessage::FetchImage { .. }
         | ClientMessage::ResyncProjection { .. } => watcher,
@@ -273,6 +274,7 @@ mod tests {
             ClientMessage::PairCancel,
             ClientMessage::Knock,
             ClientMessage::SetName { name: "n".into() },
+            ClientMessage::SetColour { colour: None },
             ClientMessage::DecideKnock {
                 knock: "k".into(),
                 admit: true,
@@ -403,6 +405,7 @@ mod tests {
             "pair_cancel",
             "knock",
             "set_name",
+            "set_colour",
             "fetch_image",
             "resync_projection",
         ];
