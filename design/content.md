@@ -29,6 +29,8 @@ Nothing executable or that a browser renders as a document, such as `text/html` 
 
 A response carries the content's `Content-Type`, `Content-Length`, `ETag` of the quoted digest, `Cache-Control: private, max-age=31536000, immutable`, `Accept-Ranges: bytes`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Cross-Origin-Resource-Policy: same-origin`. One range of bytes, `bytes=START-`, `START-END` or `-SUFFIX`, is answered 206 with its `Content-Range`, so that a transfer that stopped resumes where it left off; a range past the end 416; anything else, such as several ranges, whole. `If-None-Match` with the digest's tag, or `*`, is answered 304. The body is written in pieces of 64 KiB as the client reads them, and a response whose client has taken nothing of it for the keepalive timeout, 15 s, has its connection ended by the keepalive sweep, as a connection whose writes stall is (see `connection-liveness.md`), so that a client that stops reading holds none of the server's connections.
 
+**The first asset served.** Tomori's own server serves the farmyard's chicken this way (see `farmyard.md`), which headsets still bundle, as the fallback for a server that does not serve it.
+
 **The client's side** is described in `clients.md`: a client fetches each asset it is offered that its cache does not keep, beside its connection, resuming one that stopped, checks it against its digest, and keeps it across sessions in a cache bounded in size, whose least recently used asset is let go first, which its asset library reads before what the app bundles.
 
 ## Rationale

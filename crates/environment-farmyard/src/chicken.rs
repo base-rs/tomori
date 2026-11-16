@@ -16,6 +16,10 @@ use crate::{ID, VERSION};
 /// changes with it, and with it the farmyard's version, if what the server and clients agree on changes.
 pub const DIGEST: &str = "eb491ea326546b7c60db46c88cff9d1abf544a41e01eda0ac09de823e2d6515b";
 
+/// Who made the chicken and under what licence, as a server that serves it says with it: see
+/// `assets/models/LICENSE.md`.
+pub const ATTRIBUTION: &str = "The farmyard's chicken, by Hinoki Maple Williams, under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/)";
+
 /// The chicken's asset.
 pub fn asset() -> AssetRef {
     AssetRef::new(
