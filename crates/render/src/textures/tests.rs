@@ -403,6 +403,7 @@ impl Source for Holding {
 
 #[test]
 fn a_texture_is_loaded_by_its_digest_from_the_cache_with_its_levels() {
+    log::set_max_level(log::LevelFilter::Trace);
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         // RGBA with every level, each written as its size lays it out.
@@ -442,6 +443,21 @@ fn a_texture_is_loaded_by_its_digest_from_the_cache_with_its_levels() {
             Digest::of(&astc),
         );
         assert_eq!(loaded.is_ok(), device.features().contains(ASTC));
+        // BC7, compressed, where the device samples it, as desktops and lavapipe do.
+        let bc7 = Ktx2::new(
+            146,
+            8,
+            8,
+            vec![vec![0; 64], vec![0; 16], vec![0; 16], vec![0; 16]],
+        )
+        .bytes();
+        let loaded = load(
+            &device,
+            &queue,
+            &Holding(Some(bc7.clone())),
+            Digest::of(&bc7),
+        );
+        assert_eq!(loaded.is_ok(), device.features().contains(BC));
         // Not in the cache, or not what its digest names, or too large to read.
         assert_eq!(
             load(&device, &queue, &Holding(None), Digest::of(&png)).unwrap_err(),
@@ -492,6 +508,7 @@ impl Source for Impostor {
 
 #[test]
 fn a_scenery_s_textures_are_loaded_as_they_arrive_one_a_frame_and_one_refused_never_again() {
+    log::set_max_level(log::LevelFilter::Trace);
     test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
         let arriving = std::sync::Arc::new(Arriving::default());
         let library = Library::default();

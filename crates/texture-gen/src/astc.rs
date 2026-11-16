@@ -128,8 +128,8 @@ mod tests {
 
     #[test]
     fn a_block_is_read_back_by_another_decoder_as_it_was_meant() {
-        // A ramp across, a ramp of two colours, a flat colour, noise, and colours whose sums would have the decoder
-        // swap them.
+        // A ramp across, a ramp of two colours, a flat colour, noise, two colours, and a ramp whose ends the encoder
+        // swaps, lest the decoder swap them.
         let cases = [
             block_of(|index| [(index % 4 * 60) as u8, 40, 200, 255]),
             block_of(|index| {
@@ -147,6 +147,12 @@ mod tests {
                 } else {
                     [3, 2, 1, 255]
                 }
+            }),
+            // Red rising as green and blue fall further, so that the end its axis puts first has the greater sum, and
+            // the encoder swaps them.
+            block_of(|index| {
+                let index = index as u8;
+                [index * 13, 150 - index * 10, 150 - index * 10, 255]
             }),
         ];
         for (case, texels) in cases.iter().enumerate() {
