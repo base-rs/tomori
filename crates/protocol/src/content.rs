@@ -158,6 +158,7 @@ mod tests {
         assert!(ContentKind::Sound.recognises(b"OggS\0"));
         assert!(!ContentKind::Sound.recognises(b"RIFF"));
         // Nothing a browser renders as a document, nor a type with parameters, is a kind.
+        assert!(serde_json::from_str::<ContentKind>("7").is_err());
         for refused in ["text/html", "image/svg+xml", "image/png; charset=utf-8", ""] {
             assert_eq!(ContentKind::from_content_type(refused), None);
             assert!(serde_json::from_str::<ContentKind>(&format!("{refused:?}")).is_err());
