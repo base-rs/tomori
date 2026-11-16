@@ -4457,6 +4457,7 @@ dependencies = [
  "libc",
  "pollster",
  "serde_json",
+ "tomori-assets",
  "tomori-backend",
  "tomori-client",
  "tomori-client-quest",

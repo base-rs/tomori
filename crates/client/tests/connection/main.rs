@@ -1053,3 +1053,20 @@ fn content_whose_request_is_closed_unanswered_is_not_kept() {
     client.close();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn a_client_that_keeps_content_connects_to_an_older_server_that_offers_none_and_fetches_nothing() {
+    let (address, heads) = raw::start_recording(Some(raw::welcome()));
+    let (root, cache) = cache("older");
+    let mut options = options(address);
+    options.content = Some(cache.clone());
+    let client = Client::connect(options).unwrap();
+    wait_connected(&client);
+    // Its Hello says it reads content, and the older server, which reads no such field, never offers any.
+    let head = heads.recv_timeout(TIMEOUT).unwrap();
+    assert!(head.starts_with(b"POST /connect"));
+    assert!(heads.recv_timeout(Duration::from_millis(200)).is_err());
+    assert_eq!(cache.total(), 0);
+    client.close();
+    std::fs::remove_dir_all(root).unwrap();
+}
