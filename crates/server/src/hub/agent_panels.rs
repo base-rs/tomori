@@ -435,16 +435,6 @@ impl Hub {
         told["panels"] = json!(panels);
         told["total"] = json!(total);
         told["offset"] = json!(offset);
-        // Status panels the status wall has no slot for wait, kept, and take slots as they free.
-        let waiting: Vec<Value> = record
-            .stage
-            .waiting(&walls)
-            .into_iter()
-            .map(|(panel, title)| json!({ "panel": panel, "title": title, "status": true }))
-            .collect();
-        if !waiting.is_empty() {
-            told["waiting_for_a_slot"] = json!(waiting);
-        }
         if offset + fit < total {
             let next = offset + fit;
             told["next"] = json!(next);

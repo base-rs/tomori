@@ -980,8 +980,9 @@ impl Stage {
                     return Ok(Change::Added);
                 }
                 Placed::Wall { wall: rested, slot } => {
-                    // On its own wall in the status role, a status panel seated there meanwhile gives its slot back.
-                    let gave =
+                    // On its own wall in the status role, a status panel seated there meanwhile gives its slot back, and
+                    // expires.
+                    let _ =
                         slot < self.slots_of(walls, &rested) && self.give_way(walls, &rested, slot);
                     let free = !self.taken(walls, &rested).contains(&slot);
                     if rested != super::TOMORI_WALL && free && slot < self.slots_of(walls, &rested)
@@ -990,9 +991,6 @@ impl Stage {
                         kept.arranged = resting.arranged;
                         kept.place = Placed::Wall { wall: rested, slot };
                         self.room(walls.environment).panels.push(kept);
-                        if gave {
-                            self.settle(walls);
-                        }
                         return Ok(Change::Added);
                     }
                 }

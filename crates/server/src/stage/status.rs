@@ -4,14 +4,10 @@
 //! The space's status wall and its status panels: Tomori's notices, what the agent projects unasked and what the space
 //! keeps on the Tomori wall, which belong to the space and go with it from one environment to the next. Where the status
 //! wall is one of an environment's own, as the farmyard's notice board, its slots are shared with the environment's and
-//! participants' panels there: status panels go into its free slots, those that do not fit wait, kept but not shown,
-//! and take slots as they free, those a participant arranged first, then the newest. See `design/projection.md`.
+//! participants' panels there: status panels go into its free slots, and when it has none the oldest notice that
+//! nobody arranged expires, so that the newest always shows and none waits unseen. See `design/projection.md`.
 use super::{Kept, Layout, Placed, Pose, Stage, Status, TOMORI_COLUMNS, Walls};
 use tomori_protocol::{Grid, TOMORI_WALL};
-
-/// Where a status panel the status wall gave up for an environment's own panel waits: no wall's identity, so that it
-/// is seated again as a slot frees, in whichever environment the space is in.
-const WAITING: &str = "waiting";
 
 /// How many notices float side by side before a full status wall of an environment's own, each a slot's width further
 /// to its right, before the next shares the first's place.
@@ -84,12 +80,13 @@ impl Stage {
 
     /// Make room on the full status wall in `walls`' environment, an environment's own wall, for a panel, a status panel
     /// or not, and return the slot freed, or none. A status panel takes the slot of the oldest status panel nobody
-    /// arranged, which leaves, as a full wall's oldest does; else of the oldest of the environment's own nobody arranged;
-    /// and never one its environment published or a participant arranged. The environment's own panels come first: one
-    /// takes the slot of the oldest status panel nobody arranged, which waits; else of the oldest of its own nobody
-    /// arranged, which leaves; else of the oldest status panel, which waits; else of the oldest of its own, which leaves.
-    /// A panel its environment published is never given up: the wall is not [`Stage::crowded`], which the caller sees
-    /// to.
+    /// arranged, which expires, as a full wall's oldest does; else of the oldest of the environment's own nobody
+    /// arranged; and never one its environment published or a participant arranged. The environment's own panels come
+    /// first: one takes the slot of the oldest status panel nobody arranged, which expires; else of the oldest of its
+    /// own nobody arranged, which leaves; else of the oldest status panel, which expires; else of the oldest of its
+    /// own, which leaves. A panel its environment published is never given up: the wall is not [`Stage::crowded`],
+    /// which the caller sees to. Nothing waits: what is given up is gone, and the oldest by when it was put, then by
+    /// identity, so that the order is the same everywhere.
     pub(super) fn make_room(&mut self, walls: &Walls<'_>, status: bool) -> Option<u32> {
         let wall = walls.status_wall();
         let oldest = |list: &[Kept], arranged: Option<bool>| {
@@ -99,23 +96,14 @@ impl Stage {
                 .filter(|(_, kept)| arranged.is_none_or(|arranged| kept.arranged == arranged))
                 .filter_map(|(index, kept)| {
                     kept.slot_on(&wall)
-                        .map(|slot| (index, (kept.arranged, kept.placed), slot))
+                        .map(|slot| (index, (kept.arranged, kept.placed, kept.id.clone()), slot))
                 })
-                .min_by_key(|(_, order, _)| *order)
+                .min_by(|(_, one, _), (_, other, _)| one.cmp(other))
                 .map(|(index, _, slot)| (index, slot))
         };
         let environment = walls.environment;
         let leaves = |stage: &mut Stage, index: usize| {
             stage.room(environment).panels.remove(index);
-        };
-        let waits = |stage: &mut Stage, index: usize| {
-            let placed = stage.tick();
-            let kept = &mut stage.tomori[index];
-            kept.place = Placed::Wall {
-                wall: WAITING.to_owned(),
-                slot: 0,
-            };
-            kept.placed = placed;
         };
         let room = || {
             self.rooms
@@ -123,25 +111,19 @@ impl Stage {
                 .map(|room| room.panels.clone())
                 .unwrap_or_default()
         };
-        if status {
-            if let Some((index, slot)) = oldest(&self.tomori, Some(false)) {
-                self.tomori.remove(index);
-                return Some(slot);
-            }
-            let (index, slot) = oldest(&room(), Some(false))?;
-            leaves(self, index);
-            return Some(slot);
-        }
         if let Some((index, slot)) = oldest(&self.tomori, Some(false)) {
-            waits(self, index);
+            self.tomori.remove(index);
             return Some(slot);
         }
         if let Some((index, slot)) = oldest(&room(), Some(false)) {
             leaves(self, index);
             return Some(slot);
         }
+        if status {
+            return None;
+        }
         if let Some((index, slot)) = oldest(&self.tomori, None) {
-            waits(self, index);
+            self.tomori.remove(index);
             return Some(slot);
         }
         let (index, slot) = oldest(&room(), None)
@@ -151,8 +133,8 @@ impl Stage {
     }
 
     /// Make way, on the status wall in `walls`' environment, an environment's own, for one of the environment's own
-    /// panels that names its slot `slot` on `wall`: a status panel there, with none of the wall's own, waits for another
-    /// slot, since the environment's own panels come first. Returns whether one did.
+    /// panels that names its slot `slot` on `wall`: a status panel there, with none of the wall's own, expires, since
+    /// the environment's own panels come first. Returns whether one did.
     pub(super) fn give_way(&mut self, walls: &Walls<'_>, wall: &str, slot: u32) -> bool {
         if !walls.shared() || wall != walls.status_wall() || self.taken_by_own(walls, wall, slot) {
             return false;
@@ -164,13 +146,7 @@ impl Stage {
         else {
             return false;
         };
-        let placed = self.tick();
-        let kept = &mut self.tomori[index];
-        kept.place = Placed::Wall {
-            wall: WAITING.to_owned(),
-            slot: 0,
-        };
-        kept.placed = placed;
+        self.tomori.remove(index);
         true
     }
 
@@ -233,16 +209,17 @@ impl Stage {
             .unwrap_or_else(|| at(0))
     }
 
-    /// Whether the status panel `kept` is shown in `walls`' environment, in a slot of the status wall, rather than
-    /// waiting for one.
+    /// Whether the status panel `kept` is shown in `walls`' environment, in a slot of the status wall.
     fn seated(&self, walls: &Walls<'_>, kept: &Kept, slots: u32) -> bool {
         kept.slot_on(&walls.status_wall())
             .is_some_and(|slot| slot < slots)
     }
 
-    /// Seat the status panels waiting for a slot in `walls`' environment in the status wall's free slots, those a
-    /// participant put where they are first, then the newest; those that do not fit wait, kept but not shown. Two in
-    /// one slot, the older waits. Returns whether any moved.
+    /// Seat the status panels without a slot in `walls`' environment in the status wall's free slots, those a
+    /// participant put where they are first, then the newest; those that do not fit expire, the oldest first, so that
+    /// none waits unseen: so too a status panel a space kept waiting before notices expired, or from another
+    /// environment's status wall, as the space comes to this one. Two in one slot, the older expires. Returns whether
+    /// any moved or expired.
     pub(crate) fn settle(&mut self, walls: &Walls<'_>) -> bool {
         let wall = walls.status_wall();
         let slots = self.slots_of(walls, &wall);
@@ -253,37 +230,29 @@ impl Stage {
             .flat_map(|room| &room.panels)
             .filter_map(|kept| kept.slot_on(&wall))
             .collect();
+        // The newest first, by when each was put, then by identity, so that the order is the same everywhere.
+        let newest = |kept: &Kept| std::cmp::Reverse((kept.placed, kept.id.clone()));
         let mut order: Vec<usize> = (0..self.tomori.len()).collect();
-        order.sort_by_key(|index| std::cmp::Reverse(self.tomori[*index].placed));
-        let mut waiting = Vec::new();
+        order.sort_by_key(|index| newest(&self.tomori[*index]));
+        let mut unseated = Vec::new();
         for index in order {
             let kept = &self.tomori[index];
             match kept.slot_on(&wall) {
                 Some(slot) if self.seated(walls, kept, slots) && !taken.contains(&slot) => {
                     taken.push(slot);
                 }
-                _ => waiting.push(index),
+                _ => unseated.push(index),
             }
         }
-        waiting.sort_by_key(|index| {
+        unseated.sort_by_key(|index| {
             let kept = &self.tomori[*index];
-            (
-                !(kept.pinned || kept.arranged),
-                std::cmp::Reverse(kept.placed),
-            )
+            (!(kept.pinned || kept.arranged), newest(kept))
         });
         let mut moved = false;
-        for index in waiting {
+        let mut expired = Vec::new();
+        for index in unseated {
             let Some(slot) = (0..slots).find(|slot| !taken.contains(slot)) else {
-                // Those already on a wall that is not this environment's status wall wait where they are, so that they
-                // are back in their slots where it is.
-                if self.tomori[index].slot_on(&wall).is_some() {
-                    self.tomori[index].place = Placed::Wall {
-                        wall: WAITING.to_owned(),
-                        slot: 0,
-                    };
-                    moved = true;
-                }
+                expired.push(index);
                 continue;
             };
             taken.push(slot);
@@ -296,23 +265,11 @@ impl Stage {
             kept.placed = placed;
             moved = true;
         }
-        moved
-    }
-
-    /// The status panels waiting for a slot on the status wall in `walls`' environment, newest first, by identity and
-    /// title, as the `panels` tool lists them.
-    pub(crate) fn waiting(&self, walls: &Walls<'_>) -> Vec<(String, String)> {
-        let slots = self.slots_of(walls, &walls.status_wall());
-        let mut waiting: Vec<&Kept> = self
-            .tomori
-            .iter()
-            .filter(|kept| !self.seated(walls, kept, slots))
-            .collect();
-        waiting.sort_by_key(|kept| std::cmp::Reverse(kept.placed));
-        waiting
-            .into_iter()
-            .map(|kept| (kept.id.clone(), kept.content.title.clone()))
-            .collect()
+        expired.sort_unstable_by(|one, other| other.cmp(one));
+        for index in &expired {
+            self.tomori.remove(*index);
+        }
+        moved || !expired.is_empty()
     }
 
     /// Whether the panel `panel` is one of the space's status panels, which go with it to the next environment's status

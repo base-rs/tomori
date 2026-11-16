@@ -774,8 +774,8 @@ pub struct Stage {
     /// The last number given, to panels, walls and the stage's own order.
     #[serde(default)]
     next: u64,
-    /// The space's status panels, on the Tomori wall, or on an environment's own wall in the role, or waiting for a slot
-    /// on the status wall where they are on neither.
+    /// The space's status panels, on the Tomori wall, or on an environment's own wall in the role; one a server kept waiting for a
+    /// slot, as an older one did, takes one or expires as the space opens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tomori: Vec<Kept>,
     /// What is kept for each environment, by its identifier.
