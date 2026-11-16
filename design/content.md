@@ -29,13 +29,15 @@ Nothing executable or that a browser renders as a document, such as `text/html` 
 
 A response carries the content's `Content-Type`, `Content-Length`, `ETag` of the quoted digest, `Cache-Control: private, max-age=31536000, immutable`, `Accept-Ranges: bytes`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none'; sandbox` and `Cross-Origin-Resource-Policy: same-origin`. One range of bytes, `bytes=START-`, `START-END` or `-SUFFIX`, is answered 206 with its `Content-Range`, so that a transfer that stopped resumes where it left off; a range past the end 416; anything else, such as several ranges, whole. `If-None-Match` with the digest's tag, or `*`, is answered 304. The body is written in pieces of 64 KiB as the client reads them, and a response whose client has taken nothing of it for the keepalive timeout, 15 s, has its connection ended by the keepalive sweep, as a connection whose writes stall is (see `connection-liveness.md`), so that a client that stops reading holds none of the server's connections.
 
+**The client's side** is described in `clients.md`: a client fetches each asset it is offered that its cache does not keep, beside its connection, resuming one that stopped, checks it against its digest, and keeps it across sessions in a cache bounded in size, whose least recently used asset is let go first, which its asset library reads before what the app bundles.
+
 ## Rationale
 
 The maintainer accepted the channels and content proposal in November 2026 and chose serving environments' assets by digest as the first of the renderer's steps, so that a headset can present an environment its build does not bundle, and so that textures made on the server, and later its baked light, reach headsets the same way. Content addressing makes what a piece of content is independent of where it came from, so that a client keeps it once whichever server or environment names it, and fetches a changed asset once and an unchanged one never again. The store follows the proposal's stage 1 with three differences, each to be taken up by the stage that needs it: the ticket is sent in a message of its own after `Welcome` rather than in `Welcome`, and not yet in a response field or a cookie, which only a browser needs; a connection reads only environments' assets, offered by the environments it presents, which every role may read as they are part of the environments themselves, while images and code bodies still travel on `/connect`; and content is kept in memory, read again from the program's library at each start, rather than in the state directory, since environments' assets are part of the program.
 
 ## Scope
 
-`crates/protocol/src/content.rs`; `crates/server/src/content.rs`, the endpoint in `application.rs`, and the offer and tickets in `hub.rs`.
+`crates/protocol/src/content.rs`; `crates/server/src/content.rs`, the endpoint in `application.rs`, and the offer and tickets in `hub.rs`; and the client's side, `crates/client/src/content.rs` and `crates/assets/src/cache.rs`.
 
 ## Validation
 

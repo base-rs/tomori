@@ -333,7 +333,8 @@ async fn exchange(
             live_panels: options.projection_patches && options.live_panels,
             spawns: options.spawns,
             limits: Some(options.limits),
-            content: false,
+            // And fetches what it is offered by digest, where it has somewhere to keep it.
+            content: options.content.is_some(),
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {
@@ -347,6 +348,19 @@ async fn exchange(
             written = output.write(bytes, lifetime).await;
         }
         let _ = output.finish(lifetime).await;
+    };
+
+    // The server's offer of content, which the frames hand to its fetching, beside them.
+    let (offered, offers) = async_channel::bounded(1);
+    let fetching = async {
+        let Some(cache) = context.options.content.as_deref() else {
+            return;
+        };
+        let authorization = authorization(context.options.token.as_deref(), pinned.is_some());
+        while let Ok(offer) = offers.recv().await {
+            crate::content::fetch_offered(client, cache, authorization.as_deref(), offer, lifetime)
+                .await;
+        }
     };
 
     let download = async {
@@ -379,7 +393,7 @@ async fn exchange(
                 let mut receiving = None;
                 loop {
                     let frame = reader.next().await?;
-                    deliver(context, frame, source, &mut receiving)?;
+                    deliver(context, frame, source, &mut receiving, &offered)?;
                 }
             };
             let keepalive = keepalive(
@@ -397,7 +411,10 @@ async fn exchange(
     };
 
     // The response says how the connection ended.
-    alongside(download, upload).await
+    alongside(download, async {
+        zip(upload, fetching).await;
+    })
+    .await
 }
 
 /// `main`, with `background` making progress beside it until it is done.
@@ -547,12 +564,14 @@ pub(crate) fn receive_image(
 }
 
 /// Hand one frame to the application. `source` is this client's participant number on this connection; `receiving` is
-/// the image being received on it, if any.
+/// the image being received on it, if any; `offered` takes the server's offer of content, which this connection keeps
+/// to itself, as it holds the connection's ticket.
 fn deliver(
     context: &Context<'_>,
     frame: Frame,
     source: u32,
     receiving: &mut Option<Receiving>,
+    offered: &async_channel::Sender<crate::content::Offer>,
 ) -> Result<(), Disconnect> {
     let protocol = |error: tomori_protocol::FrameError| Disconnect::Protocol(error.to_string());
     match frame.kind {
@@ -563,6 +582,10 @@ fn deliver(
             // Keepalive is handled here and not reported: receiving it already counted as liveness.
             ServerMessage::Ping { nonce } => context.shared.outbox.pong(nonce),
             ServerMessage::Pong { .. } => {}
+            // Sent once, to a client that keeps content, which fetches it beside the frames.
+            ServerMessage::Content { session, assets } => {
+                let _ = offered.try_send(crate::content::Offer { session, assets });
+            }
             message => {
                 match &message {
                     ServerMessage::Space { state } => {

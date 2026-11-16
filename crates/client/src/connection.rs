@@ -323,6 +323,8 @@ pub struct Connection {
     names: HashMap<String, String>,
     /// The longest part of a poll since [`Self::slowest`] was last asked.
     slowest: Option<Slowest>,
+    /// Where what servers offer by digest is fetched into, if anywhere; see [`Self::fetch_into`].
+    content: Option<Arc<tomori_assets::Cache>>,
 }
 
 /// The longest part of [`Connection::poll`] in a while, as [`Connection::slowest`] says: applying one event, by its kind,
@@ -580,7 +582,35 @@ impl Connection {
             echo_test: None,
             names: HashMap::new(),
             slowest: None,
+            content: None,
         }
+    }
+
+    /// Keep what servers offer by digest in a cache in `folder`, of at most [`crate::CACHE_BYTES`], which the program's
+    /// asset library reads first, and fetch into it from the next connection on; or, without a folder or with one that
+    /// cannot be made, fetch nothing, saying why. See `design/clients.md`.
+    pub fn keep_content_in(&mut self, folder: Option<std::path::PathBuf>) {
+        let Some(folder) = folder else {
+            return;
+        };
+        match tomori_assets::Cache::open(&folder, crate::CACHE_BYTES) {
+            Ok(cache) => {
+                let cache = Arc::new(cache);
+                tomori_assets::Library::shared().add_first(cache.clone());
+                self.fetch_into(cache);
+            }
+            Err(error) => log::warn!(
+                "Content cannot be kept in {}, so none is fetched: {error}",
+                folder.display()
+            ),
+        }
+    }
+
+    /// Fetch what each server offers by digest into `cache`, and keep it there, from the next connection on. The
+    /// program adds the same cache to its asset library first, so that what it fetched is what it reads. See
+    /// `design/clients.md`.
+    pub fn fetch_into(&mut self, cache: Arc<tomori_assets::Cache>) {
+        self.content = Some(cache);
     }
 
     /// The longest part of a poll since this was last asked, and what it was, or `None` if there was no poll. See
@@ -1229,6 +1259,7 @@ impl Connection {
         options.live_panels = session.live_panels();
         options.spawns = session.spawns();
         options.hearing = self.hearing;
+        options.content = self.content.clone();
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {

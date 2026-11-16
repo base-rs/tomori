@@ -18,7 +18,7 @@ This describes how Tomori's environments load and draw models at runtime: conten
 
 **Sounds.** An environment's ambience plays sounds as assets too, Ogg Vorbis files (see `spatial-audio.md`), read through the same library and checked by the same digests, at most 1 MiB each, which the ambience's own thread reads and decodes as it plays, never the audio thread, with a decoder in Rust without unsafe code: a broken file is silent, saying why, and a decoder that panicked would end only that thread, leaving the ambience silent. Since a sound changes nothing that clients and the server agree on, and is meant to be dropped in, an environment's build may find its sounds itself and name each by the digest of the file it found, as the farmyard's does (see `farmyard.md`), rather than by a digest written beside the code: the file is still the asset its digest names, and bytes that do not match are still refused.
 
-**Delivery from the server, next.** An environment's server side is to serve its assets by digest, and headsets to download and cache them, so that a headset can present an environment its build does not bundle (#194, with #75, #76 and #84). The reference is ready for it: a digest names the asset wherever it comes from, the environment and version say whose it is, and a new `Source` that fetches and caches by digest is added beside the bundled ones without changing anything that asks for assets. Fetched bytes are read as untrusted, as every file already is.
+**Delivery from the server.** An environment's registration with the server declares the assets it serves by digest, and clients fetch and keep them, so that a client can present an environment its build does not bundle (#194; see `content.md`). A client's `Cache` of what it fetched, kept on the device by digest, is a `Source` like the bundled ones, which the client adds to its library first, `Library::add_first`, so that nothing that asks for assets changes, an asset its server serves is read as the server serves it, and what the app bundles is the fallback, for a server that serves nothing (see `clients.md`). Fetched bytes are checked against the digest as they are kept and whenever they are read, and are read as untrusted, as every file already is.
 
 ## Rationale
 
@@ -26,12 +26,12 @@ In November 2026 the maintainer decided that Tomori loads assets such as models 
 
 ## Scope
 
-`crates/assets`: `reference.rs`, `library.rs`, `gltf.rs`, `model.rs`, `pose.rs`, `instance.rs` and, with `gpu`, `gpu.rs` and `model.wgsl`; and the APK's source in `crates/client-quest`'s `android.rs`, which the headset adds to the shared library as it starts.
+`crates/assets`: `reference.rs`, `library.rs`, `cache.rs`, `gltf.rs`, `model.rs`, `pose.rs`, `instance.rs` and, with `gpu`, `gpu.rs` and `model.wgsl`; and the APK's source in `crates/client-quest`'s `android.rs`, which the headset adds to the shared library as it starts.
 
 ## Validation
 
 - Tests read a skinned glTF written by the tests, with every attribute, component type and interpolation the reader takes, a PNG and a JPEG texture, and check each value read; and refuse it broken in every way the reader checks, each with the kind of error it is: its header, its chunks, cut short, too large in bytes, JSON, counts or texture size (an image whose header claims 100,000 texels square is refused before it is decoded), indices and offsets out of range, strides that do not fit, counts that disagree, and what is not supported. Thousands of scrambled and truncated copies must neither panic nor allocate beyond the limits.
-- Tests load an asset through a library from an embedded source and a folder, refusing bytes that do not match the digest, sharing the model read once, passing over sources without it, and never reading outside the folder.
+- Tests load an asset through a library from an embedded source and a folder, refusing bytes that do not match the digest, sharing the model read once, passing over sources without it, never reading outside the folder, and looking first in a source added first; and through a cache, as `clients.md` lists.
 - Tests skin a two-bone arm on the CPU at rest and bent, blend poses, and check that hidden nodes are not drawn.
 - Rendering tests on lavapipe check that the GPU draws a skinned model where the CPU skins it, that every instance of a primitive is drawn in one draw with hidden nodes left out, that the reveal sphere cuts models off, and that a textured model read from a file is drawn; and every shader validates.
 - CI lints the crate without `gpu` and fails if it then depends on `wgpu`, `naga`, `ash` or `tomori-render`.

@@ -23,6 +23,7 @@
 //! See `design/assets.md`, `design/animation.md` and `context/usage.md`.
 pub mod animation;
 pub mod bounds;
+mod cache;
 mod chunks;
 mod gltf;
 pub mod haze;
@@ -37,6 +38,7 @@ pub mod gpu;
 
 use std::fmt;
 
+pub use cache::{Cache, Writer};
 pub use gltf::read;
 pub use instance::{Draw, Instance};
 pub use library::{Directory, Embedded, Library, Source};

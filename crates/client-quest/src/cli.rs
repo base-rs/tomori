@@ -212,6 +212,7 @@ impl Command {
         options.ambience = self.ambience;
         options.duck_under = self.duck_under;
         options.borderless = self.borderless;
+        options.content = self.overrides.content.clone();
         options
     }
 
