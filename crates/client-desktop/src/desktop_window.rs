@@ -10,6 +10,7 @@ use glam::Vec2;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::PhysicalKey,
@@ -99,13 +100,13 @@ impl<C: Contents, S: FnOnce(Gpu) -> Result<C>> ApplicationHandler for App<C, S> 
         }
         let input = match event {
             WindowEvent::RedrawRequested => {
-                let result = contents.redraw(surface);
+                let result = redraw(event_loop, contents, surface);
                 return self.fail(event_loop, result);
             }
             WindowEvent::CloseRequested => Input::Close,
-            WindowEvent::Resized(size) => Input::Resized {
-                width: size.width,
-                height: size.height,
+            WindowEvent::Resized(size) => match surface.give_size(size) {
+                Some(input) => input,
+                None => return,
             },
             WindowEvent::Focused(focused) => Input::Focused(focused),
             WindowEvent::Occluded(occluded) => Input::Occluded(occluded),
@@ -130,23 +131,89 @@ impl<C: Contents, S: FnOnce(Gpu) -> Result<C>> ApplicationHandler for App<C, S> 
             }
             _ => return,
         };
-        match contents.input(input, surface) {
-            Ok(Flow::Continue) => {}
-            Ok(Flow::Exit) => event_loop.exit(),
-            Err(error) => self.fail(event_loop, Err(error)),
-        }
+        let result = give(event_loop, contents, surface, input);
+        self.fail(event_loop, result);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some((contents, surface)) = &mut self.state else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        if fit_content_to_full_screen(&surface.window) {
+            // The window system reports the new size only with the next event, which an idle window may wait long for.
+            let result = match surface.give_size(surface.window.inner_size()) {
+                Some(input) => give(event_loop, contents, surface, input),
+                None => Ok(()),
+            };
+            surface.window.request_redraw();
+            if result.is_err() {
+                return self.fail(event_loop, result);
+            }
+        }
         match contents.about_to_wait(surface) {
             Ok(Wake::Wait) => event_loop.set_control_flow(ControlFlow::Wait),
             Ok(Wake::At(time)) => event_loop.set_control_flow(ControlFlow::WaitUntil(time)),
             Err(error) => self.fail(event_loop, Err(error)),
         }
     }
+}
+
+/// Give `input` to `contents`, ending the event loop when they ask.
+fn give<C: Contents>(
+    event_loop: &ActiveEventLoop,
+    contents: &mut C,
+    surface: &mut WindowSurface,
+    input: Input,
+) -> Result<()> {
+    if contents.input(input, surface)? == Flow::Exit {
+        event_loop.exit();
+    }
+    Ok(())
+}
+
+/// Draw `contents`, at the window's size now: a size the window system has not reported yet, as after the window's style changed, is given to them first, so that no frame is drawn at a size the window no longer has.
+fn redraw<C: Contents>(
+    event_loop: &ActiveEventLoop,
+    contents: &mut C,
+    surface: &mut WindowSurface,
+) -> Result<()> {
+    if let Some(input) = surface.give_size(surface.window.inner_size()) {
+        give(event_loop, contents, surface, input)?;
+    }
+    contents.redraw(surface)
+}
+
+/// Extend `window`'s content under its title bar while it is full screen, and only then, as [`window::full_size_content`] decides, so that the menu bar and title bar sliding down over it do not resize it in every frame of the slide, returning whether it changed. Checked each time the window has handled its events, since winit reports no change of the platform's full screen. Its view is made the first responder again after each change, entering full screen and leaving it, as winit does whenever it changes a window's style, since AppKit otherwise stops sending it keys until the window is clicked.
+#[cfg(target_os = "macos")]
+fn fit_content_to_full_screen(window: &Window) -> bool {
+    use objc2_app_kit::{NSView, NSWindowStyleMask};
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return false;
+    };
+    // SAFETY: winit's AppKit handle is its window's content view, which lives as long as the window, and this runs on the main thread, in winit's event loop.
+    let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let Some(ns_window) = view.window() else {
+        return false;
+    };
+    let mask = ns_window.styleMask();
+    let Some(full_size) = window::full_size_content(
+        mask.contains(NSWindowStyleMask::FullScreen),
+        mask.contains(NSWindowStyleMask::FullSizeContentView),
+    ) else {
+        return false;
+    };
+    ns_window.setStyleMask(if full_size {
+        mask | NSWindowStyleMask::FullSizeContentView
+    } else {
+        mask & !NSWindowStyleMask::FullSizeContentView
+    });
+    let _ = ns_window.makeFirstResponder(Some(&**view));
+    true
 }
 
 /// A window's Vulkan or Metal surface, configured for sRGB output with vsync, and the frame acquired from it.
@@ -160,6 +227,18 @@ struct WindowSurface {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     frame: Option<wgpu::SurfaceTexture>,
+    /// The size last given to the window's contents, in physical pixels.
+    given: (u32, u32),
+}
+
+impl WindowSurface {
+    /// The resize to give the contents, now that the window's size is `size`, if they do not have it yet; see [`window::resize`].
+    fn give_size(&mut self, size: PhysicalSize<u32>) -> Option<Input> {
+        let size = (size.width, size.height);
+        let input = window::resize(self.given, size);
+        self.given = size;
+        input
+    }
 }
 
 impl WindowSurface {
@@ -205,6 +284,7 @@ impl WindowSurface {
             surface,
             device,
             queue,
+            given: (config.width, config.height),
             config,
             frame: None,
         };

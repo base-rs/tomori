@@ -30,6 +30,8 @@ winit = "0.30"
 # Desktop windows on macOS draw with Metal, which has no Vulkan driver of its own.
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["metal"] }
+# The window's style, to extend its content under the title bar while full screen; the version winit uses.
+objc2-app-kit = { version = "0.2", default-features = false, features = ["std", "NSResponder", "NSView", "NSWindow"] }
 
 [dev-dependencies]
 # The device for offscreen rendering tests, and a scenery that counts what it draws.
