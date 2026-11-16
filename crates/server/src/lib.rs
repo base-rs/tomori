@@ -18,6 +18,7 @@ mod cards;
 mod channel;
 mod command;
 mod connection;
+mod content;
 mod diagram;
 mod door;
 mod environments;
@@ -76,6 +77,7 @@ pub use application::Application;
 pub use backends::{AnyBackend, AnySession, Backends};
 pub use builder::Builder;
 pub use cards::{CardSource, Failure, Fetched, FetchedCard, Rate};
+pub use content::{NAME_BYTES as ASSET_NAME_BYTES, OPEN_REQUESTS, STORE_BYTES, ServedAsset};
 pub use environments::{
     Environment, EnvironmentWall, FOLLOW_HEIGHTS, STATUS_SLOTS, StatusWall, WALL_NAME_BYTES,
     valid_wall_name,

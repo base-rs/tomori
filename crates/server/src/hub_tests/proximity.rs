@@ -221,6 +221,7 @@ fn participants_who_share_a_name_are_told_apart_and_nothing_is_told_while_the_ag
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     });
     other.join(&space);
     // Each arrives away from the station, then walks up to it.

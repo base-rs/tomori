@@ -439,6 +439,8 @@ pub struct Hub {
     roots: RwLock<Vec<WorkspaceRoot>>,
     /// The environments a space may be bound to, sent to clients in `Welcome`. See `design/environments.md`.
     environments: RwLock<Environments>,
+    /// The content served by digest: the environments' assets. See `design/content.md`.
+    content: crate::content::ContentStore,
     /// The server sides of the environments, run for the spaces bound to them. See `design/environments.md`.
     server_sides: Arc<crate::server_sides::ServerSides>,
     /// Notified when a space defers a snapshot, or an agent's next move is due sooner, so that the server's snapshot
@@ -544,6 +546,34 @@ struct HubState {
     woken: Arc<Notify>,
 }
 
+/// A connection's session ticket for its content requests, kept as its SHA-256, and how many of them are open. See
+/// `design/content.md`.
+struct ContentSession {
+    ticket: [u8; 32],
+    open: Arc<AtomicUsize>,
+}
+
+impl ContentSession {
+    /// A new session, and its ticket: 256 random bits, as hexadecimal.
+    fn mint() -> (Self, String) {
+        let mut bytes = [0; 32];
+        getrandom::fill(&mut bytes).expect("the operating system's random source is available");
+        let ticket = tomori_protocol::hash_text(&bytes);
+        (
+            Self {
+                ticket: Self::hash(&ticket),
+                open: Arc::default(),
+            },
+            ticket,
+        )
+    }
+
+    /// What a ticket is kept and looked up as.
+    fn hash(ticket: &str) -> [u8; 32] {
+        <sha2::Sha256 as sha2::Digest>::digest(ticket.as_bytes()).into()
+    }
+}
+
 struct ConnectionRecord {
     outbox: Arc<Outbox>,
     /// What the connection was admitted as at the door.
@@ -590,6 +620,11 @@ struct ConnectionRecord {
     /// Whether the client said in Hello that it reads where it arrives, [`ServerMessage::Spawn`]. See
     /// `design/environments.md`.
     spawns: bool,
+    /// Whether the client said in Hello that it reads content by digest. See `design/content.md`.
+    reads_content: bool,
+    /// The session ticket its content requests present, once it is sent one, and how many of them are open. See
+    /// `design/content.md`.
+    content: Option<ContentSession>,
     /// What the connection is bound by: the lesser of what the client said in Hello that it takes at most, today's from an
     /// older one, and [`LIMITS`]. See `design/projection.md`.
     limits: Limits,
@@ -2527,6 +2562,7 @@ impl Hub {
             slots,
             roots: RwLock::new(roots),
             environments: RwLock::new(Environments::default()),
+            content: crate::content::ContentStore::default(),
             server_sides,
             deferred_snapshot,
             counts_changed: Notify::new(),
@@ -2573,6 +2609,9 @@ impl Hub {
 
     /// Offer `environments` for spaces, as in [`crate::Server::with_environments`].
     pub(crate) fn set_environments(&self, environments: Environments) {
+        // Their assets are read before they are offered, outside the hub's lock.
+        self.content
+            .register(&environments, tomori_assets::Library::shared());
         *self
             .environments
             .write()
@@ -3016,6 +3055,51 @@ impl Hub {
         self.tokens.read().expect("never left poisoned").clone()
     }
 
+    /// The content `digest` for a request admitted at the door as `access`, presenting `ticket`: unbound unless the ticket
+    /// names a greeted connection of the same principal, a visitor's as any other's; missing unless the content is
+    /// offered to that connection; and busy while the connection has [`crate::content::OPEN_REQUESTS`] open. See
+    /// `design/content.md`.
+    pub(crate) fn content(
+        &self,
+        access: &Access,
+        ticket: &str,
+        digest: &tomori_assets::Digest,
+        cancellation: &Cancellation,
+    ) -> Result<crate::content::Served, crate::content::Refusal> {
+        use crate::content::{Permit, Refusal, Served};
+        let presented = ContentSession::hash(ticket);
+        let (presents, open) = {
+            let state = self.lock();
+            // Tickets are compared by their digests, so that how long a comparison takes says nothing of a ticket.
+            let record = state
+                .connections
+                .values()
+                .find(|record| {
+                    record
+                        .content
+                        .as_ref()
+                        .is_some_and(|session| session.ticket == presented)
+                })
+                .filter(|record| record.access.principal == access.principal)
+                .ok_or(Refusal::Unbound)?;
+            let session = record.content.as_ref().expect("found by its ticket");
+            (record.presents.clone(), session.open.clone())
+        };
+        let presentable = self.environments().presentable(presents.as_deref());
+        let (bytes, kind) = self
+            .content
+            .find(digest, &presentable)
+            .ok_or(Refusal::Missing)?;
+        let permit = Permit::take(&open).ok_or(Refusal::Busy)?;
+        Ok(Served {
+            bytes,
+            kind,
+            permit,
+            // Watched as it is sent, so that the sweep ends one whose client stops reading it.
+            progress: self.content.watch(cancellation.clone()),
+        })
+    }
+
     /// Register a connection admitted at the door as `access`. `cancellation` must end only this connection's exchange: the keepalive sweep cancels it when the connection goes silent. The connection sets the returned flag whenever data arrives, and reports its writes to the returned [`Output`]. Returns `None` for a visitor while the most visitors are connected; see `design/security.md`.
     pub fn connect(&self, cancellation: Cancellation, access: Access) -> Option<Connected> {
         let mut state = self.lock();
@@ -3069,6 +3153,8 @@ impl Hub {
                 patches: false,
                 live_panels: false,
                 spawns: false,
+                reads_content: false,
+                content: None,
                 limits: Limits::TODAY,
                 projected: None,
                 projection_sent: 0,
@@ -3101,6 +3187,7 @@ impl Hub {
 
     /// Ping connections that have been quiet for the keepalive interval, and release those that have received nothing for the keepalive timeout as if they had disconnected. Release, in the same way, connections whose current write has made no progress for the keepalive timeout: a peer that does not read can receive neither audio nor state. Also release connections that have not said Hello within `hello_timeout`, so that a peer cannot hold a connection slot by keeping a connection alive without joining. Called periodically with the current time; a connection's quiet time is measured from the first sweep that sees it or the last that saw data arrive.
     pub fn sweep(&self, now: Instant, keepalive: &Keepalive, hello_timeout: Duration) {
+        self.content.sweep(now, keepalive.timeout);
         let mut expired = Vec::new();
         let mut window_events = Vec::new();
         {
@@ -3316,6 +3403,7 @@ impl Hub {
                 live_panels,
                 spawns,
                 limits,
+                content,
             } = message
             {
                 // Before Hello rejoins the space they were in, so that they are sent its environment's state and what is projected in it.
@@ -3330,6 +3418,7 @@ impl Hub {
                     record.patches = projection && projection_patches;
                     record.live_panels = record.patches && live_panels;
                     record.spawns = spawns;
+                    record.reads_content = content;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
                     // says, within the most any connection takes; frames each way from the next on. See
                     // `design/projection.md` and `design/server.md`.
@@ -3535,7 +3624,8 @@ impl Hub {
             });
             presents.truncate(tomori_protocol::ENVIRONMENT_LIMIT);
         }
-        let environments = self.environments().presentable(presents.as_deref()).info();
+        let presentable = self.environments().presentable(presents.as_deref());
+        let environments = presentable.info();
         record.presents = presents;
         record.liveness.greeted = true;
         let role = access.role(None);
@@ -3568,6 +3658,21 @@ impl Hub {
             // `design/projection.md`.
             limits: Some(LIMITS),
         });
+        // A client that reads content is given its ticket, and told the assets it may fetch, before anything else, so
+        // that it can fetch them as it joins its space. A device admitted only to pair reads none. See
+        // `design/content.md`.
+        let record = state
+            .connections
+            .get_mut(&connection)
+            .expect("checked above");
+        if record.reads_content && role != ConnectionRole::Pairing {
+            let (session, ticket) = ContentSession::mint();
+            record.content = Some(session);
+            outbox.message(ServerMessage::Content {
+                session: ticket,
+                assets: self.content.offered(&presentable),
+            });
+        }
         self.tell_window_on_hello(state, connection);
         // The space they were in, unless it was forgotten meanwhile.
         let rejoined = rejoin.is_some_and(|space| state.join(&participant, &space));

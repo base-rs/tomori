@@ -93,6 +93,7 @@ impl Client {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         });
     }
 
@@ -246,6 +247,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -274,6 +276,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     });
     assert_eq!(
         client.errors(),
@@ -2016,6 +2019,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     });
     client.read()
 }
@@ -3243,6 +3247,7 @@ fn presenting(
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     });
     client.read();
     client
@@ -6599,6 +6604,7 @@ impl Client {
             live_panels: false,
             spawns: false,
             limits,
+            content: false,
         });
         client.read();
         client
@@ -8869,6 +8875,7 @@ impl Client {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         });
         client.read();
         client
@@ -9239,6 +9246,8 @@ mod agent_state;
 mod anchors;
 #[path = "hub_tests/asking.rs"]
 mod asking;
+#[path = "hub_tests/content.rs"]
+mod content;
 #[path = "hub_tests/cutting.rs"]
 mod cutting;
 #[path = "hub_tests/following.rs"]

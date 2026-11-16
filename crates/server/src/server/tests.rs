@@ -846,6 +846,7 @@ fn watching(server: Server) -> Server {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         },
         tomori_protocol::ClientMessage::Join { space: id },
         tomori_protocol::ClientMessage::WatchCards,

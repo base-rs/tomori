@@ -543,6 +543,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits,
+            content: false,
         })
         .encode()
     }
@@ -679,6 +680,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         })
         .encode();
         let mut body = admitted(Access::open(), vec![ended(&long_hello)]);

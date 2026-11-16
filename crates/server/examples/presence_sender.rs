@@ -83,6 +83,7 @@ impl Participant {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),

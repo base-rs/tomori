@@ -630,6 +630,11 @@ pub enum ClientMessage {
         /// a field left out is today's bound too. See `design/projection.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limits: Option<crate::Limits>,
+        /// Whether this client reads content by digest, `GET /content/DIGEST`, and [`ServerMessage::Content`], which
+        /// gives it the ticket to read it with and the environments' assets offered to it. Absent from older clients,
+        /// which would refuse that message and are never sent it. See `design/content.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        content: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory` or beneath it, for attaching. A backend without attaching answers
@@ -1149,6 +1154,17 @@ pub enum ServerMessage {
         /// `design/projection.md`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limits: Option<crate::Limits>,
+    },
+    /// What this client may read by digest, sent once, after the [`ServerMessage::Welcome`], to a client whose Hello set
+    /// `content`: the session ticket it presents with each `GET /content/DIGEST`, in the
+    /// [`crate::SESSION_FIELD`] field, beside its credential, which names this connection and lasts as long as it; and the
+    /// assets of the environments the server offers it, which it fetches, checked against their digests, when it does
+    /// not already keep them. An asset of a kind it does not read, or otherwise unreadable, is skipped, and it reads at
+    /// most [`crate::ASSET_LIMIT`]. See `design/content.md`.
+    Content {
+        session: String,
+        #[serde(default, deserialize_with = "crate::content::readable_assets")]
+        assets: Vec<crate::OfferedAsset>,
     },
     Spaces {
         spaces: Vec<SpaceSummary>,
@@ -2156,6 +2172,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -2276,6 +2293,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["environment_state"], true);
@@ -2354,6 +2372,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -2423,6 +2442,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap()["pairing_window"],
@@ -2486,6 +2506,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -2516,6 +2537,7 @@ mod tests {
                 live_panels: false,
                 spawns: false,
                 limits: None,
+                content: false,
             }
         );
 

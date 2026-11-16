@@ -310,10 +310,21 @@ fn credentials(fields: &Fields) -> Credentials {
     Credentials::from_fields(authorization, fields.values("cookie").filter_map(text))
 }
 
-/// A response body: either a client connection or a small fixed document.
+/// A response body: a client connection, a small fixed document, or content by digest.
 pub enum ResponseBody<B: ReadableBody> {
     Connection(ConnectionBody<B>),
     Fixed(Option<Vec<u8>>, u64),
+    Content(ContentBody),
+}
+
+/// The bytes of content a response sends, from one offset to another, in pieces of at most
+/// [`crate::content::PIECE_BYTES`], holding its connection's permit to have the request open until it is dropped.
+pub struct ContentBody {
+    bytes: Arc<[u8]>,
+    at: usize,
+    end: usize,
+    _permit: crate::content::Permit,
+    progress: Arc<crate::content::Progress>,
 }
 
 impl<B: ReadableBody> ResponseBody<B> {
@@ -331,18 +342,22 @@ impl<B: ReadableBody> ReadableBody for ResponseBody<B> {
     fn is_ready(&self) -> bool {
         match self {
             Self::Connection(body) => body.is_ready(),
-            Self::Fixed(..) => true,
+            Self::Fixed(..) | Self::Content(_) => true,
         }
     }
 
     fn is_empty(&self) -> bool {
-        matches!(self, Self::Fixed(None, _))
+        match self {
+            Self::Content(body) => body.at >= body.end,
+            _ => matches!(self, Self::Fixed(None, _)),
+        }
     }
 
     fn length(&self) -> Option<u64> {
         match self {
             Self::Connection(_) => None,
             Self::Fixed(_, length) => Some(*length),
+            Self::Content(body) => Some((body.end - body.at) as u64),
         }
     }
 
@@ -354,6 +369,7 @@ impl<B: ReadableBody> ReadableBody for ResponseBody<B> {
         match self {
             Self::Connection(body) => body.close(error),
             Self::Fixed(data, _) => *data = None,
+            Self::Content(body) => body.at = body.end,
         }
     }
 
@@ -363,6 +379,18 @@ impl<B: ReadableBody> ReadableBody for ResponseBody<B> {
             Self::Fixed(data, _) => Ok(match data.take() {
                 Some(data) => BodyFrame::Data { data, end: true },
                 None => BodyFrame::End,
+            }),
+            Self::Content(body) => Ok(if body.at >= body.end {
+                BodyFrame::End
+            } else {
+                body.progress.advanced();
+                let until = body.end.min(body.at + crate::content::PIECE_BYTES);
+                let data = body.bytes[body.at..until].to_vec();
+                body.at = until;
+                BodyFrame::Data {
+                    data,
+                    end: until == body.end,
+                }
             }),
         }
     }
@@ -399,6 +427,7 @@ impl Handler for Application {
         let path = request.path.as_ref().map_or("", |path| path.as_str());
         let path = path.split('?').next().unwrap_or_default();
         let get = request.method == Method::GET;
+        let head = request.method == Method::HEAD;
         let post = request.method == Method::POST;
         Ok(match path {
             tomori_protocol::CONNECT_PATH if post => {
@@ -440,6 +469,13 @@ impl Handler for Application {
                     ),
                 }
             }
+            content if (get || head) && content.starts_with(tomori_protocol::CONTENT_PATH) => self
+                .content(
+                    &request,
+                    &content[tomori_protocol::CONTENT_PATH.len()..],
+                    head,
+                    cancellation,
+                ),
             pages::STATUS_PATH if get => self.status_page(&request.fields),
             pages::SIGN_IN_PATH if get => match self.door {
                 Door::Open => redirect(pages::STATUS_PATH, None),
@@ -488,12 +524,169 @@ impl Handler for Application {
                 "text/plain",
                 ResponseBody::fixed("Method not allowed.\n"),
             ),
-            _ => response(
-                Status::NOT_FOUND,
+            content if content.starts_with(tomori_protocol::CONTENT_PATH) => response(
+                Status::new(405).expect("valid status"),
                 "text/plain",
-                ResponseBody::fixed("Not found.\n"),
+                ResponseBody::fixed("Method not allowed.\n"),
             ),
+            _ => not_found(),
         })
+    }
+}
+
+/// What a request for anything not served is answered: content not kept and content not offered alike.
+fn not_found<B: ReadableBody>() -> Response<ResponseBody<B>> {
+    response(
+        Status::NOT_FOUND,
+        "text/plain",
+        ResponseBody::fixed("Not found.\n"),
+    )
+}
+
+/// The refusal of a request whose credentials, or session ticket, are not accepted: the same for every reason.
+fn unauthorized<B: ReadableBody>() -> Response<ResponseBody<B>> {
+    let mut refused = response(
+        Status::new(401).expect("valid status"),
+        "text/plain",
+        ResponseBody::fixed("Unauthorized.\n"),
+    );
+    refused
+        .fields
+        .add("WWW-Authenticate", "Bearer")
+        .expect("valid challenge");
+    refused
+}
+
+/// The answer to a content request refused for `refusal`.
+fn refused<B: ReadableBody>(refusal: crate::content::Refusal) -> Response<ResponseBody<B>> {
+    use crate::content::Refusal;
+    match refusal {
+        Refusal::Unbound => {
+            log::debug!("Refused a content request whose ticket names no connection of its own.");
+            unauthorized()
+        }
+        Refusal::Missing => not_found(),
+        Refusal::Busy => response(
+            Status::new(503).expect("valid status"),
+            "text/plain",
+            ResponseBody::fixed("Too many content requests are open.\n"),
+        ),
+    }
+}
+
+/// The fields every content response carries: it is immutable, named by its digest, kept by no shared cache, never
+/// sniffed or run, and read by no other origin. See `design/content.md`.
+fn content_fields(fields: &mut Fields, etag: &str) {
+    for (name, value) in [
+        ("ETag", etag),
+        ("Cache-Control", "private, max-age=31536000, immutable"),
+        ("Accept-Ranges", "bytes"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("Content-Security-Policy", "default-src 'none'; sandbox"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+    ] {
+        fields.add(name, value).expect("valid content fields");
+    }
+}
+
+impl Application {
+    /// Answer `GET` or `HEAD /content/HEX`: the content whose SHA-256 is `hex`, in lower case, if the request's
+    /// credentials and session ticket name a connection it is offered to, whole or one range of it. See
+    /// `design/content.md`.
+    fn content<B: ReadableBody>(
+        &self,
+        request: &Request<B>,
+        hex: &str,
+        head: bool,
+        cancellation: &Cancellation,
+    ) -> Response<ResponseBody<B>> {
+        use crate::content::Range;
+        let Some(digest) =
+            tomori_assets::Digest::parse(hex).filter(|digest| digest.to_string() == hex)
+        else {
+            return not_found();
+        };
+        if !request.body.is_empty() {
+            return response(
+                Status::new(400).expect("valid status"),
+                "text/plain",
+                ResponseBody::fixed("A content request has no body.\n"),
+            );
+        }
+        let Some(access) = self.door.admit(&credentials(&request.fields), false) else {
+            log::debug!("Refused a content request whose credentials were not accepted.");
+            return unauthorized();
+        };
+        let field = |name| {
+            request
+                .fields
+                .values(name)
+                .next()
+                .and_then(|value| std::str::from_utf8(value).ok())
+        };
+        let Some(ticket) = field(tomori_protocol::SESSION_FIELD) else {
+            return unauthorized();
+        };
+        let served = match self.hub.content(&access, ticket, &digest, cancellation) {
+            Ok(served) => served,
+            Err(refusal) => return refused(refusal),
+        };
+        let etag = format!("\"{hex}\"");
+        let length = served.bytes.len() as u64;
+        // A client that keeps it already is told so, as for any tag it lists, or for any at all.
+        let kept = request.fields.values("if-none-match").any(|value| {
+            std::str::from_utf8(value).is_ok_and(|value| {
+                value
+                    .split(',')
+                    .any(|tag| matches!(tag.trim(), "*") || tag.trim() == etag)
+            })
+        });
+        let range = if kept {
+            Range::Whole
+        } else {
+            Range::of(field("range"), length)
+        };
+        let (status, start, end) = match range {
+            _ if kept => (304, 0, 0),
+            Range::Whole => (200, 0, length),
+            Range::Part(start, end) => (206, start, end),
+            Range::Unsatisfiable => (416, 0, 0),
+        };
+        let body = if head || matches!(status, 304 | 416) {
+            ResponseBody::Fixed(None, 0)
+        } else {
+            ResponseBody::Content(ContentBody {
+                bytes: served.bytes,
+                at: start as usize,
+                end: end as usize,
+                _permit: served.permit,
+                progress: served.progress,
+            })
+        };
+        let mut answer = Response::new(Status::new(status).expect("valid status"), body);
+        if status != 416 {
+            answer
+                .fields
+                .add("Content-Type", served.kind.content_type())
+                .expect("valid content type");
+            content_fields(&mut answer.fields, &etag);
+        }
+        match status {
+            206 => answer
+                .fields
+                .add(
+                    "Content-Range",
+                    format!("bytes {start}-{}/{length}", end - 1),
+                )
+                .expect("valid range"),
+            416 => answer
+                .fields
+                .add("Content-Range", format!("bytes */{length}"))
+                .expect("valid range"),
+            _ => {}
+        }
+        answer.metadata.content_length = (status != 304).then_some(end - start);
+        answer
     }
 }
 
@@ -533,5 +726,63 @@ mod tests {
         let mut nothing = Nothing;
         assert!(futures_lite::future::block_on(nothing.read(&Cancellation::new())).is_ok());
         nothing.close(None);
+    }
+
+    #[test]
+    fn content_is_handed_out_in_pieces_until_its_end_and_ends_once_closed() {
+        let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let store = crate::content::ContentStore::default();
+        let bytes: Arc<[u8]> = (0..crate::content::PIECE_BYTES * 2 + 10)
+            .map(|index| index as u8)
+            .collect();
+        let body = |at, end| {
+            ResponseBody::<Nothing>::Content(ContentBody {
+                bytes: bytes.clone(),
+                at,
+                end,
+                _permit: crate::content::Permit::take(&open).unwrap(),
+                progress: store.watch(Cancellation::new()),
+            })
+        };
+        let read = |body: &mut ResponseBody<Nothing>| {
+            futures_lite::future::block_on(body.read(&Cancellation::new())).unwrap()
+        };
+        let mut whole = body(5, bytes.len());
+        assert!(whole.is_ready() && !whole.is_empty() && !whole.may_have_trailers());
+        assert_eq!(whole.length(), Some(bytes.len() as u64 - 5));
+        let mut received = Vec::new();
+        loop {
+            match read(&mut whole) {
+                BodyFrame::Data { data, end } => {
+                    assert!(data.len() <= crate::content::PIECE_BYTES);
+                    received.extend(data);
+                    if end {
+                        break;
+                    }
+                }
+                _ => unreachable!("data comes until its end"),
+            }
+        }
+        assert_eq!(received, &bytes[5..]);
+        assert!(whole.is_empty());
+        assert!(matches!(read(&mut whole), BodyFrame::End));
+        let mut closed = body(0, 10);
+        closed.close(None);
+        assert!(closed.is_empty());
+        assert!(matches!(read(&mut closed), BodyFrame::End));
+        // Each holds its connection's permit until it is dropped.
+        assert_eq!(open.load(std::sync::atomic::Ordering::Acquire), 2);
+        drop((whole, closed));
+        assert_eq!(open.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_content_request_refused_is_answered_as_its_refusal_says() {
+        use crate::content::Refusal;
+        let status = |refusal| refused::<Nothing>(refusal).status.as_u16();
+        assert_eq!(
+            [Refusal::Unbound, Refusal::Missing, Refusal::Busy].map(status),
+            [401, 404, 503]
+        );
     }
 }

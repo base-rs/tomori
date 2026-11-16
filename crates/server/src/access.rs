@@ -186,6 +186,7 @@ mod tests {
                 live_panels: false,
                 spawns: false,
                 limits: None,
+                content: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },

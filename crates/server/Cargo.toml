@@ -15,6 +15,10 @@ name = "connection"
 required-features = ["fake"]
 
 [[test]]
+name = "content"
+required-features = ["fake"]
+
+[[test]]
 name = "counts"
 required-features = ["fake"]
 
@@ -89,6 +93,8 @@ glam = "0.33"
 async-channel = "2"
 tomori-backend = { version = "0.2.0", path = "../backend" }
 tomori-environment = { version = "0.2.0", path = "../environment" }
+# Environments' assets, by digest, read from the program's asset library to serve. See `design/content.md`.
+tomori-assets = { version = "0.2.0", path = "../assets", default-features = false }
 tomori-backend-opencode = { version = "0.2.0", path = "../backend-opencode", optional = true }
 base-http = "0.4.0"
 base-http-client = { version = "0.4.0", features = ["rustls"] }
@@ -103,6 +109,8 @@ event-listener = "5"
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
 gethostname = "1.1"
+# Session tickets for content requests.
+getrandom = "0.3"
 # Decoding the files the agent shows as image panels, with pure Rust decoders, and encoding them again for clients.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # Timers' times of day in IANA time zones, through daylight saving. See `design/timers.md`.

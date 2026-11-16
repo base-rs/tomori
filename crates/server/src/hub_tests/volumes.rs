@@ -32,6 +32,7 @@ impl Client {
             live_panels: false,
             spawns: false,
             limits: Some(Limits::TODAY.with_volumes(volumes, nodes)),
+            content: false,
         });
         client.read();
         client

@@ -36,6 +36,7 @@ fn projected(reply: &str) -> (tomori_protocol::Projection, Wall) {
         live_panels: false,
         spawns: false,
         limits: Some(tomori_scene::conversation::HEADSET_LIMITS),
+        content: false,
     });
     client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
     client.create_space("Studio");

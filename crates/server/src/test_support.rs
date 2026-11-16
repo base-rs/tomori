@@ -553,6 +553,7 @@ impl TestClient {
             live_panels: false,
             spawns: false,
             limits,
+            content: false,
         });
         // The welcome is the first reply to hello.
         let environments;

@@ -1469,6 +1469,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         });
         client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
         client.create_space("Studio");
