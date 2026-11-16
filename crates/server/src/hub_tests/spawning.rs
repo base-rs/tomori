@@ -30,6 +30,7 @@ impl Client {
             live_panels: false,
             spawns: true,
             limits: None,
+            content: false,
         });
         client.read();
         client
@@ -144,6 +145,7 @@ impl Client {
             live_panels: false,
             spawns: true,
             limits: None,
+            content: false,
         });
         let read = client.read();
         (client, read)

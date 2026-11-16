@@ -382,6 +382,7 @@ fn hello_is_reserved_and_closing_drains_control() {
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     };
     assert_eq!(outbox.send(hello), Err(SendError::Reserved));
     outbox.send(answer("last")).unwrap();

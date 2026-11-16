@@ -333,6 +333,7 @@ async fn exchange(
             live_panels: options.projection_patches && options.live_panels,
             spawns: options.spawns,
             limits: Some(options.limits),
+            content: false,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {

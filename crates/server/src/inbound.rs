@@ -218,6 +218,7 @@ mod tests {
             live_panels: true,
             spawns: false,
             limits: Some(tomori_protocol::Limits::MOST),
+            content: false,
         };
         let hello = Frame::client(&hello).payload.len();
         assert!(hello * 2 < WATCHING_FRAME_BYTES, "{hello} bytes");

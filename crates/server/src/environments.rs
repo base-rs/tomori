@@ -54,6 +54,8 @@ pub struct Environment {
     /// Its walkable ground, in its own coordinates, if it gives it: the navmesh its clients walk on, which the agent
     /// stands above and keeps clear of. See `design/environments.md`.
     navmesh: Option<Arc<tomori_environment::navmesh::Navmesh>>,
+    /// The assets it serves by digest, to every connection that presents it at its version. See `design/content.md`.
+    assets: Vec<crate::content::ServedAsset>,
 }
 
 /// The lowest and highest an environment may have the agent hover as it comes to someone, in metres above the space's
@@ -402,11 +404,12 @@ impl fmt::Debug for Environment {
             .field("solids", &self.solids)
             .field("follow_height", &self.follow_height)
             .field("navmesh", &self.navmesh)
+            .field("assets", &self.assets)
             .finish()
     }
 }
 
-/// Equal when they offer the same identifier, label, version, instructions, anchors, walls, solids and ground, and the same server side, which is the same one rather than one like it.
+/// Equal when they offer the same identifier, label, version, instructions, anchors, walls, solids, ground and assets, and the same server side, which is the same one rather than one like it.
 impl PartialEq for Environment {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -423,6 +426,7 @@ impl PartialEq for Environment {
             && self.solids == other.solids
             && self.follow_height == other.follow_height
             && self.navmesh == other.navmesh
+            && self.assets == other.assets
             && match (&self.side, &other.side) {
                 (Some(side), Some(other)) => Arc::ptr_eq(side, other),
                 (None, None) => true,
@@ -453,6 +457,7 @@ impl Environment {
             solids: Vec::new(),
             follow_height: None,
             navmesh: None,
+            assets: Vec::new(),
         }
     }
 
@@ -1006,6 +1011,32 @@ impl Environment {
     pub fn with_navmesh(mut self, navmesh: tomori_environment::navmesh::Navmesh) -> Self {
         self.navmesh = Some(Arc::new(navmesh));
         self
+    }
+
+    /// The environment, serving `asset` by digest to every connection that presents it at its version, so that a client
+    /// that does not bundle the asset fetches it, and keeps it, rather than going without. The server reads it from the
+    /// program's asset library, `tomori_assets::Library::shared()`, to which the environment's crate adds its embedded
+    /// assets and a program may add a folder, as it is registered: one that is not there, is not what its digest says,
+    /// is larger than its kind may be or does not start as its kind must is not served, saying why in the log. See
+    /// `design/content.md`.
+    ///
+    /// ```
+    /// use tomori_assets::{AssetRef, Digest};
+    /// use tomori_protocol::ContentKind;
+    /// use tomori_server::{Environment, ServedAsset};
+    ///
+    /// let lantern = AssetRef::new("garden", 1, "lantern.glb", Digest::of(b"glTF lantern"));
+    /// let garden = Environment::new("garden", "Garden").with_asset(ServedAsset::new(lantern, ContentKind::Model));
+    /// assert_eq!(garden.assets().len(), 1);
+    /// ```
+    pub fn with_asset(mut self, asset: crate::content::ServedAsset) -> Self {
+        self.assets.push(asset);
+        self
+    }
+
+    /// The assets it serves by digest, in the order it declared them.
+    pub fn assets(&self) -> &[crate::content::ServedAsset] {
+        &self.assets
     }
 
     /// Its walkable ground, in its own coordinates, if it gives it.

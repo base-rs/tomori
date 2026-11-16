@@ -972,7 +972,8 @@ impl Conversation {
             // A connection admitted only to pair is not shown spaces, even if a server sends them.
             ServerMessage::Spaces { .. } if self.role == ConnectionRole::Pairing => {}
             ServerMessage::PairNonce { nonce } => self.pair_with(&nonce),
-            ServerMessage::PairWaiting => {}
+            // The connection keeps what it may fetch by digest, and its ticket, to itself.
+            ServerMessage::PairWaiting | ServerMessage::Content { .. } => {}
             ServerMessage::Knocks { knocks } => self.knocks = knocks,
             ServerMessage::KnockState { state } => {
                 self.notice = Some(

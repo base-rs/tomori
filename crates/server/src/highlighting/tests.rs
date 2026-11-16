@@ -81,6 +81,7 @@ fn projecting(server: &TestServer, participant: &str) -> TestClient {
         live_panels: false,
         spawns: false,
         limits: None,
+        content: false,
     });
     client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
     client

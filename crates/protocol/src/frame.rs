@@ -412,6 +412,7 @@ mod tests {
             live_panels: false,
             spawns: false,
             limits: None,
+            content: false,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,
