@@ -429,3 +429,59 @@ fn a_kept_name_that_is_the_agents_is_shown_with_its_handle() {
     hub.refresh_names(|_| Some("Tomori".to_owned()));
     assert!(quest.read().is_empty());
 }
+
+/// The colour the participant with `principal` chose, if any.
+fn coloured(hub: &Hub, principal: &str) -> Option<u16> {
+    hub.lock()
+        .participants
+        .values()
+        .find(|participant| participant.principal.as_deref() == Some(principal))
+        .unwrap()
+        .colour
+}
+
+#[test]
+fn a_colour_asked_of_the_agent_is_the_speaker_s_alone_and_one_that_cannot_be_kept_changes_nothing()
+{
+    // Without a token store, as in `--auth open` mode, the speaker is coloured while the server keeps them.
+    let (hub, _jobs, space) = served();
+    let _bob = asking(&hub, &space, "Bob", Grant::Owner, Duration::from_secs(5));
+    let _ada = asking(&hub, &space, "Ada", Grant::Owner, Duration::ZERO);
+    // Only for a session bound to a space.
+    assert!(
+        hub.agent_set_my_colour("ses_sub_agent", "pink", Some("Ada"))
+            .is_err()
+    );
+    let recoloured = hub
+        .agent_set_my_colour("session", "pink", Some("Ada"))
+        .unwrap();
+    assert_eq!((recoloured.colour, recoloured.changed), (Some(325), true));
+    assert_eq!(recoloured.space, space);
+    assert_eq!(coloured(&hub, "token:Ada"), Some(325));
+    assert_eq!(coloured(&hub, "token:Bob"), None);
+
+    let store = Store::new("say-your-colour-unkept");
+    let (hub, _jobs, _space, quest, id, _token) = headset(&store);
+    quest.read();
+    store.refuse_writes();
+    assert_eq!(
+        hub.agent_set_my_colour("session", "teal", Some("Samuel"))
+            .unwrap_err(),
+        "Colour not changed: Tomori could not keep Samuel's colour. Ask them to say it again."
+    );
+    assert_eq!(store.tokens.entry(&id).unwrap().colour, None);
+    assert!(quest.read().is_empty());
+    store.allow_writes();
+    assert!(
+        store
+            .tokens
+            .revoke(id.strip_prefix("token:").unwrap())
+            .unwrap()
+    );
+    assert_eq!(
+        hub.agent_set_my_colour("session", "teal", Some("Samuel"))
+            .unwrap_err(),
+        "Colour not changed: Samuel's token is no longer issued."
+    );
+    assert_eq!(coloured(&hub, &id), None);
+}

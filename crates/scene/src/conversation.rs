@@ -2013,7 +2013,65 @@ impl Conversation {
             movement: self.agent_movement(),
             pointed: None,
             feedback: self.feedback,
+            colour: self.colour(),
         }
+    }
+
+    /// This participant's colour, where they may choose it: the colour they chose, if any, and the colour they are
+    /// shown in, in a space they take part in, on a server whose state says it keeps colours. See `design/people.md`.
+    fn colour(&self) -> Option<(Option<u16>, u16)> {
+        let (space, _) = self.joined_space()?;
+        let me = space
+            .participants
+            .iter()
+            .find(|participant| Some(participant.source) == self.source)
+            .filter(|_| space.colours && self.role.participates())?;
+        Some((me.colour, self.known.hue(me.source, &me.name)))
+    }
+
+    /// Choose `colour` as this participant's own, a hue a person may be, or with none go back to their name's, for
+    /// everyone holding their token, on a server that keeps colours. Says what happened in the notice. See
+    /// `design/people.md`.
+    fn set_colour(&mut self, colour: Option<u16>) {
+        if self.colour().is_none() || !matches!(self.state, Some(ConnectionState::Connected { .. }))
+        {
+            self.notice = Some("This server does not keep colours here.".into());
+            return;
+        }
+        self.notice = Some(match colour {
+            Some(hue) => format!(
+                "Changing your colour to {}.",
+                tomori_protocol::hue::name(hue)
+            ),
+            None => "Changing your colour back to your name's.".into(),
+        });
+        self.send(ClientMessage::SetColour { colour });
+    }
+
+    /// Choose this participant's colour as `text` says: a colour's name, a hue in degrees or `default`, as the console
+    /// takes it, checked as the server checks it, so that what is refused says why at once. See `design/people.md`.
+    pub fn recolour(&mut self, text: &str) {
+        match tomori_protocol::hue::parse(text) {
+            Ok(colour) => self.set_colour(colour),
+            Err(error) => self.notice = Some(format!("Colour not changed: {error}")),
+        }
+    }
+
+    /// Step this participant's colour to the next the hand menu offers: from their name's to each of
+    /// [`tomori_protocol::hue::SWATCHES`] in turn, and from the last, or from a colour none of them is, back to their
+    /// name's.
+    fn step_colour(&mut self) {
+        let chosen = self.colour().and_then(|(chosen, _)| chosen);
+        let swatches = tomori_protocol::hue::SWATCHES;
+        let next = match chosen {
+            None => Some(swatches[0].1),
+            Some(hue) => swatches
+                .iter()
+                .position(|(_, swatch)| *swatch == hue)
+                .and_then(|at| swatches.get(at + 1))
+                .map(|(_, swatch)| *swatch),
+        };
+        self.set_colour(next);
     }
 
     /// The display name this participant goes by: the one the server knows them by, or else the one this device suggests.
@@ -2297,6 +2355,7 @@ impl Conversation {
                 self.naming &= !self.titling;
             }
             crate::hand_menu::Choice::FollowSession => self.retitle(""),
+            crate::hand_menu::Choice::Colour => self.step_colour(),
         }
     }
 
