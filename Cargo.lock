@@ -236,6 +236,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "astc-decode"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6058e6202e20b7fa445692ec4b77ca8eb02508091fcd479ea753d9f60e376b"
+
+[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -612,6 +618,12 @@ dependencies = [
  "portable-atomic",
  "ruzstd",
 ]
+
+[[package]]
+name = "bcdec_rs"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d521509f38a9ab0fce76656a0416161ee5d42c1eab6672b958391e2ac7a0e31"
 
 [[package]]
 name = "bincode"
@@ -2067,6 +2079,15 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "ktx2"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d50be8a24c37debdf3170be6ca396d5b5b165f37f94837891adac735ca416b8"
+dependencies = [
+ "bitflags 2.13.2",
 ]
 
 [[package]]
@@ -4492,6 +4513,16 @@ name = "tomori-text"
 version = "0.2.0"
 dependencies = [
  "ab_glyph",
+]
+
+[[package]]
+name = "tomori-texture-gen"
+version = "0.2.0"
+dependencies = [
+ "astc-decode",
+ "bcdec_rs",
+ "image",
+ "ktx2",
 ]
 
 [[package]]

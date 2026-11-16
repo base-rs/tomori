@@ -48,18 +48,37 @@ fn cache_folder_in(xdg: Option<PathBuf>, home: Option<PathBuf>, macos: bool) -> 
     Some(caches.join("tomori/content"))
 }
 
-/// Fetch into `cache` each asset `offer` offers that it does not keep, presenting `authorization`, if any, and the
-/// offer's ticket, until `lifetime`, the connection's, ends. Each that cannot be fetched is skipped, saying why; the
-/// next connection tries it again.
+/// Whether a device sampling textures of the compressed form `textures`, if it says, wants `asset`: anything but a
+/// texture named for another form, `NAME.FORM.ktx2`, of which a server offers each form and a device draws one.
+pub(crate) fn wanted(asset: &OfferedAsset, textures: Option<&str>) -> bool {
+    let form = asset
+        .name
+        .strip_suffix(".ktx2")
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, form)| form);
+    match (asset.kind, form, textures) {
+        (tomori_protocol::ContentKind::Texture, Some(form), Some(textures)) => form == textures,
+        _ => true,
+    }
+}
+
+/// Fetch into `cache` each asset `offer` offers that it does not keep and the device wants, as [`wanted`] says of a
+/// device sampling `textures`, presenting `authorization`, if any, and the offer's ticket, until `lifetime`, the
+/// connection's, ends. Each that cannot be fetched is skipped, saying why; the next connection tries it again.
 pub(crate) async fn fetch_offered(
     client: &HttpClient<'_>,
     cache: &Cache,
     authorization: Option<&str>,
     offer: Offer,
+    textures: Option<&str>,
     lifetime: &Cancellation,
 ) {
     // What was kept of a download that stopped is resumed first, as the cache keeps only one download at a time.
-    let mut assets: Vec<&OfferedAsset> = offer.assets.iter().collect();
+    let mut assets: Vec<&OfferedAsset> = offer
+        .assets
+        .iter()
+        .filter(|asset| wanted(asset, textures))
+        .collect();
     assets.sort_by_key(|asset| {
         Digest::parse(&asset.digest).is_none_or(|digest| cache.partial(&digest) == 0)
     });
@@ -226,6 +245,35 @@ mod tests {
         assert_eq!(cache_folder_in(None, None, false), None);
         // Wherever this runs, it is somewhere or nowhere.
         let _ = cache_folder();
+    }
+
+    #[test]
+    fn a_texture_is_fetched_only_in_the_form_the_device_samples() {
+        let asset = |name: &str, kind| OfferedAsset {
+            environment: "farmyard".into(),
+            version: 1,
+            name: name.into(),
+            digest: "0".repeat(64),
+            length: 1,
+            kind,
+            licence: None,
+        };
+        let texture = tomori_protocol::ContentKind::Texture;
+        let (astc, bc7) = (
+            asset("textures/earth-colour.astc.ktx2", texture),
+            asset("textures/earth-colour.bc7.ktx2", texture),
+        );
+        assert!(wanted(&astc, Some("astc")) && !wanted(&bc7, Some("astc")));
+        assert!(!wanted(&astc, Some("bc7")) && wanted(&bc7, Some("bc7")));
+        // A device that does not say fetches every form.
+        assert!(wanted(&astc, None) && wanted(&bc7, None));
+        // A texture named for no form, and what is not a texture, whatever its name.
+        assert!(wanted(&asset("moss.ktx2", texture), Some("astc")));
+        assert!(wanted(&asset("moss.png", texture), Some("astc")));
+        assert!(wanted(
+            &asset("chicken.bc7.ktx2", tomori_protocol::ContentKind::Model),
+            Some("astc")
+        ));
     }
 
     #[test]

@@ -13,8 +13,11 @@ This describes the content store: immutable content the server serves by its dig
 | model | `model/gltf-binary` | 16 MiB, as `tomori-assets` reads one | `glTF` |
 | image | `image/png` | 8 MiB | PNG's signature |
 | sound | `audio/ogg` | 1 MiB, as an ambience plays | `OggS` |
+| texture | `image/ktx2` | 16 MiB, as `tomori-render` loads one | KTX2's identifier |
 
-Nothing executable or that a browser renders as a document, such as `text/html` or `image/svg+xml`, is ever a kind. A kind is added with the content that needs it: compressed textures as KTX2 and baked light come with the renderer's next stages (see `docs/proposals/rendering-architecture.md`).
+Nothing executable or that a browser renders as a document, such as `text/html` or `image/svg+xml`, is ever a kind. A kind is added with the content that needs it: baked light comes with the renderer's later stages (see `docs/proposals/rendering-architecture.md`).
+
+**A texture in several forms.** A texture a device samples in one compressed form or another is served in each, each its own content, named for its form, `NAME.FORM.ktx2`, such as `textures/earth-colour.astc.ktx2` and `textures/earth-colour.bc7.ktx2`, and a client that says the form its GPU samples (`tomori_client::Options::textures`, `Connection::sample_textures`), `astc` on the headset and `bc7` on a desktop, fetches each such texture only in that one, so that neither downloads nor keeps what it cannot draw; one that says none fetches every form.
 
 **Environments' assets.** An environment declares the assets it serves as it is registered, `Environment::with_asset(ServedAsset::new(asset, kind))`, each an `AssetRef` as its code names it (see `assets.md`), with a short licence notice of who made it and under what licence where it has one, at most 512 bytes. The server reads each from the program's asset library, `tomori_assets::Library::shared()`, to which the environment's crate adds its embedded assets and a program may add a folder, checked against its digest, its kind's bound and signature, and keeps it in memory, at most 512 MiB together. One that cannot be read so, or whose name is empty or longer than 256 bytes, is not served, and the log says why. Registering the environments again reads only what is new, and lets go of what no environment declares any more.
 
@@ -46,4 +49,5 @@ The maintainer accepted the channels and content proposal in November 2026 and c
 - Tests keep and offer the assets environments declare, once each, only to a connection presenting their environment at its version, and refuse one missing from the library, not its digest, larger than its kind's bound, not starting as its kind, with a name or licence too long, kept as another kind, or past the store's bound, each saying why.
 - Tests end a response whose client has taken nothing of it for the keepalive timeout, and no other.
 - Tests send a ticket and the offer only after the `Welcome` of a client that said `content`, never to one that did not or that only pairs; read only with a ticket of the same principal, a visitor's with a visitor's; refuse a fifth request open at once; and end the ticket with its connection.
+- Tests keep and offer a texture, and refuse one that does not start as KTX2 or is larger than 16 MiB; a client fetches a texture named for a form only in the form it says it samples, and every form if it says none.
 - Tests read an asset over HTTP whole, in part, past its end, conditionally and by `HEAD`, with every field above, and refuse a request without its credential or ticket, with another's ticket, for a digest not offered or not written as one, with a body, or of another method.

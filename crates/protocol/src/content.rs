@@ -42,11 +42,14 @@ pub enum ContentKind {
     Image,
     /// An Ogg Vorbis sound, such as one of an ambience's.
     Sound,
+    /// A KTX2 texture, such as a surface's base colour or normal map, compressed with its mip levels, read as
+    /// `tomori-render` loads one.
+    Texture,
 }
 
 impl ContentKind {
     /// Every kind, in the order they were added.
-    pub const EVERY: [Self; 3] = [Self::Model, Self::Image, Self::Sound];
+    pub const EVERY: [Self; 4] = [Self::Model, Self::Image, Self::Sound, Self::Texture];
 
     /// Its `Content-Type`, which a server serves it with and a client checks.
     pub fn content_type(self) -> &'static str {
@@ -54,6 +57,7 @@ impl ContentKind {
             Self::Model => "model/gltf-binary",
             Self::Image => "image/png",
             Self::Sound => "audio/ogg",
+            Self::Texture => "image/ktx2",
         }
     }
 
@@ -65,22 +69,24 @@ impl ContentKind {
     }
 
     /// The most bytes one piece of it may be: a model as `tomori-assets` reads one by default, an image as large as an
-    /// image panel's, and a sound as large as an ambience plays.
+    /// image panel's, a sound as large as an ambience plays, and a texture as large as `tomori-render` loads.
     pub fn most_bytes(self) -> u64 {
         match self {
             Self::Model => 16 << 20,
             Self::Image => 8 << 20,
             Self::Sound => 1 << 20,
+            Self::Texture => 16 << 20,
         }
     }
 
-    /// Whether `bytes` start as this kind's must: `glTF`, PNG's signature or `OggS`. Only a check, never what decides
-    /// the kind, which is declared.
+    /// Whether `bytes` start as this kind's must: `glTF`, PNG's signature, `OggS` or KTX2's identifier. Only a check,
+    /// never what decides the kind, which is declared.
     pub fn recognises(self, bytes: &[u8]) -> bool {
         let signature: &[u8] = match self {
             Self::Model => b"glTF",
             Self::Image => b"\x89PNG\r\n\x1a\n",
             Self::Sound => b"OggS",
+            Self::Texture => b"\xabKTX 20\xbb\r\n\x1a\n",
         };
         bytes.starts_with(signature)
     }
@@ -157,6 +163,12 @@ mod tests {
         assert!(ContentKind::Model.recognises(b"glTF\x02\0\0\0"));
         assert!(ContentKind::Sound.recognises(b"OggS\0"));
         assert!(!ContentKind::Sound.recognises(b"RIFF"));
+        assert_eq!(ContentKind::Texture.content_type(), "image/ktx2");
+        assert_eq!(ContentKind::Texture.most_bytes(), 16 << 20);
+        assert!(ContentKind::Texture.recognises(b"\xabKTX 20\xbb\r\n\x1a\n\x9d\0\0\0"));
+        // KTX 1, and a KTX2 identifier cut short, are not.
+        assert!(!ContentKind::Texture.recognises(b"\xabKTX 11\xbb\r\n\x1a\n"));
+        assert!(!ContentKind::Texture.recognises(b"\xabKTX 20\xbb\r\n"));
         // Nothing a browser renders as a document, nor a type with parameters, is a kind.
         assert!(serde_json::from_str::<ContentKind>("7").is_err());
         for refused in ["text/html", "image/svg+xml", "image/png; charset=utf-8", ""] {

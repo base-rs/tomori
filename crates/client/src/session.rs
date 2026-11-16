@@ -358,8 +358,15 @@ async fn exchange(
         };
         let authorization = authorization(context.options.token.as_deref(), pinned.is_some());
         while let Ok(offer) = offers.recv().await {
-            crate::content::fetch_offered(client, cache, authorization.as_deref(), offer, lifetime)
-                .await;
+            crate::content::fetch_offered(
+                client,
+                cache,
+                authorization.as_deref(),
+                offer,
+                context.options.textures,
+                lifetime,
+            )
+            .await;
         }
     };
 

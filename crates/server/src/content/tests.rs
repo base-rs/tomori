@@ -11,6 +11,8 @@ pub(crate) fn content(kind: ContentKind, tag: &str, length: usize) -> &'static [
         b"glTF"
     } else if kind == ContentKind::Image {
         b"\x89PNG\r\n\x1a\n"
+    } else if kind == ContentKind::Texture {
+        b"\xabKTX 20\xbb\r\n\x1a\n"
     } else {
         b"OggS"
     };
@@ -38,8 +40,15 @@ fn the_store_keeps_and_offers_what_each_environment_declares_as_it_should_be() {
     let lantern = content(ContentKind::Model, "lantern", 64);
     let chime = content(ContentKind::Sound, "chime", 32);
     let leaf = content(ContentKind::Image, "leaf", 40);
+    let moss = content(ContentKind::Texture, "moss", 48);
     let library = Library::default();
-    library.add(Embedded::new().with(lantern).with(chime).with(leaf));
+    library.add(
+        Embedded::new()
+            .with(lantern)
+            .with(chime)
+            .with(leaf)
+            .with(moss),
+    );
     let garden = Environment::new("garden", "Garden")
         .with_asset(
             served("garden", "lantern.glb", ContentKind::Model, lantern)
@@ -50,7 +59,8 @@ fn the_store_keeps_and_offers_what_each_environment_declares_as_it_should_be() {
         .with_version(2)
         // Shared with the garden, it is kept once.
         .with_asset(served("pond", "lantern.glb", ContentKind::Model, lantern))
-        .with_asset(served("pond", "leaf.png", ContentKind::Image, leaf));
+        .with_asset(served("pond", "leaf.png", ContentKind::Image, leaf))
+        .with_asset(served("pond", "moss.ktx2", ContentKind::Texture, moss));
     let store = ContentStore::default();
     store.register(&Environments::new([garden.clone(), pond.clone()]), &library);
     let offered = store.offered(&presenting(&[("garden", 1)]));
@@ -102,7 +112,11 @@ fn the_store_keeps_and_offers_what_each_environment_declares_as_it_should_be() {
             .find(&Digest::of(b"never kept"), &presenting(&[("pond", 2)]))
             .is_none()
     );
-    assert_eq!(store.offered(&presenting(&[("pond", 2)])).len(), 2);
+    assert_eq!(store.offered(&presenting(&[("pond", 2)])).len(), 3);
+    let (bytes, kind) = store
+        .find(&Digest::of(moss), &presenting(&[("pond", 2)]))
+        .unwrap();
+    assert_eq!((&*bytes, kind), (moss, ContentKind::Texture));
     // Registered again, what is kept is not read again, and what no environment declares now is let go.
     let empty = Library::default();
     store.register(&Environments::new([pond]), &empty);
@@ -127,16 +141,19 @@ fn an_asset_is_served_only_as_its_digest_kind_bounds_name_and_licence_allow() {
     crate::test_log::record();
     let lantern = content(ContentKind::Model, "a lantern for refusal", 64);
     let large = content(ContentKind::Sound, "large", (1 << 20) + 1);
+    let mural = content(ContentKind::Texture, "a mural too large", (16 << 20) + 1);
     let library = Library::default();
-    library.add(Embedded::new().with(lantern).with(large));
+    library.add(Embedded::new().with(lantern).with(large).with(mural));
     let declared = |name: &str, kind, bytes| served("refusing", name, kind, bytes);
     let refusing = Environment::new("refusing", "Refusing")
         // Not in the library.
         .with_asset(declared("missing.glb", ContentKind::Model, b"glTF missing"))
         // Not what its kind must start as.
         .with_asset(declared("lantern.png", ContentKind::Image, lantern))
+        .with_asset(declared("lantern.ktx2", ContentKind::Texture, lantern))
         // Larger than its kind may be.
         .with_asset(declared("large.ogg", ContentKind::Sound, large))
+        .with_asset(declared("mural.ktx2", ContentKind::Texture, mural))
         // A name too long, or none.
         .with_asset(declared(
             &"n".repeat(NAME_BYTES + 1),
@@ -158,6 +175,8 @@ fn an_asset_is_served_only_as_its_digest_kind_bounds_name_and_licence_allow() {
         "missing.glb of the environment refusing is not served: refusing/missing.glb is in none of the asset sources",
         "lantern.png of the environment refusing is not served: it is not image/png",
         "large.ogg of the environment refusing is not served: it is 1048577 bytes, more than the 1048576 that audio/ogg may be",
+        "lantern.ktx2 of the environment refusing is not served: it is not image/ktx2",
+        "mural.ktx2 of the environment refusing is not served: it is 16777217 bytes, more than the 16777216 that image/ktx2 may be",
         "refusing/ of the environment refusing is not served: its name is empty or longer than 256 bytes",
         "nnn of the environment refusing is not served: its name is empty or longer than 256 bytes",
         "licensed.glb of the environment refusing is not served: its licence notice is longer than 512 bytes",

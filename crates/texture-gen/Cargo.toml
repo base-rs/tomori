@@ -1,0 +1,20 @@
+[package]
+name = "tomori-texture-gen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tomori's tiling surface textures, generated in code from a seed: earth, stone and bark, each a base colour and a normal map, seamless, with every mip level, compressed to ASTC and BC7 in KTX2"
+repository.workspace = true
+license.workspace = true
+readme = "readme.md"
+keywords = ["tomori", "texture", "procedural", "astc", "ktx2"]
+categories = ["rendering", "game-development"]
+
+[dev-dependencies]
+# Independent decoders, to check that what the encoders write is read back as it was meant: neither lavapipe nor a
+# desktop GPU samples ASTC.
+astc-decode = "0.3"
+bcdec_rs = "0.2"
+ktx2 = "0.5"
+# The `sheet` example's pictures.
+image = { version = "0.25", default-features = false, features = ["png"] }
