@@ -15,7 +15,7 @@ categories = ["game-development"]
 
 [features]
 # The server side, which runs the beach's stones on Rapier: only a server builds it, so that a client never simulates.
-side = ["tomori-physics/simulation"]
+side = ["tomori-physics/simulation", "dep:tomori-texture-gen"]
 
 [dependencies]
 glam = "0.33"
@@ -29,6 +29,8 @@ tomori-assets = { version = "0.2.0", path = "../assets", default-features = fals
 tomori-environment = { version = "0.2.0", path = "../environment" }
 # The beach's stones, their shapes and messages, and with `side`, their simulation.
 tomori-physics = { version = "0.2.0", path = "../physics", default-features = false }
+# The farmyard's surface textures, which only a server generates.
+tomori-texture-gen = { version = "0.2.0", path = "../texture-gen", optional = true }
 # The clusters of workers at the trail's and the campsite's anchors, which the tree ferns keep clear of, and the poses of
 # the presence its server side is told.
 tomori-protocol = { version = "0.2.0", path = "../protocol" }

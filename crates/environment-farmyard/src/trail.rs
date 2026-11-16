@@ -624,11 +624,13 @@ fn track(shapes: &mut Shapes, points: &[(Vec2, Vec2)]) {
         } else {
             colors::EDGE
         };
-        if (1..=3).contains(&strip) {
-            shapes.ground(|shapes| facing(shapes, &corners, Vec3::Y, color));
-        } else {
-            facing(shapes, &corners, Vec3::Y, color);
-        }
+        shapes.material(crate::props::EARTH, |shapes| {
+            if (1..=3).contains(&strip) {
+                shapes.ground(|shapes| facing(shapes, &corners, Vec3::Y, color));
+            } else {
+                facing(shapes, &corners, Vec3::Y, color);
+            }
+        });
     }
 }
 
@@ -788,13 +790,15 @@ fn shapes() -> Shapes {
     }
     // The clearings, a little below the track where they meet it.
     for (middle, radius) in clearings() {
-        shapes.ground(|shapes| {
-            shapes.disc(
-                Vec3::new(middle.x, CLEARING_HEIGHT, middle.y),
-                radius,
-                9,
-                colors::CLEARING,
-            )
+        shapes.material(crate::props::EARTH, |shapes| {
+            shapes.ground(|shapes| {
+                shapes.disc(
+                    Vec3::new(middle.x, CLEARING_HEIGHT, middle.y),
+                    radius,
+                    9,
+                    colors::CLEARING,
+                )
+            })
         });
     }
     // A few stones along its edges, now one side, now the other, but where a clearing or the gate opens it.

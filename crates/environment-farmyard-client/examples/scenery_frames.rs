@@ -6,12 +6,13 @@
 //! viewpoints, by the GPU's timestamps: culled against both eyes as the renderer culls it, each piece lit by the lamps
 //! the world lists for it, and, to compare, without culling, with closed models' back faces drawn, with neither, culled
 //! with every piece lit by every lamp, with 28 more lanterns about the yard, by each piece's lamps and by every lamp,
-//! culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds, and with its
-//! models whole rather than in chunks, with its own lamps and with 32, the ten taken in turn frame by frame after a few
-//! seconds' warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a number for another count, and then a
+//! culled with four burning marshmallows' trails glowing before the eyes, as many as the ring holds, with its
+//! models whole rather than in chunks, with its own lamps and with 32, and with its earth, stone and bark laid with
+//! their textures, in High and in Low, the twelve taken in turn frame by frame after a few seconds' warming up, so that the GPU's clock changing affects each alike, each the median of 600 frames. Pass a number for another count, and then a
 //! configuration's name, such as `culled`, to time it alone, or several separated by `|`, as a frame that culls what
 //! the last culled writes nothing. It times the CPU too: culling, through a render world as the renderer culls, and
-//! culling and encoding both eyes. Run by hand on a desktop GPU, not on CI's lavapipe; see `design/rendering.md`.
+//! culling and encoding both eyes; and how long the textures take to load. Run by hand on a desktop GPU, not on CI's
+//! lavapipe; see `design/rendering.md`.
 //!
 //! ```sh
 //! cargo run --release -p tomori-environment-farmyard-client --example scenery_frames
@@ -26,7 +27,7 @@ use tomori_environment_farmyard_client::layout;
 use tomori_environment_farmyard_client::scenery::{CHUNK, Clock, Farmyard};
 use tomori_environment_farmyard_client::trail;
 use tomori_render::scenery::{Scenery, Target, Views};
-use tomori_render::world::{Light, World};
+use tomori_render::world::{Light, Tier, World};
 use tomori_scene::scene::headset::{Fov, View, view_projection};
 
 const SIZE: (u32, u32) = (1680, 1760);
@@ -133,15 +134,62 @@ fn main() {
         .unwrap_or(600);
     // Each configuration: whether it culls against the eyes, whether closed parts' back faces are culled, whether four
     // burning marshmallows' trails, as long as the ring holds, glow before the eyes, whether each piece is lit by the
-    // lamps listed for it, whether 28 more lanterns light the yard, and whether its models are whole.
+    // lamps listed for it, whether 28 more lanterns light the yard, which farmyard draws it, in chunks, whole, or in
+    // chunks with its textures served, and its tier.
     let only = std::env::args().nth(2);
+    let (chunks, whole, textured, textured_low) = (0, 1, 2, 3);
     let configurations: Vec<_> = [
-        ("culled", true, true, false, true, false, false),
-        ("frustum only", true, false, false, true, false, false),
-        ("back faces only", false, true, false, true, false, false),
-        ("neither", false, false, false, true, false, false),
-        ("culled, every lamp", true, true, false, false, false, false),
-        ("culled, 32 lamps", true, true, false, true, true, false),
+        ("culled", true, true, false, true, false, chunks, Tier::High),
+        (
+            "frustum only",
+            true,
+            false,
+            false,
+            true,
+            false,
+            chunks,
+            Tier::High,
+        ),
+        (
+            "back faces only",
+            false,
+            true,
+            false,
+            true,
+            false,
+            chunks,
+            Tier::High,
+        ),
+        (
+            "neither",
+            false,
+            false,
+            false,
+            true,
+            false,
+            chunks,
+            Tier::High,
+        ),
+        (
+            "culled, every lamp",
+            true,
+            true,
+            false,
+            false,
+            false,
+            chunks,
+            Tier::High,
+        ),
+        (
+            "culled, 32 lamps",
+            true,
+            true,
+            false,
+            true,
+            true,
+            chunks,
+            Tier::High,
+        ),
         (
             "culled, 32 lamps, every lamp",
             true,
@@ -149,10 +197,29 @@ fn main() {
             false,
             false,
             true,
-            false,
+            chunks,
+            Tier::High,
         ),
-        ("culled, with trails", true, true, true, true, false, false),
-        ("culled, whole", true, true, false, true, false, true),
+        (
+            "culled, with trails",
+            true,
+            true,
+            true,
+            true,
+            false,
+            chunks,
+            Tier::High,
+        ),
+        (
+            "culled, whole",
+            true,
+            true,
+            false,
+            true,
+            false,
+            whole,
+            Tier::High,
+        ),
         (
             "culled, 32 lamps, whole",
             true,
@@ -160,7 +227,28 @@ fn main() {
             false,
             true,
             true,
+            whole,
+            Tier::High,
+        ),
+        (
+            "culled, textured",
             true,
+            true,
+            false,
+            true,
+            false,
+            textured,
+            Tier::High,
+        ),
+        (
+            "culled, textured, Low",
+            true,
+            true,
+            false,
+            true,
+            false,
+            textured_low,
+            Tier::Low,
         ),
     ]
     .into_iter()
@@ -179,7 +267,8 @@ fn main() {
     }))
     .expect("an adapter");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::TIMESTAMP_QUERY,
+        required_features: wgpu::Features::TIMESTAMP_QUERY
+            | (adapter.features() & tomori_render::textures::FEATURES),
         ..Default::default()
     }))
     .expect("a device with timestamps");
@@ -220,15 +309,67 @@ fn main() {
         4,
         tomori_render::glyphs::SharedGlyphs::new(&device),
     );
-    // The farmyard in chunks, as it is drawn, and whole, as it was, each with its own render world.
-    let mut farmyards = [Some(CHUNK), None].map(|chunk| {
-        Farmyard::with_chunks(
+    // Its textures, as a client keeps them once fetched, and how long the device takes to load them.
+    let served: &'static Library = Box::leak(Box::default());
+    served.add(tomori_environment_farmyard::textures::Generated);
+    let started = Instant::now();
+    let generated = tomori_environment_farmyard::textures::textures();
+    println!(
+        "Generated {} textures, {} bytes, in {:.1} ms",
+        generated.len(),
+        generated
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum::<usize>(),
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    let started = Instant::now();
+    let form = tomori_render::textures::Compression::sampled(device.features())
+        .expect("a device sampling ASTC or BC7");
+    let (mut loaded, mut bytes) = (0, 0);
+    for surface in &tomori_environment_farmyard::textures::SURFACES {
+        for map in [
+            tomori_environment_farmyard::textures::Map::Colour,
+            tomori_environment_farmyard::textures::Map::Normal,
+        ] {
+            let asset = surface.asset(map, form.name()).expect("a form served");
+            let read = served.bytes(&asset).expect("the texture");
+            let decoded = tomori_render::textures::decode(&read, device.features())
+                .expect("a texture it samples");
+            tomori_render::textures::upload(&device, &queue, &decoded);
+            (loaded, bytes) = (
+                loaded + 1,
+                bytes + decoded.levels.iter().map(Vec::len).sum::<usize>(),
+            );
+        }
+    }
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    println!(
+        "Loaded {loaded} textures in {}, {bytes} bytes with their mip levels, in {:.1} ms, from bytes already read",
+        form.name(),
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    // The farmyard in chunks, as it is drawn, whole, as it was, and in chunks with its textures, twice, for High and for
+    // Low, each with its own render world.
+    let mut farmyards = [
+        (Some(CHUNK), false),
+        (None, false),
+        (Some(CHUNK), true),
+        (Some(CHUNK), true),
+    ]
+    .map(|(chunk, textures)| {
+        let farmyard = Farmyard::with_chunks(
             &target,
             &Coop::Built,
             Library::shared(),
             Clock::Held(CLOCK),
             chunk,
-        )
+        );
+        if textures {
+            farmyard.with_textures_from(served)
+        } else {
+            farmyard
+        }
     });
     // The flock out, as its client side shows it a little after it is made.
     let drawn = {
@@ -275,7 +416,7 @@ fn main() {
     let period = f64::from(queue.get_timestamp_period());
     // The render world, as the renderer's, with 28 more lanterns in rows across the yard and beyond it, 5 m apart and
     // reaching 4 m, dark unless a configuration lights them.
-    let mut worlds = [(); 2].map(|_| {
+    let mut worlds = [(); 4].map(|_| {
         let mut world = World::new();
         let root = world.add_root();
         let lanterns: Vec<_> = (0..28)
@@ -301,10 +442,11 @@ fn main() {
         while gpu.iter().any(|times| times.len() < frames) {
             let which = frame % configurations.len();
             frame += 1;
-            let (_, culled, back_faces, trails, listed, lit, whole) = configurations[which];
-            let farmyard = &mut farmyards[usize::from(whole)];
-            let (world, root, lanterns) = &mut worlds[usize::from(whole)];
+            let (_, culled, back_faces, trails, listed, lit, drawing, tier) = configurations[which];
+            let farmyard = &mut farmyards[drawing];
+            let (world, root, lanterns) = &mut worlds[drawing];
             let root = *root;
+            world.set_tier(tier);
             if trails {
                 paint(farmyard.embers_mut(), middle, facing);
             } else {

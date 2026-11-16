@@ -18,6 +18,9 @@ pub struct Shapes {
     /// The faces drawn as ground, which participants walk on, each a triangle, and whether what is drawn now is.
     ground: Vec<[Vec3; 3]>,
     marking: bool,
+    /// The material each triangle is drawn with, if another than the primitive's, and that of what is drawn now.
+    materials: Vec<Option<usize>>,
+    material: Option<usize>,
 }
 
 /// `color`, linear RGB, as a vertex colour, varied a little by `seed`, by at most `amount` of itself.
@@ -57,6 +60,7 @@ impl Shapes {
         for index in 1..corners.len() as u32 - 1 {
             self.indices
                 .extend([first, first + index, first + index + 1]);
+            self.materials.push(self.material);
         }
         if self.marking {
             self.ground.extend(fan(corners));
@@ -152,6 +156,14 @@ impl Shapes {
         let marking = std::mem::replace(&mut self.marking, true);
         draw(self);
         self.marking = marking;
+    }
+
+    /// Draw what `draw` draws with material `material`, rather than the one the shapes' primitive is drawn with, so that
+    /// [`Shapes::primitives`] draws it apart: earth, stone or bark, which a texture is laid on.
+    pub fn material(&mut self, material: usize, draw: impl FnOnce(&mut Self)) {
+        let outer = self.material.replace(material);
+        draw(self);
+        self.material = outer;
     }
 
     /// The faces drawn as ground so far, each a triangle.
@@ -299,11 +311,54 @@ impl Shapes {
         self.polygon(top, color);
     }
 
-    /// What has been built, as a primitive drawn with material `material`.
+    /// What has been built, as a primitive drawn with material `material`, whatever [`Shapes::material`] said.
     pub fn primitive(self, material: usize) -> Primitive {
         Primitive::new(self.positions, self.normals, self.indices)
             .with_colors(self.colors)
             .with_material(material)
+    }
+
+    /// What has been built, as a primitive for each material it is drawn with: `material`'s first, then each that
+    /// [`Shapes::material`] said, by its number, each with only its own corners, in the order they were drawn.
+    pub fn primitives(self, material: usize) -> Vec<Primitive> {
+        let materials: Vec<usize> = self
+            .materials
+            .iter()
+            .map(|tag| tag.unwrap_or(material))
+            .collect();
+        let mut used = materials.clone();
+        used.sort_unstable();
+        used.dedup();
+        used.sort_by_key(|used| *used != material);
+        used.into_iter()
+            .map(|used| {
+                let mut remap = vec![u32::MAX; self.positions.len()];
+                let (mut positions, mut normals, mut colors, mut indices) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for (triangle, _) in self
+                    .indices
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(&materials)
+                    .filter(|(_, drawn)| **drawn == used)
+                {
+                    for corner in triangle {
+                        let at = &mut remap[*corner as usize];
+                        if *at == u32::MAX {
+                            *at = positions.len() as u32;
+                            positions.push(self.positions[*corner as usize]);
+                            normals.push(self.normals[*corner as usize]);
+                            colors.push(self.colors[*corner as usize]);
+                        }
+                        indices.push(*at);
+                    }
+                }
+                Primitive::new(positions, normals, indices)
+                    .with_colors(colors)
+                    .with_material(used)
+            })
+            .collect()
     }
 }
 

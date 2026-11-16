@@ -49,12 +49,20 @@ pub mod evening {
 pub const PLAIN: usize = 0;
 /// The material of a lantern's glass, which glows.
 pub const GLASS: usize = 1;
+/// The materials of packed earth, of rock and of bark, white as [`PLAIN`] is, each named for the texture a client lays
+/// on its faces where it has it (see [`crate::textures`]).
+pub const EARTH: usize = 2;
+pub const STONE: usize = 3;
+pub const BARK: usize = 4;
 
-/// The materials of the farmyard's models: [`PLAIN`] and [`GLASS`].
+/// The materials of the farmyard's models: [`PLAIN`], [`GLASS`], [`EARTH`], [`STONE`] and [`BARK`].
 pub fn materials() -> Vec<Material> {
     vec![
         Material::new("plain", Vec4::ONE),
         Material::new("glass", Vec4::new(1.0, 0.85, 0.6, 1.0)).with_emissive(palette::GLOW * 1.6),
+        Material::new("earth", Vec4::ONE),
+        Material::new("stone", Vec4::ONE),
+        Material::new("bark", Vec4::ONE),
     ]
 }
 
@@ -68,7 +76,7 @@ pub fn scatter(seed: u32) -> f32 {
 }
 
 /// The path's stones, a little paler than the earth they are set in.
-const STONE: Vec3 = Vec3::new(0.32, 0.28, 0.23);
+const PATH_STONE: Vec3 = Vec3::new(0.32, 0.28, 0.23);
 
 /// A lantern hung at `at`: its cap and base, and its glass, which glows, into `glass`.
 pub fn lantern(shapes: &mut Shapes, glass: &mut Shapes, at: Vec3) {
@@ -100,7 +108,7 @@ fn path(shapes: &mut Shapes) {
             .iter()
             .map(|corner| ground(corner) + Vec3::Y * stone.height)
             .collect();
-        shapes.slab(&outline, &top, STONE);
+        shapes.slab(&outline, &top, PATH_STONE);
     }
 }
 
@@ -343,7 +351,9 @@ pub fn pines() -> Vec<(Vec3, f32)> {
 
 fn trees(shapes: &mut Shapes) {
     for (base, height) in pines() {
-        shapes.cylinder(base, 0.18, height * 0.25, 5, palette::BARK);
+        shapes.material(BARK, |shapes| {
+            shapes.cylinder(base, 0.18, height * 0.25, 5, palette::BARK)
+        });
         for (layer, (from, radius)) in [(0.18, 1.0), (0.42, 0.78), (0.64, 0.55)]
             .into_iter()
             .enumerate()
@@ -422,7 +432,11 @@ pub fn model() -> Model {
         vec![0],
         vec![Mesh::new(
             "yard",
-            vec![shapes.primitive(PLAIN), glass.primitive(GLASS)],
+            shapes
+                .primitives(PLAIN)
+                .into_iter()
+                .chain([glass.primitive(GLASS)])
+                .collect(),
         )],
         materials(),
         &Limits::default(),
@@ -523,18 +537,20 @@ fn yard() -> (Shapes, Shapes) {
     // across rather than fanned from one corner across the yard, so that it is drawn in chunks of its own.
     meadow(&mut shapes);
     let fence = layout::FENCE;
-    shapes.ground(|shapes| {
-        shapes.finely(
-            &[
-                Vec3::new(fence.low.x, 0.0, fence.high.y),
-                Vec3::new(fence.high.x, 0.0, fence.high.y),
-                Vec3::new(fence.high.x, 0.0, fence.low.y),
-                Vec3::new(fence.low.x, 0.0, fence.low.y),
-            ],
-            |from, to| crate::shapes::even(from, to, FINELY),
-            FINELY,
-            palette::EARTH,
-        )
+    shapes.material(EARTH, |shapes| {
+        shapes.ground(|shapes| {
+            shapes.finely(
+                &[
+                    Vec3::new(fence.low.x, 0.0, fence.high.y),
+                    Vec3::new(fence.high.x, 0.0, fence.high.y),
+                    Vec3::new(fence.high.x, 0.0, fence.low.y),
+                    Vec3::new(fence.low.x, 0.0, fence.low.y),
+                ],
+                |from, to| crate::shapes::even(from, to, FINELY),
+                FINELY,
+                palette::EARTH,
+            )
+        })
     });
     path(&mut shapes);
     fence_around(&mut shapes);
@@ -557,11 +573,32 @@ mod tests {
         let model = model();
         assert_eq!(model.node("yard"), Some(0));
         let primitives = &model.meshes[0].primitives;
-        assert_eq!(primitives.len(), 2);
+        // The plain parts, the earth, the pines' trunks of bark, and the lantern's glass.
+        let materials: Vec<Option<usize>> = primitives
+            .iter()
+            .map(|primitive| primitive.material)
+            .collect();
+        assert_eq!(
+            materials,
+            [Some(PLAIN), Some(EARTH), Some(BARK), Some(GLASS)]
+        );
         assert!(primitives[0].positions.len() > 1000);
         assert_eq!(model.materials[GLASS].emissive, palette::GLOW * 1.6);
-        // Everything but the meadow and the trees is inside the fence.
+        // The earth is inside the fence, and each pine has a trunk of five sides, two triangles each.
         let (low, high) = primitives[1].bounds();
+        assert!(
+            layout::FENCE
+                .grown(0.01)
+                .contains(glam::Vec2::new(low.x, low.z))
+        );
+        assert!(
+            layout::FENCE
+                .grown(0.01)
+                .contains(glam::Vec2::new(high.x, high.z))
+        );
+        assert!(primitives[2].indices.len() / 3 >= pines().len() * 10);
+        // Everything but the meadow and the trees is inside the fence.
+        let (low, high) = primitives[3].bounds();
         assert!(
             layout::FENCE
                 .grown(0.5)

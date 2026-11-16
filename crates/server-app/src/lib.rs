@@ -7,7 +7,7 @@ use tomori_server::{Builder, Environment, Server};
 /// The label clients show for the Minimal grid.
 pub const GRID_LABEL: &str = "Grid";
 
-/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock and the campsite's marshmallow sticks, its noticeboard, a projection wall of its own and its status wall, where participants arrive in it and where the agent's home is, its trail's stations and viewpoints and its campsite, its walkable ground, the navmesh its clients walk on, and its chicken, served by digest to clients that present it, with its author's attribution, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
+/// Tomori's own server: Tomori's own backends, and Sky, first, so that a space whose creator names none is bound to it, then the Minimal grid, labelled Grid, and the farmyard, with its server side, which runs each space's flock and the campsite's marshmallow sticks, its noticeboard, a projection wall of its own and its status wall, where participants arrive in it and where the agent's home is, its trail's stations and viewpoints and its campsite, its walkable ground, the navmesh its clients walk on, its chicken, served by digest to clients that present it, with its author's attribution, and its surfaces' textures, earth, stone and bark, generated as the server first reads them and served by digest, from `tomori-environment-farmyard`, each at the identifier and version its crate gives, which Tomori's own app presents it by too; and `--github-repository`, from `tomori-environment-github-server`, which offers the GitHub environment's prototype after them when the command line names a repository.
 ///
 /// ```
 /// let builder = tomori_server_app::builder();
@@ -17,8 +17,11 @@ pub const GRID_LABEL: &str = "Grid";
 ///     .map(|environment| (environment.id(), environment.version()))
 ///     .collect();
 /// assert_eq!(offered, [("sky", 1), ("minimal", 1), ("farmyard", 12)]);
-/// let served = &builder.environments()[2].assets()[0];
-/// assert_eq!(served.reference(), &tomori_environment_farmyard::chicken::asset());
+/// let served = builder.environments()[2].assets();
+/// assert_eq!(served[0].reference(), &tomori_environment_farmyard::chicken::asset());
+/// // Then each surface's base colour and normal map, in ASTC and in BC7.
+/// assert_eq!(served.len(), 13);
+/// assert!(served[1..].iter().all(|asset| asset.kind() == tomori_protocol::ContentKind::Texture));
 /// ```
 pub fn builder() -> Builder {
     // The chicken is read from the program's library, to which the farmyard's crate adds it, as the farmyard is
@@ -29,6 +32,10 @@ pub fn builder() -> Builder {
         tomori_protocol::ContentKind::Model,
     )
     .with_licence(tomori_environment_farmyard::chicken::ATTRIBUTION);
+    // The surfaces' textures, generated the first time the content store reads one. See `design/rendering.md`.
+    tomori_environment_farmyard::textures::bundle();
+    let textures = tomori_environment_farmyard::textures::assets()
+        .map(|asset| tomori_server::ServedAsset::new(asset, tomori_protocol::ContentKind::Texture));
     let farmyard = Environment::new(
         tomori_environment_farmyard::ID,
         tomori_environment_farmyard::LABEL,
@@ -43,6 +50,7 @@ pub fn builder() -> Builder {
     .with_solids(farmyard_solids())
     .with_navmesh(tomori_environment_farmyard::walkable::navmesh().clone())
     .with_asset(chicken);
+    let farmyard = textures.fold(farmyard, Environment::with_asset);
     let farmyard = farmyard_trail()
         .into_iter()
         .chain([farmyard_campsite()])
