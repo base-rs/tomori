@@ -275,22 +275,50 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                 .pixels()
                 .filter(|pixel| {
                     let [r, g, b, _] = pixel.0.map(i32::from);
-                    g > 190 && r - b > 40
+                    // Pale, so that a yellow or lime person's glow is not taken for it.
+                    g > 190 && r - b > 40 && b > 170
                 })
                 .count()
         };
+        // Bob's eyes take a little of his pink, which cools them a little beside the coral everyone once was.
         assert!(
-            glow(&people) > glow(&away) + 150,
+            glow(&people) > glow(&away) + 100,
             "{} {}",
             glow(&people),
             glow(&away)
         );
+        // Each in their own colour, as the conversation works it out from the space's participants.
+        let hues = {
+            let mut named = joined();
+            named.apply(space(|state| {
+                for (name, source) in [("Bob", 2), ("Cleo", 3), ("Dan", 4)] {
+                    state.participants.push(Participant {
+                        name: name.into(),
+                        source,
+                        engagement: None,
+                    });
+                }
+            }));
+            named.hues().to_vec()
+        };
+        let hue = |source: u32| {
+            hues.iter()
+                .find(|(known, _)| *known == source)
+                .map(|(_, hue)| *hue)
+                .unwrap()
+        };
+        assert_ne!(hue(2), hue(3));
         let body = |image: &image::RgbaImage| {
-            near(
-                image,
-                tomori_scene::people::swarm::COLOUR.map(|value| value * 0.75),
-                30,
-            )
+            [hue(2), hue(3)]
+                .iter()
+                .map(|hue| {
+                    near(
+                        image,
+                        tomori_protocol::hue::rgb(*hue).map(|value| value * 0.75),
+                        30,
+                    )
+                })
+                .sum::<usize>()
         };
         assert!(
             body(&people) > body(&nobody) + 2_000,

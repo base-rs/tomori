@@ -1986,7 +1986,9 @@ impl Conversation {
                         .participants
                         .iter()
                         .map(|participant| {
-                            let colour = crate::speakers::colour(participant.source);
+                            let colour = crate::speakers::colour(
+                                self.known.hue(participant.source, &participant.name),
+                            );
                             crate::hand_menu::Person {
                                 name: participant.name.clone(),
                                 colour: [colour[0], colour[1], colour[2]],
@@ -4806,6 +4808,12 @@ impl Conversation {
         self.people()
             .filter_map(|(source, heard)| Some((source, heard.controllers[index]?)))
             .collect()
+    }
+
+    /// Each participant's colour in the joined space, by their number, as every client works it out. See
+    /// `design/people.md`.
+    pub fn hues(&self) -> &[(u32, u16)] {
+        self.known.hues()
     }
 
     /// How many times the others' hands have been forgotten, on connecting and on leaving or joining a space: once it

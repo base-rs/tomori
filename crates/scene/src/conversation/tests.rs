@@ -5931,7 +5931,7 @@ fn the_space_section_switches_mode_and_speech_and_leaves_once_confirmed() {
     assert_eq!(model.people.len(), 2);
     assert!(model.people[0].you && !model.people[0].away);
     assert!(!model.people[1].you && model.people[1].away);
-    let colour = crate::speakers::colour(2);
+    let colour = crate::speakers::colour(tomori_protocol::hue::default("Bob"));
     assert_eq!(model.people[1].colour, [colour[0], colour[1], colour[2]]);
     conversation.choose_menu(crate::hand_menu::Choice::Mode("plan".into()));
     conversation.choose_menu(crate::hand_menu::Choice::Speech);

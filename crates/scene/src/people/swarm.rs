@@ -21,8 +21,9 @@ use glam::{Mat3, Quat, Vec3};
 use super::Present;
 use crate::delegation::Cube;
 
-/// A person's colour until people have colours of their own, in linear light: a warm coral, which glows against the
-/// evening and is far from the agent's violet. Every colour of a person's swarm is made from theirs (`Cues::colour`).
+/// The colour of someone the space's state does not yet name, in linear light: a warm coral, hue 13 at a person's
+/// saturation and lightness (`tomori_protocol::hue`), which glows against the evening and is far from the agent's
+/// violet. Everyone else is in their own colour; every colour of a person's swarm is made from theirs (`Cues::colour`).
 pub const COLOUR: [f32; 3] = [1.0, 0.36, 0.24];
 /// How bright a cube at the middle of what it is part of, as seen, is, whitening a little; how bright one at its outline
 /// is; and how much smaller, the head's a little less so that its outline stays round.

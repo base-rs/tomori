@@ -2675,6 +2675,7 @@ impl Step {
         // an environment's client side is given their hands from, their orbits quick while their voices play. See
         // `design/people.md`.
         self.people.hear(conversation.voices());
+        self.people.colour(conversation.hues());
         self.people.update(
             now,
             dt,

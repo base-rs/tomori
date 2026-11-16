@@ -26,6 +26,7 @@ On this proposal's review they said:
   - **A ray** uses your own ray's style, in their colour. It is drawn only while it is drawn in full on their headset, ending in a small dot on whatever it meets. A stub or a hidden ray is never drawn.
 - **A small name label above the head**, on the same dark plate as a worker's sign. It shows their name, or their handle (`Ada#23`) while two people in the space share the name. It is shown within about 6 m, while they speak, and while you point at them.
 - **A colour for each person** from a palette of eight evening-friendly hues, kept clear of the swarm's violet and the state colours. The hue comes from their tag, so it stays the same across reconnects and devices. Colour is never the only thing that tells two people apart.
+  > **Revised in stage 3:** the colour comes from their name by default, on a continuous wheel, and they may choose their own, which the server keeps with their token. See **2. Identity and colour** and Decision 9.
 - **Motion on #417's timeline.** Heads, hands and rays are drawn between updates, one update behind, from the same `Relayed` tracks that what someone holds already follows, so a stick and the hand holding it can never disagree. There is no extrapolation. A jump of more than 1.5 m is cut, not glided. Someone silent for 2 s fades out. Someone who leaves fades out where they stood.
 - **Privacy: nothing new about your body is sent.** Head, controllers and hand joints already go to everyone in the space. Only two things would newly be sent: each ray's aim and length while it is drawn in full, and the tag. A per-device setting, *Others see: everything / head only / my name only*, limits what this headset sends. Nothing is recorded.
 - **Cheap.** About 110 cube instances per person, in the batch Tomori's cubes already draw, plus one label. That is roughly 1.3 k triangles and two draws per person, culled by the render world, with less detail at a distance.
@@ -90,7 +91,12 @@ Seeing stage 1's visor block on the headset's preview, the maintainer found it m
 
 ## 2. Identity and colour
 
-- **Colour from the tag.** The tag is a person's stable number (`Ada#23`). The space state would carry it in an optional `Participant::tag`, which older clients ignore. The hue is the tag's place in a fixed palette of eight. Where an earlier participant in the space's participant order already has that hue, the next free one is used, so every client agrees and the earlier person keeps their colour. Without a tag (an older server) the colour comes from `source`, which changes on reconnecting.
+- **Colour from the tag**, as first proposed. The tag is a person's stable number (`Ada#23`). The space state would carry it in an optional `Participant::tag`, which older clients ignore. The hue is the tag's place in a fixed palette of eight. Where an earlier participant in the space's participant order already has that hue, the next free one is used, so every client agrees and the earlier person keeps their colour. Without a tag (an older server) the colour comes from `source`, which changes on reconnecting.
+- **Colour from the name, or their own choice**, as decided for stage 3 (Decision 9), replacing the tag's:
+  - **By default, from their name.** A hue from FNV-1a over the display name, trimmed and in lower case, on a continuous wheel at one saturation and lightness chosen for the evening environments and the swarm's glow, leaving out the bands about the agent's cyan and violet, waiting's amber and a failure's red. Each client works it out from the names the space state already carries, so defaults need nothing sent.
+  - **Kept apart in a space.** Where two people's hues are within 30°, the later in the space's participant order moves to the nearest clear hue, deterministically, so every client agrees; nobody's colour changes where nothing is too near.
+  - **Their own, kept with their token.** A person may choose their colour, in the hand menu's People & security, with `colour` on the desktop console, or by asking the agent; the server keeps it with their token, beside their display name, so it holds on every device and in every space. A chosen colour always wins: only defaults move aside from it. Choosing the default again returns to their name's.
+  - **Tags are not needed for colour**, so they stay the server's and the agent's.
 - **Labels.** The label shows the name as `SpaceState::participants` gives it, and the handle only while someone else in the space shares the name, the same rule the agent follows. One person on two devices with one token shares a tag and a name; that is the same person, and both are drawn.
 - **Speaking.** While someone's voice plays, which the client knows by source, their label shows a small level bar and lifts slightly towards full brightness, so you can tell who is talking where.
 - **Engagement.** Someone `away` is drawn at 30% with `away` on the label. Someone `distracted` is drawn as usual.
@@ -179,8 +185,9 @@ Each stage keeps every test passing, is reviewable alone, and changes nothing fo
    - Tests: drawing chooses hand over controller; each setting sends what it says; head-only holding still passes reach checks.
    - **Built**, after the maintainer, seeing the swarm on the headset, said "I'm also okay if we show people's hands, it's probably useful": a tracked hand is 51 cubes of joints, bones and a palm in the swarm's style, replacing the swarm's cluster, its arm ending at the wrist; a controller 13; cross-fades over 0.2 s, a lost hand dissolving over 0.15 s; one cluster at the palm beyond 5 m and nothing beyond 15 m; and *my name only* sends the head with presence's `hidden`, the others drawing nothing of them until labels exist.
 3. **Colours, labels and handles.**
-   - `Participant::tag`, the palette with deterministic collision, labels with handles where names collide, speaking, away, and the label's lift while someone looks at you.
-   - Tests: every client gives every person the same colour for one participant list; an older server's state falls back to `source`; handles show only while shared.
+   - Colours, as decided after stage 1 (Decision 9): a default from the name on a continuous wheel, clear of the agent's and the states' colours, kept apart within a space in its participant order; and a colour each person may choose, kept by the server with their token, sent as an optional `Participant::colour` in the space state, which older clients ignore, and set or cleared with a client message, offered only by a server whose state says it keeps colours. The swarm, the transcript, the queue and the hand menu's swatches all take the one colour. Built in three steps: the defaults on the client; the chosen colour with the protocol and the server; and the hand menu's row, the console's `colour` and the agent's `set_my_colour`.
+   - Labels with handles where names collide, speaking, away, and the label's lift while someone looks at you; a label, when there is one, is tinted in the person's colour.
+   - Tests: every client gives every person the same colour for one participant list, the bands skipped and nearby defaults moved apart alike; a chosen colour wins and is kept across reconnects and devices, and clearing it returns to the default; the protocol with and without the field; handles show only while shared.
 4. **Pointing at people and polish.**
    - `Resource::Participant` and its description; others' ray-end dots on panels; level of detail and label culling; the floor disc if it earns its place.
    - Tests: attention resolves and describes a person, the handle where shared; dots are drawn on the face they end on and change nothing of it; the frame log on the headset with four people.
@@ -190,13 +197,15 @@ Each stage keeps every test passing, is reviewable alone, and changes nothing fo
 The maintainer agreed with the recommendation, November 2026:
 
 1. **The head:** the visor block to start, stylised for fun rather than human or photo-realistic, with no face (**1. What others look like**).
-2. **Tags to clients:** yes, each participant's tag is sent in the space state, for stable colours (stage 3).
+2. **Tags to clients:** yes, each participant's tag is sent in the space state, for stable colours (stage 3). Superseded by Decision 9: colours come from names and choices, so tags are not sent for them.
 3. **Others' rays:** the full beam while it is drawn in full on their headset, ending in a dot (stage 1).
 4. **Privacy default:** *Others see: everything*, with *head only* and *my name only* as the setting (stage 2).
 5. **Pointing at a person** as attention: later, in stage 4.
 6. **A build registering a person's look:** later, not staged here.
 7. **New, a gaze cue:** someone looking at you is shown on their head, from the head pose already relayed, with hysteresis (stage 1, the label's part in stage 3).
 8. **Revised after stage 1, the look:** a simpler swarm than the agent's, shaped as a person, in their colour: a body and arms, by two-bone inverse kinematics to each hand, and no legs, dissolving below the chest; the head the second concept's rounded cluster, its eyes the gaze cue and its orbit quickening while they speak; about 400 cubes a person in full, fewer beyond 5 m and the head alone beyond 15 m (**The look, revised after stage 1**).
+
+9. **Revised for stage 3, colours:** having seen the swarms on the headset, the maintainer decided: "Compute a colour based on their name… set the default based on the name but allow it to be changed, and stored, per person." So a person's colour is, by default, a hue from their name, moved aside within a space from anyone too near, and otherwise the one they chose, which the server keeps with their token alongside their display name, on every device and in every space. Tags are no longer needed for colour, so Decision 2's tags to clients is not built for it (**2. Identity and colour**).
 
 ## Design documents this would change
 

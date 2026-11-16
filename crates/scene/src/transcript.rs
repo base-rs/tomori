@@ -873,7 +873,11 @@ fn queue_rows(space: &SpaceState, input: &Input<'_>, state: &State, columns: usi
         .saturating_sub(QUEUE_ROWS - 1)
         .min(entries.len().saturating_sub(QUEUE_ROWS));
     for entry in entries.iter().skip(first).take(QUEUE_ROWS) {
-        let speaker = Speaker::person(entry.source, &entry.speaker, input.you);
+        let hue = input.known.map_or_else(
+            || tomori_protocol::hue::default(&entry.speaker),
+            |known| known.hue(entry.source, &entry.speaker),
+        );
+        let speaker = Speaker::person(entry.source, &entry.speaker, input.you, hue);
         let selected = state.focus == Some(Focus::Queue(entry.id.clone()));
         let removing = input
             .cancelling

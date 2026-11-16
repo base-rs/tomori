@@ -232,9 +232,10 @@ struct Known {
     glow: f32,
     body: swarm::Body,
     hands: hands::Hands,
+    colour: [f32; 3],
 }
 
-/// Someone who left the space, fading where they last were.
+/// Someone who left the space, fading where they last were, in the colour they were.
 #[derive(Clone, Debug)]
 struct Leaving {
     source: u32,
@@ -244,6 +245,7 @@ struct Leaving {
     glow: f32,
     body: swarm::Body,
     hands: hands::Hands,
+    colour: [f32; 3],
 }
 
 /// The others in the space, as drawn each frame.
@@ -259,6 +261,8 @@ pub struct People {
     /// drift by.
     voices: Vec<u32>,
     time: f32,
+    /// Each participant's colour, by their number, as the space's state gives them.
+    hues: Vec<(u32, u16)>,
     /// What each frame is drawn from, kept from frame to frame: how many reports have arrived from each of the others,
     /// and their presence, by their numbers, as it says and as it is drawn.
     reports: Vec<u64>,
@@ -272,6 +276,21 @@ impl People {
     pub fn hear(&mut self, voices: &[u32]) {
         self.voices.clear();
         self.voices.extend_from_slice(voices);
+    }
+
+    /// Colour each participant as `hues` says, by their numbers, as the conversation works them out from the space's
+    /// participants, for the next update; anyone not among them is [`swarm::COLOUR`].
+    pub fn colour(&mut self, hues: &[(u32, u16)]) {
+        self.hues.clear();
+        self.hues.extend_from_slice(hues);
+    }
+
+    /// The colour of `source`'s swarm.
+    fn colour_of(&self, source: u32) -> [f32; 3] {
+        self.hues
+            .iter()
+            .find(|(known, _)| *known == source)
+            .map_or(swarm::COLOUR, |(_, hue)| tomori_protocol::hue::rgb(*hue))
     }
 
     /// The others at `now`, `dt` seconds after the last frame, from `heard`, each as their presence last said, by their
@@ -322,6 +341,7 @@ impl People {
                     glow: known.glow,
                     body: known.body,
                     hands: known.hands,
+                    colour: known.colour,
                 });
             }
             here
@@ -333,6 +353,7 @@ impl People {
         let mut used = 0;
         for (&(source, present), reports) in drawn.iter().zip(&reports) {
             let cut = self.relayed.cut(source);
+            let colour = self.colour_of(source);
             let known = self.known.entry(source).or_insert_with(|| Known {
                 reports: *reports,
                 heard: now,
@@ -344,7 +365,9 @@ impl People {
                 glow: 0.0,
                 body: swarm::Body::new(&present, eyes, source),
                 hands: hands::Hands::new(&present),
+                colour,
             });
+            known.colour = colour;
             if known.reports != *reports {
                 known.reports = *reports;
                 known.heard = now;
@@ -393,8 +416,7 @@ impl People {
                 &shown,
                 (&known.body, &known.hands),
                 swarm::Cues {
-                    // Everyone's colour alike, until people have colours of their own.
-                    colour: swarm::COLOUR,
+                    colour,
                     fade,
                     glow: known.glow,
                     eyes,
@@ -413,8 +435,7 @@ impl People {
                 &leaving.drawn,
                 (&leaving.body, &leaving.hands),
                 swarm::Cues {
-                    // Everyone's colour alike, until people have colours of their own.
-                    colour: swarm::COLOUR,
+                    colour: leaving.colour,
                     fade: leaving.shown * (1.0 - t),
                     glow: leaving.glow,
                     eyes,
