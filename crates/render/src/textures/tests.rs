@@ -531,18 +531,21 @@ fn a_scenery_s_textures_are_loaded_as_they_arrive_one_a_frame_and_one_refused_ne
             asset("first.ktx2", &first),
             asset("second.ktx2", &second),
             asset("broken.ktx2", &broken),
+            asset("impostor.ktx2", b"the texture it names"),
         ]);
-        // None is here: each is looked for once, in turn, then not until it is due again.
-        for _ in 0..3 {
+        // None is here, or not as its digest says: each is looked for once, in turn, then not until it is due again, and
+        // the impostor never.
+        for _ in 0..4 {
             assert!(!resident.poll(&device, &queue, &library));
         }
+        assert!(matches!(resident.textures[3].1, State::Refused));
         assert!(!resident.settled());
         arriving
             .0
             .lock()
             .unwrap()
             .extend([first.clone(), broken.clone()]);
-        for _ in 3..RETRY_FRAMES {
+        for _ in 4..RETRY_FRAMES {
             assert!(!resident.poll(&device, &queue, &library));
         }
         assert!(resident.get(Digest::of(&first)).is_none());

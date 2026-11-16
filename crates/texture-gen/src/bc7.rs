@@ -163,11 +163,7 @@ mod tests {
         assert_eq!(u128::from_le_bytes(block) & 0x7f, 1 << 6);
         let mut decoded = [0u8; 64];
         bcdec_rs::bc7(&block, &mut decoded, 16);
-        assert!(
-            decoded[0] >= 250 && decoded[60] <= 20,
-            "{} {}",
-            decoded[0],
-            decoded[60]
-        );
+        let (first, last) = (decoded[0], decoded[60]);
+        assert!(first >= 250 && last <= 20, "{first} {last}");
     }
 }
