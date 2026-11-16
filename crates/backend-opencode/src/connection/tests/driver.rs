@@ -1361,6 +1361,70 @@ fn reconciliation_lists_agents_for_a_session_offering_none_and_reports_its_runni
 }
 
 #[test]
+fn a_reconciliation_overtaken_by_an_event_is_discarded() {
+    let shared = Arc::new(FakeShared::default());
+    let service = FakeService::start(shared.clone(), "secret");
+    let address = Arc::new(Mutex::new(service.address));
+    let (commands, connection) = connect_to(&address);
+    let (id, events) = block_on(commands.reply_with(|reply| Command::Create {
+        spec: SessionSpec {
+            directory: "/tmp".into(),
+            title: "Overtaken".into(),
+        },
+        reply,
+    }))
+    .unwrap();
+    block_on(commands.reply_with(|reply| Command::Snapshot {
+        id: id.clone(),
+        identity: events.identity.clone(),
+        reply,
+    }))
+    .and_then(SnapshotReply::accept)
+    .unwrap();
+    let watched = watch(&events);
+    // From now on the service holds the reply of each lookup of the running
+    // sessions, so the next one, made by a reconciliation, waits.
+    let mut seen = 0;
+    shared.update(|state| {
+        state.hold_active = true;
+        seen = state.active_requests;
+    });
+    wait_for_active_requests(&shared, seen + 1);
+    // An event for the session lands meanwhile, so what the reconciliation
+    // reads is older than what is known.
+    service.send(json!({"type":"session.agent.switched","data":{"sessionID":id,"agent":"plan"}}));
+    let switched = Event::ModesChanged(Modes {
+        offered: Vec::new(),
+        current: Some("plan".into()),
+    });
+    until(&watched, "the agent switch", |event| *event == switched);
+    // The held reply says it is running, and is released.
+    shared.update(|state| {
+        state.active.insert(id.clone());
+        state.hold_active = false;
+    });
+    // A later reconciliation starts only once the overtaken one has been
+    // dealt with, and is the first to report it running.
+    wait_for_active_requests(&shared, seen + 2);
+    until(&watched, "the running state", |event| *event == Event::Busy);
+    drop(commands);
+    join_within(connection, Duration::from_secs(5));
+    shared.update(|state| state.stopping = true);
+    drop(service);
+}
+
+/// Wait until the service has received `count` lookups of the running sessions.
+fn wait_for_active_requests(shared: &FakeShared, count: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut state = shared.state.lock().unwrap();
+    while state.active_requests < count {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!remaining.is_zero(), "lookup {count} did not arrive");
+        state = shared.changed.wait_timeout(state, remaining).unwrap().0;
+    }
+}
+
+#[test]
 fn the_simulated_service_does_not_find_what_it_does_not_simulate() {
     let service = FakeService::start(Arc::new(FakeShared::default()), "");
     let mut socket = std::net::TcpStream::connect(service.address).unwrap();

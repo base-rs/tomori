@@ -112,6 +112,10 @@ struct FakeState {
     stalled_children: HashSet<String>,
     /// Sessions OpenCode lists among those it is running.
     active: HashSet<String>,
+    /// While set, the lookup of the running sessions waits before it is answered.
+    hold_active: bool,
+    /// Lookups of the running sessions received.
+    active_requests: usize,
     /// Sessions whose child listing fails.
     failing_children: HashSet<String>,
     /// Each session's record, where it is not the plain one.
@@ -358,10 +362,17 @@ fn fake_exchange(
             json!({ "data": agents.unwrap_or_else(|| json!([])) }).to_string(),
         )
     } else if path == "/api/session/active" {
-        let active: serde_json::Map<String, Value> = shared
-            .state
-            .lock()
-            .unwrap()
+        let mut state = shared.state.lock().unwrap();
+        state.active_requests += 1;
+        shared.changed.notify_all();
+        while state.hold_active && !state.stopping {
+            state = shared
+                .changed
+                .wait_timeout(state, Duration::from_millis(50))
+                .unwrap()
+                .0;
+        }
+        let active: serde_json::Map<String, Value> = state
             .active
             .iter()
             .map(|id| (id.clone(), json!({"type": "running"})))
