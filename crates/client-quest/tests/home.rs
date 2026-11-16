@@ -156,6 +156,7 @@ fn state(workers: usize) -> SpaceState {
             name: "Ada".into(),
             source: 1,
             engagement: None,
+            colour: None,
         }],
         workers: WORKERS[..workers]
             .iter()

@@ -148,6 +148,7 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                         name: name.into(),
                         source,
                         engagement: None,
+                        colour: None,
                     });
                 }
             }));
@@ -296,6 +297,7 @@ fn two_people_at_a_wall_are_drawn_among_tomori_s_cubes_in_their_one_draw_culled_
                         name: name.into(),
                         source,
                         engagement: None,
+                        colour: None,
                     });
                 }
             }));

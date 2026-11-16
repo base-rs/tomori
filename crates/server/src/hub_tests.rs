@@ -9246,6 +9246,8 @@ mod agent_state;
 mod anchors;
 #[path = "hub_tests/asking.rs"]
 mod asking;
+#[path = "hub_tests/colouring.rs"]
+mod colouring;
 #[path = "hub_tests/content.rs"]
 mod content;
 #[path = "hub_tests/cutting.rs"]

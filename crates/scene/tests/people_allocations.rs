@@ -104,6 +104,7 @@ fn a_frame_with_others_in_the_space_allocates_nothing_once_everyone_is_known() {
                 name: name.into(),
                 source,
                 engagement: None,
+                colour: None,
             });
         }
     }));

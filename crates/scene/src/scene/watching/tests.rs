@@ -133,6 +133,7 @@ fn furnished(role: ConnectionRole) -> Conversation {
             name: "Bea".into(),
             source: 2,
             engagement: None,
+            colour: None,
         });
         state.workers = vec![tomori_protocol::Worker {
             id: "ses_a".into(),
@@ -459,6 +460,7 @@ fn a_watcher_runs_the_client_side_of_the_environment_it_draws_and_tells_it_nothi
             name: "Bea".into(),
             source: 2,
             engagement: None,
+            colour: None,
         });
     }));
     // Once its scenery has grown in, it is made once and shows what it shows each frame.

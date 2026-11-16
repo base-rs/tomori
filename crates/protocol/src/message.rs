@@ -1079,6 +1079,13 @@ pub enum ClientMessage {
     SetName {
         name: String,
     },
+    /// Choose this participant's own colour, as a hue in whole degrees, one [`crate::hue::clear`] allows, for everyone
+    /// using the same token, or, with none, go back to their name's. Sent only to a server whose
+    /// [`crate::SpaceState::colours`] is set. See `design/people.md`.
+    SetColour {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        colour: Option<u16>,
+    },
     /// Ask the server side of the current space's environment, `environment` at `version`, for something, in the
     /// environment's own `intent`, at most [`crate::MESSAGE_LIMIT`] bytes. Participants only. Sent only once the server
     /// has sent this connection the environment's [`ServerMessage::EnvironmentState`] in the space, so never to an older
@@ -2554,6 +2561,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ClientMessage::SetName { name: "Ada".into() }).unwrap(),
             serde_json::json!({"type": "set_name", "name": "Ada"})
+        );
+        // A colour is a hue in degrees, and none goes back to the name's.
+        for (message, json) in [
+            (
+                ClientMessage::SetColour { colour: Some(165) },
+                serde_json::json!({"type": "set_colour", "colour": 165}),
+            ),
+            (
+                ClientMessage::SetColour { colour: None },
+                serde_json::json!({"type": "set_colour"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&message).unwrap(), json);
+            assert_eq!(
+                serde_json::from_value::<ClientMessage>(json).unwrap(),
+                message
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<ClientMessage>(
+                serde_json::json!({"type": "set_colour", "colour": null})
+            )
+            .unwrap(),
+            ClientMessage::SetColour { colour: None }
         );
         assert_eq!(
             serde_json::to_value(ServerMessage::Name { name: "Ada".into() }).unwrap(),

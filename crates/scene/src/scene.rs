@@ -3104,6 +3104,7 @@ pub mod fixtures {
                 name: "Ada".into(),
                 source: 1,
                 engagement: None,
+                colour: None,
             }],
             ..Default::default()
         };

@@ -364,6 +364,10 @@ pub struct SpaceState {
     /// titling the space. False from older servers; a client offers renaming the space only when this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub renames: bool,
+    /// Whether the server keeps a participant's chosen colour and accepts [`crate::ClientMessage::SetColour`]. False
+    /// from older servers; a client offers choosing a colour only when this is set. See `design/people.md`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub colours: bool,
     /// Where the space's environment has participants arrive, and puts the agent's home and the workers' arrangement,
     /// each only when its registration says. None from older servers, and when the server no longer offers the
     /// environment, which a client reads as the default layout. See `design/environments.md`.
@@ -969,6 +973,11 @@ pub struct Participant {
     /// for clients that do not report it, which count as listening.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engagement: Option<Engagement>,
+    /// The colour the participant chose, as a hue in whole degrees ([`crate::hue`]), which the server keeps with their
+    /// token, or none while they are in their name's. Absent from older servers, and ignored by older clients. See
+    /// `design/people.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u16>,
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -1117,6 +1126,7 @@ mod tests {
                 name: "Ada".into(),
                 source: 1,
                 engagement: None,
+                colour: None,
             }],
             ..SpaceState::default()
         })
@@ -1135,6 +1145,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(participant.engagement, Some(Engagement::Away));
+    }
+
+    #[test]
+    fn a_chosen_colour_and_keeping_colours_are_absent_from_older_servers() {
+        let ada = Participant {
+            name: "Ada".into(),
+            source: 1,
+            engagement: None,
+            colour: None,
+        };
+        let json = serde_json::to_value(&ada).unwrap();
+        assert_eq!(json, serde_json::json!({"name": "Ada", "source": 1}));
+        assert_eq!(serde_json::from_value::<Participant>(json).unwrap(), ada);
+        let chosen = Participant {
+            colour: Some(165),
+            ..ada
+        };
+        let json = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(json["colour"], 165);
+        assert_eq!(serde_json::from_value::<Participant>(json).unwrap(), chosen);
+        let older = serde_json::to_value(SpaceState::default()).unwrap();
+        assert!(older.get("colours").is_none());
+        assert!(!serde_json::from_value::<SpaceState>(older).unwrap().colours);
+        let keeps = SpaceState {
+            colours: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&keeps).unwrap();
+        assert_eq!(json["colours"], true);
+        assert_eq!(serde_json::from_value::<SpaceState>(json).unwrap(), keeps);
     }
 
     #[test]

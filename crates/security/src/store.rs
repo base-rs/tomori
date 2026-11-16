@@ -41,6 +41,12 @@ pub struct Entry {
     /// None only once every tag is taken. See `design/security.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<u32>,
+    /// The colour its holder chose, as a hue in whole degrees, kept beside their name so that it holds on every device
+    /// presenting the token and in every space; none while they are in their name's. The server checks that it is one a
+    /// person may be as it keeps it and again as it reads it. Absent from a store written before colours, or by an
+    /// older process, which drops it as it writes the store again. See `design/people.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u16>,
     hash: String,
 }
 
@@ -156,6 +162,7 @@ impl TokenStore {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |since| since.as_secs()),
             tag: None,
+            colour: None,
             hash: token::hash(&token),
         };
         let id = entry.id.clone();
@@ -203,6 +210,20 @@ impl TokenStore {
             };
         })?;
         Ok(renamed)
+    }
+
+    /// Keep `colour` as the colour of the holder of the token with identifier `id`, or, with none, forget the one they
+    /// chose. Returns false if no token has the identifier, as after it was revoked. The caller checks that the colour is
+    /// one a person may be. See `design/people.md`.
+    pub fn recolour(&self, id: &str, colour: Option<u16>) -> Result<bool, StoreError> {
+        let mut found = false;
+        self.change(|entries| {
+            if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
+                entry.colour = colour;
+                found = true;
+            }
+        })?;
+        Ok(found)
     }
 
     /// The issued tokens, oldest first.
@@ -511,6 +532,29 @@ mod tests {
         assert!(tag(&mut entries));
         assert_eq!(entries[entries.len() - 2].tag, Some(LAST_TAG));
         assert_eq!(entries.last().unwrap().tag, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_holder_s_colour_is_kept_with_their_token_beside_their_name() {
+        let directory = directory("colours");
+        let store = TokenStore::open(&directory).unwrap();
+        let (ada, _) = store.issue("Ada", Grant::Owner).unwrap();
+        assert_eq!(ada.colour, None);
+        let text = fs::read_to_string(directory.join(TOKENS_FILE)).unwrap();
+        assert!(!text.contains("colour"), "{text}");
+        assert!(store.recolour(&ada.id, Some(165)).unwrap());
+        // Kept across reopening, as after a restart, and renaming keeps it.
+        store.rename(&ada.id, "Ayoko", |_| false).unwrap();
+        let reopened = TokenStore::open(&directory).unwrap();
+        let kept = reopened.entry(&ada.principal().id).unwrap();
+        assert_eq!((kept.name.as_str(), kept.colour), ("Ayoko", Some(165)));
+        // Forgotten, they are their name's colour again.
+        assert!(reopened.recolour(&ada.id, None).unwrap());
+        assert_eq!(reopened.entry(&ada.principal().id).unwrap().colour, None);
+        // A revoked token has none to keep.
+        reopened.revoke(&ada.id).unwrap();
+        assert!(!reopened.recolour(&ada.id, Some(20)).unwrap());
         fs::remove_dir_all(directory).unwrap();
     }
 

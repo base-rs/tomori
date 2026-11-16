@@ -2637,6 +2637,7 @@ impl SpaceModel {
             deletes_session: false,
             renamed_by: self.renamed_by.clone(),
             renames: true,
+            colours: true,
             // Set by the hub, which knows the environments.
             anchors: tomori_protocol::Anchors::default(),
             away: None,

@@ -420,6 +420,7 @@ fn a_client_side_is_given_the_others_right_hands_in_the_space_but_never_its_own(
             name: "Bea".into(),
             source: 2,
             engagement: None,
+            colour: None,
         });
     };
     rig.conversation.apply(space(with_bea));
@@ -712,6 +713,7 @@ fn a_client_side_is_given_the_others_left_hands_too() {
             name: "Bea".into(),
             source: 2,
             engagement: None,
+            colour: None,
         });
     }));
     let pose = |x: f32| tomori_protocol::Pose {

@@ -364,6 +364,7 @@ mod tests {
                     name: "Bob".into(),
                     source: 2,
                     engagement: None,
+                    colour: None,
                 });
             })
         };

@@ -82,6 +82,7 @@ fn joined(environment: Environment, projected: bool) -> Conversation {
                 name: "Ada".into(),
                 source: 1,
                 engagement: None,
+                colour: None,
             }],
             workers: (0..8)
                 .map(|index| Worker {

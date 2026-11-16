@@ -537,6 +537,8 @@ struct HubState {
     knock_cooldowns: HashMap<(String, String), Instant>,
     /// When each identity was last renamed through its space's agent, for [`agent_names::RENAME_LIMIT`].
     renames: agent_names::Renames,
+    /// When each identity last chose a colour, for [`COLOUR_LIMIT`].
+    recolours: agent_names::Renames,
     /// The counts when they were last compared, to notice a change.
     counts: Counts,
     /// The cards the server shows in their environment's spaces, if it shows any. See `design/github.md`.
@@ -744,6 +746,9 @@ struct ParticipantRecord {
     /// The number that tells them apart from others of the same name, as in `Ada#23`: their token's, kept with it, or,
     /// without one, one no token or other participant has, kept while the server keeps them. See `design/security.md`.
     tag: Option<u32>,
+    /// The colour they chose, as a hue: their token's, kept with it, or, without one, theirs while the server keeps them.
+    /// None while they are in their name's. See `design/people.md`.
+    colour: Option<u16>,
     source: u32,
     connection: Option<ConnectionId>,
     space: Option<String>,
@@ -1213,6 +1218,8 @@ enum Deferred {
     Admit(KnockRecord),
     /// Keep a principal's new name with their token, outside the lock, and then call everyone holding it by it.
     Rename(Rename),
+    /// Keep a token holder's chosen colour with their token, outside the lock.
+    Recolour(Recolour),
     /// Send the image with this SHA-256 to a connection that asked for it, read outside the lock, as it may be read from
     /// the state directory.
     Image(ConnectionId, [u8; 32]),
@@ -1226,6 +1233,20 @@ struct Rename {
     /// The participant who asked, by hub key, and the utterance that said the name, if they spoke it, to answer once it is kept. A name kept on their behalf, as when their token had none, answers nobody.
     asked: Option<(String, Option<String>)>,
 }
+
+/// A token holder's chosen colour, or none for their name's, to keep with their token. See [`Hub::keep_colour`].
+struct Recolour {
+    tokens: Arc<tomori_security::TokenStore>,
+    principal: String,
+    colour: Option<u16>,
+    /// The participant who asked, by hub key, told if it could not be kept.
+    asked: String,
+}
+
+/// At most this many changes of a participant's colour, for one identity, in a minute: enough to step through the hand
+/// menu's swatches and back to their name's, and few enough that a client, or a turn the agent is misled in, cannot keep
+/// writing the token store and redrawing everyone in the space. See `design/people.md`.
+pub const COLOUR_LIMIT: usize = 10;
 
 /// Why a token holder's new name was not kept with their token.
 enum Unkept {
@@ -1975,6 +1996,7 @@ impl HubState {
                 name: record.name.clone(),
                 source: record.source,
                 engagement: record.engagement,
+                colour: record.colour,
             })
             .collect()
     }
@@ -2225,6 +2247,78 @@ impl HubState {
                     finished: true,
                 },
             );
+        }
+    }
+
+    /// Colour everyone `coloured` picks as `colour`, or their name's with none, telling the spaces they take part in.
+    fn recolour(
+        &mut self,
+        coloured: impl Fn(&str, &ParticipantRecord) -> bool,
+        colour: Option<u16>,
+    ) {
+        let mut spaces = Vec::new();
+        for (key, record) in self.participants.iter_mut() {
+            if coloured(key, record) && record.colour != colour {
+                record.colour = colour;
+                spaces.extend(record.space.clone().map(|space| (space, key.clone())));
+            }
+        }
+        // A visitor is drawn in no space, so only the spaces they take part in are told.
+        for (space, key) in spaces {
+            if self
+                .space(&space)
+                .is_some_and(|known| known.model.participants.contains(&key))
+            {
+                self.touch_space(&space);
+            }
+        }
+    }
+
+    /// Colour `participant` as they asked, `colour`, already checked as one a person may be, or their name's with none.
+    /// A token holder's colour is kept with their token, which the server writes outside the lock, and everyone holding
+    /// it is coloured once it is written; anyone else's is kept only while the server keeps them. The colour they have
+    /// already changes nothing; more than [`COLOUR_LIMIT`] changes in a minute are refused. See `design/people.md`.
+    fn recolour_request(
+        &mut self,
+        participant: &str,
+        colour: Option<u16>,
+        tokens: Option<Arc<tomori_security::TokenStore>>,
+        deferred: &mut Vec<Deferred>,
+    ) {
+        // Whoever asked is known, as they act; were they not, there would be nothing to colour.
+        let (principal, unchanged) = self
+            .participants
+            .get(participant)
+            .map(|record| (record.principal.clone(), record.colour == colour))
+            .unwrap_or((None, true));
+        if unchanged {
+            return;
+        }
+        if !self.recolours.admit_up_to(
+            principal.as_deref().unwrap_or(participant),
+            Instant::now(),
+            COLOUR_LIMIT,
+        ) {
+            self.error(
+                participant,
+                format!(
+                    "Colour not changed: you have changed it {COLOUR_LIMIT} times in the last minute, the most Tomori allows. Try again in a minute."
+                ),
+            );
+            return;
+        }
+        match (principal, tokens) {
+            (Some(principal), Some(tokens)) => deferred.push(Deferred::Recolour(Recolour {
+                tokens,
+                principal,
+                colour,
+                asked: participant.to_owned(),
+            })),
+            // A visitor, or anyone on a server that keeps no tokens, as in `--auth open` mode.
+            _ => {
+                self.recolour(|key, _| key == participant, colour);
+                log::info!("A participant without a token chose the colour {colour:?}.");
+            }
         }
     }
 
@@ -2952,6 +3046,7 @@ impl Hub {
                 Deferred::Cancel(id) => self.transcriber.cancel(id),
                 Deferred::Admit(knock) => self.admit(knock),
                 Deferred::Rename(rename) => self.keep_name(rename),
+                Deferred::Recolour(recolour) => self.keep_colour(recolour),
                 Deferred::Keep => {
                     self.keep();
                 }
@@ -3024,6 +3119,52 @@ impl Hub {
             (Err(error), None) => error_message(format!("Name not changed: {error}")),
         };
         state.send(&participant, reply);
+    }
+
+    /// Keep `colour` with the token of `principal` in `tokens`, then colour everyone holding it alike, on every device;
+    /// or say why not. Called outside the lock, since it writes the token store. See `design/people.md`.
+    fn write_colour(
+        &self,
+        tokens: &tomori_security::TokenStore,
+        principal: &str,
+        colour: Option<u16>,
+    ) -> (MutexGuard<'_, HubState>, Result<(), Unkept>) {
+        let id = principal.strip_prefix("token:").unwrap_or_default();
+        let kept = match tokens.recolour(id, colour) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Unkept::Revoked),
+            Err(error) => {
+                log::warn!("Could not keep the colour of token {id}: {error}.");
+                Err(Unkept::Unwritten)
+            }
+        };
+        let mut state = self.lock();
+        if kept.is_ok() {
+            log::info!("Token {id} chose the colour {colour:?}.");
+            state.recolour(
+                |_, record| record.principal.as_deref() == Some(principal),
+                colour,
+            );
+        }
+        (state, kept)
+    }
+
+    /// Keep a token holder's chosen colour with their token, telling whoever asked if it could not be kept.
+    fn keep_colour(&self, recolour: Recolour) {
+        let Recolour {
+            tokens,
+            principal,
+            colour,
+            asked,
+        } = recolour;
+        let (state, kept) = self.write_colour(&tokens, &principal, colour);
+        if let Err(unkept) = kept {
+            let why = match unkept {
+                Unkept::Revoked => "Your token is no longer issued.",
+                Unkept::Unwritten => "Your colour could not be kept. Try again.",
+            };
+            state.error(&asked, format!("Colour not changed: {why}"));
+        }
     }
 
     /// Call each token holder by the name kept with their token, where it changed, such as by `tomori-server auth rename` in another process. `kept` gives a principal's name, or `None` once their token is revoked. A name that is not one the server shows is ignored. See `design/security.md`.
@@ -3551,13 +3692,19 @@ impl Hub {
         }
         let name = kept.unwrap_or(suggested);
         let tokens = self.token_store();
-        // A token holder's tag is their token's; anyone else's is one nobody has, kept while the server keeps them.
-        let token_tag = access
+        // A token holder's tag and colour are their token's; anyone else's tag is one nobody has, and their colour the
+        // one they chose, each kept while the server keeps them.
+        let entry = access
             .principal
             .as_deref()
             .zip(tokens.as_deref())
-            .and_then(|(principal, tokens)| tokens.entry(principal))
-            .and_then(|entry| entry.tag);
+            .and_then(|(principal, tokens)| tokens.entry(principal));
+        let token_tag = entry.as_ref().and_then(|entry| entry.tag);
+        let token_colour = entry.as_ref().map(|entry| {
+            entry
+                .colour
+                .filter(|hue| tomori_protocol::hue::check(*hue).is_ok())
+        });
         let participant = participant_key(access.principal.as_deref(), &participant);
         let tag = token_tag.or_else(|| {
             state
@@ -3577,6 +3724,7 @@ impl Hub {
                     principal: access.principal.clone(),
                     name: String::new(),
                     tag: None,
+                    colour: None,
                     source,
                     connection: None,
                     space: None,
@@ -3595,6 +3743,9 @@ impl Hub {
             .expect("inserted above");
         record.name = limits::presented(name, tag);
         record.tag = tag;
+        if let Some(colour) = token_colour {
+            record.colour = colour;
+        }
         record.departed = None;
         // A new connection may be from a client that reports nothing, which stays at the live edge, and from another device.
         record.engagement = None;
