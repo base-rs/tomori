@@ -60,9 +60,11 @@ fn create(backends: wgpu::Backends) -> Result<Gpu, String> {
         "GPU tests use {} ({:?}, {}).",
         info.name, info.device_type, info.driver
     ));
-    // With the GPU's timestamps where it has them, as lavapipe does, so that the frame profiler is tested timing.
+    // With the GPU's timestamps where it has them, as lavapipe does, so that the frame profiler is tested timing, and
+    // ASTC where it samples it, as the headset does, so that textures are tested loading as there.
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: adapter.features() & crate::profiler::FEATURES,
+        required_features: adapter.features()
+            & (crate::profiler::FEATURES | crate::textures::FEATURES),
         ..Default::default()
     }))
     .expect("the adapter must provide a device");

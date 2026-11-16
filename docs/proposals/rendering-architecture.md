@@ -566,7 +566,7 @@ Stage 1 was worth doing before the render world, since it paid at once and its c
   - stage 3, each piece's own lamps (#475, #476);
   - stage 5, foveation (#405), which took the eyes from 8.32 ms to 6.72 ms.
 - **Under way:** stage 2's render world (#411, #413) and chunks (#481). Sorting, the rest of Tomori's own things and the environment registry remain.
-- **Stage 6 under way:** materials described in the render world, drawn by today's pipelines exactly as before, and the tiers, chosen at startup by the device or a setting and logged, each drawn by today's renderer for now, pixel for pixel as before, both now in `design/rendering.md`; loading textures by digest follows.
+- **Stage 6 under way:** materials described in the render world, drawn by today's pipelines exactly as before; the tiers, chosen at startup by the device or a setting and logged, each drawn by today's renderer for now, pixel for pixel as before; and textures loaded by digest from the content store's cache, ASTC kept compressed where the device samples it and PNG as RGBA, each with the mipmaps it carries, not yet sampled; all now in `design/rendering.md`.
 - **Tried and closed:** stage 4.
   - LOD (#484) returns as a generic part of stage 9.
   - Multiview (#414) gave way to resolution with 2× MSAA (#527).
