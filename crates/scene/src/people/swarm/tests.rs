@@ -310,30 +310,32 @@ fn hands_come_up_as_they_are_tracked_and_fall_back_to_rest_as_they_are_lost() {
     assert!(reached(&body, &holding, 1).distance(hand) > 0.01);
     body.follow(&holding, 0.15, EYES, false);
     assert!(reached(&body, &holding, 1).distance(hand) < 1e-4);
-    // A tracked hand's palm is the hand rather than its controller, or its wrist where its palm is not seen.
+    // A tracked hand's wrist is the hand rather than its controller, where its joints are drawn from, or its palm where
+    // its wrist is not seen.
     let mut joints: Joints = [None; tomori_protocol::JOINT_COUNT];
-    let wrist = eyes + Vec3::new(0.25, -0.35, -0.4);
-    joints[1] = Some(Joint {
-        position: wrist,
-        radius: 0.02,
-    });
-    let mut tracked = holding;
-    tracked.joints[1] = Some(joints);
-    assert_eq!(super::hand(&tracked, 1), Some(wrist));
     let palm = eyes + Vec3::new(0.26, -0.33, -0.45);
     joints[0] = Some(Joint {
         position: palm,
         radius: 0.02,
     });
+    let mut tracked = holding;
     tracked.joints[1] = Some(joints);
     assert_eq!(super::hand(&tracked, 1), Some(palm));
+    let wrist = eyes + Vec3::new(0.25, -0.35, -0.4);
+    joints[1] = Some(Joint {
+        position: wrist,
+        radius: 0.02,
+    });
+    tracked.joints[1] = Some(joints);
+    assert_eq!(super::hand(&tracked, 1), Some(wrist));
     assert_eq!(super::hand(&tracked, 0), None);
-    // The hand's cluster is about where it reaches, paler than the body.
+    // The hand's cluster is about where it reaches, paler than the body, unless a hand or controller drawn there
+    // replaces it (`people::hands`).
     let body = Body::new(&tracked, EYES, 2);
     let cubes = drawn(&tracked, &body, &cues(0.0, 0.0));
     for (index, part) in parts() {
         if part == Part::Hand(1) {
-            assert!(at(&cubes[index]).distance(palm) < 0.06);
+            assert!(at(&cubes[index]).distance(wrist) < 0.06);
             assert!(cubes[index].color[1] > COLOUR[1] && cubes[index].color[2] > COLOUR[2]);
         }
     }

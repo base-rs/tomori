@@ -53,7 +53,11 @@ fn lit(people: &People) -> f32 {
     let cubes = &people.figures()[0].cubes;
     let detail = [swarm::Detail::Full, swarm::Detail::Fewer]
         .into_iter()
-        .find(|detail| swarm::cubes(*detail) == cubes.len())
+        // Less a hand's cluster or two, and with whatever hands and controllers are drawn in their place.
+        .find(|detail| {
+            let swarm = swarm::cubes(*detail);
+            cubes.len() + 26 >= swarm && cubes.len() <= swarm + hands::MOST
+        })
         .expect("drawn at a detail");
     let (at, mote) = swarm::MOTES
         .iter()
