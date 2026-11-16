@@ -592,3 +592,81 @@ fn a_frame_names_the_avatar_it_shows_among_its_elements() {
         format!("{:?}", Some(("figure", SPACE, false)))
     );
 }
+
+/// What `conversation` asked its server for since it last said, the images among them by hash.
+fn fetched(conversation: &mut Conversation) -> Vec<String> {
+    conversation
+        .take_actions()
+        .into_iter()
+        .filter_map(|action| match action {
+            tomori_client::connection::Action::Send(
+                tomori_protocol::ClientMessage::FetchImage { image },
+            ) => Some(image),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_watcher_asks_for_the_images_its_space_s_image_panels_show_a_few_at_a_time_as_a_visitor() {
+    use crate::images::ASKING;
+    const PNG: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    // Three images on a wall, one of them shown by a second panel too.
+    let hashes: Vec<String> = (1..=3).map(|index| format!("{index:064x}")).collect();
+    let shows = [0, 1, 2, 0];
+    let panels = shows
+        .iter()
+        .enumerate()
+        .map(|(slot, image)| {
+            tomori_protocol::Panel::new(
+                format!("panel-{slot}"),
+                "Render",
+                "An image.",
+                tomori_protocol::Place::Wall {
+                    wall: tomori_protocol::TOMORI_WALL.into(),
+                    slot: slot as u32,
+                },
+            )
+            .with_image(tomori_protocol::Image::new(
+                hashes[*image].clone(),
+                64,
+                48,
+                PNG.len() as u32,
+            ))
+        })
+        .collect();
+    let mut conversation = lobby(ConnectionRole::Visitor);
+    show_projection(&mut conversation, Vec::new(), panels);
+    conversation.apply(space(|state| state.projection = true));
+    conversation.take_actions();
+    let mut step = clocked();
+    let mut feedback = felt();
+    let start = Instant::now();
+    let mut watch = |conversation: &mut Conversation, index: u32| {
+        let now = start + std::time::Duration::from_secs_f32(FRAME * index as f32);
+        let held = step
+            .watch(camera(), conversation, &mut feedback, now, FRAME)
+            .images
+            .len();
+        (fetched(conversation), held)
+    };
+    // It asks for the first of them, no more than a few at a time, and not again while they are on their way.
+    let (asked, held) = watch(&mut conversation, 1);
+    assert_eq!((asked.as_slice(), held), (&hashes[..ASKING], 0));
+    assert_eq!(watch(&mut conversation, 2), (Vec::new(), 0));
+    // As each arrives it asks for the next, and draws the panels that show what it holds.
+    conversation.apply(Event::Image {
+        hash: hashes[0].clone(),
+        png: PNG.to_vec().into(),
+    });
+    let (asked, held) = watch(&mut conversation, 3);
+    assert_eq!((asked.as_slice(), held), (&hashes[ASKING..], 2));
+    for hash in &hashes[1..] {
+        conversation.apply(Event::Image {
+            hash: hash.clone(),
+            png: PNG.to_vec().into(),
+        });
+    }
+    // All held, one for each panel that shows its image, and nothing more is asked for.
+    assert_eq!(watch(&mut conversation, 4), (Vec::new(), 4));
+}

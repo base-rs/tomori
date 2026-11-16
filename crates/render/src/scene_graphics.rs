@@ -1004,9 +1004,11 @@ mod tests {
     }
 
     /// Set `TOMORI_IMAGE_PANEL_PREVIEW` to a PNG path to save what this renders: the wall from home before the image
-    /// arrives, and once it has, then the same image floating in front of home, close up.
+    /// arrives, and once it has, then the same image floating in front of home, close up. A watcher's frame draws it as a
+    /// participant's does.
     #[test]
-    fn an_image_panel_draws_its_image_on_a_wall_and_floating_from_one_texture() {
+    fn an_image_panel_draws_its_image_on_a_wall_and_floating_from_one_texture_to_a_participant_and_a_watcher()
+     {
         const WIDTH: u32 = 960;
         const HEIGHT: u32 = 720;
         test_gpu::with(|test_gpu::Gpu { device, queue, .. }| {
@@ -1027,132 +1029,148 @@ mod tests {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
-            renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
-            let mut panels = Panels::new(&device, &renderer);
-            let png = render_png();
-            let hash = "ab".repeat(32);
-            let image = tomori_protocol::Image::new(hash.clone(), 640, 360, png.len() as u32);
-            // To the right of home, facing it, clear of the wall ahead.
-            let floating =
-                tomori_protocol::Pose::upright_facing([1.1, 1.45, -0.9], [0.0, 1.45, 0.0]);
-            let shown = vec![
-                tomori_protocol::Panel::new(
-                    "panel-1",
-                    "Session browser",
-                    "The layout, rendered: folders on the left, sessions on the right.",
-                    tomori_protocol::Place::Wall {
-                        wall: tomori_protocol::TOMORI_WALL.into(),
-                        slot: 2,
-                    },
-                )
-                .with_image(image.clone())
-                .with_age(30),
-                tomori_protocol::Panel::new(
-                    "panel-2",
-                    "Session browser",
-                    "The same render, pulled off the wall.",
-                    tomori_protocol::Place::Free { pose: floating },
-                )
-                .with_image(image),
-            ];
-            let mut conversation = joined();
-            show_projection(&mut conversation, Vec::new(), shown);
-            let head = Mat4::from_translation(arrival::HOME);
-            let senses = Senses {
-                focused: true,
-                head: Some(head),
-                head_pose: Pose::from_transform(head),
-                viewer: Some(arrival::HOME),
-                space_head: head,
-                trigger: Some(0.0),
-                beam: true,
-                ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
-                ..Default::default()
-            };
-            let mut step = Step::default();
-            let now = Instant::now();
-            let lens = glam::camera::rh::proj::directx::perspective(
-                1.1,
-                WIDTH as f32 / HEIGHT as f32,
-                0.05,
-                50.0,
-            );
-            let at_wall = lens
-                * glam::camera::rh::view::look_at_mat4(
-                    arrival::HOME,
-                    Vec3::new(0.0, 0.7, -2.3),
-                    Vec3::Y,
+            let mut counted = Vec::new();
+            for watching in [false, true] {
+                let mut renderer = Renderer::new(&device, &queue, format, WIDTH, HEIGHT);
+                renderer.set_environment(tomori_scene::environment::Environment::MINIMAL);
+                let mut panels = Panels::new(&device, &renderer);
+                let png = render_png();
+                let hash = "ab".repeat(32);
+                let image = tomori_protocol::Image::new(hash.clone(), 640, 360, png.len() as u32);
+                // To the right of home, facing it, clear of the wall ahead.
+                let floating =
+                    tomori_protocol::Pose::upright_facing([1.1, 1.45, -0.9], [0.0, 1.45, 0.0]);
+                let shown = vec![
+                    tomori_protocol::Panel::new(
+                        "panel-1",
+                        "Session browser",
+                        "The layout, rendered: folders on the left, sessions on the right.",
+                        tomori_protocol::Place::Wall {
+                            wall: tomori_protocol::TOMORI_WALL.into(),
+                            slot: 2,
+                        },
+                    )
+                    .with_image(image.clone())
+                    .with_age(30),
+                    tomori_protocol::Panel::new(
+                        "panel-2",
+                        "Session browser",
+                        "The same render, pulled off the wall.",
+                        tomori_protocol::Place::Free { pose: floating },
+                    )
+                    .with_image(image),
+                ];
+                let mut conversation = joined();
+                show_projection(&mut conversation, Vec::new(), shown);
+                let head = Mat4::from_translation(arrival::HOME);
+                let senses = Senses {
+                    focused: true,
+                    head: Some(head),
+                    head_pose: Pose::from_transform(head),
+                    viewer: Some(arrival::HOME),
+                    space_head: head,
+                    trigger: Some(0.0),
+                    beam: true,
+                    ray: tomori_scene::pointing::Ray::new(arrival::HOME, -Vec3::Y),
+                    ..Default::default()
+                };
+                let mut step = Step::default();
+                let now = Instant::now();
+                let lens = glam::camera::rh::proj::directx::perspective(
+                    1.1,
+                    WIDTH as f32 / HEIGHT as f32,
+                    0.05,
+                    50.0,
                 );
-            // From 0.7 m in front of the floating panel, square on.
-            let floating_at = Vec3::from_array(floating.position);
-            let facing = glam::Quat::from_array(floating.orientation) * Vec3::Z;
-            let at_floating = lens
-                * glam::camera::rh::view::look_at_mat4(
-                    floating_at + facing * 0.7,
-                    floating_at,
-                    Vec3::Y,
-                );
-            let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
-                renderer.render(
-                    &device,
-                    &queue,
-                    std::slice::from_ref(&view),
-                    &[matrix],
-                    Mat4::IDENTITY,
-                    &panels.list(Mat4::IDENTITY),
-                );
-                read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
-            };
-            let orange = |image: &image::RgbaImage| {
-                image
-                    .pixels()
-                    .filter(|pixel| {
-                        let [r, g, b, _] = pixel.0.map(i32::from);
-                        r > 200 && (100..200).contains(&g) && b < 90
-                    })
-                    .count()
-            };
-            // Before its image arrives, each panel shows where it will be, and nothing is decoded.
-            let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
-            assert!(frame.images.is_empty());
-            draw(&mut renderer, &device, &queue, &mut panels, &frame);
-            let waiting = capture(&mut renderer, &panels, at_wall);
-            assert_eq!(orange(&waiting), 0);
-            // Once it arrives, both panels draw it, from one texture with every mipmap level.
-            conversation.apply(tomori_client::Event::Image {
-                hash: hash.clone(),
-                png: png.into(),
-            });
-            let deadline = Instant::now() + std::time::Duration::from_secs(20);
-            while renderer.images().binding(&hash).is_none() {
-                assert!(Instant::now() < deadline, "the image was never uploaded");
-                let frame = step.update(&senses, &mut conversation, &mut felt(), now, 0.01);
-                assert_eq!(frame.images.len(), 2, "one for each panel that shows it");
+                let at_wall = lens
+                    * glam::camera::rh::view::look_at_mat4(
+                        arrival::HOME,
+                        Vec3::new(0.0, 0.7, -2.3),
+                        Vec3::Y,
+                    );
+                // From 0.7 m in front of the floating panel, square on.
+                let floating_at = Vec3::from_array(floating.position);
+                let facing = glam::Quat::from_array(floating.orientation) * Vec3::Z;
+                let at_floating = lens
+                    * glam::camera::rh::view::look_at_mat4(
+                        floating_at + facing * 0.7,
+                        floating_at,
+                        Vec3::Y,
+                    );
+                let capture = |renderer: &mut Renderer, panels: &Panels, matrix: Mat4| {
+                    renderer.render(
+                        &device,
+                        &queue,
+                        std::slice::from_ref(&view),
+                        &[matrix],
+                        Mat4::IDENTITY,
+                        &panels.list(Mat4::IDENTITY),
+                    );
+                    read_back(&device, &queue, &texture, (WIDTH, HEIGHT))
+                };
+                let orange = |image: &image::RgbaImage| {
+                    image
+                        .pixels()
+                        .filter(|pixel| {
+                            let [r, g, b, _] = pixel.0.map(i32::from);
+                            r > 200 && (100..200).contains(&g) && b < 90
+                        })
+                        .count()
+                };
+                // Before its image arrives, each panel shows where it will be, and nothing is decoded.
+                let frame = if watching {
+                    step.watch(head, &mut conversation, &mut felt(), now, 0.01)
+                } else {
+                    step.update(&senses, &mut conversation, &mut felt(), now, 0.01)
+                };
+                assert!(frame.images.is_empty());
                 draw(&mut renderer, &device, &queue, &mut panels, &frame);
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                let waiting = capture(&mut renderer, &panels, at_wall);
+                assert_eq!(orange(&waiting), 0);
+                // Once it arrives, both panels draw it, from one texture with every mipmap level.
+                conversation.apply(tomori_client::Event::Image {
+                    hash: hash.clone(),
+                    png: png.into(),
+                });
+                let deadline = Instant::now() + std::time::Duration::from_secs(20);
+                while renderer.images().binding(&hash).is_none() {
+                    assert!(Instant::now() < deadline, "the image was never uploaded");
+                    let frame = if watching {
+                        step.watch(head, &mut conversation, &mut felt(), now, 0.01)
+                    } else {
+                        step.update(&senses, &mut conversation, &mut felt(), now, 0.01)
+                    };
+                    assert_eq!(frame.images.len(), 2, "one for each panel that shows it");
+                    draw(&mut renderer, &device, &queue, &mut panels, &frame);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                assert_eq!(renderer.images().levels(&hash), Some((0, 10)));
+                let one: usize = crate::panel_images::mipmaps(crate::panel_images::Level {
+                    width: 640,
+                    height: 360,
+                    pixels: vec![0; 640 * 360 * 4],
+                })
+                .iter()
+                .map(|level| level.pixels.len())
+                .sum();
+                assert_eq!(renderer.images().used(), one);
+                let on_wall = capture(&mut renderer, &panels, at_wall);
+                let close = capture(&mut renderer, &panels, at_floating);
+                // The disc is drawn in the wall's slot, and large floating close up.
+                let (small, large) = (orange(&on_wall), orange(&close));
+                assert!(small > 100, "{small}");
+                assert!(large > 20 * small.min(500), "{large}");
+                let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
+                image::imageops::replace(&mut sheet, &waiting, 0, 0);
+                image::imageops::replace(&mut sheet, &on_wall, 0, HEIGHT.into());
+                image::imageops::replace(&mut sheet, &close, 0, (2 * HEIGHT).into());
+                if !watching {
+                    crate::test_support::preview("TOMORI_IMAGE_PANEL_PREVIEW", &sheet);
+                }
+                counted.push((small, large));
             }
-            assert_eq!(renderer.images().levels(&hash), Some((0, 10)));
-            let one: usize = crate::panel_images::mipmaps(crate::panel_images::Level {
-                width: 640,
-                height: 360,
-                pixels: vec![0; 640 * 360 * 4],
-            })
-            .iter()
-            .map(|level| level.pixels.len())
-            .sum();
-            assert_eq!(renderer.images().used(), one);
-            let on_wall = capture(&mut renderer, &panels, at_wall);
-            let close = capture(&mut renderer, &panels, at_floating);
-            // The disc is drawn in the wall's slot, and large floating close up.
-            let (small, large) = (orange(&on_wall), orange(&close));
-            assert!(small > 100, "{small}");
-            assert!(large > 20 * small.min(500), "{large}");
-            let mut sheet = image::RgbaImage::new(WIDTH, HEIGHT * 3);
-            image::imageops::replace(&mut sheet, &waiting, 0, 0);
-            image::imageops::replace(&mut sheet, &on_wall, 0, HEIGHT.into());
-            image::imageops::replace(&mut sheet, &close, 0, (2 * HEIGHT).into());
-            crate::test_support::preview("TOMORI_IMAGE_PANEL_PREVIEW", &sheet);
+            // A watcher draws the images of the panels, on the wall and floating, as a participant does.
+            assert_eq!(counted[0], counted[1]);
             assert!(pollster::block_on(scope.pop()).is_none());
         });
     }

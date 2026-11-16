@@ -89,14 +89,26 @@ pub struct Server {
 
 impl Server {
     pub fn start() -> Self {
+        Self::serving(false)
+    }
+
+    /// As [`Server::start`], also serving Tomori's tools, so that the agent of a space it creates may show images, as [`tomori_server::test_support::TestServer::show_image`] does.
+    pub fn start_with_tools() -> Self {
+        Self::serving(true)
+    }
+
+    fn serving(tools: bool) -> Self {
         let certificate = tomori_security::ServerCertificate::generate();
         let pin = certificate.fingerprint();
         let config = certificate
             .server_config()
             .expect("the certificate is usable");
-        let server = tomori_server::test_support::TestServer::with_tokens(true, move |server| {
-            server.with_tls(config)
-        });
+        let configure = move |server: tomori_server::Server| server.with_tls(config);
+        let server = if tools {
+            tomori_server::test_support::TestServer::with_tokens_and_tools(true, configure)
+        } else {
+            tomori_server::test_support::TestServer::with_tokens(true, configure)
+        };
         Self { server, pin }
     }
 

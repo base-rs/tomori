@@ -281,6 +281,24 @@ impl TestServer {
         })
     }
 
+    /// Show the image file `path` of `directory`, as the agent of the space its first session is bound to does with `show_image`: prepared, kept, and projected as a panel titled `title`, captioned `caption`, which the server then keeps for everyone in the space to fetch. See `design/projection.md`.
+    pub fn show_image(
+        &self,
+        directory: &std::path::Path,
+        path: &str,
+        title: &str,
+        caption: &str,
+    ) -> tomori_protocol::Image {
+        let started = self.backend.started();
+        let session = tomori_backend::Session::id(&started[0]);
+        let prepared = crate::images::prepare(directory, path).expect("the image is prepared");
+        self.hub.images.put(&prepared).expect("the image is kept");
+        self.hub
+            .agent_show_image(&session, title, caption, None, prepared.image.clone())
+            .expect("the image is shown");
+        prepared.image
+    }
+
     fn launch(
         backend: FakeBackend,
         build: impl FnOnce(Backends) -> Server + Send + 'static,
