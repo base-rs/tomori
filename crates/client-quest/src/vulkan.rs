@@ -119,11 +119,13 @@ impl Gpu {
         let adapter = hal_instance
             .expose_adapter(physical)
             .context("exposing XR Vulkan adapter")?;
-        // The GPU's timestamps, where it has them, for the frame log; see `design/rendering.md`.
+        // The GPU's timestamps, where it has them, for the frame log, and ASTC textures; see `design/rendering.md`.
         let wanted = if adapter_samples {
-            tomori_render::profiler::FEATURES | tomori_render::graphics::ADAPTER_SAMPLES
-        } else {
             tomori_render::profiler::FEATURES
+                | tomori_render::textures::FEATURES
+                | tomori_render::graphics::ADAPTER_SAMPLES
+        } else {
+            tomori_render::profiler::FEATURES | tomori_render::textures::FEATURES
         };
         let features = adapter.features & wanted;
         let limits = wgpu::Limits::default();
