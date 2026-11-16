@@ -44,10 +44,20 @@ const LABEL_COLUMNS: usize = 20;
 /// The nearest a label brought in front of its volume comes to the viewer, in metres, unless it stood nearer.
 const NEAREST: f32 = 0.4;
 
-/// How far away a volume floating and one in a wall's slot are read from, in metres, from which its front is seen
-/// within its plate.
+/// The deepest a volume is drawn, as a share of its width or height, whichever is larger: a layout deeper than that,
+/// as a layered one's folded ranks or a force layout's, is drawn shallower, its nodes nearer one another front to
+/// back, so that its depth neither shrinks it seen from in front nor stands it far before its plate.
+const DEPTH_SHARE: f32 = 0.3;
+/// How far away a volume floating and one in a wall's slot are read from, in metres, from which its front, nearer the
+/// eyes than its plate, is seen within the plate: no deeper than [`DEPTH_SHARE`], it is seen at most a few tenths
+/// larger.
 const FLOATING_READ: f32 = 1.3;
 const SLOT_READ: f32 = 2.0;
+/// How far apart front to back the nodes at the two nearest depths are kept, at least, beyond the widest node, as a
+/// layout is drawn shallower, in millimetres.
+const RANK_GAP_MM: f32 = 30.0;
+/// How much of its plate's area a volume leaves clear at each side, as a share of the area's width and height.
+const FIT_MARGIN: f32 = 0.03;
 /// How far a volume's back stands in front of its face, in metres, so that its plate is behind everything it draws.
 const STAND_OFF: f32 = 0.01;
 
@@ -194,6 +204,9 @@ pub struct Mesh {
     cards: Vec<Option<Arc<Canvas>>>,
     /// Its legend, of its groups and kinds, kept with it.
     legend: Vec<Entry>,
+    /// What it draws, as its plate fits it: kept from the mesh it was posed from while its nodes are pulled about, so
+    /// that pulling never makes it larger or smaller.
+    fitting: Arc<Fitting>,
     /// Its world edges to things here, drawn in the space.
     leaders: Vec<leaders::Leader>,
     /// The nodes and edges lit, the rest dimmed, while no node is focused on, as a path between two held.
@@ -370,7 +383,7 @@ fn along(direction: Vec3) -> Mat3 {
 impl Mesh {
     /// What `diagram` draws, as [`Diagram::bounded`] holds it, whatever a server sent.
     pub fn new(source: &Diagram) -> Self {
-        Self::built(source, source.bounded(), None)
+        Self::built(source, shallower(source.bounded()), None)
     }
 
     /// It as drawn while a participant pulls its nodes about, its nodes where the server laid them out, its edges
@@ -615,6 +628,10 @@ impl Mesh {
                 .collect(),
         };
         Self {
+            fitting: kept.map_or_else(
+                || Arc::new(Fitting::of(&parts, &labels)),
+                |mesh| mesh.fitting.clone(),
+            ),
             cards,
             legend: legend(&diagram),
             highlight: None,
@@ -1080,6 +1097,200 @@ fn edge_parts(
     points
 }
 
+/// How much nearer one another front to back `diagram`'s nodes are drawn, as a share: no deeper than [`DEPTH_SHARE`]
+/// of its width or height, whichever is larger, but no nearer than keeps the nodes at the two nearest depths, as a
+/// layered layout's folded ranks, apart by the widest node and [`RANK_GAP_MM`].
+fn depth_share(diagram: &Diagram) -> f32 {
+    let [width, height, depth] = diagram.extent.map(|side| f32::from(side.max(1)));
+    let mut depths: Vec<f32> = diagram
+        .nodes
+        .iter()
+        .map(|node| f32::from(node.at[2]))
+        .collect();
+    depths.sort_by(f32::total_cmp);
+    let nearest = depths
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|apart| *apart > 1.0)
+        .fold(f32::INFINITY, f32::min);
+    let widest = diagram
+        .nodes
+        .iter()
+        .map(|node| node.width())
+        .fold(0.0, f32::max);
+    (DEPTH_SHARE * width.max(height) / depth)
+        .max((widest + RANK_GAP_MM) / nearest)
+        .min(1.0)
+}
+
+/// `diagram` drawn as shallow as [`depth_share`] says: its nodes, waypoints and groups brought nearer its middle front
+/// to back, and its extent with them.
+fn shallower(mut diagram: Diagram) -> Diagram {
+    let share = depth_share(&diagram);
+    if share >= 1.0 {
+        return diagram;
+    }
+    let squeeze = |at: &mut [i16; 3]| at[2] = (f32::from(at[2]) * share).round() as i16;
+    for node in &mut diagram.nodes {
+        squeeze(&mut node.at);
+    }
+    for at in diagram
+        .edges
+        .iter_mut()
+        .flat_map(|edge| edge.via.iter_mut())
+    {
+        squeeze(at);
+    }
+    for group in &mut diagram.groups {
+        squeeze(&mut group.low);
+        squeeze(&mut group.high);
+    }
+    diagram.extent[2] = (f32::from(diagram.extent[2]) * share).round() as u16;
+    diagram
+}
+
+/// Where a volume stands on its face, as its plate fits it: its scale, from its own millimetres into the face's metres,
+/// and the translation, from the middle of the face's area, of its own middle.
+type Placement = (f32, Vec3);
+
+/// What a volume draws, as its plate fits it, in its own millimetres: every corner of its solids, its nodes', its
+/// groups' bars, its edges' tubes and arrowheads, which grow with it; and its labels, each where it stands, its rows
+/// above its first, and its canvas's half size, which grow with it only as [`label_scale`] says; and where it stood
+/// for each area it was fitted to, kept, since fitting looks at every corner.
+#[derive(Debug, Default)]
+pub struct Fitting {
+    corners: Vec<Vec3>,
+    labels: Vec<(Vec3, f32, glam::Vec2)>,
+    fitted: std::sync::Mutex<Vec<([u32; 3], Placement)>>,
+}
+
+impl Fitting {
+    fn of(parts: &[Part], labels: &[Label]) -> Self {
+        let corners = parts
+            .iter()
+            .flat_map(|part| {
+                (0..8).map(move |corner| {
+                    let sign = Vec3::new(
+                        if corner & 1 == 0 { -0.5 } else { 0.5 },
+                        if corner & 2 == 0 { -0.5 } else { 0.5 },
+                        if corner & 4 == 0 { -0.5 } else { 0.5 },
+                    );
+                    part.position + part.basis * (part.scale * sign)
+                })
+            })
+            .collect();
+        let labels = labels
+            .iter()
+            .map(|label| {
+                let (width, height) = label.canvas.size();
+                let rows = label.canvas.rows.len().saturating_sub(1);
+                (
+                    label.at,
+                    (rows * CELL_HEIGHT) as f32 * PIXEL / 2.0,
+                    glam::Vec2::new(width, height) / 2.0,
+                )
+            })
+            .collect();
+        Self {
+            corners,
+            labels,
+            fitted: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Every point that bounds what it draws at `scale`, in the face's metres about the middle of the box about its
+    /// solids, its back `STAND_OFF` before the face: each corner of its solids, and, where `labelled_too`, of its labels
+    /// as large as they are then drawn.
+    fn points(&self, scale: f32, labelled_too: bool) -> impl Iterator<Item = Vec3> + '_ {
+        let (low, high) = self.corners.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(low, high), at| (low.min(*at), high.max(*at)),
+        );
+        let middle = Vec3::new((low.x + high.x) / 2.0, (low.y + high.y) / 2.0, low.z);
+        let offset = Vec3::Z * STAND_OFF - middle * scale;
+        let labelled = label_scale(Mat4::from_scale(Vec3::splat(scale)));
+        let solids = self.corners.iter().map(move |at| *at * scale + offset);
+        let labels =
+            self.labels
+                .iter()
+                .filter(move |_| labelled_too)
+                .flat_map(move |(at, lift, half)| {
+                    let centre = *at * scale + offset + Vec3::Y * lift * labelled;
+                    let half = *half * labelled;
+                    [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
+                        .map(|(x, y)| centre + Vec3::new(half.x * x, half.y * y, 0.0))
+                });
+        solids.chain(labels)
+    }
+
+    /// The box, in the face's metres about the middle of the box about its solids, about everything it draws at
+    /// `scale`, as seen on the face from `read` metres straight before that middle: each point nearer the eyes seen as
+    /// much further from the middle.
+    fn projected(&self, scale: f32, read: f32, labelled_too: bool) -> (glam::Vec2, glam::Vec2) {
+        let mut low = glam::Vec2::splat(f32::INFINITY);
+        let mut high = glam::Vec2::splat(f32::NEG_INFINITY);
+        for at in self.points(scale, labelled_too) {
+            let seen = at.truncate() * read / (read - at.z).max(read / 4.0);
+            low = low.min(seen);
+            high = high.max(seen);
+        }
+        if low.x > high.x {
+            return (glam::Vec2::ZERO, glam::Vec2::ZERO);
+        }
+        (low, high)
+    }
+
+    /// Where it stands to fit `area`, a width and height in metres, seen from `read` metres before it: as large as
+    /// everything it draws, as seen, fits it, and as seen in its middle; or, where a label is wider than the area at
+    /// any scale, half as large as its solids alone fit. Kept for each area.
+    fn placement(&self, area: glam::Vec2, read: f32) -> Placement {
+        let key = [area.x.to_bits(), area.y.to_bits(), read.to_bits()];
+        let mut fitted = self
+            .fitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, placement)) = fitted.iter().find(|(known, _)| *known == key) {
+            return *placement;
+        }
+        let largest = |labelled_too: bool| {
+            let fits = |scale: f32| {
+                let (low, high) = self.projected(scale, read, labelled_too);
+                high.x - low.x <= area.x && high.y - low.y <= area.y
+            };
+            // A millimetre to a metre, larger than any plate holds, bounds it above.
+            let (mut small, mut large) = (0.0_f32, 1.0_f32);
+            for _ in 0..24 {
+                let middle = (small + large) / 2.0;
+                if fits(middle) {
+                    small = middle;
+                } else {
+                    large = middle;
+                }
+            }
+            small
+        };
+        let scale = largest(true).max(largest(false) / 2.0).max(1e-6);
+        let (low, high) = self.projected(scale, read, true);
+        let (corner_low, corner_high) = self.corners.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(low, high), at| (low.min(*at), high.max(*at)),
+        );
+        let middle = Vec3::new(
+            (corner_low.x + corner_high.x) / 2.0,
+            (corner_low.y + corner_high.y) / 2.0,
+            corner_low.z,
+        );
+        let centred = -((low + high) / 2.0).extend(0.0);
+        let placement = (scale, centred + Vec3::Z * STAND_OFF - middle * scale);
+        // A plate is fitted at a handful of sizes; a volume stretched by hand at many.
+        if fitted.len() >= 8 {
+            fitted.remove(0);
+        }
+        fitted.push((key, placement));
+        placement
+    }
+}
+
 /// The arrowheads of an edge along `path`, from where it points from to where it points, in a light tone of `colour`:
 /// one with its point at the path's end, against the target's surface, and one a little past its middle, clear of the
 /// labels above its ends, each as long as [`ARROW_MM`] says or a fifth of the edge, whichever is shorter.
@@ -1249,9 +1460,6 @@ fn passing(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3) -> (f32, f32) {
 /// legend takes at most a quarter of its face's body, fewer rows on a small slot, counting the rest.
 pub const LEGEND_ROWS: usize = 4;
 const LEGEND_GAP: usize = 2;
-/// How many rows below its heading a face keeps clear of its diagram, so that the labels above its highest nodes stand
-/// clear of its title.
-const LABEL_ROOM: usize = 2;
 /// A legend's entries' colour of text, and of the solids showing its kinds.
 const LEGEND_TEXT: [f32; 4] = [0.72, 0.76, 0.82, 1.0];
 const LEGEND_SOLID: [f32; 3] = [0.62, 0.66, 0.72];
@@ -1386,7 +1594,7 @@ fn shape(panel: &Panel, diagram: &Diagram, fit: Fit) -> (usize, usize, usize) {
             let columns = ((width / (CELL_WIDTH as f32 * PIXEL)).ceil() as usize)
                 .max(super::heading_width(panel))
                 .clamp(super::FIT_COLUMNS.0, TABLE_COLUMNS);
-            let rows = diagram_rows(diagram) + LABEL_ROOM;
+            let rows = diagram_rows(diagram);
             (
                 columns,
                 (rows / 3).saturating_sub(LEGEND_GAP).min(LEGEND_ROWS),
@@ -1493,18 +1701,64 @@ pub(super) fn fit(panel: &Panel, diagram: &Diagram, fit: Fit) -> (usize, usize) 
     }
 }
 
-/// How wide and tall a volume of `diagram` floats, in metres, at its own scale: its longest side within [`FLOATING`].
-/// Its plate grows by as much as its front, nearer the eyes, is seen larger from [`FLOATING_READ`] away, so that the
-/// diagram drawn within it is as large.
+/// How wide and tall a volume of `diagram` floats, in metres, at its own scale: its longer side seen from in front
+/// within [`FLOATING`], however deep it is, and no taller than [`FIT_ROWS`] allow; as wide and tall as its nodes, drawn
+/// as shallow as [`depth_share`] says, are seen from [`FLOATING_READ`] before it, as its fit sees them, so that its
+/// diagram fills its plate; with room for the widest of its labels to stand half beyond its nodes at either side and a
+/// row of them above.
 fn floating_size(diagram: &Diagram) -> (f32, f32) {
-    let extent = diagram.extent.map(|side| f32::from(side.max(1)) / 1000.0);
-    let longest = extent.iter().copied().fold(0.0, f32::max);
-    let scale = longest.clamp(FLOATING.0, FLOATING.1) / longest;
-    let nearer = FLOATING_READ / (FLOATING_READ - (extent[2] * scale).min(FLOATING_READ / 3.0));
-    // No more than its rows may grow, so that it does not grow only wider.
+    let [width, height, _] = diagram.extent.map(|side| f32::from(side.max(1)) / 1000.0);
+    let longest = width.max(height);
+    let scale = longest.clamp(FLOATING.0, FLOATING.1) / longest / 1000.0;
+    let share = depth_share(diagram);
+    let back = diagram
+        .nodes
+        .iter()
+        .map(|node| f32::from(node.at[2]) * share - node.width() / 2.0)
+        .fold(f32::INFINITY, f32::min);
+    let mut low = glam::Vec2::splat(f32::INFINITY);
+    let mut high = glam::Vec2::splat(f32::NEG_INFINITY);
+    for node in &diagram.nodes {
+        let half = node.width() / 2.0;
+        let front = (f32::from(node.at[2]) * share + half - back) * scale + STAND_OFF;
+        let seen = FLOATING_READ / (FLOATING_READ - front).max(FLOATING_READ / 4.0);
+        let at = glam::Vec2::new(f32::from(node.at[0]), f32::from(node.at[1])) * scale;
+        low = low.min((at - glam::Vec2::splat(half * scale)) * seen);
+        high = high.max((at + glam::Vec2::splat(half * scale)) * seen);
+    }
+    // Never smaller than its extent, which holds its waypoints and groups too.
+    let extent = glam::Vec2::new(width, height) * scale * 1000.0;
+    let seen = if low.x > high.x {
+        extent
+    } else {
+        (high - low).max(extent)
+    };
+    let widest = diagram
+        .nodes
+        .iter()
+        .map(|node| {
+            let text = node
+                .label
+                .lines()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0);
+            let detail = if node.shape == Shape::Card && !node.detail.is_empty() {
+                28
+            } else {
+                0
+            };
+            text.min(LABEL_COLUMNS).max(detail)
+        })
+        .max()
+        .unwrap_or(0);
+    let label = |cells: usize, size: usize| (cells * size + 6) as f32 * LABEL_PIXEL;
+    // With its margins, and no taller than its most rows, and as much narrower, so that it keeps its diagram's shape.
+    let size = (seen + glam::Vec2::new(label(widest, CELL_WIDTH), label(1, CELL_HEIGHT)))
+        / (1.0 - 2.0 * FIT_MARGIN);
     let tallest = (FIT_ROWS.1 * CELL_HEIGHT) as f32 * PIXEL;
-    let nearer = nearer.min((tallest / (extent[1] * scale)).max(1.0));
-    (extent[0] * scale * nearer, extent[1] * scale * nearer)
+    let size = size * (tallest / size.y).min(1.0);
+    (size.x, size.y)
 }
 
 /// A volume's face, sized as `fit` says, framed by `border`: its title, bold, its metadata and age, a rule, the plate its
@@ -1533,39 +1787,41 @@ pub(super) fn face(panel: &Panel, diagram: &Diagram, fit: Fit, border: Option<[f
     canvas
 }
 
-/// Where a volume of `diagram` stands on its face, sized as `fit` says: from its own millimetres into the face's own
-/// metres, its middle in the middle of the plate between the room below its heading kept for its labels and its
-/// legend, as large as fits there, no deeper than half its height in a slot, and its back just in front of the face.
-pub fn placed(panel: &Panel, diagram: &Diagram, fit: Fit) -> Mat4 {
+/// The area of a volume's face its diagram is drawn within, sized as `fit` says, in the face's metres about its middle:
+/// between its heading and its legend, less [`FIT_MARGIN`] at each side.
+pub fn area(panel: &Panel, diagram: &Diagram, fit: Fit) -> (glam::Vec2, glam::Vec2) {
     let (columns, body) = self::fit(panel, diagram, fit);
     let (_, most, _) = shape(panel, diagram, fit);
     let (width, height) = super::sized(columns, body);
     let legend = legend_height(&legend_widths(diagram), columns, most);
-    let room = LABEL_ROOM.min(body.saturating_sub(legend + 1));
-    let body = body.saturating_sub(legend + room).max(1);
-    let area = (
-        (columns * CELL_WIDTH) as f32 * PIXEL,
-        (body * CELL_HEIGHT) as f32 * PIXEL,
-    );
-    let top = height / 2.0 - (PADDING.1 + (3 + room) * CELL_HEIGHT) as f32 * PIXEL;
+    let rows = body.saturating_sub(legend).max(1);
+    let top = height / 2.0 - (PADDING.1 + 3 * CELL_HEIGHT) as f32 * PIXEL;
     let left = -width / 2.0 + PADDING.0 as f32 * PIXEL;
-    let middle = Vec3::new(left + area.0 / 2.0, top - area.1 / 2.0, 0.0);
-    let extent = diagram.extent.map(|side| f32::from(side.max(1)));
-    // As large as fits, its front, nearer the eyes than the face, seen within the area from as far as it is read,
-    // straight on, so that nothing of it is seen over its title or its legend: where its front, `depth` before the
-    // face, seen from `read` away, grows by `read / (read - depth)`.
-    let read = match fit {
+    let size = glam::Vec2::new((columns * CELL_WIDTH) as f32, (rows * CELL_HEIGHT) as f32) * PIXEL;
+    let margin = size * FIT_MARGIN;
+    (
+        glam::Vec2::new(left, top - size.y) + margin,
+        glam::Vec2::new(left + size.x, top) - margin,
+    )
+}
+
+/// Where the volume `mesh` draws stands on the face of `panel`, sized as `fit` says: from its own millimetres into the
+/// face's own metres, as large as everything it draws fits the face's [`area`], its solids, edges and labels as large
+/// as they are drawn then, the box about them in the middle of that area, and its back just in front of the face. It
+/// is fitted as the server laid it out, so that pulling its nodes about never makes it larger or smaller.
+pub fn placed(panel: &Panel, mesh: &Mesh, fit: Fit) -> Mat4 {
+    let (low, high) = area(panel, mesh.source(), fit);
+    let (scale, offset) = mesh.fitting.placement(high - low, read(fit));
+    Mat4::from_translation(((low + high) / 2.0).extend(0.0) + offset)
+        * Mat4::from_scale(Vec3::splat(scale))
+}
+
+/// How far from its face a volume sized as `fit` says is read, in metres.
+fn read(fit: Fit) -> f32 {
+    match fit {
         Fit::Slot(_) => SLOT_READ,
         Fit::Text => FLOATING_READ,
-    };
-    let fits = |area: f32, side: f32| area * read / (side * read + area * extent[2]);
-    let mut scale = fits(area.0, extent[0]).min(fits(area.1, extent[1]));
-    if matches!(fit, Fit::Slot(_)) {
-        scale = scale.min(area.1 / 2.0 / extent[2]);
     }
-    let depth = extent[2] * scale;
-    Mat4::from_translation(middle + Vec3::Z * (depth / 2.0 + STAND_OFF))
-        * Mat4::from_scale(Vec3::splat(scale))
 }
 
 /// A volume as a frame draws it: what it draws, kept across frames, from its own millimetres into the scene, the node
