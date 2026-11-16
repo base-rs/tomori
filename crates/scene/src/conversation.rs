@@ -3074,17 +3074,23 @@ impl Conversation {
             self.cancelling = None;
             self.cancel_now(entry);
         }
-        // The images of the panels shown that are not held yet, a few at a time. See `design/projection.md`.
-        let shown = self.shown_images();
-        for hash in self.images.wanted(&shown.iter().collect::<Vec<_>>(), now) {
-            self.actions
-                .push(Action::Send(ClientMessage::FetchImage { image: hash }));
-        }
+        self.fetch_images(now);
         // A selected entry that has been sent or cancelled is no longer selected.
         if let Some(selected) = &self.queue_selected
             && !self.waiting().iter().any(|entry| &entry.id == selected)
         {
             self.queue_selected = None;
+        }
+    }
+
+    /// Ask for the images of the panels shown in the joined space that are not held yet, a few at a time, at `now`: each
+    /// frame of a participant's step, by [`Self::tick_space`], and of a watcher's, who sees them as a participant does,
+    /// whatever its role. See `design/projection.md`.
+    pub fn fetch_images(&mut self, now: Instant) {
+        let shown = self.shown_images();
+        for hash in self.images.wanted(&shown.iter().collect::<Vec<_>>(), now) {
+            self.actions
+                .push(Action::Send(ClientMessage::FetchImage { image: hash }));
         }
     }
 

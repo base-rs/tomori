@@ -4144,6 +4144,7 @@ dependencies = [
  "anyhow",
  "env_logger",
  "glam 0.33.12",
+ "image",
  "libc",
  "log",
  "pollster",

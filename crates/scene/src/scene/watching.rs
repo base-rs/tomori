@@ -214,8 +214,9 @@ impl Step {
     /// watcher, it also holds no rights over walls, whatever its role, so that it draws no handles or padlocks; its
     /// environment's client side is told no participant, what that asks its server side is dropped and its passes are
     /// not felt; its sounds and the environment's ambience are handed to `feedback`, as a participant's are, which plays
-    /// them only if it hears the ambience, as the spectator's does with its ambience on. A step that has watched stays
-    /// a watcher. See `design/spectator.md`.
+    /// them only if it hears the ambience, as the spectator's does with its ambience on. As a participant's step does,
+    /// it asks for the images its space's image panels show, as a visitor may. A step that has watched stays a watcher.
+    /// See `design/spectator.md`.
     pub fn watch(
         &mut self,
         camera: Mat4,
@@ -225,6 +226,8 @@ impl Step {
         dt: f32,
     ) -> Frame<'_> {
         self.watching = true;
+        // A participant's buttons ask for the images their space's panels show, and a watcher has none.
+        conversation.fetch_images(now);
         let mut frame = self.update(&senses(camera), conversation, feedback, now, dt);
         for element in PERSONAL {
             frame.withhold(element);

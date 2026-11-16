@@ -619,6 +619,57 @@ mod tests {
         });
     }
 
+    /// What the spectator's view of `feed` draws in an offscreen target of `width` by `height`, which a row of takes a
+    /// multiple of 256 bytes of, after `frames` frames, with the renderer that drew it.
+    fn draw_view(
+        gpu: &tomori_render::test_gpu::Gpu,
+        feed: Feed,
+        (width, height): (u32, u32),
+        frames: usize,
+        mut ready: impl FnMut(&mut crate::graphics::Renderer) -> bool,
+    ) -> (Vec<u8>, crate::graphics::Renderer) {
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer =
+            crate::graphics::Renderer::new(&gpu.device, &gpu.queue, format, width, height);
+        let target = target(gpu, width, height);
+        let mut view = crate::spectator_view::SpectatorView::new(feed);
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        for frame in 0.. {
+            render(gpu, &mut view, &mut renderer, &target);
+            if frame + 1 >= frames && ready(&mut renderer) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the view was never ready");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("spectator panels readback"),
+            size: u64::from(width * height * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+            },
+            target.size(),
+        );
+        gpu.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let pixels = buffer.slice(..).get_mapped_range().unwrap().to_vec();
+        (pixels, renderer)
+    }
+
     fn pose(x: f32) -> tomori_protocol::Pose {
         tomori_protocol::Pose {
             position: [x, 1.6, 0.0],
@@ -1390,43 +1441,8 @@ mod tests {
         );
         // And drawn, in an offscreen render of the spectator's view, over the wall without them.
         let draw = |gpu: &tomori_render::test_gpu::Gpu, feed: Feed| {
-            let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-            let mut renderer =
-                crate::graphics::Renderer::new(&gpu.device, &gpu.queue, format, WIDTH, HEIGHT);
-            let target = target(gpu, WIDTH, HEIGHT);
-            let mut view = crate::spectator_view::SpectatorView::new(feed);
-            for _ in 0..4 {
-                render(gpu, &mut view, &mut renderer, &target);
-            }
-            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("spectator panels readback"),
-                size: u64::from(WIDTH * HEIGHT * 4),
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let mut encoder = gpu.device.create_command_encoder(&Default::default());
-            encoder.copy_texture_to_buffer(
-                target.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(WIDTH * 4),
-                        rows_per_image: Some(HEIGHT),
-                    },
-                },
-                target.size(),
-            );
-            gpu.queue.submit([encoder.finish()]);
-            buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-            gpu.device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .unwrap();
-            let uploaded = renderer.images().levels(&hash).is_some();
-            (
-                buffer.slice(..).get_mapped_range().unwrap().to_vec(),
-                uploaded,
-            )
+            let (pixels, mut renderer) = draw_view(gpu, feed, (WIDTH, HEIGHT), 4, |_| true);
+            (pixels, renderer.images().levels(&hash).is_some())
         };
         let changed = |a: &[u8], b: &[u8]| {
             a.chunks(4)
@@ -1449,6 +1465,68 @@ mod tests {
             assert!(
                 image > 20,
                 "the image must draw over its panels: {image} pixels changed"
+            );
+        });
+    }
+
+    /// A picture to show: a blue sky fading to teal, a grid of white lines, and an orange disc.
+    fn picture() -> image::RgbImage {
+        image::RgbImage::from_fn(640, 360, |x, y| {
+            let (dx, dy) = (x as f32 - 420.0, y as f32 - 170.0);
+            if x % 40 == 0 || y % 40 == 0 {
+                image::Rgb([255, 255, 255])
+            } else if dx * dx + dy * dy < 90.0 * 90.0 {
+                image::Rgb([250, 130, 20])
+            } else {
+                image::Rgb([30, 60 + (y / 3) as u8, 200])
+            }
+        })
+    }
+
+    /// How many of `pixels`, 8-bit RGBA, are the picture's orange.
+    fn orange(pixels: &[u8]) -> usize {
+        pixels
+            .chunks(4)
+            .filter(|pixel| pixel[0] > 200 && (100..200).contains(&pixel[1]) && pixel[2] < 90)
+            .count()
+    }
+
+    #[test]
+    fn a_visitor_s_spectator_fetches_the_image_an_image_panel_shows_and_draws_it() {
+        const WIDTH: u32 = 960;
+        const HEIGHT: u32 = 540;
+        let server = Server::start_with_tools();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let folder =
+            std::env::temp_dir().join(format!("tomori-spectator-image-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        picture().save(folder.join("render.png")).unwrap();
+        let shown = server
+            .server
+            .show_image(&folder, "render.png", "Render", "A disc on a grid.");
+        let _ = std::fs::remove_dir_all(folder);
+        // A spectator with no token, which the server admits as a visitor, asks for what the panel shows, as the server
+        // sends it, and holds it.
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space),
+            token: None,
+            ..Default::default()
+        });
+        until(&mut feed, |feed| {
+            feed.conversation.role() == ConnectionRole::Visitor
+                && feed.conversation.images().png(&shown.hash).is_some()
+        });
+        // And draws it over the panel it is shown on.
+        tomori_render::test_gpu::with(|gpu| {
+            let (pixels, _) = draw_view(&gpu, feed, (WIDTH, HEIGHT), 4, |renderer| {
+                renderer.images().binding(&shown.hash).is_some()
+            });
+            let drawn = orange(&pixels);
+            assert!(
+                drawn > 100,
+                "the picture's disc must be drawn: {drawn} pixels"
             );
         });
     }

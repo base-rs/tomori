@@ -44,6 +44,8 @@ winit = "0.30"
 libc = "0.2"
 
 [dev-dependencies]
+# The picture an image panel shows, made in a test and read back from the render.
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde_json = "1"
 tomori-client-desktop = { version = "0.2.0", path = "../client-desktop", features = ["testing"] }
 # The device for offscreen rendering tests.
