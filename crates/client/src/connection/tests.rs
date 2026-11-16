@@ -510,6 +510,7 @@ fn identity(store: &Store, server: Option<String>, token: Option<String>) -> Ide
             server,
             name: Some("Ada".into()),
             token,
+            content: None,
         },
     )
 }
@@ -2003,6 +2004,72 @@ mod served {
                 client: Client::connect(options).expect("the client starts"),
             }
         }
+    }
+
+    #[test]
+    fn what_a_server_offers_by_digest_is_fetched_over_tls_with_the_token_into_the_cache_given() {
+        crate::test_support::log_everything();
+        let mut bytes = b"glTF".to_vec();
+        bytes.extend_from_slice(b"a lantern a connection fetches over TLS");
+        let lantern: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+        tomori_assets::Library::shared().add(tomori_assets::Embedded::new().with(lantern));
+        let digest = tomori_assets::Digest::of(lantern);
+        let certificate = tomori_security::ServerCertificate::generate();
+        let config = certificate
+            .server_config()
+            .expect("the certificate is usable");
+        let server = tomori_server::test_support::TestServer::with_tokens(false, move |server| {
+            server
+                .with_tls(config)
+                .with_environments([tomori_server::Environment::new("garden", "Garden")
+                    .with_asset(tomori_server::ServedAsset::new(
+                        tomori_assets::AssetRef::new("garden", 1, "lantern.glb", digest),
+                        tomori_protocol::ContentKind::Model,
+                    ))])
+        });
+        let token = server.issue("Ada", tomori_security::Grant::Owner).1;
+        let root = std::env::temp_dir().join(format!(
+            "tomori-client-connection-content-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = Script::default();
+        let mut connection = kept(
+            &mut session,
+            Store::new(None),
+            Some(server.address.to_string()),
+            Some(token),
+            Scripted::default(),
+            Nowhere,
+        );
+        connection.keep_content_in(Some(root.clone()));
+        connecting(&mut session);
+        let kept = root.join(digest.to_string());
+        until(&mut connection, &mut session, |_, _| kept.exists());
+        // The program's library reads it from there first.
+        let asset = tomori_assets::AssetRef::new("garden", 1, "lantern.glb", digest);
+        assert_eq!(
+            tomori_assets::Library::shared().bytes(&asset).unwrap(),
+            lantern
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_is_kept_nowhere_without_a_folder_or_with_one_that_cannot_be_made() {
+        let watch = crate::test_log::watch("tomori-client-unmade-content");
+        let mut session = Script::default();
+        let mut connection = connection(&mut session, Scripted::default(), Nowhere);
+        connection.keep_content_in(None);
+        let file = std::env::temp_dir().join(format!(
+            "tomori-client-unmade-content-{}",
+            std::process::id()
+        ));
+        std::fs::write(&file, b"a file where the folder would be").unwrap();
+        connection.keep_content_in(Some(file.clone()));
+        assert!(connection.content.is_none());
+        assert_eq!(watch.records().len(), 1);
+        std::fs::remove_file(file).unwrap();
     }
 
     /// The session applies the connection's own [`Report::Connecting`], as a conversation connects.

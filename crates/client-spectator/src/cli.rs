@@ -65,6 +65,7 @@ impl Command {
             ambience: false,
             duck_under: DuckUnder::Played,
             borderless: false,
+            content: None,
         };
         let (mut audio_output, mut mode) = (None, None);
         let mut arguments = arguments.into_iter();
@@ -239,6 +240,7 @@ mod tests {
                 ambience: false,
                 duck_under: DuckUnder::Played,
                 borderless: false,
+                content: None,
             }
         );
         let command = parse(&["--server", "h:1", "--token", "tomori_u"]).unwrap();

@@ -36,6 +36,108 @@ pub fn image() -> (String, Vec<u8>) {
 
 pub const BROKEN_IMAGE: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
+/// The ticket the mini server gives a client that reads content, and requires of each content request.
+pub const TICKET: &str = "the-ticket";
+
+/// How the mini server answers a request for one of the assets it offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// As it should: whole, or from a range asked for.
+    Whole,
+    /// With another `Content-Type`.
+    Html,
+    /// With more bytes than offered.
+    Longer,
+    /// Not found.
+    Missing,
+    /// With bytes that are not what its digest says.
+    Other,
+    /// Always as a range from its fifth byte, whatever was asked.
+    WrongRange,
+    /// Its head saying more bytes than its body has, so that its body ends early.
+    Cut,
+    /// As it should, but its bytes, which its digest names, do not start as a model's must.
+    Unsigned,
+}
+
+/// An asset the mini server offers: its name, its bytes, and how it answers for it.
+pub struct Offered {
+    pub name: &'static str,
+    pub bytes: Vec<u8>,
+    pub answer: Answer,
+}
+
+impl Offered {
+    pub fn digest(&self) -> tomori_assets::Digest {
+        tomori_assets::Digest::of(&self.bytes)
+    }
+}
+
+/// The assets the mini server offers, in order, each as a model of its own: those answered as they should, one to
+/// resume and one whose kept part is not its own among them, then each way of answering wrongly, and last a sentinel,
+/// fetched once everything before it is done.
+pub fn offered() -> Vec<Offered> {
+    let model = |tag: &str, answer| {
+        let mut bytes = if answer == Answer::Unsigned {
+            b"<svg".to_vec()
+        } else {
+            b"glTF".to_vec()
+        };
+        bytes.extend(tag.bytes().cycle().take(3000));
+        bytes
+    };
+    [
+        ("good.glb", Answer::Whole),
+        ("resumed.glb", Answer::Whole),
+        ("reprefixed.glb", Answer::Whole),
+        ("html.glb", Answer::Html),
+        ("longer.glb", Answer::Longer),
+        ("missing.glb", Answer::Missing),
+        ("other.glb", Answer::Other),
+        ("ranged.glb", Answer::WrongRange),
+        ("cut.glb", Answer::Cut),
+        ("unsigned.glb", Answer::Unsigned),
+        ("sentinel.glb", Answer::Whole),
+    ]
+    .into_iter()
+    .map(|(name, answer)| Offered {
+        name,
+        bytes: model(name, answer),
+        answer,
+    })
+    .collect()
+}
+
+/// What the mini server offers by digest, as it offers it: each of [`offered`], then one whose digest is not written as
+/// one, and one larger than a model may be.
+fn offer() -> ServerMessage {
+    let asset = |name: &str, digest: String, length| tomori_protocol::OfferedAsset {
+        environment: "mini".into(),
+        version: 1,
+        name: name.into(),
+        digest,
+        length,
+        kind: tomori_protocol::ContentKind::Model,
+        licence: None,
+    };
+    let mut assets: Vec<_> = offered()
+        .iter()
+        .map(|offered| {
+            asset(
+                offered.name,
+                offered.digest().to_string(),
+                offered.bytes.len() as u64,
+            )
+        })
+        .collect();
+    assets.insert(0, asset("unwritten.glb", "not a digest".into(), 10));
+    assets.insert(1, asset("huge.glb", "0".repeat(64), 1 << 30));
+    ServerMessage::Content {
+        session: TICKET.into(),
+        assets,
+    }
+}
+
 /// What the client sent, by connection number (counting from one).
 pub type Log = Arc<Mutex<Vec<(u32, Received)>>>;
 
@@ -43,6 +145,8 @@ pub type Log = Arc<Mutex<Vec<(u32, Received)>>>;
 pub enum Received {
     Message(ClientMessage),
     Audio(u32),
+    /// A request for content: the asset's name, and the range it asked for, if any.
+    Fetch(String, Option<String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +178,15 @@ impl Handler for Mini {
         _: &mut InterimResponses<I>,
         _: &Cancellation,
     ) -> Result<Response<Session<B>>, Infallible> {
+        if let Some(digest) = request
+            .path
+            .as_deref()
+            .and_then(|path| path.strip_prefix(tomori_protocol::CONTENT_PATH))
+            .map(str::to_owned)
+        {
+            let fields = request.fields.clone();
+            return Ok(self.content(request.body, digest, &fields));
+        }
         let path_matches = request.path.as_deref() == Some(CONNECT_PATH);
         let status = if self.mode == Mode::Unavailable || !path_matches {
             Status::SERVICE_UNAVAILABLE
@@ -95,6 +208,89 @@ impl Handler for Mini {
                 log: self.log.clone(),
             },
         ))
+    }
+}
+
+impl Mini {
+    /// The answer to a request for the content `digest`, with `fields`, as [`offered`] says.
+    fn content<B: ReadableBody>(
+        &self,
+        body: B,
+        digest: String,
+        fields: &base_http::Fields,
+    ) -> Response<Session<B>> {
+        let field = |name| {
+            fields
+                .values(name)
+                .next()
+                .map(|value| String::from_utf8(value.to_vec()).unwrap())
+        };
+        let offered = offered()
+            .into_iter()
+            .find(|offered| offered.digest().to_string() == digest)
+            .unwrap();
+        self.log
+            .lock()
+            .unwrap()
+            .push((0, Received::Fetch(offered.name.to_owned(), field("range"))));
+        let length = offered.bytes.len();
+        let from = field("range")
+            .and_then(|range| {
+                range
+                    .strip_prefix("bytes=")?
+                    .strip_suffix('-')?
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or(0);
+        let ticketed = field(tomori_protocol::SESSION_FIELD).as_deref() == Some(TICKET);
+        let (status, bytes, content_range) = match offered.answer {
+            _ if !ticketed => (Status::new(401).unwrap(), Vec::new(), None),
+            Answer::Missing => (Status::NOT_FOUND, Vec::new(), None),
+            Answer::Longer => (
+                Status::OK,
+                [offered.bytes.clone(), vec![0; 10]].concat(),
+                None,
+            ),
+            Answer::Other => (Status::OK, vec![b'x'; length], None),
+            Answer::WrongRange => (
+                Status::new(206).unwrap(),
+                offered.bytes[5..].to_vec(),
+                Some(format!("bytes 5-{}/{length}", length - 1)),
+            ),
+            _ if from > 0 => (
+                Status::new(206).unwrap(),
+                offered.bytes[from..].to_vec(),
+                Some(format!("bytes {from}-{}/{length}", length - 1)),
+            ),
+            _ => (Status::OK, offered.bytes.clone(), None),
+        };
+        let content_type = if offered.answer == Answer::Html {
+            "text/html"
+        } else {
+            "model/gltf-binary"
+        };
+        let cut = offered.answer == Answer::Cut;
+        let declared = bytes.len() as u64 + if cut { 100 } else { 0 };
+        let mut response = Response::new(
+            status,
+            Session {
+                body,
+                decoder: FrameDecoder::new(),
+                output: VecDeque::from([bytes]),
+                ended: true,
+                greeted: false,
+                connection: 0,
+                mode: self.mode,
+                log: self.log.clone(),
+            },
+        );
+        response.metadata.content_length = Some(declared);
+        response.fields.add("content-type", content_type).unwrap();
+        if let Some(range) = content_range {
+            response.fields.add("content-range", range).unwrap();
+        }
+        response
     }
 }
 
@@ -137,7 +333,7 @@ impl<B: ReadableBody> Session<B> {
                 let message = frame.to_client_message().unwrap();
                 self.record(Received::Message(message.clone()));
                 match message {
-                    ClientMessage::Hello { .. } => {
+                    ClientMessage::Hello { content, .. } => {
                         self.greeted = true;
                         let protocol = if self.mode == Mode::WrongProtocol {
                             PROTOCOL_VERSION + 1
@@ -156,6 +352,9 @@ impl<B: ReadableBody> Session<B> {
                             name: Some("Ada Lovelace".into()),
                             limits: None,
                         });
+                        if content {
+                            self.reply(offer());
+                        }
                     }
                     ClientMessage::Join { space } => self.reply(ServerMessage::Space {
                         state: Box::new(SpaceState {

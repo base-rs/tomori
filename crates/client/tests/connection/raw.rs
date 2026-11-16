@@ -98,6 +98,15 @@ pub fn start(body: Option<Vec<u8>>) -> SocketAddr {
 
 /// Like [`start`], also sending the head of each request received.
 pub fn start_recording(body: Option<Vec<u8>>) -> (SocketAddr, Receiver<Vec<u8>>) {
+    start_answering(body, false)
+}
+
+/// Like [`start_recording`], but closing each request for content at once, unanswered.
+pub fn start_unanswering(body: Vec<u8>) -> (SocketAddr, Receiver<Vec<u8>>) {
+    start_answering(Some(body), true)
+}
+
+fn start_answering(body: Option<Vec<u8>>, unanswered: bool) -> (SocketAddr, Receiver<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let (heads, received) = mpsc::channel();
@@ -115,7 +124,11 @@ pub fn start_recording(body: Option<Vec<u8>>) -> (SocketAddr, Receiver<Vec<u8>>)
                     }
                     head.push(byte[0]);
                 }
+                let content = head.starts_with(b"GET /content/");
                 let _ = heads.send(head);
+                if unanswered && content {
+                    return;
+                }
                 if let Some(body) = body {
                     let mut response =
                         b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n".to_vec();

@@ -7,7 +7,10 @@ mod server;
 use std::net::{SocketAddr, TcpListener};
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use server::{ECHO_SOURCE, MiniServer, Mode, Received};
+use tomori_assets::Cache;
 use tomori_client::{Backoff, Client, ConnectionState, Disconnect, Event, Keepalive, Options};
 use tomori_protocol::{AudioFrame, ClientMessage, Gate, ServerMessage};
 
@@ -872,4 +875,181 @@ fn a_connection_reset_while_writing_is_a_transport_failure() {
     reset.send(()).unwrap();
     let reason = wait_disconnected(&client);
     assert!(matches!(reason, Disconnect::Transport(_)), "{reason:?}");
+}
+
+/// A cache in an empty folder of its own, for the test `name`.
+fn cache(name: &str) -> (std::path::PathBuf, Arc<Cache>) {
+    let root = std::env::temp_dir().join(format!(
+        "tomori-client-content-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let cache = Arc::new(Cache::open(&root, 1 << 20).unwrap());
+    (root, cache)
+}
+
+/// Keep the first `length` bytes of `bytes` as a download of `digest` that stopped, or `bytes` in its place.
+fn stopped(cache: &Cache, offered: &server::Offered, bytes: &[u8]) {
+    let mut writer = cache.writer(&offered.digest(), 0).unwrap();
+    writer.write(bytes).unwrap();
+}
+
+/// Wait until `check` holds.
+fn wait_until(mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !check() {
+        assert!(Instant::now() < deadline, "timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The content requests the mini server received, in order.
+fn fetches(server: &MiniServer) -> Vec<(String, Option<String>)> {
+    server
+        .received(0)
+        .into_iter()
+        .filter_map(|received| match received {
+            Received::Fetch(name, range) => Some((name, range)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn what_is_offered_by_digest_is_fetched_once_into_the_cache_resumed_where_it_stopped_and_refused_unless_it_is_as_offered()
+ {
+    log::set_max_level(log::LevelFilter::Trace);
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let offered = server::offered();
+    let (root, cache) = cache("fetched");
+    // A third of the one to resume was fetched before.
+    stopped(&cache, &offered[1], &offered[1].bytes[..1000]);
+    let mut options = options(server.address);
+    options.content = Some(cache.clone());
+    let client = Client::connect(options).unwrap();
+    let sentinel = offered.last().unwrap().digest();
+    wait_until(|| cache.contains(&sentinel));
+    let kept: Vec<&str> = offered
+        .iter()
+        .filter(|offered| cache.contains(&offered.digest()))
+        .map(|offered| offered.name)
+        .collect();
+    assert_eq!(
+        kept,
+        ["good.glb", "resumed.glb", "reprefixed.glb", "sentinel.glb"]
+    );
+    let fetched = fetches(&server);
+    // The download that stopped first, from where it stopped; what is not as offered not at all.
+    assert_eq!(
+        fetched[0],
+        ("resumed.glb".into(), Some("bytes=1000-".into()))
+    );
+    assert_eq!(fetched.len(), offered.len());
+    assert!(server.received(1).iter().any(|received| matches!(
+        received,
+        Received::Message(ClientMessage::Hello { content: true, .. })
+    )));
+    // Connected again, it fetches only what it does not keep.
+    client.send(kick()).unwrap();
+    wait_until(|| fetches(&server).len() == offered.len() + 7);
+    let again: Vec<String> = fetches(&server)[offered.len()..]
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    assert_eq!(
+        again,
+        [
+            "html.glb",
+            "longer.glb",
+            "missing.glb",
+            "other.glb",
+            "ranged.glb",
+            "cut.glb",
+            "unsigned.glb"
+        ]
+    );
+    client.close();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_download_resumed_from_bytes_that_were_not_its_own_is_fetched_again_whole() {
+    log::set_max_level(log::LevelFilter::Trace);
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let offered = server::offered();
+    let (root, cache) = cache("reprefixed");
+    stopped(&cache, &offered[2], &[b'x'; 1000]);
+    let mut options = options(server.address);
+    options.content = Some(cache.clone());
+    let client = Client::connect(options).unwrap();
+    wait_until(|| cache.contains(&offered[2].digest()));
+    let fetched = fetches(&server);
+    assert_eq!(
+        fetched[..2],
+        [
+            ("reprefixed.glb".into(), Some("bytes=1000-".into())),
+            ("reprefixed.glb".into(), None)
+        ]
+    );
+    client.close();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_cache_that_cannot_be_written_keeps_nothing_and_the_connection_carries_on() {
+    log::set_max_level(log::LevelFilter::Trace);
+    let server = MiniServer::start(localhost(), Mode::Normal);
+    let offered = server::offered();
+    let (root, cache) = cache("unwritable");
+    std::fs::remove_dir_all(&root).unwrap();
+    let mut options = options(server.address);
+    options.content = Some(cache.clone());
+    let client = Client::connect(options).unwrap();
+    wait_connected(&client);
+    wait_until(|| {
+        fetches(&server)
+            .iter()
+            .any(|(name, _)| name == "sentinel.glb")
+    });
+    assert!(
+        offered
+            .iter()
+            .all(|offered| !cache.contains(&offered.digest()))
+    );
+    client.send(join("still connected")).unwrap();
+    wait_for_space(&client, "still connected");
+    client.close();
+}
+
+#[test]
+fn content_whose_request_is_closed_unanswered_is_not_kept() {
+    log::set_max_level(log::LevelFilter::Trace);
+    let asset = |name: &str| tomori_protocol::OfferedAsset {
+        environment: "raw".into(),
+        version: 1,
+        name: name.into(),
+        digest: tomori_assets::Digest::of(name.as_bytes()).to_string(),
+        length: 10,
+        kind: tomori_protocol::ContentKind::Model,
+        licence: None,
+    };
+    let mut body = raw::welcome();
+    body.extend(raw::message(&ServerMessage::Content {
+        session: "ticket".into(),
+        assets: vec![asset("first.glb"), asset("second.glb")],
+    }));
+    let (address, heads) = raw::start_unanswering(body);
+    let (root, cache) = cache("unanswered");
+    let mut options = options(address);
+    options.content = Some(cache.clone());
+    let client = Client::connect(options).unwrap();
+    // Once the second is asked for, the first has failed.
+    let mut asked = 0;
+    while asked < 2 {
+        let head = heads.recv_timeout(TIMEOUT).unwrap();
+        asked += usize::from(head.starts_with(b"GET /content/"));
+    }
+    assert_eq!(cache.total(), 0);
+    client.close();
+    std::fs::remove_dir_all(root).unwrap();
 }

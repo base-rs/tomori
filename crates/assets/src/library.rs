@@ -7,7 +7,8 @@
 //!
 //! Today assets are bundled with the app: on Android in the APK's `assets` folder, which the app adds as a source, and
 //! elsewhere embedded in the environment's crate, which adds them as an [`Embedded`] source. A source that fetches them
-//! from the environment's server side, by digest, can be added beside these without changing what asks for them.
+//! from the environment's server side, by digest, is added beside these without changing what asks for them: a client's
+//! [`crate::Cache`] of what it fetched, which it adds first.
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
@@ -22,6 +23,13 @@ pub trait Source: Send + Sync {
     /// them cut, which the library then refuses as not the asset. The library checks the bytes against the asset's
     /// digest, so a source need not.
     fn read(&self, asset: &AssetRef, limit: usize) -> Option<Vec<u8>>;
+}
+
+/// A shared source is a source, as a client shares its cache between its library and its connection.
+impl<S: Source + ?Sized> Source for Arc<S> {
+    fn read(&self, asset: &AssetRef, limit: usize) -> Option<Vec<u8>> {
+        (**self).read(asset, limit)
+    }
 }
 
 /// Assets embedded in the program, by digest, as an environment's crate bundles them with `include_bytes!`.
@@ -116,6 +124,15 @@ impl Library {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::new(source));
+    }
+
+    /// Look for assets in `source` before the sources added before it, as a client's cache of what its server serves
+    /// comes before what the app bundles.
+    pub fn add_first(&self, source: impl Source + 'static) {
+        self.sources
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(0, Arc::new(source));
     }
 
     /// The bytes of `asset` from the first source that has them as the asset's digest says, or why not: no source has

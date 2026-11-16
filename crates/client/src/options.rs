@@ -178,6 +178,11 @@ pub struct Options {
     /// [`crate::connection::Session::limits`]. The connection reads frames of up to the lesser of this and what the
     /// server states in its Welcome, today's from a server that states none. See `design/projection.md`.
     pub limits: Limits,
+    /// Where content the server offers by digest, its environments' assets, is fetched into and kept, which each
+    /// connection says in its Hello, or `None`, the default, which fetches nothing. The program adds the same cache to
+    /// its asset library first, `tomori_assets::Library::shared().add_first(cache.clone())`, so that what it fetched is
+    /// what it reads, and what it bundles is the fallback. See `design/clients.md`.
+    pub content: Option<std::sync::Arc<tomori_assets::Cache>>,
 }
 
 /// Written without the participant identity or the token, which are secrets, so that logging options cannot reveal them.
@@ -208,6 +213,7 @@ impl std::fmt::Debug for Options {
             .field("live_panels", &self.live_panels)
             .field("spawns", &self.spawns)
             .field("limits", &self.limits)
+            .field("content", &self.content)
             .finish()
     }
 }
@@ -239,6 +245,7 @@ impl Options {
             live_panels: false,
             spawns: false,
             limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
+            content: None,
         }
     }
 }

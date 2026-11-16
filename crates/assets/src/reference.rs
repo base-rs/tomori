@@ -42,6 +42,11 @@ impl Digest {
         Some(Self(bytes))
     }
 
+    /// The digest whose bytes are `bytes`, as a hash computed in parts gives them.
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Its bytes.
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0

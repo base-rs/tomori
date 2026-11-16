@@ -5,8 +5,8 @@
 ## Assets
 
 - `AssetRef::new(environment, version, name, digest)` names an asset: the environment it belongs to, at its protocol version, its name, which is also its path beneath a folder of assets (`ENVIRONMENT/NAME`), and the SHA-256 `Digest` of its bytes, which is what it is. Write the digest beside the code that expects the asset, so that changing the file without its digest fails to load it.
-- A `Source` reads an asset's bytes: `Embedded`, bytes compiled in with `include_bytes!`; `Directory`, a folder holding each asset at its path; or one of the app's own, such as the APK's `assets` folder on Android. A source never needs to check the digest.
-- `Library::shared()` is the program's library; `Library::new(limits)` makes another. `add` appends a source; `bytes` returns the first source's bytes that match the digest, or an `Error` of kind `Missing` or `Mismatch`; `model` reads the bytes as glTF, once, and shares the `Arc<Model>` by digest with everything that asks.
+- A `Source` reads an asset's bytes: `Embedded`, bytes compiled in with `include_bytes!`; `Directory`, a folder holding each asset at its path; or one of the app's own, such as the APK's `assets` folder on Android; or a `Cache`, what a client fetched from its server by digest, kept on the device, which `Cache::writer` writes and checks. A source never needs to check the digest, and an `Arc` of one is one.
+- `Library::shared()` is the program's library; `Library::new(limits)` makes another. `add` appends a source, and `add_first` puts one before the rest, as a client puts its cache; `bytes` returns the first source's bytes that match the digest, or an `Error` of kind `Missing` or `Mismatch`; `model` reads the bytes as glTF, once, and shares the `Arc<Model>` by digest with everything that asks.
 
 ## Reading glTF
 

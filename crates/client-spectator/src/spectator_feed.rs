@@ -75,11 +75,14 @@ pub struct SpectatorOptions {
     /// shared screen, rather than a decorated window with the platform's title bar that can be moved, resized and made
     /// full screen. The PipeWire source without a window has no window to be borderless. See `design/spectator.md`.
     pub borderless: bool,
+    /// The folder what its server offers by digest, its environments' assets, is fetched into and kept in, such as
+    /// `tomori_client::cache_folder()`, or `None`, by default, to fetch nothing. See `design/clients.md`.
+    pub content: Option<std::path::PathBuf>,
 }
 
 impl SpectatorOptions {
-    /// No server, space, participant or token, every voice played, no ambience, ducking under the voices played, and a
-    /// decorated window.
+    /// No server, space, participant or token, every voice played, no ambience, ducking under the voices played, a
+    /// decorated window, and no content kept.
     pub fn new() -> Self {
         Self::default()
     }
@@ -164,6 +167,7 @@ impl Feed {
         connection.hear_ambience(options.ambience);
         connection.hear(options.voices);
         connection.duck_under(options.duck_under);
+        connection.keep_content_in(options.content.clone());
 
         // If a space is given, join it directly, as the lobby's accept would.
         if let Some(space) = &options.space {

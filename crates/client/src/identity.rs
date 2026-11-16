@@ -31,6 +31,9 @@ pub struct Overrides {
     pub name: Option<String>,
     /// A token for the server this device connects to next, such as one from `tomori-server auth mint`. See `design/security.md`.
     pub token: Option<String>,
+    /// The folder content its servers offer by digest is fetched into and kept in, such as [`crate::cache_folder`] on a
+    /// desktop, or `None` to fetch nothing. See `design/clients.md`.
+    pub content: Option<std::path::PathBuf>,
 }
 
 /// Who this device is to a server: its participant identity, its display name, and what it was given at startup.
@@ -59,6 +62,7 @@ impl std::fmt::Debug for Overrides {
             .field("server", &self.server)
             .field("name", &self.name)
             .field("token", &secret(&self.token))
+            .field("content", &self.content)
             .finish()
     }
 }
@@ -407,6 +411,7 @@ mod tests {
             server: Some(" 10.0.0.1:8765 ".into()),
             name: Some("Ada".into()),
             token: Some(" tomori_abc ".into()),
+            content: None,
         };
         let identity = Identity::new(&store, Some("Quest 3"), overrides);
         assert_eq!(identity.name, "Ada");
@@ -421,6 +426,7 @@ mod tests {
             server: None,
             name: None,
             token: Some("tomori_secret".into()),
+            content: None,
         };
         let identity = Identity::new(&store, None, overrides.clone());
         let credential = Credential {
@@ -502,6 +508,7 @@ mod tests {
             server: Some("  ".into()),
             name: Some("/me".into()),
             token: Some(" ".into()),
+            content: None,
         };
         let identity = Identity::new(&store, Some("Quest 3"), overrides.clone());
         assert_eq!(identity.name, "Quest 3");

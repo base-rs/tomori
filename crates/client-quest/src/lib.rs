@@ -52,11 +52,13 @@ pub use tomori_scene::locomotion::{Locomotion, Outline, OutlineError, Pad, Surfa
 #[cfg(not(target_os = "android"))]
 pub fn main(builder: Builder) -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let command = Command::parse(
+    let mut command = Command::parse(
         std::env::args().skip(1),
         std::env::var("TOMORI_SERVER").ok(),
         std::env::var("TOMORI_TOKEN").ok(),
     )?;
+    // What its servers offer by digest is kept in the user's cache folder. See `design/clients.md`.
+    command.overrides.content = tomori_client::cache_folder();
     for (name, value) in command.environment(std::env::var_os("PIPEWIRE_ALSA").is_some()) {
         // SAFETY: the process has started no other thread yet, so nothing reads the environment concurrently.
         unsafe { std::env::set_var(name, value) };
@@ -348,6 +350,8 @@ fn android_connection(
         None
     });
     let store = identity::Store::new(android.data());
+    // What its servers offer by digest is kept in the app's own storage. See `design/clients.md`.
+    let content = android.data().map(|data| data.join("content"));
     let identity = identity::Identity::new(&store, device.as_deref(), overrides);
     let mut conversation = conversation::Conversation::new(&identity.name);
     // `am start -e tomori.echo_test on` measures the echo each time the live microphone opens, with the platform's echo canceller; `canceller-off` with it disabled, all else equal; and `uncancelled` with the recognition preset and media output, as push-to-talk captures. See `design/spatial-audio.md`.
@@ -389,6 +393,7 @@ fn android_connection(
     if let Some(label) = label {
         connection.set_echo_test(label, !uncancelled);
     }
+    connection.keep_content_in(content);
     (conversation, connection)
 }
 

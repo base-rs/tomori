@@ -21,6 +21,8 @@ fn tomori(arguments: &[&str], path: Option<&Path>) -> Output {
         .env_remove("PIPEWIRE_ALSA")
         .env_remove("PIPEWIRE_NODE")
         .env("XR_RUNTIME_JSON", "/nonexistent/openxr_runtime.json")
+        // What a server offers by digest is kept beneath the target folder, never in the user's cache.
+        .env("XDG_CACHE_HOME", env!("CARGO_TARGET_TMPDIR"))
         .env("RUST_LOG", "info")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

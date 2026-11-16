@@ -97,14 +97,15 @@ pub fn pipewire_alsa_properties(spectator: bool, already_set: bool) -> Option<St
     })
 }
 
-/// A participant's conversation and connection, with the desktop's microphone and speaker. Desktop runs keep nothing, so each is a new participant.
+/// A participant's conversation and connection, with the desktop's microphone and speaker. Desktop runs keep no identity, so each is a new participant, but keep what servers offer by digest in `overrides.content`, if given.
 pub fn connection(overrides: Overrides) -> (Conversation, Connection) {
+    let content = overrides.content.clone();
     let store = identity::Store::new(None);
     let identity = identity::Identity::new(&store, identity::host_name().as_deref(), overrides);
     let mut conversation = Conversation::new(&identity.name);
     // A desktop machine draws more panels than a headset. See `design/clients.md`.
     conversation.set_limits(tomori_scene::conversation::DESKTOP_LIMITS);
-    let connection = Connection::new(
+    let mut connection = Connection::new(
         identity,
         store,
         Box::new(()),
@@ -112,6 +113,8 @@ pub fn connection(overrides: Overrides) -> (Conversation, Connection) {
         Box::new(desktop_audio::Speaker),
         &mut conversation,
     );
+    // What its servers offer by digest is kept where the command line says, the user's cache folder. See `design/clients.md`.
+    connection.keep_content_in(content);
     (conversation, connection)
 }
 
