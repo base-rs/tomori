@@ -39,11 +39,12 @@ impl tomori_environment::ServerSide for Answering {
     }
 }
 
-/// A side that never reads what it is handed.
-struct Stuck;
+/// A side that never reads what it is handed, saying once it has started so a test can wait for it.
+struct Stuck(async_channel::Sender<()>);
 
 impl tomori_environment::ServerSide for Stuck {
     fn run(&self, space: &tomori_environment::Space) -> tomori_environment::Result<()> {
+        let _ = self.0.try_send(());
         futures_lite::future::block_on(space.cancellation().cancelled());
         Ok(())
     }
@@ -640,8 +641,11 @@ fn no_action_is_taken_in_a_turn_tomori_s_own_notes_began() {
 
 #[test]
 fn actions_are_held_to_a_few_waiting_and_a_rate_and_never_reach_a_side_that_stopped() {
-    let yard = yard(Stuck);
+    let (started, running) = async_channel::bounded(1);
+    let yard = yard(Stuck(started));
     let hub = &yard.hub;
+    // Shut down only once the side is running, or it may be stopped before it starts and its code never runs.
+    running.recv_blocking().expect("the side starts");
     speak(&yard);
     let take = || {
         hub.agent_act(
