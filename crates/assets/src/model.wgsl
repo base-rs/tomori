@@ -1,6 +1,7 @@
 // Models drawn with tomori-assets: each instance's meshes, skinned on the GPU from its joint matrices or placed by its
 // node's matrix, lit by the scenery's light: a sky and ground ambient, the sun or moon, and the few lamps listed for each
-// piece, or every lamp, with haze.
+// piece, or every lamp, with haze. A material's surface, where it has one, is laid on each face along the axis its normal
+// is nearest: its colour varying the face's about itself, its normal map bending the face's normal within it.
 
 struct Camera {
     view_projection: mat4x4<f32>,
@@ -41,9 +42,15 @@ struct Material {
     base_color: vec4<f32>,
     // Its light, and whether it is cut out below half alpha in its fourth component.
     emissive: vec4<f32>,
+    // Its surface: tiles a metre, how far each piece's is turned at most either way, in radians, whether its colour is
+    // sampled, and whether its normal map is.
+    surface: vec4<f32>,
+    // The reciprocal of its surface colour's mean, which its texels are multiplied by.
+    flat: vec4<f32>,
 }
 
-// One instance of one primitive: where its node is, and where its joint matrices begin, if it is skinned.
+// One instance of one primitive: where its node is, where its joint matrices begin, if it is skinned, and a number of its
+// own, which turns and shifts its surface.
 struct Placed {
     world: mat4x4<f32>,
     // The first joint matrix, and whether the primitive is skinned.
@@ -58,6 +65,9 @@ struct Placed {
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var base_texture: texture_2d<f32>;
 @group(1) @binding(2) var base_sampler: sampler;
+@group(1) @binding(3) var surface_color: texture_2d<f32>;
+@group(1) @binding(4) var surface_normal: texture_2d<f32>;
+@group(1) @binding(5) var surface_sampler: sampler;
 @group(2) @binding(0) var<storage, read> placed: array<Placed>;
 @group(2) @binding(1) var<storage, read> joints: array<mat4x4<f32>>;
 
@@ -80,6 +90,17 @@ struct Shaded {
     @location(3) color: vec4<f32>,
     // The piece's lamps, as it is placed.
     @location(4) @interpolate(flat) lamps: vec4<u32>,
+    // How its surface is turned, the cosine and sine of its angle, and shifted, in tiles.
+    @location(5) @interpolate(flat) turn: vec4<f32>,
+}
+
+// A number from 0 up to 1 from `seed`, and from it, salted, another.
+fn unit(seed: u32, salt: u32) -> f32 {
+    var hash = seed ^ (salt * 0x9e3779b9u);
+    hash ^= hash >> 16u;
+    hash *= 0x7feb352du;
+    hash ^= hash >> 15u;
+    return f32(hash >> 8u) / 16777216.0;
 }
 
 @vertex
@@ -105,6 +126,48 @@ fn model_vertex(vertex: Vertex, @builtin(instance_index) instance: u32) -> Shade
     out.uv = vertex.uv;
     out.color = vertex.color;
     out.lamps = one.lamps;
+    // Each piece's surface turned by up to its material's most either way, and shifted by up to a tile, from its own
+    // number, if it turns at all.
+    let most = material.surface.y;
+    let angle = (unit(one.joints.z, 1u) * 2.0 - 1.0) * most;
+    let shift = select(vec2<f32>(0.0), vec2<f32>(unit(one.joints.z, 2u), unit(one.joints.z, 3u)), most > 0.0);
+    out.turn = vec4<f32>(cos(angle), sin(angle), shift);
+    return out;
+}
+
+// A surface laid on a face whose normal is `normal`, at `world`, whose position changes by `dx` and `dy` a pixel across
+// and down the screen: its colour, divided by its mean, and the normal bent by its normal map. Each face takes its
+// texels along the axis its normal is nearest, up first, so that faces meeting at an edge meet in the texture; `u` and
+// `v` run along world axes in its plane, `v` down the side of what stands, so that it stands upright, turned and shifted
+// by the piece's own `turn`, scaled to tiles. Sampled by the gradients of where it is, so that where the axis
+// changes from one pixel to the next, as at a face's edge, the level sampled does not.
+struct Laid {
+    color: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn laid(world: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, normal: vec3<f32>, turn: vec4<f32>) -> Laid {
+    let reach = abs(normal);
+    let up = reach.y >= max(reach.x, reach.z);
+    let across_x = !up && reach.x > reach.z;
+    let u_axis = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), across_x);
+    let v_axis = select(vec3<f32>(0.0, -1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), up);
+    let along = turn.x * u_axis + turn.y * v_axis;
+    let down = turn.x * v_axis - turn.y * u_axis;
+    let scale = material.surface.x;
+    let uv = vec2<f32>(dot(world, along), dot(world, down)) * scale + turn.zw;
+    let ddx = vec2<f32>(dot(dx, along), dot(dx, down)) * scale;
+    let ddy = vec2<f32>(dot(dy, along), dot(dy, down)) * scale;
+    var out: Laid;
+    out.color = textureSampleGrad(surface_color, surface_sampler, uv, ddx, ddy).rgb * material.flat.rgb;
+    out.normal = normal;
+    if material.surface.w > 0.0 {
+        let bent = textureSampleGrad(surface_normal, surface_sampler, uv, ddx, ddy).xyz * 2.0 - 1.0;
+        // The directions `u` and `v` grow in on the face, which its texels' slopes are along.
+        let tangent = normalize(along - normal * dot(normal, along));
+        let bitangent = normalize(down - normal * dot(normal, down));
+        out.normal = normalize(tangent * bent.x + bitangent * bent.y + normal * bent.z);
+    }
     return out;
 }
 
@@ -122,9 +185,11 @@ fn lamp_light(index: u32, weight: f32, world: vec3<f32>, normal: vec3<f32>) -> v
 
 fn shade(in: Shaded, facing: bool) -> vec4<f32> {
     // Derivatives first, in uniform control flow: a mesh without normals is lit by each triangle's own, from how its
-    // position changes across the screen.
-    let flat = cross(dpdx(in.world), dpdy(in.world));
-    let surface = material.base_color * in.color * textureSample(base_texture, base_sampler, in.uv);
+    // position changes across the screen, and a surface is sampled by them.
+    let dx = dpdx(in.world);
+    let dy = dpdy(in.world);
+    let flat = cross(dx, dy);
+    var surface = material.base_color * in.color * textureSample(base_texture, base_sampler, in.uv);
     if material.emissive.w > 0.0 && surface.a < 0.5 {
         discard;
     }
@@ -136,6 +201,11 @@ fn shade(in: Shaded, facing: bool) -> vec4<f32> {
         normal = -normal;
     }
     normal = normalize(normal);
+    if material.surface.z > 0.0 {
+        let laid = laid(in.world, dx, dy, normal, in.turn);
+        surface = vec4<f32>(surface.rgb * laid.color, surface.a);
+        normal = laid.normal;
+    }
     var light = mix(lighting.ground.rgb, lighting.sky.rgb, normal.y * 0.5 + 0.5)
         + lighting.sun.rgb * max(dot(normal, lighting.sun_direction.xyz), 0.0);
     // Its own lamps, in the lamps' order, or every lamp.

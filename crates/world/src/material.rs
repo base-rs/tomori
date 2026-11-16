@@ -6,8 +6,9 @@
 //!
 //! Today's renderer reads a material's shading model, its base colour and emission, its alpha mode and its flags, and
 //! draws it by the pipeline its shading model names, as before: `tomori-render`'s `materials` maps one to the other.
-//! Its textures, by digest, and its roughness and metalness are carried for the render paths still to come, and
-//! nothing reads them yet.
+//! A stylised material's base colour texture and normal map, by digest, are laid on faces without texture coordinates
+//! by its [`Projection`], in the tiers that sample them; its roughness and metalness are carried for the render paths
+//! still to come, and nothing reads them yet.
 use glam::{Vec3, Vec4};
 use tomori_assets::Digest;
 
@@ -47,6 +48,29 @@ pub enum Alpha {
     Blend,
 }
 
+/// How a texture is laid on faces that have no texture coordinates, as the faceted models built in code have none: each
+/// face's projected along the axis its normal is nearest, in the world, `metres` a tile across, so that faces meeting at
+/// an edge meet in the texture too; and each piece's, as each instance of a model, or each chunk of one, is drawn, turned
+/// by up to `turn` radians either way and shifted by a part of a tile of its own, so that copies do not repeat each
+/// other, or neither, `turn` nothing, so that pieces that meet, as the chunks of one ground, meet in the texture too.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projection {
+    pub metres: f32,
+    pub turn: f32,
+}
+
+impl Projection {
+    /// A tile `metres` across, each piece's neither turned nor shifted.
+    pub fn new(metres: f32) -> Self {
+        Self { metres, turn: 0.0 }
+    }
+
+    /// This projection, each piece's turned by up to `turn` radians either way and shifted by a part of a tile.
+    pub fn with_turn(self, turn: f32) -> Self {
+        Self { turn, ..self }
+    }
+}
+
 /// How something drawn is shaded: its shading model; its base colour, which multiplies the colours its vertices or
 /// instances carry, as glTF's base colour factor does, and the texture it may be read from; its roughness, metalness
 /// and normal map; the light it gives off; how it covers what is behind it; and whether it is hazed and lit by its
@@ -56,13 +80,19 @@ pub struct Material {
     pub shading: Shading,
     /// Linear RGBA: white draws the colours of the vertices or instances as they are.
     pub base_color: Vec4,
-    /// The base colour's texture, by the digest of its bytes in the content store; not yet sampled.
+    /// The base colour's texture, by the digest of its bytes in the content store.
     pub base_color_texture: Option<Digest>,
+    /// The mean of the base colour's texture, linear RGB, as it is made: the colour a tier that does not sample the
+    /// texture stands in for it with. Today's renderer divides the texture's colour by it, so that the texture varies the
+    /// colours a model's vertices carry about themselves, and draws them as they are where it does not sample it.
+    pub flat_color: Vec3,
+    /// How its textures are laid on faces without texture coordinates, or none, for a model's own.
+    pub projection: Option<Projection>,
     /// From 0, a mirror, to 1, wholly diffuse; not yet read.
     pub roughness: f32,
     /// From 0, a dielectric, to 1, a metal; not yet read.
     pub metalness: f32,
-    /// A tangent-space normal map, by digest; not yet sampled.
+    /// A tangent-space normal map, by digest, its `x` across the texture and `y` down it.
     pub normal_texture: Option<Digest>,
     /// Light it gives off, linear RGB, as a lantern's glass does.
     pub emissive: Vec3,
@@ -84,6 +114,8 @@ impl Material {
             shading,
             base_color: Vec4::ONE,
             base_color_texture: None,
+            flat_color: Vec3::ONE,
+            projection: None,
             roughness: 1.0,
             metalness: 0.0,
             normal_texture: None,
@@ -104,6 +136,19 @@ impl Material {
     pub fn with_base_color_texture(self, digest: Digest) -> Self {
         Self {
             base_color_texture: Some(digest),
+            ..self
+        }
+    }
+
+    /// This material, its base colour texture's mean `flat_color`, linear RGB.
+    pub fn with_flat_color(self, flat_color: Vec3) -> Self {
+        Self { flat_color, ..self }
+    }
+
+    /// This material, its textures laid on faces without texture coordinates by `projection`.
+    pub fn with_projection(self, projection: Projection) -> Self {
+        Self {
+            projection: Some(projection),
             ..self
         }
     }

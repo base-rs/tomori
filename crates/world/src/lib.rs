@@ -35,7 +35,7 @@ mod world;
 pub use light::{
     EnvironmentLight, FADE, Falloff, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit, assign,
 };
-pub use material::{Alpha, Material, MaterialId, Shading};
+pub use material::{Alpha, Material, MaterialId, Projection, Shading};
 pub use tier::Tier;
 pub use tomori_assets::Digest;
 pub use tomori_assets::bounds::{Aabb, Frustum, Tally};

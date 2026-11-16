@@ -8,7 +8,9 @@
 //! Once a frame, [`Renderer::cull`] keeps only the instances of each primitive that the eyes' frustum may see, and a
 //! closed primitive, [`Primitive::closed`](crate::Primitive::closed), is drawn without its back faces; and
 //! [`Renderer::light`] lists the few lamps that light each piece, as a render world assigns them, which its pixels then
-//! add up, rather than every lamp. See `design/rendering.md`.
+//! add up, rather than every lamp. A material may be given a [`Surface`], a base colour texture and a normal map laid on
+//! faces that have no texture coordinates by projecting each along the axis its normal is nearest. See
+//! `design/rendering.md`.
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
@@ -60,6 +62,16 @@ pub fn lamps(list: impl IntoIterator<Item = (u32, f32)>) -> [u32; 4] {
         weights as u32,
         (weights >> 32) as u32,
     ]
+}
+
+/// A number of its own for the piece of instance `instance` drawing primitive `primitive`, the same each time it is
+/// placed, which turns and shifts its surface's texture.
+fn seed(instance: usize, primitive: usize) -> u32 {
+    let mut hash =
+        (instance as u32).wrapping_mul(0x9e37_79b9) ^ (primitive as u32).wrapping_mul(0x85eb_ca6b);
+    hash ^= hash >> 15;
+    hash = hash.wrapping_mul(0x2c1b_3c6d);
+    hash ^ hash >> 12
 }
 
 /// A lamp: where it is, how far its light reaches, falling to nothing there, and its colour, as bright as at its
@@ -205,10 +217,15 @@ impl From<&Lighting> for LightingUniform {
 struct MaterialUniform {
     base_color: [f32; 4],
     emissive: [f32; 4],
+    /// Its surface, if it has one: how many tiles a metre, how far each piece's is turned at most, whether its colour is
+    /// sampled, and whether its normal map is.
+    surface: [f32; 4],
+    /// The colour its surface's colour is divided by, the texture's mean, as its reciprocal.
+    flat: [f32; 4],
 }
 
 impl From<&Material> for MaterialUniform {
-    /// Its base colour, and its emission with whether it is masked.
+    /// Its base colour, and its emission with whether it is masked, without a surface.
     fn from(material: &Material) -> Self {
         Self {
             base_color: material.base_color.to_array(),
@@ -216,12 +233,29 @@ impl From<&Material> for MaterialUniform {
                 .emissive
                 .extend(f32::from(u8::from(material.masked)))
                 .to_array(),
+            surface: [0.0; 4],
+            flat: [1.0; 4],
         }
     }
 }
 
-/// One piece as its shader reads it: where its node is; where its joint matrices begin and whether it is skinned; and
-/// its lamps, as [`lamps`] packs them, or every lamp, [`EVERY_LAMP`].
+/// A texture laid on a material's faces where they have no texture coordinates, as faceted models built in code have
+/// none: its base colour, divided by `flat`, the colour's mean, linear RGB, so that it varies the colours the faces carry
+/// about themselves; and its tangent-space normal map, if it has one, which bends each face's normal within it. Each face
+/// takes its texels projected along the axis its normal is nearest, in the scene, `metres` a tile across, and each piece
+/// of an instance, turned by up to `turn` radians either way and shifted by a part of a tile of its own, or neither,
+/// `turn` nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct Surface<'a> {
+    pub color: &'a wgpu::TextureView,
+    pub normal: Option<&'a wgpu::TextureView>,
+    pub flat: Vec3,
+    pub metres: f32,
+    pub turn: f32,
+}
+
+/// One piece as its shader reads it: where its node is; where its joint matrices begin, whether it is skinned, and its
+/// [`seed`]; and its lamps, as [`lamps`] packs them, or every lamp, [`EVERY_LAMP`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Placed {
@@ -264,6 +298,8 @@ pub struct GpuModel {
     materials: Vec<wgpu::BindGroup>,
     /// Each material's uniform, as last written, and its buffer.
     uniforms: Vec<(MaterialUniform, wgpu::Buffer)>,
+    /// Each material's own texture, by its texture coordinates, or white, which a surface is bound beside.
+    textures: Vec<wgpu::TextureView>,
     plain: wgpu::BindGroup,
 }
 
@@ -365,7 +401,12 @@ pub struct Renderer {
     lighting: wgpu::Buffer,
     frames: [wgpu::BindGroup; 2],
     sampler: wgpu::Sampler,
+    /// A surface's sampler: filtered across up to four texels of the largest level a pixel spans, as the ground is seen
+    /// at a glancing angle, then between levels.
+    surface_sampler: wgpu::Sampler,
     white: wgpu::TextureView,
+    /// A normal map's flat texel, facing straight out, bound where a material has none.
+    flat_normal: wgpu::TextureView,
     reveal: Option<(Vec3, f32)>,
 }
 
@@ -448,6 +489,20 @@ pub(crate) fn mipmaps(texture: &Texture) -> Vec<(u32, u32, Vec<u8>)> {
     levels
 }
 
+/// The binding of a texture sampled in the fragment shader.
+fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
 fn upload_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -511,19 +566,20 @@ impl Renderer {
         let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Model material layout"),
             entries: &[
-                uniform_entry(0, wgpu::ShaderStages::FRAGMENT),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                // Read by the vertex shader too, which turns each piece's surface.
+                uniform_entry(0, both),
+                texture_entry(1),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // A surface's colour and normal map, and their sampler.
+                texture_entry(3),
+                texture_entry(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -634,6 +690,28 @@ impl Renderer {
                 pixels: vec![255; 4],
             },
         );
+        let flat_normal = {
+            let texture = device.create_texture_with_data(
+                queue,
+                &wgpu::TextureDescriptor {
+                    label: Some("Model flat normal"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                },
+                wgpu::util::TextureDataOrder::LayerMajor,
+                &[128, 128, 255, 255],
+            );
+            texture.create_view(&Default::default())
+        };
         Self {
             pipeline: pipeline("model_fragment", None),
             closed: pipeline("model_fragment", Some(wgpu::Face::Back)),
@@ -654,7 +732,18 @@ impl Renderer {
                 mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             }),
+            surface_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Model surface sampler"),
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                anisotropy_clamp: 4,
+                ..Default::default()
+            }),
             white,
+            flat_normal,
             reveal: None,
         }
     }
@@ -670,7 +759,24 @@ impl Renderer {
             contents: bytemuck::bytes_of(&uniform),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let binding = self.binding(device, &buffer, texture, None);
+        (binding, buffer)
+    }
+
+    /// A material's binding: its uniform `buffer`, its own `texture`, and its surface's colour and normal map, if it has a
+    /// surface, or white and a flat normal.
+    fn binding(
+        &self,
+        device: &wgpu::Device,
+        buffer: &wgpu::Buffer,
+        texture: &wgpu::TextureView,
+        surface: Option<&Surface<'_>>,
+    ) -> wgpu::BindGroup {
+        let color = surface.map_or(&self.white, |surface| surface.color);
+        let normal = surface
+            .and_then(|surface| surface.normal)
+            .unwrap_or(&self.flat_normal);
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Model material"),
             layout: &self.material_layout,
             entries: &[
@@ -686,9 +792,52 @@ impl Renderer {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(color),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.surface_sampler),
+                },
             ],
+        })
+    }
+
+    /// Draw `model`'s material `index` with `surface` laid on its faces, from the next pass, or without one, `None`, as it
+    /// was uploaded; nothing for a model with no such material. Its bindings are made again, so a caller sets a surface
+    /// only as it changes, as when its textures arrive or a tier that does not sample them is chosen.
+    pub fn set_surface(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        model: &mut GpuModel,
+        index: usize,
+        surface: Option<Surface<'_>>,
+    ) {
+        let Some((written, buffer)) = model.uniforms.get_mut(index) else {
+            return;
+        };
+        written.surface = surface.map_or([0.0; 4], |surface| {
+            [
+                1.0 / surface.metres.max(1e-3),
+                surface.turn,
+                1.0,
+                f32::from(u8::from(surface.normal.is_some())),
+            ]
         });
-        (binding, buffer)
+        written.flat = surface.map_or([1.0; 4], |surface| {
+            (1.0 / surface.flat.max(Vec3::splat(1e-3)))
+                .extend(1.0)
+                .to_array()
+        });
+        queue.write_buffer(buffer, 0, bytemuck::bytes_of(written));
+        model.materials[index] =
+            self.binding(device, buffer, &model.textures[index], surface.as_ref());
     }
 
     /// Draw `model`'s material `index` with the base colour, emission and mask of `material`, as a render world says it,
@@ -701,15 +850,21 @@ impl Renderer {
         index: usize,
         material: &Material,
     ) -> bool {
-        let uniform = MaterialUniform::from(material);
-        match model.uniforms.get_mut(index) {
-            Some((written, buffer)) if *written != uniform => {
-                queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
-                *written = uniform;
-                true
-            }
-            _ => false,
+        let Some((written, buffer)) = model.uniforms.get_mut(index) else {
+            return false;
+        };
+        // Its surface as it was set.
+        let uniform = MaterialUniform {
+            surface: written.surface,
+            flat: written.flat,
+            ..MaterialUniform::from(material)
+        };
+        if *written == uniform {
+            return false;
         }
+        queue.write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
+        *written = uniform;
+        true
     }
 
     /// Upload `model`, once, to draw any number of its instances.
@@ -719,7 +874,7 @@ impl Renderer {
             .iter()
             .map(|texture| upload_texture(device, queue, texture))
             .collect();
-        let (materials, uniforms) = model
+        let ((materials, uniforms), own): ((Vec<_>, Vec<_>), Vec<_>) = model
             .materials
             .iter()
             .map(|material| {
@@ -728,7 +883,7 @@ impl Renderer {
                     .texture
                     .map_or(&self.white, |texture| &textures[texture]);
                 let (binding, buffer) = self.material(device, uniform, texture);
-                (binding, (uniform, buffer))
+                ((binding, (uniform, buffer)), texture.clone())
             })
             .unzip();
         let mut primitives = Vec::new();
@@ -799,6 +954,8 @@ impl Renderer {
         let plain = MaterialUniform {
             base_color: [1.0; 4],
             emissive: [0.0; 4],
+            surface: [0.0; 4],
+            flat: [1.0; 4],
         };
         // Never empty, as a buffer bound must not be.
         all_vertices.resize(all_vertices.len().max(1), Vertex::zeroed());
@@ -818,6 +975,7 @@ impl Renderer {
             meshes,
             materials,
             uniforms,
+            textures: own,
             plain: self.material(device, plain, &self.white).0,
         }
     }
@@ -887,7 +1045,7 @@ impl Renderer {
             .map(|_| [Vec::new(), Vec::new()])
             .collect();
         let mut joints: Vec<[f32; 16]> = Vec::new();
-        for instance in instances {
+        for (number, instance) in instances.iter().enumerate() {
             for draw in instance.draws() {
                 let first = joints.len() as u32;
                 let skinned = draw.joints.as_ref().map_or(0, |matrices| {
@@ -902,7 +1060,7 @@ impl Renderer {
                         primitive,
                         placed: Placed {
                             world: draw.world.to_cols_array(),
-                            joints: [first, skinned, 0, 0],
+                            joints: [first, skinned, seed(number, primitive), 0],
                             lamps: EVERY_LAMP,
                         },
                         bounds: gpu.extent.placed(&draw),

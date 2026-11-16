@@ -3,8 +3,10 @@
 
 //! The render world's materials drawn by today's pipelines: which pipeline draws each, by its shading model, and the
 //! values it draws it with, so that what is submitted through the world is drawn exactly as it was before materials
-//! were. See `design/rendering.md`.
-use tomori_world::{Alpha, Material, Shading};
+//! were; and, in the tiers that sample them, the textures a stylised material lays on its faces. See
+//! `design/rendering.md`.
+use glam::Vec3;
+use tomori_world::{Alpha, Digest, Material, Projection, Shading, Tier};
 
 /// A pipeline of today's renderer, as a material's shading model chooses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,11 +55,84 @@ pub fn glow(material: &Material) -> Option<f32> {
     (pipeline(material)? == Pipeline::Cubes).then_some(material.glow.clamp(0.0, 1.0))
 }
 
+/// What the model pipeline lays on a material's faces: its base colour texture and its normal map, by digest, its base
+/// colour's mean, which its texels are divided by, and how both are laid on faces without texture coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sampled {
+    pub color: Digest,
+    pub normal: Option<Digest>,
+    pub flat: Vec3,
+    pub projection: Projection,
+}
+
+/// What the model pipeline samples of `material` in `tier`: in High and Ultra, its base colour texture and normal map,
+/// laid on its faces by its projection; in Low, nothing, so that it is drawn by its faces' own colours, as before
+/// textures were, at no cost of the GPU's; and nothing for a material the model pipeline does not draw, or without a
+/// base colour texture and a projection.
+pub fn sampled(material: &Material, tier: Tier) -> Option<Sampled> {
+    if tier == Tier::Low || pipeline(material)? != Pipeline::Models {
+        return None;
+    }
+    Some(Sampled {
+        color: material.base_color_texture?,
+        normal: material.normal_texture,
+        flat: material.flat_color,
+        projection: material.projection?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use glam::{Vec3, Vec4};
 
     use super::*;
+
+    #[test]
+    fn high_and_ultra_sample_a_stylised_material_s_textures_and_low_its_faces_colours() {
+        let (grain, bumps) = (Digest::of(b"grain"), Digest::of(b"bumps"));
+        let earth = Material::new(Shading::Stylised)
+            .with_base_color_texture(grain)
+            .with_normal_texture(bumps)
+            .with_flat_color(Vec3::new(0.25, 0.17, 0.1))
+            .with_projection(Projection::new(2.0));
+        let drawn = Sampled {
+            color: grain,
+            normal: Some(bumps),
+            flat: Vec3::new(0.25, 0.17, 0.1),
+            projection: Projection::new(2.0),
+        };
+        assert_eq!(sampled(&earth, Tier::High), Some(drawn));
+        assert_eq!(sampled(&earth, Tier::Ultra), Some(drawn));
+        assert_eq!(sampled(&earth, Tier::Low), None);
+        // Without a normal map, its colour alone.
+        let flat = Material {
+            normal_texture: None,
+            ..earth
+        };
+        assert_eq!(
+            sampled(&flat, Tier::High).map(|sampled| sampled.normal),
+            Some(None)
+        );
+        // Without a texture, or a projection, or drawn by another pipeline, nothing.
+        for material in [
+            Material {
+                base_color_texture: None,
+                ..earth
+            },
+            Material {
+                projection: None,
+                ..earth
+            },
+            Material {
+                shading: Shading::Own,
+                lamps: false,
+                ..earth
+            },
+            earth.with_haze(false),
+        ] {
+            assert_eq!(sampled(&material, Tier::High), None, "{material:?}");
+        }
+    }
 
     #[test]
     fn each_shading_model_is_drawn_by_today_s_pipeline_for_it() {
