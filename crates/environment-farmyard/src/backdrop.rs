@@ -22,7 +22,7 @@ use tomori_assets::{Limits, Mesh, Model, Node, Transform};
 use tomori_environment::sightlines::{Solid, Spot};
 
 use crate::layout::{self, BACKDROP_CENTRE, POOL, POOL_RADIUS, RIVER, RIVER_HALF_WIDTH};
-use crate::props::{self, PLAIN, palette, scatter};
+use crate::props::{self, BARK, PLAIN, STONE, palette, scatter};
 use crate::shapes::Shapes;
 
 mod ranges;
@@ -580,12 +580,17 @@ fn foothills(shapes: &mut Shapes) {
     }
 }
 
-/// The materials of the backdrop's models: the yard's.
+/// A model of one node named `name` drawing `shapes`, of the yard's materials, [`PLAIN`] but where they say another.
 pub(crate) fn built(name: &str, shapes: Shapes) -> Model {
+    built_of(name, shapes, PLAIN)
+}
+
+/// A model of one node named `name` drawing `shapes`, of the yard's materials, `material` but where they say another.
+fn built_of(name: &str, shapes: Shapes, material: usize) -> Model {
     Model::built(
         vec![Node::new(name, Transform::IDENTITY).with_mesh(0)],
         vec![0],
-        vec![Mesh::new(name, vec![shapes.primitive(PLAIN)])],
+        vec![Mesh::new(name, shapes.primitives(material))],
         props::materials(),
         &Limits::default(),
     )
@@ -704,13 +709,15 @@ fn blade(
 }
 
 fn cabbage_tree(shapes: &mut Shapes) {
-    shapes.cylinder(
-        Vec3::new(0.0, -SUNK, 0.0),
-        0.11,
-        2.3 + SUNK,
-        5,
-        colors::CABBAGE_BARK,
-    );
+    shapes.material(BARK, |shapes| {
+        shapes.cylinder(
+            Vec3::new(0.0, -SUNK, 0.0),
+            0.11,
+            2.3 + SUNK,
+            5,
+            colors::CABBAGE_BARK,
+        )
+    });
     let fork = Vec3::new(0.0, 2.2, 0.0);
     for branch in 0..3 {
         let yaw = (branch as f32 + scatter(branch + 400) * 0.4) / 3.0 * TAU;
@@ -721,7 +728,9 @@ fn cabbage_tree(shapes: &mut Shapes) {
                 1.0 + scatter(branch + 420) * 0.5,
                 yaw.cos() * out,
             );
-        shapes.beam(fork, tip, 0.09, colors::CABBAGE_BARK);
+        shapes.material(BARK, |shapes| {
+            shapes.beam(fork, tip, 0.09, colors::CABBAGE_BARK)
+        });
         // A tuft: a ball of leaves, and the longest spiking out of it.
         clump(
             shapes,
@@ -805,13 +814,15 @@ pub(crate) fn clump(
 }
 
 fn podocarp(shapes: &mut Shapes) {
-    shapes.cylinder(
-        Vec3::new(0.0, -SUNK, 0.0),
-        0.26,
-        9.0 + SUNK,
-        6,
-        colors::PODOCARP_BARK,
-    );
+    shapes.material(BARK, |shapes| {
+        shapes.cylinder(
+            Vec3::new(0.0, -SUNK, 0.0),
+            0.26,
+            9.0 + SUNK,
+            6,
+            colors::PODOCARP_BARK,
+        )
+    });
     let crown = [
         colors::PODOCARP,
         colors::PODOCARP * 1.25,
@@ -1159,7 +1170,7 @@ pub fn stone() -> Model {
             );
         }
     }
-    built("stone", shapes)
+    built_of("stone", shapes, STONE)
 }
 
 /// How many corners each ring of the waterfall rock has.
@@ -1219,7 +1230,7 @@ pub fn rock() -> Model {
         let corners = [middle, rings[2][side], rings[2][(side + 1) % ROCK_SIDES]];
         facing(&mut shapes, &corners, Vec3::Y, colors::STONE * 1.1);
     }
-    built("rock", shapes)
+    built_of("rock", shapes, STONE)
 }
 
 /// How many stones lie along the river's banks, in its shallows and about the pool's shore.

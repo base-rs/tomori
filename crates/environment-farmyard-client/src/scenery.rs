@@ -12,7 +12,9 @@
 //! the space's environment does. Its large models are split into chunks as they are uploaded ([`CHUNK`]), and its
 //! models, ferns and plaques, with their bounds, its lamps and its moonlight are submitted to the renderer's world,
 //! and once a frame what neither eye can see of them is culled, and each model's pieces, each chunk among them, and
-//! each fern are lit by the few lamps the world lists for them, rather than by every lamp.
+//! each fern are lit by the few lamps the world lists for them, rather than by every lamp. Its earth, stone and bark
+//! are laid with the textures its server serves by digest, in the tiers that sample them, once they arrive, and drawn
+//! by their faces' own colours until then and in Low (see `tomori_environment_farmyard::textures`).
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,12 +22,13 @@ use std::time::Instant;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use tomori_assets::bounds::{Aabb, Tally};
-use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer};
+use tomori_assets::gpu::{Batch, GpuModel, Lamp, Lighting, Renderer, Surface};
 use tomori_assets::{Instance, Library, Model};
 use tomori_render::scenery::{Scenery, Target, Views};
+use tomori_render::textures::{Compression, Resident};
 use tomori_render::world::{
-    Alpha, EnvironmentLight, Item, ItemId, Layer, Light, LightId, Material, MaterialId, Mobility,
-    RootId, Shading, World,
+    Alpha, Digest, EnvironmentLight, Item, ItemId, Layer, Light, LightId, Material, MaterialId,
+    Mobility, Projection, RootId, Shading, Tier, World,
 };
 use wgpu::util::DeviceExt;
 
@@ -39,6 +42,7 @@ use tomori_environment_farmyard::ferns::{self, Detail, Fern};
 use tomori_environment_farmyard::layout;
 use tomori_environment_farmyard::props::{self, evening, palette};
 use tomori_environment_farmyard::terrace;
+use tomori_environment_farmyard::textures;
 use tomori_environment_farmyard::trail;
 use tomori_render::ui_panel::{Canvas, Panel, Pipeline};
 use tomori_scene::ui_text::{Row, Style};
@@ -361,15 +365,18 @@ fn lanterns() -> [Lamp; 3] {
 pub use tomori_render::scenery::eye;
 
 /// One model the farmyard draws, uploaded once, with its instances placed, and the item it is in the render world, once
-/// submitted, with its model's materials as the world describes them, those it keeps of them, by the model's index,
-/// which paint each piece, and how many times one was drawn otherwise than it was uploaded.
+/// submitted, with its model's materials as the world describes them, and their names, those it keeps of them, by the
+/// model's index, which paint each piece, how many times one was drawn otherwise than it was uploaded, and the textures
+/// each is laid with, by digest, as last laid.
 struct Drawn {
     model: GpuModel,
     batch: Batch,
     item: Option<ItemId>,
     materials: Vec<Material>,
+    names: Vec<Option<String>>,
     painted: Vec<MaterialId>,
     repainted: usize,
+    laid: Vec<Option<(Digest, Option<Digest>)>>,
 }
 
 impl Drawn {
@@ -390,8 +397,40 @@ impl Drawn {
             batch,
             item: None,
             materials: model.materials.iter().map(Material::from).collect(),
+            names: model
+                .materials
+                .iter()
+                .map(|material| material.name.clone())
+                .collect(),
             painted: Vec::new(),
             repainted: 0,
+            laid: vec![None; model.materials.len()],
+        }
+    }
+
+    /// Lay each of its materials named for one of the farmyard's surfaces, earth, stone or bark, with that surface's
+    /// textures in the compressed form `form`, which the device samples, before it is submitted.
+    fn lay(&mut self, form: Compression) {
+        let named = self
+            .materials
+            .iter_mut()
+            .zip(&self.names)
+            .filter_map(|(material, name)| {
+                name.as_deref()
+                    .and_then(textures::Surface::named)
+                    .map(|surface| (material, surface))
+            });
+        for (material, surface) in named {
+            let asset = |map| {
+                surface
+                    .asset(map, form.name())
+                    .expect("a form the farmyard serves")
+            };
+            *material = material
+                .with_base_color_texture(asset(textures::Map::Colour).digest())
+                .with_normal_texture(asset(textures::Map::Normal).digest())
+                .with_flat_color(Vec3::from_array(surface.flat))
+                .with_projection(Projection::new(surface.metres).with_turn(surface.turn));
         }
     }
 
@@ -446,15 +485,47 @@ impl Drawn {
         );
     }
 
-    /// Draw each of its model's materials as `world` says it, as the model pipeline draws it, writing only what changed.
-    fn paint(&mut self, queue: &wgpu::Queue, models: &Renderer, world: &World) {
-        for (index, material) in self.painted.iter().enumerate() {
-            if let Some(material) = world
-                .material(*material)
-                .and_then(tomori_render::materials::model)
-            {
+    /// Draw each of its model's materials as `world` says it, as the model pipeline draws it, writing only what changed,
+    /// laid with the textures its tier samples of those `textures` holds, its normal map from when it arrives, and laid
+    /// again only as that changes.
+    fn paint(
+        &mut self,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        models: &Renderer,
+        world: &World,
+        textures: &Resident,
+    ) {
+        let tier = world.tier();
+        for (index, material) in self
+            .painted
+            .iter()
+            .enumerate()
+            .filter_map(|(index, painted)| {
+                world.material(*painted).map(|material| (index, material))
+            })
+        {
+            if let Some(drawn) = tomori_render::materials::model(material) {
                 self.repainted +=
-                    usize::from(models.set_material(queue, &mut self.model, index, &material));
+                    usize::from(models.set_material(queue, &mut self.model, index, &drawn));
+            }
+            let sampled = tomori_render::materials::sampled(material, tier);
+            let color = sampled.and_then(|sampled| textures.get(sampled.color));
+            let normal = sampled
+                .and_then(|sampled| sampled.normal)
+                .and_then(|digest| textures.get(digest).map(|view| (digest, view)));
+            let laying = sampled
+                .zip(color)
+                .map(|(sampled, _)| (sampled.color, normal.map(|(digest, _)| digest)));
+            if self.laid[index] != laying {
+                self.laid[index] = laying;
+                let surface = sampled.zip(color).map(|(sampled, color)| Surface {
+                    color,
+                    normal: normal.map(|(_, view)| view),
+                    flat: sampled.flat,
+                    metres: sampled.projection.metres,
+                    turn: sampled.projection.turn,
+                });
+                models.set_surface(device, queue, &mut self.model, index, surface);
             }
         }
     }
@@ -464,13 +535,14 @@ impl Drawn {
     /// much it then draws.
     fn cull(
         &mut self,
-        queue: &wgpu::Queue,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
         models: &Renderer,
+        textures: &Resident,
         views: &Views<'_>,
         listed: bool,
     ) -> Tally {
         if let Some((world, _)) = views.world() {
-            self.paint(queue, models, world);
+            self.paint((device, queue), models, world, textures);
         }
         match self.item.zip(views.world()).filter(|_| listed) {
             Some((item, (world, _))) => models.light(
@@ -1336,6 +1408,11 @@ pub struct Farmyard {
     /// lit by, each by those listed for it, if `listed`, or by every one.
     lit: Option<Vec<Lamp>>,
     listed: bool,
+    /// The device, which lays textures as they arrive, the textures its surfaces are laid with, as they arrive, and the
+    /// library they arrive in.
+    device: wgpu::Device,
+    textures: Resident,
+    library: &'static Library,
 }
 
 impl Farmyard {
@@ -1448,7 +1525,19 @@ impl Farmyard {
         let fire = Fire::new(target, &pipeline_layout);
         let trails = Trails::new(target, &pipeline_layout);
         let ferns = Ferns::new(target, &pipeline_layout);
-        Self {
+        // Its surfaces' textures in the form the device samples, if any.
+        let form = Compression::sampled(device.features());
+        let assets = form.into_iter().flat_map(|form| {
+            textures::SURFACES.iter().flat_map(move |surface| {
+                [textures::Map::Colour, textures::Map::Normal].map(|map| {
+                    surface
+                        .asset(map, form.name())
+                        .expect("a form the farmyard serves")
+                })
+            })
+        });
+        let textures = Resident::new(assets);
+        let mut farmyard = Self {
             sky,
             cameras,
             bindings,
@@ -1474,7 +1563,48 @@ impl Farmyard {
             lamps: Vec::new(),
             lit: None,
             listed: true,
+            device: device.clone(),
+            textures,
+            library: Library::shared(),
+        };
+        if let Some(form) = form {
+            for drawn in farmyard.drawn_mut() {
+                drawn.lay(form);
+            }
         }
+        farmyard
+    }
+
+    /// Every model it draws, but the chickens, which have no surfaces of the farmyard's.
+    fn drawn_mut(&mut self) -> impl Iterator<Item = &mut Drawn> {
+        let Self {
+            yard,
+            coop,
+            campsite,
+            sticks,
+            logs,
+            beach,
+            stones,
+            backdrop,
+            ..
+        } = self;
+        [yard, coop, campsite, sticks, logs, beach, stones]
+            .into_iter()
+            .chain([
+                &mut backdrop.trail,
+                &mut backdrop.terrace,
+                &mut backdrop.foothills,
+                &mut backdrop.stones,
+                &mut backdrop.rock,
+            ])
+            .chain(&mut backdrop.plants)
+    }
+
+    /// Its surfaces' textures read from `library`, rather than the program's, as they arrive there, for pictures and
+    /// tests.
+    pub fn with_textures_from(mut self, library: &'static Library) -> Self {
+        self.library = library;
+        self
     }
 
     /// The trails burning marshmallows paint in the air, to draw one as if by hand, for pictures and measures; what is
@@ -1719,8 +1849,18 @@ impl Scenery for Farmyard {
             plaques,
             lit,
             listed,
+            device,
+            textures,
+            library,
             ..
         } = self;
+        // Its surfaces' textures, one a frame as they arrive, where its tier samples them.
+        if views
+            .world()
+            .is_some_and(|(world, _)| world.tier() != Tier::Low)
+        {
+            textures.poll(device, queue, library);
+        }
         // The lamps the world lights it by this frame, in its order, which each piece's and fern's lamps index.
         match views.world() {
             Some((world, root)) => {
@@ -1753,7 +1893,7 @@ impl Scenery for Farmyard {
             .chain(&mut backdrop.plants)
             .chain([&mut backdrop.stones, &mut backdrop.rock])
         {
-            tally += drawn.cull(queue, models, views, listed);
+            tally += drawn.cull((device, queue), models, textures, views, listed);
         }
         tally += ferns.cull(views, listed);
         // The ferns are placed for the first eye, as they are again when it is prepared.

@@ -769,15 +769,42 @@ fn the_backdrop_is_modest_for_the_quest() {
         (Kind::Flax, 39),
     ] {
         let model = kind.model().unwrap();
+        let primitives = &model.meshes[0].primitives;
         assert_eq!(
-            model.meshes[0].primitives[0].indices.len() / 3,
+            primitives
+                .iter()
+                .map(|primitive| primitive.indices.len() / 3)
+                .sum::<usize>(),
             count,
+            "{kind:?}"
+        );
+        // A tree's trunk is of bark, apart; the rest of it plain.
+        let materials: Vec<Option<usize>> = primitives
+            .iter()
+            .map(|primitive| primitive.material)
+            .collect();
+        let bark = matches!(kind, Kind::Podocarp | Kind::CabbageTree);
+        assert_eq!(
+            materials,
+            if bark {
+                vec![Some(PLAIN), Some(props::BARK)]
+            } else {
+                vec![Some(PLAIN)]
+            },
             "{kind:?}"
         );
     }
     assert_eq!(Kind::ALL.len(), 5);
-    // A river stone is fifteen, drawn once for all of them.
+    // A river stone is fifteen, drawn once for all of them, of stone, as the waterfall rock is.
     assert_eq!(stone().meshes[0].primitives[0].indices.len() / 3, 15);
+    for model in [stone(), rock()] {
+        let materials: Vec<Option<usize>> = model.meshes[0]
+            .primitives
+            .iter()
+            .map(|primitive| primitive.material)
+            .collect();
+        assert_eq!(materials, [Some(props::STONE)]);
+    }
 }
 
 /// How high the drawn ground is at `point`, from the triangle of `model`'s mesh beneath it, if any.

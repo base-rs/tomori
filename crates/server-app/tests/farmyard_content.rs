@@ -1,9 +1,10 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The `tomori-server` executable's farmyard serves its chicken by digest, with its author's attribution, and a client
-//! presenting the farmyard fetches it into its cache, from which a library with nothing bundled loads it, as a headset
-//! that does not bundle the chicken would, and keeps it across a restart. See `design/content.md`.
+//! The `tomori-server` executable's farmyard serves its chicken by digest, with its author's attribution, and its
+//! surfaces' textures, and a client presenting the farmyard fetches the chicken and the textures in the form its GPU
+//! samples into its cache, from which a library with nothing bundled loads them, as a headset that does not bundle the
+//! chicken would, and keeps them across a restart. See `design/content.md`.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use tomori_server::fake::FakeBackend;
 use tomori_server::test_support::{TestServer, TextTranscriber};
 
 #[test]
-fn a_client_presenting_the_farmyard_fetches_its_chicken_by_digest_and_loads_it_from_its_cache_alone()
+fn a_client_presenting_the_farmyard_fetches_its_chicken_and_textures_by_digest_and_loads_them_from_its_cache_alone()
  {
     let environments = tomori_server_app::builder().environments().to_vec();
     let farmyard = environments
@@ -35,19 +36,32 @@ fn a_client_presenting_the_farmyard_fetches_its_chicken_by_digest_and_loads_it_f
         version: tomori_environment_farmyard::VERSION,
     }]);
     options.content = Some(cache.clone());
+    // A headset, which samples ASTC.
+    options.textures = Some("astc");
     let client = tomori_client::Client::connect(options).unwrap();
     let digest = chicken::asset().digest();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !cache.contains(&digest) {
-        assert!(Instant::now() < deadline, "the chicken is fetched");
+    let (astc, bc7): (Vec<_>, Vec<_>) = tomori_environment_farmyard::textures::assets()
+        .partition(|asset| asset.name().ends_with(".astc.ktx2"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !cache.contains(&digest) || !astc.iter().all(|asset| cache.contains(&asset.digest())) {
+        assert!(
+            Instant::now() < deadline,
+            "the chicken and the textures are fetched"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
     client.close();
+    // Only those it samples.
+    assert_eq!((astc.len(), bc7.len()), (6, 6));
+    assert!(!bc7.iter().any(|asset| cache.contains(&asset.digest())));
     // Loaded from what was fetched alone, as the server and every client load it.
     let library = Library::default();
     library.add(cache.clone());
     let fetched = Chicken::load(&library).expect("the fetched chicken loads");
     assert!(fetched.stride() > 0.0);
+    for asset in &astc {
+        assert!(library.bytes(asset).unwrap().starts_with(b"\xabKTX 20\xbb"));
+    }
     // And kept: the next run reads it without fetching it again.
     drop(library);
     drop(cache);

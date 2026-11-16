@@ -38,6 +38,7 @@ mod shapes;
 #[cfg(feature = "side")]
 pub mod side;
 pub mod terrace;
+pub mod textures;
 pub mod trail;
 pub mod walkable;
 pub mod workbench;

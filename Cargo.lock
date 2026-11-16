@@ -4213,6 +4213,7 @@ dependencies = [
  "tomori-environment",
  "tomori-physics",
  "tomori-protocol",
+ "tomori-texture-gen",
 ]
 
 [[package]]
