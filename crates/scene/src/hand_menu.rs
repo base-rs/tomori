@@ -203,6 +203,8 @@ pub enum MenuKey {
     PairingWindow,
     /// Say a new display name with the next press of X, or not after all.
     Rename,
+    /// Step this participant's own colour to the next.
+    Colour,
     /// Say the space's new title with the next press of X, or not after all, as an owner.
     RenameSpace,
     /// Let the space's title follow its agent session's again, as an owner.
@@ -343,6 +345,9 @@ pub struct Model {
     pub pointed: Option<MenuKey>,
     /// This device's Feedback setting.
     pub feedback: tomori_client::feedback::Settings,
+    /// This participant's colour, where they may choose it, in a space they take part in on a server that keeps
+    /// colours: the colour they chose, if any, and the colour they are shown in. See `design/people.md`.
+    pub colour: Option<(Option<u16>, u16)>,
 }
 
 /// The joined space, as the menu shows it.
@@ -407,6 +412,8 @@ pub enum Choice {
     PairingWindow,
     /// Say a new display name with the next press of X, or not after all.
     Rename,
+    /// Step this participant's own colour to the next: each of a few in turn, then their name's again.
+    Colour,
     /// Say the space's new title with the next press of X, or not after all.
     RenameSpace,
     /// Let the space's title follow its agent session's again.
@@ -1070,6 +1077,18 @@ pub fn items(section: Option<Section>, model: &Model) -> Vec<Item> {
                     },
                 );
             }
+            // Their own colour, with a swatch of it, which choosing steps through a few colours and back to their name's.
+            if let Some((chosen, shown)) = model.colour {
+                let colour = match chosen {
+                    Some(hue) => tomori_protocol::hue::name(hue),
+                    None => "your name's".to_owned(),
+                };
+                items.push(Item {
+                    key: MenuKey::Colour,
+                    kind: MenuKind::Person(tomori_protocol::hue::rgb(shown)),
+                    text: format!("Your colour: {colour}"),
+                });
+            }
             // What the others see of this participant, on this device, and in a line what that means; one row each,
             // whichever it is, so that choosing it moves no row. See `design/people.md`.
             button(
@@ -1150,6 +1169,7 @@ pub fn text(section: Option<Section>, model: &Model) -> Vec<String> {
         .map(|item| match item.kind {
             MenuKind::Section { .. } | MenuKind::Button => format!("[{}]", item.text),
             MenuKind::Heading => item.text.to_uppercase(),
+            MenuKind::Person(_) if item.key == MenuKey::Colour => format!("[{}]", item.text),
             MenuKind::Person(_) => format!("  {}", item.text),
             _ => item.text,
         })
@@ -1279,6 +1299,7 @@ impl HandMenu {
             MenuKey::Pair => Some(Choice::Pair),
             MenuKey::PairingWindow => Some(Choice::PairingWindow),
             MenuKey::Rename => Some(Choice::Rename),
+            MenuKey::Colour => Some(Choice::Colour),
             MenuKey::RenameSpace => Some(Choice::RenameSpace),
             MenuKey::FollowSession => Some(Choice::FollowSession),
             MenuKey::Text(_) | MenuKey::Cue | MenuKey::WristCue => None,

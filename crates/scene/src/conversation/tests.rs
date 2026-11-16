@@ -5917,6 +5917,89 @@ fn speaking_over_a_replay_stops_it_and_asking_again_hears_what_was_skipped() {
 }
 
 #[test]
+fn a_participant_steps_their_colour_in_the_hand_menu_and_chooses_one_on_the_console() {
+    use crate::hand_menu::Choice;
+    let ada = tomori_protocol::hue::default("Ada");
+    // A server that does not keep colours offers none, and refuses to choose.
+    let mut older = joined(|_| {});
+    assert_eq!(older.menu_model().colour, None);
+    older.recolour("teal");
+    assert!(sent(&mut older).is_empty());
+    assert_eq!(
+        older.menu_model().notice.as_deref(),
+        Some("This server does not keep colours here.")
+    );
+
+    let mut conversation = joined(|space| space.colours = true);
+    assert_eq!(conversation.menu_model().colour, Some((None, ada)));
+    // From their name's to the first of the few, and on.
+    conversation.choose_menu(Choice::Colour);
+    assert_eq!(
+        sent(&mut conversation),
+        [ClientMessage::SetColour { colour: Some(20) }]
+    );
+    assert_eq!(
+        conversation.menu_model().notice.as_deref(),
+        Some("Changing your colour to coral.")
+    );
+    let chosen = |hue| {
+        space(|space| {
+            space.colours = true;
+            space.participants[0].colour = hue;
+        })
+    };
+    conversation.apply(chosen(Some(20)));
+    assert_eq!(conversation.menu_model().colour, Some((Some(20), 20)));
+    conversation.choose_menu(Choice::Colour);
+    assert_eq!(
+        sent(&mut conversation),
+        [ClientMessage::SetColour { colour: Some(58) }]
+    );
+    // From the last, or from a colour none of the few is, back to their name's.
+    for hue in [325, 100] {
+        conversation.apply(chosen(Some(hue)));
+        conversation.choose_menu(Choice::Colour);
+        assert_eq!(
+            sent(&mut conversation),
+            [ClientMessage::SetColour { colour: None }]
+        );
+        assert_eq!(
+            conversation.menu_model().notice.as_deref(),
+            Some("Changing your colour back to your name's.")
+        );
+    }
+    // On the console, by name, degrees or default; what no person may be is refused here at once.
+    conversation.recolour("Teal");
+    conversation.recolour("140");
+    conversation.recolour("default");
+    assert_eq!(
+        sent(&mut conversation),
+        [
+            ClientMessage::SetColour { colour: Some(165) },
+            ClientMessage::SetColour { colour: Some(140) },
+            ClientMessage::SetColour { colour: None },
+        ]
+    );
+    conversation.recolour("240");
+    assert!(sent(&mut conversation).is_empty());
+    assert!(
+        conversation
+            .menu_model()
+            .notice
+            .unwrap()
+            .starts_with("Colour not changed: Hue 240 is kept for the agent")
+    );
+    // Disconnected, nothing is sent.
+    conversation.apply(Event::State(ConnectionState::Disconnected {
+        reason: tomori_client::Disconnect::Timeout,
+        retry_in: Duration::from_secs(2),
+    }));
+    conversation.take_actions();
+    conversation.recolour("teal");
+    assert!(sent(&mut conversation).is_empty());
+}
+
+#[test]
 fn the_space_section_switches_mode_and_speech_and_leaves_once_confirmed() {
     let mut conversation = joined(|space| {
         space.speech = SpeechSetting::Brief;

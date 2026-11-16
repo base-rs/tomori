@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! The agent's `set_my_name`: whoever spoke renames the device they speak from by saying so, as in "my name is Ayoko", such as when someone else puts on a headset. Only the speaker's own name changes, as the server checks who spoke, never anyone else's, and only their name: their identity, token, role and what they may do stay as they were, so a person borrowing an owner's headset still acts as that owner. See `design/security.md`.
+//! The agent's `set_my_name` and `set_my_colour`: whoever spoke renames the device they speak from by saying so, as in "my name is Ayoko", such as when someone else puts on a headset. Only the speaker's own name changes, as the server checks who spoke, never anyone else's, and only their name: their identity, token, role and what they may do stay as they were, so a person borrowing an owner's headset still acts as that owner. So too, asking for a colour, as in "make me teal", changes only the speaker's colour, checked alike. See `design/security.md` and `design/people.md`.
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -153,6 +153,105 @@ impl Hub {
             id,
             changed,
             sharing,
+        })
+    }
+}
+
+/// What `set_my_colour` did, for the tool's result.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Recoloured {
+    /// The space whose agent coloured them.
+    pub space: String,
+    /// Their handle, as `presence` gives it, such as `Ayoko#23`.
+    pub id: String,
+    /// The colour they chose now, or none for their name's.
+    pub colour: Option<u16>,
+    /// Whether their colour changed: the colour they have already changes nothing.
+    pub changed: bool,
+}
+
+impl Hub {
+    /// Choose `colour`, as a person says one ([`tomori_protocol::hue::parse`]), as the own colour of whoever's words the
+    /// agent of the space bound to `session` was given last, `requested_by`, as they asked: kept with their token beside
+    /// their name, or, without one, while the server keeps them, as their own `set_colour` is. Checked as `set_my_name`
+    /// is, who spoke and that they may ([`RENAMES`]), and counted with their own choices, at most
+    /// [`super::COLOUR_LIMIT`] a minute. Logged at info. See `design/people.md`.
+    pub(crate) fn agent_set_my_colour(
+        &self,
+        session: &str,
+        colour: &str,
+        requested_by: Option<&str>,
+    ) -> Result<Recoloured, String> {
+        let colour = tomori_protocol::hue::parse(colour)
+            .map_err(|error| format!("Colour not changed: {error}"))?;
+        let mut state = self.lock();
+        let space = self.calling_space(&state, session)?;
+        let requester = self.requester(&state, &space, requested_by, RENAMES)?;
+        // The speaker, whom the check above found under this lock; only their colour changes.
+        let source = state
+            .given(&space)
+            .map(|given| given.source)
+            .expect("the words checked are given");
+        let (key, principal, name, previous) = state
+            .participants
+            .iter()
+            .find(|(_, participant)| participant.source == source)
+            .map(|(key, participant)| {
+                (
+                    key.clone(),
+                    participant.principal.clone(),
+                    participant.name.clone(),
+                    participant.colour,
+                )
+            })
+            .expect("whoever asked is known, as the check found");
+        let changed = previous != colour;
+        if changed {
+            if !state.recolours.admit_up_to(
+                principal.as_deref().unwrap_or(&key),
+                Instant::now(),
+                super::COLOUR_LIMIT,
+            ) {
+                log::info!(
+                    "The agent of space {space}, as {} asked, was refused a colour: the most changes in a minute.",
+                    requester.logged()
+                );
+                return Err(format!(
+                    "{name} has changed their colour {} times in the last minute, the most Tomori allows, so it stays as it is. Ask them to wait a minute and say it again.",
+                    super::COLOUR_LIMIT
+                ));
+            }
+            match (principal, self.token_store()) {
+                (Some(principal), Some(tokens)) => {
+                    drop(state);
+                    let (again, kept) = self.write_colour(&tokens, &principal, colour);
+                    state = again;
+                    kept.map_err(|unkept| match unkept {
+                        Unkept::Revoked => {
+                            format!("Colour not changed: {name}'s token is no longer issued.")
+                        }
+                        Unkept::Unwritten => format!(
+                            "Colour not changed: Tomori could not keep {name}'s colour. Ask them to say it again."
+                        ),
+                    })?;
+                }
+                // Anyone without a token, as in `--auth open` mode, is coloured only while the server keeps them.
+                _ => state.recolour(|candidate, _| candidate == key, colour),
+            }
+            log::info!(
+                "The agent of space {space}, as {} asked, changed their colour from {previous:?} to {colour:?}.",
+                requester.logged()
+            );
+        }
+        let tag = state
+            .participants
+            .get(&key)
+            .and_then(|participant| participant.tag);
+        Ok(Recoloured {
+            space,
+            id: crate::presence::handle(&name, tag),
+            colour,
+            changed,
         })
     }
 }

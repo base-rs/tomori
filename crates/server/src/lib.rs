@@ -82,11 +82,11 @@ pub use environments::{
     Environment, EnvironmentWall, FOLLOW_HEIGHTS, STATUS_SLOTS, StatusWall, WALL_NAME_BYTES,
     valid_wall_name,
 };
-pub use hub::CLOSED_SPACES;
 pub use hub::agent_actions::ACT_TIMEOUT;
 pub use hub::agent_inspect::{
     FULL_PER_MINUTE, INSPECT_TIMEOUT, INSPECTION_BYTES, RECHECK_EVERY, RESULT_BYTES,
 };
+pub use hub::{CLOSED_SPACES, COLOUR_LIMIT};
 pub use hub::{
     Closing, KNOCK_COOLDOWN, KNOCK_TIMEOUT, KNOCKS_PER_SPACE, Opener, PAIRING_ATTEMPTS,
     PAIRING_OPEN_FOR, PAIRING_TIMEOUT, PAIRING_WINDOW, PairingEvent, PairingState, PairingView,

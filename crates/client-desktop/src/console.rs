@@ -19,7 +19,7 @@ macro_rules! say {
     };
 }
 
-const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, the hand menu's Spoken replies row), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), feedback ambience off|low|medium|high (how loud an environment's ambience plays), others (show what the others in a space see of you), others everything|head|name (let them see everything, your head only, or your name only, which hides you from view, not from the server), q (quit).";
+const HELP: &str = "Commands, one or more per line: u/d/l/r (left stick), < > (right stick left and right), ^ v (right stick up and down: select a waiting entry in the queue strip, which a removes), a, b (close or dismiss), leave (hold B: leave the space), y, x (start talking to the agent, x again to send), point (list the workers), point N (point at worker N, so that what you say next is about it; point off stops), mute (spoken replies, the hand menu's Spoken replies row), replay (the latest reply, or stop it, right stick click), p (pair this device as an owner, or cancel), o (as an owner, open pairing for a new device, or close it), k (knock to take part in the space you watch), + or - (admit or decline the first knock waiting), m (show people & security), s (show the space: its title, mode, speech and this terminal's settings), i (show the agent's instructions), t (show the right wrist's transcript; tu/td/tl/tr move on it, ta is its A and tb its B), instruct TEXT (as an owner, give the space you are in, or else the next space you create, TEXT as its own instructions; instruct alone removes them), environment ID (as an owner, change the space's environment, for everyone in it, to one that s lists), delete (as an owner, say what deleting the space you are in does), delete space (delete it for everyone in it, keeping its agent session), delete space and session (delete its agent session too, with its conversation, which cannot be undone), name NAME (change your display name, which the server keeps with your token, on every device using it), colour HUE|NAME|default (in a space, choose your own colour, by a hue in degrees or one of coral, yellow, lime, green, teal, magenta and pink, kept with your token beside your name; default goes back to your name's), title TITLE (as an owner, rename the space you are in, for everyone; title alone lets it follow its agent session's title again), feedback (show the Feedback setting), feedback sounds|vibration full|reduced|off (change it), feedback mono on|off (hear every source in both ears alike), feedback ambience off|low|medium|high (how loud an environment's ambience plays), others (show what the others in a space see of you), others everything|head|name (let them see everything, your head only, or your name only, which hides you from view, not from the server), q (quit).";
 
 /// `delete` says what deleting the joined space does, as the hand menu asks before deleting it; `delete space` deletes it for everyone in it, keeping its agent session, and `delete space and session` deletes its session too, the words themselves asking explicitly, as the menu's second question does. See `design/hand-menu.md`.
 fn delete(conversation: &mut Conversation, argument: &str, out: &mut Out) {
@@ -234,6 +234,14 @@ fn serve(
                 // Changing this participant's display name; the rest of the line is the name.
                 if let Some(rest) = line.trim_start().strip_prefix("name ") {
                     conversation.rename(rest);
+                    poll(conversation);
+                    let notice = conversation.menu_model().notice.unwrap_or_default();
+                    say!(out, "({notice})");
+                    continue;
+                }
+                // Choosing this participant's own colour; the rest of the line is a hue, a colour's name or default.
+                if let Some(rest) = line.trim_start().strip_prefix("colour ") {
+                    conversation.recolour(rest);
                     poll(conversation);
                     let notice = conversation.menu_model().notice.unwrap_or_default();
                     say!(out, "({notice})");
@@ -809,6 +817,42 @@ mod tests {
         );
         let (out, _) = session(&mut conversation, &["m"]);
         assert!(out.contains("You: Ada ("), "{out}");
+    }
+
+    #[test]
+    fn colour_chooses_your_own_colour_where_the_server_keeps_colours() {
+        let mut conversation = joined();
+        let (out, _) = session(&mut conversation, &["colour teal"]);
+        assert!(
+            out.contains("(This server does not keep colours here.)"),
+            "{out}"
+        );
+        conversation.apply(space(|state| state.colours = true));
+        conversation.take_actions();
+        let (out, _) = session(
+            &mut conversation,
+            &["colour purple", "colour teal", "colour default"],
+        );
+        assert!(
+            out.contains("(Colour not changed: A colour is one of coral,"),
+            "{out}"
+        );
+        assert!(out.contains("(Changing your colour to teal.)"), "{out}");
+        assert!(
+            out.contains("(Changing your colour back to your name's.)"),
+            "{out}"
+        );
+        let colour = |colour| {
+            tomori_client::connection::Action::Send(tomori_protocol::ClientMessage::SetColour {
+                colour,
+            })
+        };
+        assert_eq!(
+            conversation.take_actions(),
+            [colour(Some(165)), colour(None)]
+        );
+        let (out, _) = session(&mut conversation, &["m"]);
+        assert!(out.contains("Your colour: "), "{out}");
     }
 
     #[test]

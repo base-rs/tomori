@@ -457,6 +457,47 @@ fn a_participant_can_say_a_new_name_where_the_server_renames() {
 }
 
 #[test]
+fn a_participant_steps_their_own_colour_with_a_swatch_of_it() {
+    let mut model = Model {
+        name: "Ada".into(),
+        role: ConnectionRole::Collaborator,
+        in_space: true,
+        renames: true,
+        colour: Some((None, 115)),
+        ..Default::default()
+    };
+    let rows = items(Some(Section::PeopleAndSecurity), &model);
+    let at = rows
+        .iter()
+        .position(|item| item.key == MenuKey::Colour)
+        .unwrap();
+    // After changing the name, in the colour they are shown in.
+    assert_eq!(rows[at - 1].key, MenuKey::Rename);
+    assert_eq!(rows[at].text, "Your colour: your name's");
+    assert_eq!(
+        rows[at].kind,
+        MenuKind::Person(tomori_protocol::hue::rgb(115))
+    );
+    model.colour = Some((Some(165), 165));
+    assert!(texts(&items(Some(Section::PeopleAndSecurity), &model)).contains(&"Your colour: teal"));
+    model.colour = Some((Some(140), 140));
+    assert!(texts(&items(Some(Section::PeopleAndSecurity), &model)).contains(&"Your colour: 140°"));
+    // The console marks it as one to choose.
+    assert!(
+        text(Some(Section::PeopleAndSecurity), &model).contains(&"[Your colour: 140°]".to_owned())
+    );
+    let mut menu = HandMenu::default();
+    assert_eq!(menu.choose(&MenuKey::Colour), Some(Choice::Colour));
+    // Where colours are not kept, or not theirs to choose, nothing is offered.
+    model.colour = None;
+    assert!(
+        !items(Some(Section::PeopleAndSecurity), &model)
+            .iter()
+            .any(|item| item.key == MenuKey::Colour)
+    );
+}
+
+#[test]
 fn an_owner_renames_the_space_aloud_or_lets_it_follow_its_session_and_everyone_sees_who_named_it() {
     let mut model = in_space(ConnectionRole::Owner);
     let space = model.space.as_mut().unwrap();

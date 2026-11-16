@@ -344,6 +344,27 @@ fn set_my_name_tool(change: &Value) -> Value {
     })
 }
 
+/// The `set_my_colour` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
+fn set_my_colour_tool(change: &Value) -> Value {
+    let names: Vec<&str> = tomori_protocol::hue::SWATCHES
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    json!({
+        "name": "set_my_colour",
+        "description": "Change the colour the person who just spoke is drawn and shown in, for everyone, on every device using their token and in every space, when they ask for it, as in \"make me teal\", \"I'd like to be pink\" or \"go back to my own colour\": their figure, their name in the transcript and their swatch take it, and it stays until they change it again. By default each person's colour comes from their name. Only the speaker's colour changes, never anyone else's, and nothing else about them. An owner or a collaborator may, a few times a minute. Then confirm it briefly, as in \"You're teal now\".",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "colour": { "type": "string", "maxLength": 32, "description": format!("The colour they asked for: one of {}; a hue in whole degrees, 16 to 27, 54 to 175 or 280 to 355, since the rest are kept for you and for states such as waiting and failure; or default, for their name's colour again.", names.join(", ")) },
+                "requested_by": { "type": "string", "maxLength": crate::limits::NAME_BYTES, "description": format!("Whoever asked, as Tomori gave you their words. {REQUESTED_BY}") },
+            },
+            "required": ["colour", "requested_by"],
+        },
+        "annotations": change,
+    })
+}
+
 /// The `place_worker` tool's definition, apart from the rest so that the list's macro stays within its recursion limit.
 fn place_worker_tool(change: &Value) -> Value {
     json!({
@@ -445,6 +466,7 @@ fn tools() -> Value {
     let set_wall = set_wall_tool(&change);
     let act = act_tool();
     let set_my_name = set_my_name_tool(&change);
+    let set_my_colour = set_my_colour_tool(&change);
     let mut tools = json!([
         {
             "name": "server",
@@ -740,6 +762,7 @@ fn tools() -> Value {
         .position(|tool| tool["name"] == "rename_space")
         .expect("rename_space is listed");
     list.insert(after + 1, set_my_name);
+    list.insert(after + 2, set_my_colour);
     // Beside set_wall, the other tool that sets a wall.
     let after = list
         .iter()
@@ -1027,6 +1050,7 @@ async fn call(
         "set_environment" => session.and_then(|session| set_environment(hub, session, arguments)),
         "rename_space" => session.and_then(|session| rename_space(hub, session, arguments)),
         "set_my_name" => session.and_then(|session| set_my_name(hub, session, arguments)),
+        "set_my_colour" => session.and_then(|session| set_my_colour(hub, session, arguments)),
         "pairing" => session.and_then(|session| hub.tool_pairing(session).map(structured)),
         "confirm_pairing" => session.and_then(|session| confirm_pairing(hub, session, arguments)),
         "decline_pairing" => session.and_then(|session| {
@@ -1794,6 +1818,31 @@ fn set_my_name(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Val
         "name": renamed.name,
         "id": renamed.id,
         "changed": renamed.changed,
+        "next": next,
+    })))
+}
+
+/// The `set_my_colour` tool: whoever spoke, in the colour they asked for, and what the agent is to say. See
+/// `design/people.md`.
+fn set_my_colour(hub: &Hub, session: &str, arguments: Arguments<'_>) -> Result<Value, String> {
+    let colour = text(arguments, "colour")?;
+    crate::limits::check(colour, 32, "colour")?;
+    let recoloured = hub.agent_set_my_colour(session, colour, requested_by(arguments)?)?;
+    let said = recoloured.colour.map_or_else(
+        || "their name's colour".to_owned(),
+        tomori_protocol::hue::name,
+    );
+    let next = if recoloured.changed {
+        format!("Tell them briefly that they are now {said}.")
+    } else {
+        format!("They are already {said}, so nothing changed; say so briefly.")
+    };
+    Ok(structured(json!({
+        "space": recoloured.space,
+        "id": recoloured.id,
+        "colour": recoloured.colour.map_or_else(|| "default".to_owned(), tomori_protocol::hue::name),
+        "hue": recoloured.colour,
+        "changed": recoloured.changed,
         "next": next,
     })))
 }
