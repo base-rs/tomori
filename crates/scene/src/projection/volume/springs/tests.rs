@@ -102,41 +102,44 @@ fn a_node_held_fans_what_feeds_it_left_what_it_feeds_right_and_the_rest_falls_ba
     }
     // It comes to rest, and sleeps once nothing is held.
     assert!(!springs.asleep());
-    springs.let_go(0, true);
+    springs.let_go(0);
     run(&mut springs, 3.0);
     assert!(springs.asleep());
 }
 
 #[test]
-fn let_go_outside_a_node_springs_home_and_inside_it_stays_pinned_until_unpinned() {
+fn a_node_let_go_stays_exactly_where_it_was_let_go_until_everything_is_unpinned() {
     let mut springs = hub();
     let home = springs.positions().to_vec();
-    springs.hold(0, 0, Vec3::new(0.0, 0.0, 600.0));
+    // Let go far before the volume, 60 cm towards its holder, it stays there, the rest settling about it.
+    let far = Vec3::new(0.0, 0.0, 600.0);
+    springs.hold(0, 0, far);
     run(&mut springs, 1.0);
-    springs.let_go(0, false);
-    assert!(!springs.done());
+    springs.let_go(0);
+    run(&mut springs, 5.0);
+    assert!(springs.pinned(0));
+    assert_eq!(springs.positions()[0], far);
+    assert!(springs.asleep() && !springs.done());
+    // Let go within it, it stays there too.
+    let pin = Vec3::new(120.0, 80.0, 0.0);
+    springs.hold(1, 6, pin);
+    run(&mut springs, 0.5);
+    springs.let_go(1);
+    run(&mut springs, 5.0);
+    assert!(springs.pinned(6) && springs.pinned(0));
+    assert_eq!(springs.positions()[6], pin);
+    // Taken up again, it is held, not pinned.
+    springs.hold(0, 6, pin);
+    assert!(!springs.pinned(6));
+    springs.let_go(0);
+    // Unpinned, everything springs home and it is done.
+    springs.unpin();
+    assert!(!springs.any_pinned());
     run(&mut springs, 3.0);
     assert!(springs.done());
     for (at, home) in springs.positions().iter().zip(&home) {
         assert!(at.distance(*home) <= 0.5, "{at} {home}");
     }
-    // Let go within it, it stays where it was let go, the rest settling about it, until unpinned.
-    let pin = Vec3::new(120.0, 80.0, 0.0);
-    springs.hold(1, 6, pin);
-    run(&mut springs, 0.5);
-    springs.let_go(1, true);
-    run(&mut springs, 5.0);
-    assert!(springs.pinned(6) && springs.any_pinned());
-    assert_eq!(springs.positions()[6], pin);
-    assert!(springs.asleep() && !springs.done());
-    // Taken up again, it is held, not pinned; let go outside and unpinned, everything is home.
-    springs.hold(0, 6, pin);
-    assert!(!springs.pinned(6));
-    springs.let_go(0, true);
-    springs.unpin();
-    assert!(!springs.any_pinned());
-    run(&mut springs, 3.0);
-    assert!(springs.done());
 }
 
 #[test]
@@ -152,7 +155,7 @@ fn two_hands_hold_two_nodes_and_one_node_passes_between_them() {
     assert_eq!((springs.held(0), springs.held(1)), (None, Some(3)));
     // Moving or letting go of a hand holding nothing does nothing, nor holding a node it does not have.
     springs.move_to(0, Vec3::ONE);
-    springs.let_go(0, true);
+    springs.let_go(0);
     springs.hold(0, 99, Vec3::ZERO);
     assert_eq!(springs.held(0), None);
     assert!(!springs.any_pinned());

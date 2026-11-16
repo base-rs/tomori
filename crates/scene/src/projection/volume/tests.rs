@@ -554,7 +554,7 @@ mod projector {
     }
 
     #[test]
-    fn the_grip_on_a_node_pulls_it_with_the_ray_its_neighbours_following_and_let_go_without_it_springs_home()
+    fn the_grip_on_a_node_pulls_it_with_the_ray_its_neighbours_following_and_let_go_beyond_it_stays_there()
      {
         let (projection, pose) = leaked();
         let mut projector = Projector::default();
@@ -608,13 +608,34 @@ mod projector {
             "{:?}",
             instances[0].position
         );
-        // Let go out there, it is felt and springs home, and the server's layout is drawn again.
+        // Let go out there, as the hand opening turns the ray away, it is felt and stays exactly where it was drawn in
+        // the hand, pinned, the rest settling about it.
         let output = projector.update(gripped(
-            input(Some(projection), towards(b), false, Hold::default(), now),
+            input(
+                Some(projection),
+                towards(Vec3::new(5.0, 1.5, -1.2)),
+                false,
+                Hold::default(),
+                now,
+            ),
             false,
         ));
         assert_eq!(output.pulled, Some(crate::sides::Side::Right));
         assert!(!projector.carrying_in(crate::sides::Side::Right));
+        let output = frames(&mut projector, 400, |_| {
+            input(Some(projection), None, false, Hold::default(), now)
+        });
+        let mut instances = Vec::new();
+        output.volumes[0].instances(&mut instances);
+        assert!(
+            instances[1].position.distance(end) < 1e-3,
+            "{:?} {end}",
+            instances[1].position
+        );
+        assert!(projector.springs["panel-1"].springs.pinned(1));
+        // The trigger on the volume's face, off its nodes, puts it back, and the server's layout is drawn again.
+        let face = towards(world(projection, pose, Vec3::new(100.0, 120.0, 0.0)));
+        projector.update(input(Some(projection), face, true, Hold::default(), now));
         let output = frames(&mut projector, 400, |_| {
             input(Some(projection), None, false, Hold::default(), now)
         });
@@ -658,18 +679,18 @@ mod projector {
         ));
         assert_eq!(output.pulled, Some(crate::sides::Side::Right));
         let up = c + Vec3::new(0.05, 0.08, 0.0);
-        // Held well in front of the volume first, then brought back within it as the grip lets go: where the hand lets
-        // it go decides.
+        // Held 8 cm up, within the volume, then let go as the hand, opening, jerks 50 cm forward: it stays where it was
+        // held, not where the hand went.
         let out = c + Vec3::new(0.05, 0.0, 0.5);
         frames(&mut projector, 30, |_| {
             gripped(
-                input(Some(projection), hand(out), false, Hold::default(), now),
+                input(Some(projection), hand(up), false, Hold::default(), now),
                 true,
             )
         });
         projector.update(input(
             Some(projection),
-            hand(up),
+            hand(out),
             false,
             Hold::default(),
             now,
@@ -1848,4 +1869,40 @@ fn moving_the_largest_diagram_s_nodes_each_frame_costs_far_less_than_a_frame() {
     eprintln!("a frame of 64 nodes and 128 edges pulled about took {each:?}");
     assert!(each < std::time::Duration::from_micros(500), "{each:?}");
     assert_eq!(posed.node_at(9), springs.positions()[9]);
+}
+
+#[test]
+fn a_node_pinned_far_beyond_its_volume_keeps_its_labels_before_the_box_about_its_nodes() {
+    let drawn = diagram(
+        &[
+            ("a", Shape::Box, [-200, 0, 0]),
+            ("b", Shape::Box, [0, 0, 0]),
+            ("c", Shape::Box, [200, 0, 0]),
+        ],
+        vec![edge(0, 1, Style::Solid, Arrow::Forward)],
+    );
+    let mesh = Mesh::new(&drawn);
+    let mut posed = mesh.posed();
+    // b pinned 3 m before the volume, as pulled towards its holder and let go there.
+    let at = [
+        Vec3::new(-200.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 3_000.0),
+        Vec3::new(200.0, 0.0, 0.0),
+    ];
+    posed.repose(&at, None);
+    // The box its labels are brought before reaches it, so that its label stays with it rather than behind it.
+    assert!(f32::from(posed.diagram.extent[2]) / 2.0 >= 3_000.0);
+    let model =
+        Mat4::from_translation(Vec3::new(0.0, 1.5, -4.0)) * Mat4::from_scale(Vec3::splat(0.001));
+    let viewer = Vec3::new(0.0, 1.5, 0.0);
+    let mut sheets = Vec::new();
+    posed.sheets(model, viewer, None, &mut sheets);
+    assert_eq!(sheets.len(), posed.labels());
+    let node = model.transform_point3(at[1]);
+    let nearest = sheets
+        .iter()
+        .map(|sheet| sheet.model.unwrap().transform_point3(Vec3::ZERO))
+        .map(|label| (label - node).length())
+        .fold(f32::INFINITY, f32::min);
+    assert!(nearest < 0.1, "{nearest}");
 }
