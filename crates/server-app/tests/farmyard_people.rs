@@ -157,10 +157,11 @@ fn differing(image: &image::RgbaImage, without: &image::RgbaImage) -> (f32, usiz
     (sum / count.max(1) as f32, count)
 }
 
-/// Whether `pixel` is a soft, warm off-white, as the eyes are.
+/// Whether `pixel` is a soft, warm off-white, as the eyes are: warm, so that the whitened middle of a lime or yellow
+/// person is not taken for them.
 fn is_off_white(pixel: &image::Rgba<u8>) -> bool {
     let [r, g, b, _] = pixel.0.map(i32::from);
-    g > 200 && r - g < 30 && b > 170
+    g > 200 && (0..30).contains(&(r - g)) && b > 170
 }
 
 /// How many of `image`'s pixels are a soft, warm off-white, as the eyes are.

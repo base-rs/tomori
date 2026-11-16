@@ -16,6 +16,7 @@ pub mod cluster;
 pub mod context;
 pub mod diagram;
 mod frame;
+pub mod hue;
 mod keepalive;
 mod limits;
 mod message;

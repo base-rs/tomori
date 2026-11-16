@@ -91,7 +91,10 @@ fn turns_are_grouped_by_speaker_with_tool_only_messages_as_chips() {
         ]
     );
     assert_eq!(groups[1].texts.len(), 1);
-    assert_eq!(groups[2].speaker.colour, speakers::colour(1));
+    assert_eq!(
+        groups[2].speaker.colour,
+        speakers::colour(tomori_protocol::hue::default("Ada"))
+    );
     assert!(tool_only(&space.messages[1]));
     assert!(!tool_only(&space.messages[2]));
     assert!(tools("[not a tool]").is_none());
@@ -121,7 +124,10 @@ fn the_transcript_shows_names_bars_chips_and_markdown_without_markers() {
     );
     // Each speaker's rows carry their colour as a bar.
     let bob = rows.iter().find(|row| row.plain().trim() == "Bob").unwrap();
-    assert_eq!(bob.bar, Some(speakers::colour(2)));
+    assert_eq!(
+        bob.bar,
+        Some(speakers::colour(tomori_protocol::hue::default("Bob")))
+    );
     let agent = rows
         .iter()
         .find(|row| row.plain().trim() == "Agent")
@@ -758,7 +764,7 @@ fn markdown_quotes_tables_and_rules_are_drawn_and_its_cache_is_bounded() {
 
 #[test]
 fn a_streaming_group_and_too_many_tools_say_so() {
-    let speaker = Speaker::person(1, "Ada", Some(1));
+    let speaker = Speaker::person(1, "Ada", Some(1), 100);
     let group = Group {
         key: "m1".into(),
         speaker,

@@ -352,6 +352,42 @@ fn someone_who_leaves_fades_where_they_last_were_and_a_number_forgotten_is_drawn
 }
 
 #[test]
+fn each_person_is_drawn_in_their_own_colour_kept_as_they_leave() {
+    let start = Instant::now();
+    let at = |milliseconds: u64| start + Duration::from_millis(milliseconds);
+    let mut people = People::default();
+    // Seen from three metres behind, in full.
+    let behind = Some(Vec3::new(0.0, 1.6, 3.0));
+    let (bob, cleo) = (heard(1.0, 0), heard(-1.0, 0));
+    people.colour(&[(2, 125), (3, 325)]);
+    people.update(at(0), FRAME, 0, [(2, &bob), (3, &cleo)], behind, None);
+    let eyes = |people: &People, source: u32| {
+        people
+            .figures()
+            .iter()
+            .find(|figure| figure.source == source)
+            .map(|figure| figure.cubes[index(swarm::Part::Eye(0))].color)
+    };
+    let green = tomori_protocol::hue::rgb(125);
+    let pink = tomori_protocol::hue::rgb(325);
+    assert_eq!(eyes(&people, 2), Some(swarm::eyes(green)));
+    assert_eq!(eyes(&people, 3), Some(swarm::eyes(pink)));
+    // Bob leaves, fading in his colour, though the space's state no longer names him.
+    people.colour(&[(3, 325)]);
+    people.update(at(14), FRAME, 0, [(3, &cleo)], behind, None);
+    assert_eq!(eyes(&people, 2), Some(swarm::eyes(green)));
+    // Cleo chooses another colour, which she is drawn in from the next frame; someone the state does not name yet is
+    // the coral everyone was.
+    people.colour(&[(3, 20)]);
+    people.update(at(28), FRAME, 0, [(3, &cleo), (4, &bob)], behind, None);
+    assert_eq!(
+        eyes(&people, 3),
+        Some(swarm::eyes(tomori_protocol::hue::rgb(20)))
+    );
+    assert_eq!(eyes(&people, 4), Some(swarm::eyes(swarm::COLOUR)));
+}
+
+#[test]
 fn someone_close_to_the_eyes_is_drawn_fainter_and_not_at_all_closer_still() {
     let mut people = People::default();
     let now = Instant::now();
