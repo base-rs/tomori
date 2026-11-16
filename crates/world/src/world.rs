@@ -8,7 +8,7 @@ use glam::{Mat4, Vec3};
 use crate::bvh::{Bvh, Leaf};
 use crate::light::{self, EnvironmentLight, LIGHTS, LIGHTS_PER_INSTANCE, Light, LightId, Lit};
 use crate::material::{Material, MaterialId};
-use crate::{Aabb, Tally, Views};
+use crate::{Aabb, Tally, Tier, Views};
 
 /// A mesh, as the backend that uploaded it names it: the world never reads its vertices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -213,6 +213,7 @@ pub struct World {
     materials: Slots<(RootId, Material)>,
     views: Views,
     culling: bool,
+    tier: Tier,
 }
 
 impl Default for World {
@@ -231,7 +232,18 @@ impl World {
             materials: Slots::default(),
             views: Views::default(),
             culling: true,
+            tier: Tier::default(),
         }
+    }
+
+    /// Drawn in `tier`, as the device's render path draws it.
+    pub fn set_tier(&mut self, tier: Tier) {
+        self.tier = tier;
+    }
+
+    /// The tier it is drawn in: [`Tier::High`] until it is told otherwise.
+    pub fn tier(&self) -> Tier {
+        self.tier
     }
 
     /// New coordinates, active, carried into the views' by nothing.

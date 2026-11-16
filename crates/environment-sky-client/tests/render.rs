@@ -399,3 +399,67 @@ fn sky_multisamples_with_the_scene_pass() {
         })
     });
 }
+
+#[test]
+fn every_tier_draws_sky_as_it_was_drawn() {
+    use tomori_render::tiers::Tier;
+    const SIZE: (u32, u32) = (256, 192);
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    test_gpu::with(|gpu| {
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let projection = glam::camera::rh::proj::directx::perspective(
+            1.2,
+            SIZE.0 as f32 / SIZE.1 as f32,
+            0.05,
+            2_000.0,
+        );
+        // Towards the shrine, the swarm before it, and up at the clouds.
+        let looking = |target: glam::Vec3| {
+            [-0.032, 0.032].map(|x| {
+                let eye = glam::Vec3::new(x, 1.6, 4.0);
+                projection * glam::camera::rh::view::look_at_mat4(eye, target, glam::Vec3::Y)
+            })
+        };
+        let views = [
+            looking(glam::Vec3::new(0.0, 1.0, 0.0)),
+            looking(glam::Vec3::new(0.0, 30.0, -20.0)),
+        ];
+        let draw = |tier: Option<Tier>| {
+            let mut renderer = Renderer::with_sceneries(
+                &gpu.device,
+                &gpu.queue,
+                FORMAT,
+                SIZE.0,
+                SIZE.1,
+                4,
+                &sky(),
+            );
+            renderer.set_environment(SKY);
+            if let Some(tier) = tier {
+                renderer.set_tier(tier);
+            }
+            renderer.update(&gpu.queue, &Swarm::default(), None, false);
+            views.map(|matrices| {
+                test_gpu::draw_eyes(
+                    &gpu,
+                    &mut renderer,
+                    SIZE,
+                    FORMAT,
+                    &matrices,
+                    Mat4::IDENTITY,
+                    &[],
+                )
+            })
+        };
+        let before = draw(None);
+        assert!(
+            before[0][0]
+                .chunks(4)
+                .any(|pixel| pixel != &before[0][0][..4])
+        );
+        for tier in Tier::ALL {
+            assert!(draw(Some(tier)) == before, "{tier:?} drew Sky otherwise");
+        }
+        assert!(pollster::block_on(scope.pop()).is_none());
+    });
+}

@@ -38,6 +38,7 @@ pub mod solids;
 pub mod test_gpu;
 #[cfg(test)]
 mod test_support;
+pub mod tiers;
 pub mod ui_panel;
 pub mod workspace_graphics;
 

@@ -49,6 +49,12 @@ pub fn run_desktop(
         xr_types::resolution(std::env::var("TOMORI_RESOLUTION").ok().as_deref(), 1.0),
         // `TOMORI_COMPOSITOR_FILTER`, as the headset's `tomori.compositor_filter`.
         xr_types::compositor_filter(std::env::var("TOMORI_COMPOSITOR_FILTER").ok().as_deref()),
+        // `TOMORI_TIER`, as the headset's `tomori.tier`; a desktop runtime's GPU is a desktop's.
+        tomori_render::tiers::choose(
+            tomori_render::tiers::Device::Desktop,
+            std::env::var("TOMORI_TIER").ok().as_deref(),
+            "TOMORI_TIER",
+        ),
         || false,
         conversation,
         connection,
@@ -59,7 +65,7 @@ pub fn run_desktop(
 const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const BLEND: xr::EnvironmentBlendMode = xr::EnvironmentBlendMode::OPAQUE;
 
-/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; where the GPU cannot draw them, it draws the most it can of fewer, never more (`graphics::choose_samples`). `foveation` is the fixed foveation asked for, where the runtime and GPU can, and `resolution` the scale of each eye's image over the runtime's recommendation (`xr_types::resolution`); see `design/rendering.md`.
+/// `samples` is the samples per pixel to draw each eye with, such as [`crate::graphics::SAMPLES`] for multisample anti-aliasing; where the GPU cannot draw them, it draws the most it can of fewer, never more (`graphics::choose_samples`). `foveation` is the fixed foveation asked for, where the runtime and GPU can, `resolution` the scale of each eye's image over the runtime's recommendation (`xr_types::resolution`), and `tier` the quality tier it draws in (`tomori_render::tiers::choose`); see `design/rendering.md`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     platform: &impl xr::PlatformInfo,
@@ -67,6 +73,7 @@ pub fn run(
     foveation: foveation::Request,
     resolution: f32,
     compositor_filter: xr::CompositionLayerSettingsFlagsFB,
+    tier: tomori_render::tiers::Choice,
     mut destroyed: impl FnMut() -> bool,
     mut conversation: crate::conversation::Conversation,
     mut connection: crate::connection::Connection,
@@ -295,6 +302,8 @@ pub fn run(
         samples,
         sceneries,
     );
+    renderer.set_tier(tier.tier);
+    log::info!("{}", tier.describe());
     log::info!(
         "Drawing each eye {width}x{height} at {resolution}x the runtime's recommendation, at most {}x{}, {samples}x multisampled, {foveation_summary}, {compositor_summary}",
         views

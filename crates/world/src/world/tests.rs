@@ -60,6 +60,14 @@ fn items_are_added_placed_and_removed_by_their_handles() {
 }
 
 #[test]
+fn a_world_is_drawn_in_the_tier_it_is_told() {
+    let mut world = World::new();
+    assert_eq!(world.tier(), crate::Tier::High);
+    world.set_tier(crate::Tier::Low);
+    assert_eq!(world.tier(), crate::Tier::Low);
+}
+
+#[test]
 fn what_neither_eye_sees_is_culled_whether_it_is_static_or_dynamic() {
     let mut world = World::new();
     let root = world.add_root();
