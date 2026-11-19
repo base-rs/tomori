@@ -143,6 +143,7 @@ fn a_hello_longer_than_a_visitor_sends_is_refused() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     let error = client.error();
     assert!(

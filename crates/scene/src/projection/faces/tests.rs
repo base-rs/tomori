@@ -1142,7 +1142,6 @@ fn pointing_at_a_chart_links_a_readout_on_every_chart_sharing_its_time() {
     assert!(projector.linked.is_empty());
 }
 
-/// A panel's faces give no linked readout before its face is drawn, nor for a panel of no chart.
 /// A chart of buckets and a line over the same window, on one wall, link at the same place across each, from the
 /// window's start to now, and the buckets' readout reads the bucket that holds the time.
 #[test]
@@ -1226,6 +1225,7 @@ fn a_chart_of_buckets_links_to_a_line_over_its_window_at_the_same_place_across_e
     }
 }
 
+/// A panel's faces give no linked readout before its face is drawn, nor for a panel of no chart.
 #[test]
 fn a_face_not_yet_drawn_or_of_no_chart_links_no_readout() {
     let chart = crate::chart::fixtures::pressure();

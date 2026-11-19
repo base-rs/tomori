@@ -304,6 +304,24 @@ fn hello_says_whether_the_session_applies_projection_patches_and_states_its_limi
 }
 
 #[test]
+fn hello_says_whether_the_session_reads_charts_of_buckets() {
+    // A session that does not say so is sent each chart of buckets as instants; one that reads them says so.
+    for reads in [false, true] {
+        let server = MiniServer::start(localhost(), Mode::Normal);
+        let mut options = options(server.address);
+        assert!(!options.chart_buckets);
+        options.chart_buckets = reads;
+        assert!(format!("{options:?}").contains(&format!("chart_buckets: {reads}")));
+        let client = Client::connect(options).unwrap();
+        assert_eq!(wait_connected(&client), 1);
+        assert!(matches!(
+            server.received(1).first(),
+            Some(Received::Message(ClientMessage::Hello { chart_buckets, .. })) if *chart_buckets == reads
+        ));
+    }
+}
+
+#[test]
 fn a_long_frame_is_read_within_the_limit_both_sides_state_and_its_arrival_reported() {
     use tomori_protocol::{Frame, Limits, MAX_FRAME_BYTES, MOST_FRAME_BYTES};
     let long = ServerMessage::Error {

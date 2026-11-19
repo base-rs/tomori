@@ -59,6 +59,7 @@ fn the_welcome_says_how_long_an_utterance_may_be() {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         // The welcome is the first reply to hello.
         client.wait_for(|message| {
@@ -167,6 +168,7 @@ fn greet(hub: &Hub, participant: &str) -> ConnectionId {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         },
     );
     connection
@@ -245,6 +247,7 @@ fn visitors_are_not_counted_as_participants() {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         },
     );
     assert_eq!(hub.counts(), counts(0, 0));
@@ -290,6 +293,7 @@ fn only_so_many_disconnected_visitors_are_remembered() {
                 spawns: false,
                 limits: None,
                 content: false,
+                chart_buckets: false,
             },
         );
         connection
@@ -497,6 +501,7 @@ fn being_put_back_in_a_space_on_reconnecting_does_not_clear_its_attention() {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         },
     );
     hub.handle(

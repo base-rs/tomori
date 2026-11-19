@@ -188,6 +188,7 @@ mod tests {
                 spawns: false,
                 limits: None,
                 content: false,
+                chart_buckets: false,
             },
             ClientMessage::Ping { nonce: 1 },
             ClientMessage::Pong { nonce: 1 },

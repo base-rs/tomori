@@ -193,8 +193,9 @@ pub enum Resource {
     /// its own copy of the body; an older server ignores `line` and `row`. On a chart panel's plot, `across` says where
     /// along its time axis the ray meets it, in [`crate::chart::ACROSS`] parts from its oldest point to its newest, or,
     /// where its points are buckets, from where its first begins to where its last ends, so that the server reads the
-    /// time there and each series' value from its own copy of the chart; an older server ignores it. See
-    /// `design/projection.md` and `design/panel-actions.md`.
+    /// time there and each series' value from its own copy of the chart, as the client was sent it: a client whose
+    /// `Hello` does not set `chart_buckets` is sent no buckets, and says `across` over the points of the instants it
+    /// was sent. An older server ignores it. See `design/projection.md` and `design/panel-actions.md`.
     #[non_exhaustive]
     Panel {
         panel: String,
@@ -636,6 +637,14 @@ pub enum ClientMessage {
         /// which would refuse that message and are never sent it. See `design/content.md`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         content: bool,
+        /// Whether this client reads a chart whose points are buckets, [`crate::chart::Chart::buckets`]: draws each
+        /// across its step, reads a time in the bucket that holds it, and says `across`
+        /// ([`Resource::Panel`]) over [`crate::chart::Chart::steps`]. Absent from older clients, which read every
+        /// chart's points as instants: the server sends them each chart of buckets as
+        /// [`crate::chart::Chart::instants`] makes it, and reads the `across` they say on that chart, so that what such
+        /// a client draws, reads and reports agree. See `design/projection.md`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        chart_buckets: bool,
     },
     ListSpaces,
     /// The existing sessions of `backend` in `directory` or beneath it, for attaching. A backend without attaching answers
@@ -2181,6 +2190,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         };
         // A newer client lists what it presents, at each version.
         let listing = hello(Some(vec![
@@ -2302,6 +2312,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["environment_state"], true);
@@ -2381,6 +2392,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap(),
@@ -2432,6 +2444,32 @@ mod tests {
     }
 
     #[test]
+    fn reading_charts_of_buckets_is_an_addition_older_peers_never_say() {
+        // An older client says nothing, and is read as reading every chart's points as instants.
+        let older: ClientMessage = serde_json::from_value(
+            serde_json::json!({"type": "hello", "protocol": 2, "participant": "p", "name": "Ada"}),
+        )
+        .unwrap();
+        let ClientMessage::Hello { chart_buckets, .. } = older else {
+            unreachable!("a hello");
+        };
+        assert!(!chart_buckets);
+        // Said only by a client that reads them, and read back.
+        let json = serde_json::json!({
+            "type": "hello", "protocol": 2, "participant": "p", "name": "Ada", "chart_buckets": true
+        });
+        let newer: ClientMessage = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            newer,
+            ClientMessage::Hello {
+                chart_buckets: true,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&newer).unwrap(), json);
+    }
+
+    #[test]
     fn whether_pairing_is_open_is_an_addition_older_peers_never_see() {
         let hello = ClientMessage::Hello {
             protocol: 2,
@@ -2451,6 +2489,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         };
         assert_eq!(
             serde_json::to_value(&hello).unwrap()["pairing_window"],
@@ -2515,6 +2554,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         };
         let json = serde_json::to_value(&hello).unwrap();
         assert_eq!(json["names"], true);
@@ -2546,6 +2586,7 @@ mod tests {
                 spawns: false,
                 limits: None,
                 content: false,
+                chart_buckets: false,
             }
         );
 

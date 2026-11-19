@@ -7822,6 +7822,9 @@ mod events {
         );
         conversation.set_limits(DESKTOP_LIMITS);
         assert_eq!(Session::limits(&conversation), DESKTOP_LIMITS);
+        // And it says that it reads charts of buckets, which `chart` draws and reads as the intervals they are, so
+        // that it is sent them rather than the instants an older client is.
+        assert!(Session::chart_buckets(&conversation));
     }
 
     #[test]

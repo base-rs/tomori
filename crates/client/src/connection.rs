@@ -230,6 +230,13 @@ pub trait Session {
         false
     }
 
+    /// Whether the session reads a chart whose points are buckets, [`tomori_protocol::chart::Chart::buckets`], as
+    /// `tomori-scene` draws and reads one, which each connection says in its Hello; see
+    /// [`crate::Options::chart_buckets`]. A session that does not is sent each as instants.
+    fn chart_buckets(&self) -> bool {
+        false
+    }
+
     /// Tell `feedback`, once a frame at `now`, what is waiting for the participant and how long they have been recording, so that it cues them: see [`feedback::Feedback::observe_requests`], [`feedback::Feedback::observe_knocks`] and [`feedback::Feedback::observe_recording`]. A session that shows the participant nothing observes nothing.
     fn observe(&self, feedback: &mut feedback::Feedback, now: Instant) {
         let _ = (feedback, now);
@@ -1258,6 +1265,7 @@ impl Connection {
         options.limits = session.limits();
         options.live_panels = session.live_panels();
         options.spawns = session.spawns();
+        options.chart_buckets = session.chart_buckets();
         options.hearing = self.hearing;
         options.content = self.content.clone();
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.

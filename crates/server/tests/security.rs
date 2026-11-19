@@ -65,6 +65,7 @@ fn welcome(client: &mut TestClient, participant: &str) -> ServerMessage {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     client.wait_for(|message| {
         matches!(message, ServerMessage::Welcome { .. }).then(|| message.clone())
@@ -353,6 +354,7 @@ fn a_token_renamed_elsewhere_renames_its_holders_within_a_sweep() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     let welcomed = ada.wait_for(|message| match message {
         ServerMessage::Welcome { name, .. } => Some(name.clone()),

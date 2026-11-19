@@ -82,6 +82,7 @@ fn projecting(server: &TestServer, participant: &str) -> TestClient {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
     client

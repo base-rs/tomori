@@ -544,6 +544,7 @@ mod tests {
             spawns: false,
             limits,
             content: false,
+            chart_buckets: false,
         })
         .encode()
     }
@@ -681,6 +682,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         })
         .encode();
         let mut body = admitted(Access::open(), vec![ended(&long_hello)]);

@@ -572,6 +572,7 @@ impl TestClient {
             spawns: false,
             limits,
             content: false,
+            chart_buckets: false,
         });
         // The welcome is the first reply to hello.
         let environments;

@@ -413,6 +413,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         };
         let audio = AudioFrame {
             gate: Gate::Agent,

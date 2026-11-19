@@ -181,6 +181,7 @@ fn raw_join(server: &TestServer, space: &str) -> TcpStream {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     }));
     request.extend(chunk(&ClientMessage::Join {
         space: space.to_owned(),

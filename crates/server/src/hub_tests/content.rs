@@ -61,6 +61,7 @@ fn greeted(
         spawns: false,
         limits: None,
         content,
+        chart_buckets: false,
     });
     let sent = client.read();
     (client, sent)

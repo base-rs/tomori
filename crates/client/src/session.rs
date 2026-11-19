@@ -335,6 +335,8 @@ async fn exchange(
             limits: Some(options.limits),
             // And fetches what it is offered by digest, where it has somewhere to keep it.
             content: options.content.is_some(),
+            // And reads charts of buckets, where its session does.
+            chart_buckets: options.chart_buckets,
         };
         let mut bytes = Frame::client(&hello).encode();
         for message in context.shared.outbox.connect() {

@@ -1091,6 +1091,106 @@ fn a_chart_of_buckets_pointed_at_is_read_in_the_bucket_that_holds_the_time_and_l
 }
 
 #[test]
+fn a_chart_of_buckets_pointed_at_by_a_client_that_reads_none_is_read_as_that_client_was_sent_it() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    // The requests in each 15 minutes of 24 hours, a bucket each, the bucket `index` counting `index`, labelled at
+    // their edges; and a line over the same 24 hours, 97 instants 15 minutes apart, on its wall.
+    let labels = vec![
+        AxisLabel::new(0, "-24 h"),
+        AxisLabel::new(48, "-12 h"),
+        AxisLabel::new(96, "now"),
+    ];
+    let series = |name: &str, style: SeriesStyle, points: u32| {
+        Series::new(
+            name,
+            Colour::Teal,
+            style,
+            (0..points).map(|index| Some(index as f32)).collect(),
+        )
+    };
+    let live = TimeAxis::Live { step_ms: 900_000 };
+    let volume = Chart::new(96)
+        .with_buckets(true)
+        .with_time(live)
+        .with_labels(labels.clone())
+        .with_series(series("requests", SeriesStyle::Bars, 96));
+    let latency = Chart::new(97)
+        .with_time(live)
+        .with_labels(labels)
+        .with_series(series("p99", SeriesStyle::Line, 97));
+    for (id, chart) in [("volume", volume.clone()), ("latency", latency)] {
+        stage
+            .publish(&walls, publishing(Panel::chart(id, id, chart)), 0)
+            .unwrap();
+    }
+    let shown = stage.view("s", &walls, 0);
+    let panel = |title: &str| shown.panels.iter().find(|panel| panel.title == title);
+    let across = |title: &str, across: u16, instants: bool| {
+        stage
+            .describe_at(
+                &walls,
+                &panel(title).unwrap().id,
+                crate::stage::Pointed {
+                    across: Some(across),
+                    instants,
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
+            .unwrap()
+    };
+    // A client that reads no buckets is sent the chart as instants, each where its bucket ends, its labels under the
+    // points of the buckets that end at them, and says where it points over the 95 steps between them.
+    let sent = crate::stage::without_buckets(panel("volume").unwrap().clone());
+    let instants = sent.chart.as_deref().unwrap();
+    assert_eq!(*instants, volume.clone().cleaned().unwrap().instants());
+    assert_eq!(
+        instants.labels,
+        [AxisLabel::new(47, "-12 h"), AxisLabel::new(95, "now")]
+    );
+    // A panel of a chart of instants, or of none, is sent as it is.
+    for plain in [
+        panel("latency").unwrap().clone(),
+        tomori_protocol::Panel::new("p", "Notes", "Text.", sent.place.clone()),
+    ] {
+        assert_eq!(crate::stage::without_buckets(plain.clone()), plain);
+    }
+    // Pointed at 94.4 of those 95 steps, its readout says nine minutes ago and the bar it draws there, and so is the
+    // agent told, with what the line reads nine minutes ago; read over the 96 steps of the buckets, the same place
+    // was told as another bucket's.
+    let place = (94.4_f32 / 95.0 * 10_000.0).round() as u16;
+    assert_eq!(
+        instants.read_at(instants.at_across(place)),
+        "-9 min: requests 94"
+    );
+    let pointed = across("volume", place, true);
+    assert!(
+        pointed.ends_with(
+            "; at the time pointed at: \"-9 min: requests 94\"; linked charts at that time: \"latency: -9 min: p99 \
+             95.4\")"
+        ),
+        "{pointed}"
+    );
+    assert!(
+        across("volume", place, false).contains("at the time pointed at: \"-9 min: requests 95\""),
+    );
+    // Pointing at the line ten minutes ago, its linked readout over the bars says ten minutes ago, and the bar it
+    // draws there, astride the end of the bucket before the last: so is the agent told, where a client that reads
+    // buckets is told the last bucket.
+    let linked = across("latency", 9_931, true);
+    assert!(
+        linked.ends_with("linked charts at that time: \"volume: -10 min: requests 94\")"),
+        "{linked}"
+    );
+    let linked = across("latency", 9_931, false);
+    assert!(
+        linked.ends_with("linked charts at that time: \"volume: -10 min: requests 95\")"),
+        "{linked}"
+    );
+}
+
+#[test]
 fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_then() {
     let declared = roomy();
     let walls = Walls {

@@ -155,6 +155,7 @@ fn a_space_is_bound_to_one_offered_environment_shared_by_its_participants() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     let offered = ada.wait_for(|message| match message {
         ServerMessage::Welcome { environments, .. } => Some(environments.clone()),

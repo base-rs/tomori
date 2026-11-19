@@ -94,6 +94,7 @@ impl Client {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
     }
 
@@ -248,6 +249,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     let errors = client.errors();
     assert!(errors[0].starts_with("Unsupported protocol"), "{errors:?}");
@@ -277,6 +279,7 @@ fn hello_is_said_once_in_this_protocol_with_an_identity() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     assert_eq!(
         client.errors(),
@@ -2020,6 +2023,7 @@ fn hello_as(client: &Client, participant: &str, name: &str, names: bool) -> Vec<
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     client.read()
 }
@@ -3248,6 +3252,7 @@ fn presenting(
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     client.read();
     client
@@ -6605,6 +6610,7 @@ impl Client {
             spawns: false,
             limits,
             content: false,
+            chart_buckets: false,
         });
         client.read();
         client
@@ -8876,6 +8882,7 @@ impl Client {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         client.read();
         client
@@ -9246,6 +9253,8 @@ mod agent_state;
 mod anchors;
 #[path = "hub_tests/asking.rs"]
 mod asking;
+#[path = "hub_tests/buckets.rs"]
+mod buckets;
 #[path = "hub_tests/colouring.rs"]
 mod colouring;
 #[path = "hub_tests/content.rs"]

@@ -84,6 +84,7 @@ impl Participant {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         client.wait_for(|message| match message {
             ServerMessage::Welcome { source, .. } => Some(*source),

@@ -155,7 +155,8 @@ pub enum SeriesStyle {
     /// A line through its points.
     #[default]
     Line,
-    /// Level from each point to the next, then up or down to it, as a count of replicas changes.
+    /// Level from each point to the next, then up or down to it, as a count of replicas changes; on a chart of
+    /// buckets ([`Chart::buckets`]), level across each bucket, up or down where the next begins.
     Step,
     /// A line, with the area below it, down to the axis's lowest value, filled faintly.
     Area,
@@ -428,8 +429,14 @@ pub struct Chart {
     /// Whether its points are buckets rather than instants: each a whole step of its axis, such as the requests counted
     /// in each 15 minutes, the last ending where its axis ends, so that 96 of them span 96 steps, where 96 instants
     /// span 95. Its bars are drawn across their steps, its labels stand at their edges ([`AxisLabel`]), a time is read
-    /// in the bucket that holds it, and its [`TimeAxis`] says the whole window they cover. An older client ignores it,
-    /// and draws and reads each bucket as an instant, as before there were buckets.
+    /// in the bucket that holds it, and its [`TimeAxis`] says the whole window they cover. A step series is level across
+    /// each of its buckets, from where it begins to where it ends; a line or an area runs between their middles.
+    ///
+    /// A client that knows no buckets would ignore it, and read each bucket as an instant under labels that stand at
+    /// edges, so that the time its readout says, the time it links other charts at and the place it reports all differ
+    /// by up to a step. So the server sends one only to a client whose `Hello` says that it reads them,
+    /// [`crate::ClientMessage::Hello::chart_buckets`], and any other the chart as [`Chart::instants`] makes it, which
+    /// such a client draws, reads and reports as one thing.
     ///
     /// ```
     /// use tomori_protocol::chart::{Chart, ChartTime, TimeAxis};
@@ -579,6 +586,47 @@ impl Chart {
     /// buckets, each standing at the middle of its step, half a step.
     pub fn inset(&self) -> f32 {
         if self.buckets { 0.5 } else { 0.0 }
+    }
+
+    /// The chart with its points as instants, as a reader that knows no buckets, such as an older client, is sent it
+    /// and reads it: unchanged where its points are instants already; and where they are buckets, each point the
+    /// instant its bucket ends, as a chart said totals over intervals before it could say buckets. Its values are
+    /// unchanged, so that a panel's live data applies to it as it is. Each label, which stood at a bucket's edge, stands
+    /// under the point of the bucket that ends there, and one where the first bucket begins, a time before its first
+    /// point, is left out. A live axis is unchanged, its last point now, where its last bucket ends; a fixed window
+    /// runs from the end of its first bucket, to the millisecond, to the end of its last. So the times its labels say,
+    /// those its axis says and the place a reader reports across it agree, a step for each bucket, though it spans a
+    /// step less than the window counted, draws each bar astride the end of its interval and reads the bucket before
+    /// for a time in a bucket's older half, as every chart of such totals did before buckets.
+    ///
+    /// ```
+    /// use tomori_protocol::chart::{AxisLabel, Chart, ChartTime, TimeAxis};
+    ///
+    /// let day = Chart::new(96)
+    ///     .with_time(TimeAxis::Live { step_ms: 900_000 })
+    ///     .with_labels(vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(96, "now")])
+    ///     .with_buckets(true)
+    ///     .instants();
+    /// assert!(!day.buckets);
+    /// assert_eq!(day.labels, [AxisLabel::new(95, "now")]);
+    /// assert_eq!(day.time_of(95.0), Some(ChartTime::BeforeNow { ms: 0.0 }));
+    /// ```
+    pub fn instants(mut self) -> Self {
+        if !self.buckets {
+            return self;
+        }
+        let steps = i128::from(self.steps());
+        self.buckets = false;
+        self.labels.retain_mut(|label| {
+            let point = label.at.checked_sub(1);
+            label.at = point.unwrap_or_default();
+            point.is_some()
+        });
+        if let Some(TimeAxis::Fixed { from_ms, to_ms }) = &mut self.time {
+            let step = (i128::from(*to_ms) - i128::from(*from_ms)) / steps;
+            *from_ms = (i128::from(*from_ms) + step) as i64;
+        }
+        self
     }
 
     /// The chart, its points in time as `time` says.
@@ -911,9 +959,10 @@ pub fn utc_minute(ms: i64, dated: bool) -> String {
     format!("{month:02}-{day:02} {hours:02}:{minute:02}")
 }
 
-/// How many parts a chart's time axis is read in, from its oldest point at 0 to its newest at `ACROSS`, where a
-/// participant points at it: [`crate::Resource::Panel::across`], fine enough for every point of the longest chart, and
-/// whatever its count of points. See `design/projection.md`.
+/// How many parts a chart's time axis is read in, from its start at 0 to its end at `ACROSS`, where a participant
+/// points at it, [`crate::Resource::Panel::across`]: from its oldest point to its newest, or, on a chart of buckets,
+/// from where its first bucket begins to where its last ends, [`Chart::steps`] in all. Fine enough for every point of
+/// the longest chart, and whatever its count of points. See `design/projection.md`.
 pub const ACROSS: u16 = 10_000;
 
 /// The most characters of what a chart reads at a time, [`Chart::read_at`]: its time, and each series' name and value.
@@ -1160,18 +1209,42 @@ impl Chart {
     /// dot, read within half a point of it; a step's held from its point to the next; and a bar's, the bar drawn for
     /// the stretch of points nearest, as tall as the one of them farthest from its base where a chart of more than
     /// [`STRETCHES`] points draws one for each stretch. `None` where it has no value there, a gap, never zero; kept to
-    /// [`SIGNIFICANT`] figures. On a chart of buckets, `at` is so many steps from where its first begins, and each
-    /// point stands at the middle of its bucket ([`Chart::inset`]), so that a bar's is the bucket that holds `at`, from
-    /// where it begins to where it ends, never the one before for a time in its older half.
+    /// [`SIGNIFICANT`] figures.
+    ///
+    /// On a chart of buckets, `at` is so many steps from where its first begins, and each point stands at the middle
+    /// of its bucket ([`Chart::inset`]). A bar's and a step's are those of the bucket that holds `at`, from where it
+    /// begins to where it ends, a place on an edge in the later, never the bucket before for a time in a bucket's older
+    /// half, so that a step over bars reads the bucket the bars read, everywhere. A line's or an area's is read between
+    /// the middles of its buckets, and has none before the middle of the first or after that of the last, where
+    /// nothing of it is drawn, but for a point alone there, a dot.
+    ///
+    /// ```
+    /// use tomori_protocol::chart::{Chart, Colour, Series, SeriesStyle};
+    ///
+    /// let values = vec![Some(10.0), Some(20.0), Some(30.0)];
+    /// let series = |style| Series::new("requests", Colour::Teal, style, values.clone());
+    /// let chart = Chart::new(3)
+    ///     .with_buckets(true)
+    ///     .with_series(series(SeriesStyle::Bars))
+    ///     .with_series(series(SeriesStyle::Step))
+    ///     .with_series(series(SeriesStyle::Line));
+    /// // A quarter of the way into the second bucket: its bar and its step, and the line on its way up to its middle.
+    /// assert_eq!(chart.value_at(0, 1.25), Some(20.0));
+    /// assert_eq!(chart.value_at(1, 1.25), Some(20.0));
+    /// assert_eq!(chart.value_at(2, 1.25), Some(17.5));
+    /// // Before the middle of the first bucket, the bar and the step are the first bucket's, and no line is drawn.
+    /// assert_eq!(chart.value_at(1, 0.25), Some(10.0));
+    /// assert_eq!(chart.value_at(2, 0.25), None);
+    /// ```
     pub fn value_at(&self, series: usize, at: f32) -> Option<f32> {
         let series = self.series.get(series)?;
         let points = self.points.clamp(2, CHART_POINTS) as usize;
         let last = (points - 1) as f32;
-        let at = if at.is_nan() {
-            0.0
-        } else {
-            (at - self.inset()).clamp(0.0, last)
-        };
+        // Where it is among the points, the first at 0: on a chart of buckets, half a step in from where `at` counts.
+        let along = if at.is_nan() { 0.0 } else { at } - self.inset();
+        // Before the first point or after the last, which only a chart of buckets has room for, and draws no line in.
+        let beyond = self.buckets && !(0.0..=last).contains(&along);
+        let at = along.clamp(0.0, last);
         let value = |index: usize| series.values.get(index).copied().flatten();
         // Whether the point `index` is joined to the next by its line.
         let joined = |index: usize| {
@@ -1179,10 +1252,15 @@ impl Chart {
                 && value(index + 1).is_some()
                 && !series.breaks.contains(&(index as u32))
         };
+        // Whether the point `index` stands alone, joined to neither neighbour, and so is drawn as a dot.
+        let alone = |index: usize| !joined(index) && (index == 0 || !joined(index - 1));
         let index = at.floor() as usize;
         let share = at - index as f32;
+        // The point nearest: on a chart of buckets, that of the bucket that holds `at`, an edge in the later.
         let nearest = at.round() as usize;
         let value = match series.style {
+            // Level across its own bucket, from where it begins to where it ends.
+            SeriesStyle::Step if self.buckets => value(nearest),
             SeriesStyle::Step => value(index),
             SeriesStyle::Bars => {
                 let stretches = points.min(STRETCHES);
@@ -1197,6 +1275,8 @@ impl Chart {
                     .copied()
                     .max_by(|a, b| (a - base).abs().total_cmp(&(b - base).abs()))
             }
+            // A point alone is drawn as a dot, read within half a point of it, whichever side of it.
+            _ if beyond => value(nearest).filter(|_| alone(nearest)),
             _ if share == 0.0 => value(index),
             _ if joined(index) => {
                 let (from, to) = (
@@ -1207,8 +1287,7 @@ impl Chart {
                     (f64::from(from) + (f64::from(to) - f64::from(from)) * f64::from(share)) as f32,
                 )
             }
-            // A point alone, joined to neither neighbour, is drawn as a dot, read within half a point of it.
-            _ if !joined(nearest) && (nearest == 0 || !joined(nearest - 1)) => value(nearest),
+            _ if alone(nearest) => value(nearest),
             _ => None,
         };
         value.and_then(rounded)

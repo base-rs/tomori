@@ -861,6 +861,27 @@ fn valid_within(pose: &Pose, reach: f32) -> Option<Pose> {
     ))
 }
 
+/// `panel` as a client that reads no buckets is sent it: its chart, where its points are buckets, as the instants such
+/// a client reads them as, [`tomori_protocol::chart::Chart::instants`], and otherwise unchanged. See the older clients
+/// of chart panels in `design/projection.md`.
+pub fn without_buckets(mut panel: tomori_protocol::Panel) -> tomori_protocol::Panel {
+    panel.chart = panel.chart.map(|chart| Box::new(chart.instants()));
+    panel
+}
+
+/// `chart` as whoever points at it reads it: as it is, or, with `instants`, a client that reads no buckets, as that
+/// client was sent it, [`without_buckets`], so that the agent is told the time and values its readout showed.
+fn read_as(
+    chart: &tomori_protocol::chart::Chart,
+    instants: bool,
+) -> std::borrow::Cow<'_, tomori_protocol::chart::Chart> {
+    if instants && chart.buckets {
+        std::borrow::Cow::Owned(chart.clone().instants())
+    } else {
+        std::borrow::Cow::Borrowed(chart)
+    }
+}
+
 /// The most charts linked to one pointed at that its description reads, as a participant's client draws their readouts
 /// at the same time.
 pub const LINKED_READINGS: usize = 3;
@@ -872,11 +893,13 @@ const LINKED_READING_CHARS: usize = 120;
 /// by their time axes, never their labels: live charts on its wall, by how long before now, where it is live, or fixed
 /// windows anywhere, by the instant, where it is one, that cover the time,
 /// at most [`LINKED_READINGS`], each its title and reading, in quotes, cut to [`LINKED_READING_CHARS`]. See the linked
-/// time cursor in `design/projection.md`.
+/// time cursor in `design/projection.md`. Each is read as whoever points reads it: with `instants`, as a client that
+/// reads no buckets was sent it, [`read_as`].
 fn linked_readings(
     shown: &tomori_protocol::Projection,
     pointed: &tomori_protocol::Panel,
     time: Option<tomori_protocol::chart::ChartTime>,
+    instants: bool,
 ) -> Vec<String> {
     let Some(time) = time else {
         return Vec::new();
@@ -895,7 +918,7 @@ fn linked_readings(
                     || (here.is_some() && wall(panel) == here))
         })
         .filter_map(|panel| {
-            let chart = panel.chart.as_ref()?;
+            let chart = read_as(panel.chart.as_deref()?, instants);
             let at = chart.at_time(time)?;
             Some(format!(
                 "\"{}\"",
@@ -2023,7 +2046,8 @@ impl Stage {
     ///
     /// On a chart panel pointed at `across` its time axis, it says the time there and each series' value, read from the
     /// stage's own copy of the chart, as `; at the time pointed at: "-6 min: admitted 203,800 a minute"`, in quotes, as it
-    /// is the environment's text. See `design/projection.md`.
+    /// is the environment's text; pointed at by a client that reads no buckets, [`Pointed::instants`], from that copy
+    /// as the client was sent it, so that it is the time and values the client showed. See `design/projection.md`.
     pub(crate) fn describe_at(
         &self,
         walls: &Walls<'_>,
@@ -2039,6 +2063,7 @@ impl Stage {
             edge,
             world_edge,
             chip,
+            instants,
         } = at;
         let shown = self.view("", walls, now);
         let panel = shown.panel(panel)?;
@@ -2134,6 +2159,8 @@ impl Stage {
             ));
         }
         if let (Some(chart), Some(across)) = (&panel.chart, across) {
+            // Read as whoever points reads it, so that `across` is a place on the chart their client drew.
+            let chart = read_as(chart, instants);
             details.push_str(&format!(
                 "; at the time pointed at: \"{}\"",
                 crate::space::one_line(
@@ -2141,7 +2168,12 @@ impl Stage {
                     tomori_protocol::chart::READING_CHARS
                 )
             ));
-            let linked = linked_readings(&shown, panel, chart.time_of(chart.at_across(across)));
+            let linked = linked_readings(
+                &shown,
+                panel,
+                chart.time_of(chart.at_across(across)),
+                instants,
+            );
             if !linked.is_empty() {
                 details.push_str(&format!(
                     "; linked charts at that time: {}",
@@ -2290,6 +2322,9 @@ pub(crate) struct Pointed<'a> {
     pub world_edge: Option<u16>,
     /// The chip of its context pointed at, by its parameter. See `design/panel-context.md`.
     pub chip: Option<&'a str>,
+    /// Whether their client reads every chart's points as instants, as one whose Hello does not say that it reads
+    /// buckets: `across` is then a place on the chart as that client was sent it, [`without_buckets`].
+    pub instants: bool,
 }
 
 /// Why a participant's tick is refused when the panel changed since the version they saw: the client cues it, and the
