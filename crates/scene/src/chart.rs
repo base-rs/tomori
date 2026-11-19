@@ -130,12 +130,13 @@ fn sane(value: f32) -> Option<f32> {
 /// `chart` as a client draws it, whatever a server sent: from 2 to [`CHART_POINTS`] points; at most [`CHART_SERIES`]
 /// series, each of at most as many values as points, every value held to [`CHART_MAGNITUDE`], its breaks inside it and
 /// its width within [`LINE_WIDTHS`]; at most [`CHART_REFERENCES`] reference lines, [`CHART_SHADES`] shades and
-/// [`CHART_LABELS`] labels at points it has; its axis's ends held as its values are; and every name, label, unit and
-/// note on one line, cut as the server cuts them.
+/// [`CHART_LABELS`] labels at points it has, or, where its points are buckets, at their edges; its axis's ends held as
+/// its values are; and every name, label, unit and note on one line, cut as the server cuts them.
 pub fn bounded(chart: &Chart) -> Chart {
     let points = chart.points.clamp(2, CHART_POINTS);
     let name = |text: &str| one_line(text, CHART_NAME_CHARS);
-    let mut bounded = Chart::new(points);
+    let mut bounded = Chart::new(points).with_buckets(chart.buckets);
+    let steps = bounded.steps();
     bounded.series = chart
         .series
         .iter()
@@ -178,7 +179,7 @@ pub fn bounded(chart: &Chart) -> Chart {
     bounded.labels = chart
         .labels
         .iter()
-        .filter(|label| label.at < points)
+        .filter(|label| label.at <= steps)
         .take(CHART_LABELS)
         .map(|label| tomori_protocol::chart::AxisLabel::new(label.at, name(&label.text)))
         .collect();
@@ -225,8 +226,9 @@ pub struct Drawing {
 }
 
 /// Where a chart's plot is drawn, in font pixels, its left and top edges, its width and its height, the range of
-/// values it spans, lowest and highest, and how many points it has along its time axis: what its readout needs to read
-/// the time and the values under a point on it, without laying the chart out again. See [`readout`].
+/// values it spans, lowest and highest, and how many points it has along its time axis, and how many steps that spans,
+/// [`Chart::steps`], one fewer than its points or, where they are buckets, as many: what its readout needs to read the
+/// time and the values under a point on it, without laying the chart out again. See [`readout`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlotArea {
     pub left: f32,
@@ -235,6 +237,7 @@ pub struct PlotArea {
     pub height: f32,
     pub range: (f32, f32),
     pub points: u32,
+    pub steps: u32,
     /// The lines thinned to be drawn, as they are drawn, each series' by its index, a run of points, in font pixels,
     /// for each part its line draws: those of more points than [`LINE_VERTICES`], which its readout reads where they
     /// are drawn rather than where their points are.
@@ -244,18 +247,19 @@ pub struct PlotArea {
 }
 
 impl PlotArea {
-    /// Where along the time axis `point`, in font pixels, is, as a point's index or a share of the way between two;
-    /// `None` off the plot.
+    /// Where along the time axis `point`, in font pixels, is, as a point's index or a share of the way between two,
+    /// or, on a chart of buckets, so many steps from where its first begins; `None` off the plot.
     pub fn at(&self, [x, y]: [f32; 2]) -> Option<f32> {
         let across = (x - self.left) / self.width;
         let down = (y - self.top) / self.height;
         ((0.0..=1.0).contains(&across) && (0.0..=1.0).contains(&down))
-            .then(|| across * (self.points.max(2) - 1) as f32)
+            .then(|| across * self.steps.max(1) as f32)
     }
 
-    /// Where `at`, a point's index or a share of the way between two, is across the plot.
+    /// Where `at`, a point's index or a share of the way between two, or, on a chart of buckets, so many steps from
+    /// where its first begins, is across the plot.
     pub fn x(&self, at: f32) -> f32 {
-        self.left + self.width * at / (self.points.max(2) - 1) as f32
+        self.left + self.width * at / self.steps.max(1) as f32
     }
 
     /// The value at `y` down the plot, as [`PlotArea::y`] places it.
@@ -302,10 +306,22 @@ struct Plot<'a> {
 }
 
 impl Plot<'_> {
-    /// Where point `index` is across the plot.
+    /// Where `at`, so many steps along the chart's axis, is across the plot, which spans [`Chart::steps`] of them.
+    fn place(&self, at: f32) -> f32 {
+        self.left + self.width * at / self.chart.steps() as f32
+    }
+
+    /// Where point `index` is across the plot: from its left edge to its right, or, where the chart's points are
+    /// buckets, the middle of its bucket, half a step in from where it begins.
     fn x(&self, index: usize) -> f32 {
-        let last = self.chart.points.saturating_sub(1).max(1) as f32;
-        self.left + self.width * index as f32 / last
+        self.place(index as f32 + self.chart.inset())
+    }
+
+    /// Where the chart's points stand across the plot: how far in from its left edge the first is, and how far on from
+    /// it the last: the plot's whole width, or, where they are buckets, half a bucket in from either edge.
+    fn span(&self) -> (f32, f32) {
+        let inset = self.width * self.chart.inset() / self.chart.steps() as f32;
+        (inset, self.width - 2.0 * inset)
     }
 
     /// Where `value` is down the plot, above or below it where it is beyond the range, worked out in double precision
@@ -415,18 +431,20 @@ impl Plot<'_> {
     /// the plot.
     fn fill(&self, from: Bound, to: Bound, above: bool, quads: usize) -> Vec<[[f32; 2]; 4]> {
         let last = self.chart.points.saturating_sub(1).max(1) as f32;
+        // Across where the points stand, from the first, at 0, to the last, `width` on.
+        let (first, width) = self.span();
         let stepped = self.bound_stepped(from) || self.bound_stepped(to);
-        let count = (quads / 2).min(self.width.floor() as usize).max(1);
-        let column = self.width / count as f32;
-        let gap = |x: f32| self.gap(from, to, x / self.width * last);
+        let count = (quads / 2).min(width.floor() as usize).max(1);
+        let column = width / count as f32;
+        let gap = |x: f32| self.gap(from, to, x / width * last);
         // A few samples to each font pixel, the columns' ends and the points, in order.
-        let samples = (self.width * 4.0).ceil() as usize;
-        let step = self.width / samples as f32;
+        let samples = (width * 4.0).ceil() as usize;
+        let step = width / samples as f32;
         let mut places: Vec<f32> = (0..samples)
             .map(|sample| (sample as f32 + 0.5) * step)
             .collect();
         places.extend((0..=count).map(|index| index as f32 * column));
-        places.extend((0..=last as usize).map(|index| index as f32 / last * self.width));
+        places.extend((0..=last as usize).map(|index| index as f32 / last * width));
         places.sort_by(f32::total_cmp);
         places.dedup();
         let mut pieces: Vec<Piece> = Vec::new();
@@ -501,8 +519,9 @@ impl Plot<'_> {
         for index in order.into_iter().take(quads.saturating_sub(pieces.len())) {
             two[index] = !stepped;
         }
-        let quad =
-            |corners: [(f32, f32); 4]| corners.map(|(x, value)| [self.left + x, self.y(value)]);
+        let quad = |corners: [(f32, f32); 4]| {
+            corners.map(|(x, value)| [self.left + first + x, self.y(value)])
+        };
         let lower = |x: f32, otherwise: f32| gap(x).map_or(otherwise, |(_, below)| below);
         let mut shaded = Vec::new();
         for (piece, two) in pieces.iter().zip(two) {
@@ -893,7 +912,11 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         .iter()
         .filter(|series| series.style == SeriesStyle::Bars)
         .collect();
-    let stretches = bar_stretches(chart.points as usize, plot.width, barred.len());
+    let stretches = stretches_of(
+        chart.points as usize,
+        plot.width / chart.steps() as f32,
+        barred.len(),
+    );
     drawing.plot = Some(PlotArea {
         left: plot.left,
         top: plot.top,
@@ -901,6 +924,7 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         height: plot.height,
         range,
         points: chart.points,
+        steps: chart.steps(),
         thinned: Vec::new(),
         stretches,
     });
@@ -939,11 +963,12 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         ));
     }
     // The first label starts at its point and the last ends at its, the rest centred on theirs; one that would
-    // overlap the label before it is left out.
+    // overlap the label before it is left out. Where the points are buckets, each stands at an edge of theirs, from
+    // where the first begins to where the last ends.
     let mut end = f32::MIN;
-    let last = chart.points.saturating_sub(1);
+    let last = chart.steps();
     for label in &chart.labels {
-        let x = plot.x(label.at as usize);
+        let x = plot.place(label.at as f32);
         shapes.push(line([x, plot.top], [x, plot.bottom()], GRID_WIDTH, GRID));
         let text = cells(&label.text, DIM);
         let width = (text.len() * CELL_WIDTH) as f32;
@@ -1081,11 +1106,17 @@ pub const BAR_WIDTH: f32 = 2.0;
 /// the narrowest stretch, a stretch of more points where they would be narrower, rather than bars stacked, which would
 /// read as a sum, or overlapping, which hide one another.
 pub fn bar_stretches(points: usize, width: f32, bars: usize) -> usize {
+    stretches_of(points, width / points.saturating_sub(1).max(1) as f32, bars)
+}
+
+/// How many stretches a chart of `points` points, `pitch` font pixels from each to the next, draws its `bars` series of
+/// bars in, as [`bar_stretches`] says for a chart of instants, whose points are a plot's width over one fewer apart;
+/// those of a chart of buckets are its width over as many.
+fn stretches_of(points: usize, pitch: f32, bars: usize) -> usize {
     let most = points.min(LINE_VERTICES);
     if bars <= 1 {
         return most;
     }
-    let pitch = width / points.saturating_sub(1).max(1) as f32;
     (1..=most)
         .rev()
         .find(|stretches| (points / stretches) as f32 * pitch * BAR >= BAR_WIDTH * bars as f32)
@@ -1094,12 +1125,13 @@ pub fn bar_stretches(points: usize, width: f32, bars: usize) -> usize {
 
 /// The value of the bar of the series `index` drawn nearest `at`, a point's index or a share of the way between two,
 /// of `chart` drawn in `stretches`, as [`bar_stretches`] finds them: as tall as the one of its stretch's points
-/// farthest from the axis's base, kept to its figures; `None` where none of them has a value.
+/// farthest from the axis's base, kept to its figures; `None` where none of them has a value. On a chart of buckets,
+/// `at` is so many steps from where its first begins, and the bar is that of the bucket that holds it.
 pub fn bar_at(chart: &Chart, index: usize, at: f32, stretches: usize) -> Option<f32> {
     let series = chart.series.get(index)?;
     let points = chart.points.clamp(2, CHART_POINTS) as usize;
     let stretches = stretches.clamp(1, points);
-    let nearest = (if at.is_nan() { 0.0 } else { at })
+    let nearest = (if at.is_nan() { 0.0 } else { at - chart.inset() })
         .round()
         .clamp(0.0, (points - 1) as f32) as usize;
     let stretch = nearest * stretches / points;
@@ -1127,7 +1159,7 @@ fn bars(
 ) {
     let color = ink(series.colour, 1.0);
     let points = plot.chart.points as usize;
-    let pitch = plot.width / plot.chart.points.saturating_sub(1).max(1) as f32;
+    let pitch = plot.width / plot.chart.steps() as f32;
     let (low, high) = plot.range;
     let right = plot.left + plot.width;
     for stretch in 0..stretches {
@@ -1624,6 +1656,31 @@ pub mod fixtures {
                     .with_breaks(vec![90]),
             )
             .with_axis(ValueAxis::new(None, None, "a minute"))
+    }
+
+    /// The requests in each 15 minutes of the last 24 hours: 96 buckets, a bar each, the last ending now, labelled at
+    /// their edges, every six hours.
+    pub fn requests() -> Chart {
+        let values = (0..96)
+            .map(|index| Some(5200.0 + 2400.0 * (index as f32 / 15.0).sin()))
+            .collect();
+        Chart::new(96)
+            .with_buckets(true)
+            .with_time(tomori_protocol::chart::TimeAxis::Live { step_ms: 900_000 })
+            .with_labels(vec![
+                AxisLabel::new(0, "-24 h"),
+                AxisLabel::new(24, "-18 h"),
+                AxisLabel::new(48, "-12 h"),
+                AxisLabel::new(72, "-6 h"),
+                AxisLabel::new(96, "now"),
+            ])
+            .with_series(Series::new(
+                "requests",
+                Colour::Teal,
+                SeriesStyle::Bars,
+                values,
+            ))
+            .with_axis(ValueAxis::new(Some(0.0), None, "per 15 min"))
     }
 
     /// Nothing measured: a chart that says so.

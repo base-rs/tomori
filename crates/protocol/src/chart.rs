@@ -198,7 +198,9 @@ impl Note {
     }
 }
 
-/// A label along the axis, under the point `at`, from 0, such as `-15 min` under the first and `now` under the last.
+/// A label along the axis, under the point `at`, from 0, such as `-15 min` under the first and `now` under the last;
+/// or, on a chart whose points are buckets ([`Chart::buckets`]), under where its bucket `at` begins, and, with `at` its
+/// count of points, under where its last ends, such as `-24 h` at 0 and `now` at 96 of 96.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct AxisLabel {
@@ -393,6 +395,12 @@ fn is_shown(legend: &bool) -> bool {
 /// A chart: `points` evenly spaced points along one time axis, labelled along it, a value axis, its series, reference
 /// lines and shaded regions, whether it shows a legend, and a badge and a status line. A chart with no value at all
 /// shows that it has none, with its status line if it has one, and never an empty plot that could be read as quiet.
+///
+/// Its points are instants, a step apart, its axis running from the first to the last, unless it says they are
+/// [buckets](Chart::buckets), each a whole step, its axis running from where the first begins to where the last ends.
+/// A place along its axis is counted in steps from its start, to [`Chart::steps`] at its end: on a chart of instants,
+/// a point's index or a share of the way between two; on one of buckets, bucket 3 from 3 to 4, its point standing at
+/// its middle, 3.5.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Chart {
@@ -417,7 +425,32 @@ pub struct Chart {
     /// time, never by its labels, which are only shown. An older client ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time: Option<TimeAxis>,
+    /// Whether its points are buckets rather than instants: each a whole step of its axis, such as the requests counted
+    /// in each 15 minutes, the last ending where its axis ends, so that 96 of them span 96 steps, where 96 instants
+    /// span 95. Its bars are drawn across their steps, its labels stand at their edges ([`AxisLabel`]), a time is read
+    /// in the bucket that holds it, and its [`TimeAxis`] says the whole window they cover. An older client ignores it,
+    /// and draws and reads each bucket as an instant, as before there were buckets.
+    ///
+    /// ```
+    /// use tomori_protocol::chart::{Chart, ChartTime, TimeAxis};
+    ///
+    /// let day = Chart::new(96)
+    ///     .with_time(TimeAxis::Live { step_ms: 900_000 })
+    ///     .with_buckets(true);
+    /// assert_eq!(day.steps(), 96);
+    /// assert_eq!(day.time_of(0.0), Some(ChartTime::BeforeNow { ms: 86_400_000.0 }));
+    /// assert_eq!(
+    ///     serde_json::to_string(&day).unwrap(),
+    ///     r#"{"points":96,"axis":{},"series":[],"time":{"kind":"live","step_ms":900000},"buckets":true}"#
+    /// );
+    /// ```
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub buckets: bool,
 }
+
+/// How far past either end of its window, in steps, a time is still found on a chart of buckets, [`Chart::at_time`]:
+/// only as far as arithmetic rounds, so that another chart's end of the same window is its end.
+const BUCKET_SLACK: f64 = 1e-6;
 
 /// The most milliseconds between a chart's points, a day.
 pub const CHART_STEP_MS: u32 = 86_400_000;
@@ -430,10 +463,13 @@ pub const CHART_EARLIEST_MS: i64 = -62_167_219_200_000;
 
 /// What a chart's points are in time: those of a live chart, whose last point is now and each `step_ms` milliseconds
 /// after the one before, or those of a fixed window, whose first point is at `from_ms` and last at `to_ms`, absolute
-/// instants in milliseconds since the Unix epoch, in UTC, the points evenly between. Two charts are linked at the same
-/// time only by these, a live chart to another live chart by how long before now, a fixed window to another by the
-/// instant, never by a time of day. `Unknown` stands for a kind a newer server sends, which links nothing. See the
-/// linked time cursor in `design/projection.md`.
+/// instants in milliseconds since the Unix epoch, in UTC, the points evenly between. Where its points are buckets
+/// ([`Chart::buckets`]), a live chart's last bucket ends now and each covers `step_ms` milliseconds, and a fixed
+/// window's first bucket begins at `from_ms` and its last ends at `to_ms`, the buckets evenly between, so that the
+/// axis says the whole window its buckets cover, as a chart of instants over the same window says it. Two charts are
+/// linked at the same time only by these, a live chart to another live chart by how long before now, a fixed window to
+/// another by the instant, never by a time of day. `Unknown` stands for a kind a newer server sends, which links
+/// nothing. See the linked time cursor in `design/projection.md`.
 ///
 /// ```
 /// use tomori_protocol::chart::TimeAxis;
@@ -515,7 +551,34 @@ impl Chart {
             badge: None,
             status: None,
             time: None,
+            buckets: false,
         }
+    }
+
+    /// The chart, its points buckets, each a whole step of its axis, or instants. See [`Chart::buckets`].
+    pub fn with_buckets(mut self, buckets: bool) -> Self {
+        self.buckets = buckets;
+        self
+    }
+
+    /// How many steps its time axis spans, from its start to its end: one between each two of its points, or, where
+    /// its points are buckets, one for each. A chart of fewer than two points reads as two.
+    ///
+    /// ```
+    /// use tomori_protocol::chart::Chart;
+    ///
+    /// assert_eq!(Chart::new(97).steps(), 96);
+    /// assert_eq!(Chart::new(96).with_buckets(true).steps(), 96);
+    /// ```
+    pub fn steps(&self) -> u32 {
+        let points = self.points.max(2);
+        if self.buckets { points } else { points - 1 }
+    }
+
+    /// How far along its axis, in steps, its first point stands from its start: nothing, or, where its points are
+    /// buckets, each standing at the middle of its step, half a step.
+    pub fn inset(&self) -> f32 {
+        if self.buckets { 0.5 } else { 0.0 }
     }
 
     /// The chart, its points in time as `time` says.
@@ -593,9 +656,9 @@ impl Chart {
     /// before its first, those beyond dropped from the oldest, and every value finite, kept to [`SIGNIFICANT`] figures,
     /// or a gap; its breaks inside it, in order, once each; a width within [`LINE_WIDTHS`]; at most
     /// [`CHART_REFERENCES`] finite reference lines, [`CHART_SHADES`] shades whose edges name something, and
-    /// [`CHART_LABELS`] labels at points it has; an axis whose fixed values are finite, the lowest below the highest;
-    /// and every name, label, unit and note on one line, cut to [`CHART_NAME_CHARS`], or [`CHART_STATUS_CHARS`] for the
-    /// status line.
+    /// [`CHART_LABELS`] labels at points it has, or, where its points are buckets, at their edges; an axis whose fixed
+    /// values are finite, the lowest below the highest; and every name, label, unit and note on one line, cut to
+    /// [`CHART_NAME_CHARS`], or [`CHART_STATUS_CHARS`] for the status line.
     pub fn cleaned(mut self) -> Result<Self, &'static str> {
         if !(2..=CHART_POINTS).contains(&self.points) {
             return Err("A chart has from 2 to 256 points.");
@@ -645,7 +708,8 @@ impl Chart {
             })
             .take(CHART_SHADES)
             .collect();
-        self.labels.retain(|label| label.at < self.points);
+        let steps = self.steps();
+        self.labels.retain(|label| label.at <= steps);
         self.labels.truncate(CHART_LABELS);
         for label in &mut self.labels {
             label.text = name(&label.text);
@@ -669,10 +733,10 @@ impl Chart {
         Ok(self)
     }
 
-    /// Whether it and `other` are the same chart but for their live data, [`Chart::same_data`]: their points, labels,
-    /// value axis, reference lines, shaded regions and legend, and their series' names, colours, styles, widths and
-    /// dashes, in the same order. A panel's version covers these, and its data seq the rest. See
-    /// `design/projection.md`.
+    /// Whether it and `other` are the same chart but for their live data, [`Chart::same_data`]: their points, whether
+    /// they are buckets, their time, labels, value axis, reference lines, shaded regions and legend, and their series'
+    /// names, colours, styles, widths and dashes, in the same order. A panel's version covers these, and its data seq
+    /// the rest. See `design/projection.md`.
     pub fn same_structure(&self, other: &Chart) -> bool {
         let Chart {
             points,
@@ -685,9 +749,11 @@ impl Chart {
             badge: _,
             status: _,
             time,
+            buckets,
         } = self;
         *points == other.points
             && *time == other.time
+            && *buckets == other.buckets
             && *labels == other.labels
             && *axis == other.axis
             && *references == other.references
@@ -749,7 +815,8 @@ impl Chart {
     /// each; or that it has no data. On a fixed window, each series' newest value, whether or not the window is still
     /// filling, and the instant it is at in UTC as the window's axis labels write it against `today`, in days since the
     /// Unix epoch in UTC, [`utc_minute`]: `0.194 at 05:56 UTC` within today, `0.194 at 11-13 05:56 UTC` for a window not
-    /// within it, or spanning days, or where today is not known, or at its end, `0.194 at its end, 10:00 UTC`.
+    /// within it, or spanning days, or where today is not known, or at its end, `0.194 at its end, 10:00 UTC`; a
+    /// bucket's, the instant it ends at.
     pub fn summary_on(&self, today: Option<i64>) -> String {
         let unit = if self.axis.unit.is_empty() {
             String::new()
@@ -763,7 +830,7 @@ impl Chart {
         if !self.has_values() {
             lines.push("No data.".to_owned());
         }
-        let last = (self.points.max(2) - 1) as usize;
+        let steps = self.steps() as usize;
         for series in &self.series {
             lines.push(match self.current(series) {
                 Some((at, value)) => {
@@ -772,10 +839,11 @@ impl Chart {
                             let day = |ms: i64| ms.div_euclid(DAY_MS);
                             let dated = today != Some(day(from_ms)) || today != Some(day(to_ms));
                             let span = i128::from(to_ms) - i128::from(from_ms);
-                            let ms =
-                                i128::from(from_ms) + span * at.min(last) as i128 / last as i128;
+                            // A bucket's value is of the step that ends a step on from where it begins.
+                            let at = (at + usize::from(self.buckets)).min(steps);
+                            let ms = i128::from(from_ms) + span * at as i128 / steps as i128;
                             let instant = utc_minute(ms as i64, dated);
-                            if at >= last {
+                            if at >= steps {
                                 format!("at its end, {instant} UTC")
                             } else {
                                 format!("at {instant} UTC")
@@ -1080,10 +1148,10 @@ impl Chart {
         }
     }
 
-    /// Where along its time axis `across`, in [`ACROSS`] parts, is: a point's index, or a share of the way between two.
+    /// Where along its time axis `across`, in [`ACROSS`] parts, is: a point's index, or a share of the way between
+    /// two, or, on a chart of buckets, so many steps from where its first begins.
     pub fn at_across(&self, across: u16) -> f32 {
-        let last = self.points.max(2) - 1;
-        f32::from(across.min(ACROSS)) / f32::from(ACROSS) * last as f32
+        f32::from(across.min(ACROSS)) / f32::from(ACROSS) * self.steps() as f32
     }
 
     /// The value of the series `series` at `at`, a point's index or a share of the way between two, as it is drawn
@@ -1092,7 +1160,9 @@ impl Chart {
     /// dot, read within half a point of it; a step's held from its point to the next; and a bar's, the bar drawn for
     /// the stretch of points nearest, as tall as the one of them farthest from its base where a chart of more than
     /// [`STRETCHES`] points draws one for each stretch. `None` where it has no value there, a gap, never zero; kept to
-    /// [`SIGNIFICANT`] figures.
+    /// [`SIGNIFICANT`] figures. On a chart of buckets, `at` is so many steps from where its first begins, and each
+    /// point stands at the middle of its bucket ([`Chart::inset`]), so that a bar's is the bucket that holds `at`, from
+    /// where it begins to where it ends, never the one before for a time in its older half.
     pub fn value_at(&self, series: usize, at: f32) -> Option<f32> {
         let series = self.series.get(series)?;
         let points = self.points.clamp(2, CHART_POINTS) as usize;
@@ -1100,7 +1170,7 @@ impl Chart {
         let at = if at.is_nan() {
             0.0
         } else {
-            at.clamp(0.0, last)
+            (at - self.inset()).clamp(0.0, last)
         };
         let value = |index: usize| series.values.get(index).copied().flatten();
         // Whether the point `index` is joined to the next by its line.
@@ -1148,9 +1218,10 @@ impl Chart {
     /// two labels about it that say a time of one kind, or the two nearest it, and written as they are, `-6 min 25 s`
     /// or `now` between `-10 min` and `-5 min`, or `14:03:25` between `14:00` and `14:05`, to the second where its points
     /// are less than the unit apart; or else a label at the point nearest it, or which point it is, `point 121 of
-    /// 181`.
+    /// 181`. On a chart of buckets, `at` is so many steps from where its first begins, as its labels are, a label at
+    /// the edge nearest it, and the point the bucket that holds it.
     pub fn time_at(&self, at: f32) -> String {
-        let last = (self.points.max(2) - 1) as f32;
+        let last = self.steps() as f32;
         let at = if at.is_nan() {
             0.0
         } else {
@@ -1169,14 +1240,16 @@ impl Chart {
             let distance = |pair: &&[(f32, Time)]| (pair[0].0 - at).max(at - pair[1].0).max(0.0);
             distance(a).total_cmp(&distance(b))
         });
-        let nearest = (at.round() as u32).min(self.points.max(2) - 1);
+        let nearest = (at.round() as u32).min(self.steps());
         let Some([(from_at, from), (to_at, to)]) = pair.map(|pair| [pair[0], pair[1]]) else {
+            let points = self.points.max(2);
+            let point = ((at - self.inset()).round() as u32).min(points - 1);
             return self
                 .labels
                 .iter()
                 .find(|label| label.at == nearest)
                 .map_or_else(
-                    || format!("point {} of {}", nearest + 1, self.points.max(2)),
+                    || format!("point {} of {points}", point + 1),
                     |label| label.text.clone(),
                 );
         };
@@ -1207,7 +1280,8 @@ impl Chart {
 
     /// The time at `at`, a point's index or a share of the way between two, held to its points, as its [`TimeAxis`] says:
     /// so many milliseconds before now on a live chart, or the instant on a fixed window; `None` where it says neither.
-    /// Its labels are never read for it. See the linked time cursor in `design/projection.md`.
+    /// On a chart of buckets, `at` is so many steps from where its first begins, held to its window. Its labels are
+    /// never read for it. See the linked time cursor in `design/projection.md`.
     ///
     /// ```
     /// use tomori_protocol::chart::{Chart, ChartTime, TimeAxis};
@@ -1217,9 +1291,13 @@ impl Chart {
     /// let hourly = Chart::new(61).with_time(TimeAxis::Live { step_ms: 60_000 });
     /// assert_eq!(hourly.at_time(ChartTime::BeforeNow { ms: 300_000.0 }), Some(55.0));
     /// assert_eq!(Chart::new(10).time_of(3.0), None);
+    /// // Ten minutes ago is in the last of an hour's buckets of 15 minutes, which ends now.
+    /// let buckets = Chart::new(4).with_time(TimeAxis::Live { step_ms: 900_000 }).with_buckets(true);
+    /// let at = buckets.at_time(ChartTime::BeforeNow { ms: 600_000.0 }).unwrap();
+    /// assert_eq!(at.floor(), 3.0);
     /// ```
     pub fn time_of(&self, at: f32) -> Option<ChartTime> {
-        let last = f64::from(self.points.max(2) - 1);
+        let last = f64::from(self.steps());
         let at = if at.is_nan() {
             0.0
         } else {
@@ -1239,9 +1317,11 @@ impl Chart {
     /// Where along its time axis `time` is, a point's index or a share of the way between two, as its [`TimeAxis`] says:
     /// a time before now only on a live chart and an instant only on a fixed window; `None` for another kind, a chart
     /// that says neither, or a time before its first point or after its last by more than half a point, so that a chart
-    /// that does not cover it shows nothing there.
+    /// that does not cover it shows nothing there. On a chart of buckets, so many steps from where its first begins,
+    /// and `None` for a time outside the window they cover, which has no half a point beyond it.
     pub fn at_time(&self, time: ChartTime) -> Option<f32> {
-        let last = f64::from(self.points.max(2) - 1);
+        let last = f64::from(self.steps());
+        let beyond = if self.buckets { BUCKET_SLACK } else { 0.5 };
         let at = match (self.time?, time) {
             (TimeAxis::Live { step_ms }, ChartTime::BeforeNow { ms }) => {
                 last - ms / f64::from(step_ms)
@@ -1251,7 +1331,8 @@ impl Chart {
             }
             _ => return None,
         };
-        (at.is_finite() && (-0.5..=last + 0.5).contains(&at)).then(|| at.clamp(0.0, last) as f32)
+        (at.is_finite() && (-beyond..=last + beyond).contains(&at))
+            .then(|| at.clamp(0.0, last) as f32)
     }
 
     /// How a value of the chart reads, `value` in its axis's unit, `203,800 a minute`; `no data` where it has none.

@@ -34,6 +34,7 @@ fn charts() -> Vec<(&'static str, Chart)> {
         ("Swinging pressure", fixtures::swinging()),
         ("Many steps", fixtures::stepping()),
         ("Replicas", fixtures::tracking()),
+        ("Requests per 15 min", fixtures::requests()),
     ]
 }
 

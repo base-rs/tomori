@@ -2471,11 +2471,8 @@ impl Projector {
                     .map(|read| (panel, model, read))
             });
         output.across = read.as_ref().map(|(panel, _, (at, ..))| {
-            let last = panel
-                .chart
-                .as_ref()
-                .map_or(1, |chart| chart.points.max(2) - 1);
-            (at / last as f32 * f32::from(tomori_protocol::chart::ACROSS)).round() as u16
+            let steps = panel.chart.as_ref().map_or(1, |chart| chart.steps());
+            (at / steps as f32 * f32::from(tomori_protocol::chart::ACROSS)).round() as u16
         });
         output.linked = self.linked(
             &standing,

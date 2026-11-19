@@ -62,15 +62,16 @@ fn freezes(published: &Published) -> bool {
 }
 
 /// The window `chart`, `published`'s, shows, as absolute instants in milliseconds since the Unix epoch in UTC: a live
-/// chart's, its last point the instant it was published, as many steps back as it has points; a fixed chart's, its own.
-/// None for one whose time its chart does not say.
+/// chart's, its last point the instant it was published, as many steps back as it has points, or, where they are
+/// buckets, its last ending then, every bucket's step back; a fixed chart's, its own. None for one whose time its chart
+/// does not say.
 fn shown_window(
     chart: &tomori_protocol::chart::Chart,
     published: &Published,
 ) -> Option<(i64, i64)> {
     match chart.time? {
         TimeAxis::Live { step_ms } => {
-            let span = i64::from(chart.points.max(2) - 1) * i64::from(step_ms);
+            let span = i64::from(chart.steps()) * i64::from(step_ms);
             Some((published.at_ms - span, published.at_ms))
         }
         TimeAxis::Fixed { from_ms, to_ms } => Some((from_ms, to_ms)),

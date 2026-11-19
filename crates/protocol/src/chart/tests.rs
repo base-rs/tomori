@@ -799,6 +799,249 @@ fn cleaning_keeps_a_time_axis_only_where_it_is_sound_and_it_is_part_of_a_chart_s
     assert!(!fixed_chart.same_structure(&Chart::new(181)));
 }
 
+/// The requests counted in each of `points` buckets of `step_ms`, live, as bars, the bucket `index` counting `index`,
+/// labelled from `-24 h` where its first begins to `now` where its last ends.
+fn requests(points: u32, step_ms: u32) -> Chart {
+    Chart::new(points)
+        .with_buckets(true)
+        .with_time(TimeAxis::Live { step_ms })
+        .with_labels(vec![
+            AxisLabel::new(0, "-24 h"),
+            AxisLabel::new(points / 2, "-12 h"),
+            AxisLabel::new(points, "now"),
+        ])
+        .with_series(Series::new(
+            "requests",
+            Colour::Teal,
+            SeriesStyle::Bars,
+            (0..points).map(|index| Some(index as f32)).collect(),
+        ))
+}
+
+#[test]
+fn a_chart_of_buckets_spans_every_bucket_and_says_so_on_the_wire() {
+    // 96 buckets of 15 minutes span 96 steps, the 24 hours they count, where 96 instants span the 95 between them.
+    let day = requests(96, 900_000);
+    assert_eq!((day.steps(), day.inset()), (96, 0.5));
+    let instants = Chart::new(96).with_time(TimeAxis::Live { step_ms: 900_000 });
+    assert_eq!((instants.steps(), instants.inset()), (95, 0.0));
+    assert_eq!(Chart::new(0).with_buckets(true).steps(), 2);
+    // A place across it is so many steps from where its first bucket begins, to where its last ends.
+    assert_eq!(day.at_across(0), 0.0);
+    assert_eq!(day.at_across(ACROSS / 2), 48.0);
+    assert_eq!(day.at_across(ACROSS), 96.0);
+    // On the wire, said only where it is so, and read as instants from an older server, which never says it.
+    let wire = serde_json::to_value(&day).unwrap();
+    assert_eq!(wire["buckets"], serde_json::json!(true));
+    assert_eq!(
+        wire["time"],
+        serde_json::json!({"kind": "live", "step_ms": 900_000})
+    );
+    assert!(
+        serde_json::to_value(&instants)
+            .unwrap()
+            .get("buckets")
+            .is_none()
+    );
+    let older: Chart = serde_json::from_str(r#"{"points": 96}"#).unwrap();
+    assert!(!older.buckets);
+    let read: Chart = serde_json::from_value(wire).unwrap();
+    assert_eq!(read, day);
+    // Cleaned, its labels are kept at its buckets' edges, one where its last ends, and none beyond; a chart of
+    // instants has no point there.
+    let labelled = |chart: Chart| -> Vec<u32> {
+        chart
+            .with_labels(vec![
+                AxisLabel::new(0, "a"),
+                AxisLabel::new(95, "b"),
+                AxisLabel::new(96, "c"),
+                AxisLabel::new(97, "d"),
+            ])
+            .cleaned()
+            .unwrap()
+            .labels
+            .iter()
+            .map(|label| label.at)
+            .collect()
+    };
+    assert_eq!(labelled(day.clone()), [0, 95, 96]);
+    assert_eq!(labelled(instants.clone()), [0, 95]);
+    assert!(day.clone().cleaned().unwrap().buckets);
+    // Whether its points are buckets is part of its structure, as its time is.
+    assert!(day.same_structure(&day.clone()));
+    assert!(!day.same_structure(&day.clone().with_buckets(false)));
+    assert!(day.same_data(&day.clone().with_buckets(false)));
+}
+
+#[test]
+fn a_time_on_a_chart_of_buckets_is_in_the_bucket_that_holds_it() {
+    let day = requests(96, 900_000);
+    let before = |minutes: f64| ChartTime::BeforeNow {
+        ms: minutes * 60_000.0,
+    };
+    // Its axis is the whole window: from 24 hours ago, where its first bucket begins, to now, where its last ends.
+    assert_eq!(day.time_of(0.0), Some(before(1440.0)));
+    assert_eq!(day.time_of(96.0), Some(before(0.0)));
+    assert_eq!(day.time_of(48.0), Some(before(720.0)));
+    assert_eq!(day.time_of(900.0), Some(before(0.0)));
+    assert_eq!(day.time_of(f32::NAN), Some(before(1440.0)));
+    // Ten minutes ago, and fourteen, in the older half of the last bucket, which counts the last 15 minutes, are in
+    // it, and read it; sixteen is in the one before.
+    let read = |chart: &Chart, minutes: f64| {
+        let at = chart.at_time(before(minutes)).unwrap();
+        (at.floor(), chart.value_at(0, at))
+    };
+    assert_eq!(read(&day, 10.0), (95.0, Some(95.0)));
+    assert_eq!(read(&day, 14.0), (95.0, Some(95.0)));
+    assert_eq!(read(&day, 16.0), (94.0, Some(94.0)));
+    assert_eq!(read(&day, 1439.0), (0.0, Some(0.0)));
+    // The same bars as instants, each at its bucket's end, as a chart said them before it could say buckets, read the
+    // bucket before for a time in a bucket's older half.
+    let instants = day.clone().with_buckets(false);
+    assert_eq!(read(&instants, 10.0).1, Some(94.0));
+    // A bucket is read from where it begins to where it ends, the last to the axis's end, and nonsense as the oldest.
+    for (at, bucket) in [
+        (0.0, 0.0),
+        (0.2, 0.0),
+        (0.99, 0.0),
+        (1.0, 1.0),
+        (95.5, 95.0),
+        (96.0, 95.0),
+        (900.0, 95.0),
+        (-5.0, 0.0),
+        (f32::NAN, 0.0),
+    ] {
+        assert_eq!(day.value_at(0, at), Some(bucket), "{at}");
+    }
+    // It lines up with a line over the same window, 97 instants 15 minutes apart: every time on either is at the same
+    // place across the other, from the window's start to now.
+    let line = Chart::new(97).with_time(TimeAxis::Live { step_ms: 900_000 });
+    for at in [0.0, 0.25, 12.5, 48.0, 95.75, 96.0] {
+        assert_eq!(day.at_time(line.time_of(at).unwrap()), Some(at), "{at}");
+        assert_eq!(line.at_time(day.time_of(at).unwrap()), Some(at), "{at}");
+    }
+    // An hour of buckets of a minute lines up with an hour's line at 5 seconds.
+    let hour = requests(60, 60_000);
+    let fine = Chart::new(721).with_time(TimeAxis::Live { step_ms: 5_000 });
+    assert_eq!(hour.at_time(fine.time_of(0.0).unwrap()), Some(0.0));
+    assert_eq!(hour.at_time(fine.time_of(714.0).unwrap()), Some(59.5));
+    assert_eq!(hour.at_time(fine.time_of(720.0).unwrap()), Some(60.0));
+    // A time outside the window its buckets cover is on it nowhere: it has no half a point beyond its ends, as a
+    // chart of instants has.
+    assert_eq!(hour.at_time(before(60.5)), None);
+    assert_eq!(hour.at_time(before(-0.5)), None);
+    assert_eq!(hour.at_time(before(60.0)), Some(0.0));
+    assert_eq!(hour.at_time(before(0.0)), Some(60.0));
+    assert_eq!(day.at_time(before(1440.0 * 60.0)), None);
+    // A fixed window of buckets, 14 November 2026 in UTC, begins where its first does and ends where its last does,
+    // and links by the instant to a line over the same window.
+    let from_ms = 1_794_614_400_000;
+    let window = TimeAxis::Fixed {
+        from_ms,
+        to_ms: from_ms + 86_400_000,
+    };
+    let fixed = requests(96, 900_000).with_time(window);
+    let instant = |minutes: i64| ChartTime::Instant {
+        utc_ms: (from_ms + minutes * 60_000) as f64,
+    };
+    assert_eq!(fixed.time_of(0.0), Some(instant(0)));
+    assert_eq!(fixed.time_of(96.0), Some(instant(1440)));
+    assert_eq!(fixed.time_of(1.0), Some(instant(15)));
+    let at = fixed.at_time(instant(10)).unwrap();
+    assert_eq!((at.floor(), fixed.value_at(0, at)), (0.0, Some(0.0)));
+    let line = Chart::new(97).with_time(window);
+    assert_eq!(fixed.at_time(line.time_of(96.0).unwrap()), Some(96.0));
+    assert_eq!(line.at_time(fixed.time_of(0.5).unwrap()), Some(0.5));
+    assert_eq!(fixed.at_time(instant(-1)), None);
+    assert_eq!(fixed.at_time(instant(1441)), None);
+    assert_eq!(fixed.at_time(before(10.0)), None);
+}
+
+#[test]
+fn a_chart_of_buckets_is_read_as_it_is_drawn_each_point_at_the_middle_of_its_bucket() {
+    // A line, a step and bars over four buckets: each point stands at the middle of its bucket.
+    let series = |name: &str, style: SeriesStyle| {
+        Series::new(
+            name,
+            Colour::Teal,
+            style,
+            vec![Some(2.0), Some(4.0), None, Some(8.0)],
+        )
+    };
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_series(series("line", SeriesStyle::Line))
+        .with_series(series("step", SeriesStyle::Step))
+        .with_series(series("bars", SeriesStyle::Bars));
+    // A line is read between the middles of its buckets, and before the first's as the first.
+    assert_eq!(chart.value_at(0, 0.5), Some(2.0));
+    assert_eq!(chart.value_at(0, 1.0), Some(3.0));
+    assert_eq!(chart.value_at(0, 1.5), Some(4.0));
+    assert_eq!(chart.value_at(0, 0.1), Some(2.0));
+    assert_eq!(chart.value_at(0, 2.5), None);
+    assert_eq!(chart.value_at(0, 4.0), Some(8.0));
+    // A step is held from the middle of its bucket to the next's.
+    assert_eq!(chart.value_at(1, 1.4), Some(2.0));
+    assert_eq!(chart.value_at(1, 1.5), Some(4.0));
+    // A bar is its whole bucket's, a gap never zero.
+    assert_eq!(chart.value_at(2, 1.0), Some(4.0));
+    assert_eq!(chart.value_at(2, 1.99), Some(4.0));
+    assert_eq!(chart.value_at(2, 2.5), None);
+    assert_eq!(chart.value_at(2, 3.0), Some(8.0));
+    // Bars of more than 128 buckets are drawn one to a stretch, as tall as its farthest from the base, and read so.
+    let many = Chart::new(256).with_buckets(true).with_series(Series::new(
+        "bars",
+        Colour::Red,
+        SeriesStyle::Bars,
+        (0..256).map(|index| Some(index as f32)).collect(),
+    ));
+    assert_eq!(many.value_at(0, 0.5), Some(1.0));
+    assert_eq!(many.value_at(0, 255.9), Some(255.0));
+    // Its time is read from its labels, which stand at its buckets' edges, and written as they are.
+    let day = requests(96, 900_000);
+    assert_eq!(day.time_at(0.0), "-24 h");
+    assert_eq!(day.time_at(48.0), "-12 h");
+    assert_eq!(day.time_at(95.0), "-15 min");
+    assert_eq!(day.time_at(96.0), "now");
+    assert_eq!(day.time_at(900.0), "now");
+    assert_eq!(day.read_at(95.5), "-8 min: requests 95");
+    assert_eq!(day.read_at(day.at_across(ACROSS)), "now: requests 95");
+    // Labels that say no time give the label at the edge nearest, or else the bucket that holds it.
+    let named = day.clone().with_labels(vec![AxisLabel::new(96, "end")]);
+    assert_eq!(named.time_at(95.6), "end");
+    assert_eq!(named.time_at(95.4), "point 96 of 96");
+    assert_eq!(named.time_at(0.2), "point 1 of 96");
+    assert_eq!(named.time_at(96.0), "end");
+    assert_eq!(
+        day.clone().with_labels(Vec::new()).time_at(96.0),
+        "point 96 of 96"
+    );
+    // On a fixed window, its summary says its newest bucket's value at the instant that bucket ends: 02:00 to 10:00 UTC
+    // on 14 November 2026 in eight buckets of an hour, read to the fourth, which ends at 06:00, and then whole.
+    let from_ms = 1_794_621_600_000;
+    let window = |values: Vec<Option<f32>>| {
+        Chart::new(8)
+            .with_buckets(true)
+            .with_series(Series::new(
+                "requests",
+                Colour::Teal,
+                SeriesStyle::Bars,
+                values,
+            ))
+            .with_time(TimeAxis::Fixed {
+                from_ms,
+                to_ms: from_ms + 8 * 3_600_000,
+            })
+    };
+    let today = Some(from_ms / 86_400_000);
+    let filling = window((0..8).map(|at| (at < 4).then_some(120.0)).collect());
+    assert_eq!(filling.summary_on(today), "requests: 120 at 06:00 UTC");
+    assert_eq!(
+        window(vec![Some(90.0); 8]).summary_on(today),
+        "requests: 90 at its end, 10:00 UTC"
+    );
+}
+
 /// A chart of `count` series, each named after its place, of 181 points.
 fn of_series(count: usize) -> Chart {
     (0..count).fold(Chart::new(181), |chart, index| {

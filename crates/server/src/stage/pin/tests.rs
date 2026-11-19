@@ -456,6 +456,64 @@ fn a_copy_is_frozen_to_the_window_its_chart_shows_and_unfrozen_to_follow_again()
 }
 
 #[test]
+fn a_copy_of_a_chart_of_buckets_is_frozen_to_the_whole_window_its_buckets_count() {
+    let walls = console();
+    let (mut stage, latency, _, _) = console_stage();
+    // The console's chart, published again as ten buckets of 6 s, a bar each.
+    let chart = Chart::new(10)
+        .with_buckets(true)
+        .with_time(TimeAxis::Live { step_ms: 6_000 })
+        .with_series(Series::new(
+            "requests",
+            Colour::Teal,
+            SeriesStyle::Bars,
+            vec![Some(7.0); 10],
+        ));
+    stage
+        .publish(
+            &walls,
+            Publishing::new(Panel::chart("latency", "Latency", chart).depends_on(["region"]))
+                .unwrap(),
+            1_000,
+        )
+        .unwrap();
+    let (copy, _) = stage
+        .place_pulled(&walls, &latency, floating(), None)
+        .unwrap()
+        .1
+        .unwrap();
+    // Published, as if, at 02:30 UTC on 14 November 2026.
+    let to_ms = 1_794_623_400_000;
+    stage
+        .here_mut("console", &copy)
+        .and_then(|kept| kept.published.as_mut())
+        .unwrap()
+        .at_ms = to_ms;
+    assert_eq!(stage.freeze(&walls, &copy, true), Ok(true));
+    // Frozen to the window its buckets count: ten of 6 s back from the instant its last ended, where ten instants
+    // would be the nine steps between them.
+    let from_ms = to_ms - 60_000;
+    assert_eq!(
+        chips(&stage, &copy)[1].1,
+        ContextValue::Window { from_ms, to_ms }
+    );
+    // Its chart is kept for that window, its points buckets still, labelled at their edges, from where its first
+    // begins to where its last ends.
+    let frozen = chart_of(&stage, &copy);
+    assert!(frozen.buckets);
+    assert_eq!(frozen.time, Some(TimeAxis::Fixed { from_ms, to_ms }));
+    let labels: Vec<(u32, &str)> = frozen
+        .labels
+        .iter()
+        .map(|label| (label.at, label.text.as_str()))
+        .collect();
+    assert_eq!(
+        labels,
+        [(0, "11-14 02:29"), (5, "02:29"), (10, "02:30 UTC")]
+    );
+}
+
+#[test]
 fn only_a_copy_of_a_chart_is_frozen_on_every_path() {
     let walls = console();
     let (mut stage, latency, pods, _) = console_stage();

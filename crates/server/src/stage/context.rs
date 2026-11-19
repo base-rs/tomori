@@ -281,12 +281,12 @@ fn set(
 }
 
 /// What a chart's own time axis says a panel following time shows: live over as many minutes as its points span,
-/// rounded up, or its fixed window; nothing where it says neither.
+/// rounded up, the steps between them, or, where they are buckets, every bucket's, so that 96 of 15 minutes are the 24
+/// hours they count; or its fixed window; nothing where it says neither.
 fn shown_time(chart: &Chart) -> Option<ContextValue> {
     match chart.time? {
         TimeAxis::Live { step_ms } => Some(ContextValue::Live {
-            minutes: (u64::from(chart.points.max(2) - 1) * u64::from(step_ms)).div_ceil(60_000)
-                as u32,
+            minutes: (u64::from(chart.steps()) * u64::from(step_ms)).div_ceil(60_000) as u32,
         }),
         TimeAxis::Fixed { from_ms, to_ms } => Some(ContextValue::Window { from_ms, to_ms }),
         _ => None,
