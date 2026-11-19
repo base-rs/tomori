@@ -1142,7 +1142,6 @@ fn pointing_at_a_chart_links_a_readout_on_every_chart_sharing_its_time() {
     assert!(projector.linked.is_empty());
 }
 
-/// A panel's faces give no linked readout before its face is drawn, nor for a panel of no chart.
 /// A chart of buckets and a line over the same window, on one wall, link at the same place across each, from the
 /// window's start to now, and the buckets' readout reads the bucket that holds the time.
 #[test]
@@ -1167,6 +1166,7 @@ fn a_chart_of_buckets_links_to_a_line_over_its_window_at_the_same_place_across_e
     let shown = projection(vec![
         chart("volume", timed(96, SeriesStyle::Bars).with_buckets(true), 0),
         chart("latency", timed(97, SeriesStyle::Line), 1),
+        chart("trend", timed(96, SeriesStyle::Line).with_buckets(true), 2),
     ]);
     let mut projector = Projector::default();
     projector.update(input(&shown, HOME, None));
@@ -1209,7 +1209,7 @@ fn a_chart_of_buckets_links_to_a_line_over_its_window_at_the_same_place_across_e
     for (share, bucket) in [(0.992, 95), (0.503, 48), (0.004, 0), (0.203, 19)] {
         let ray = towards(&projector, "latency", share);
         let output = projector.update(input(&shown, HOME, ray));
-        assert_eq!(output.linked.len(), 1, "{share}");
+        assert_eq!(output.linked.len(), 2, "{share}");
         let (across, read) = linked(&projector, "volume");
         assert!((across - share).abs() < 0.004, "{share}: {across}");
         assert_eq!(read, format!("requests {bucket}"), "{share}");
@@ -1224,8 +1224,18 @@ fn a_chart_of_buckets_links_to_a_line_over_its_window_at_the_same_place_across_e
         let (across, _) = linked(&projector, "latency");
         assert!((across - share).abs() < 0.004, "{share}: {across}");
     }
+    // A line over the same buckets, linked where the window ends and where it begins, in the half of its last bucket
+    // and of its first that its line does not reach, reads that bucket, as the bars do, rather than no data.
+    for (share, bucket) in [(0.999, 95), (0.001, 0)] {
+        let ray = towards(&projector, "volume", share);
+        projector.update(input(&shown, HOME, ray));
+        let (across, read) = linked(&projector, "trend");
+        assert!((across - share).abs() < 0.004, "{share}: {across}");
+        assert_eq!(read, format!("requests {bucket}"), "{share}");
+    }
 }
 
+/// A panel's faces give no linked readout before its face is drawn, nor for a panel of no chart.
 #[test]
 fn a_face_not_yet_drawn_or_of_no_chart_links_no_readout() {
     let chart = crate::chart::fixtures::pressure();

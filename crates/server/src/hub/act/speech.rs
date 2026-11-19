@@ -113,6 +113,9 @@ impl Hub {
                             .collect()
                     })
                     .unwrap_or_default();
+                // A chart pointed at is read as their client reads it: as instants, unless it said that it reads
+                // buckets. See `design/projection.md`.
+                let instants = !state.connections[&connection].chart_buckets;
                 let attention = match state.space(&space) {
                     Some(record) if answer.is_none() && !naming && !titling => {
                         let environments = self.environments();
@@ -122,7 +125,14 @@ impl Hub {
                             &attention,
                             state.cards_of(&space),
                             record.channel.as_ref(),
-                            &|panel, at| record.stage.describe_at(&walls, panel, at, now),
+                            &|panel, at| {
+                                record.stage.describe_at(
+                                    &walls,
+                                    panel,
+                                    crate::stage::Pointed { instants, ..at },
+                                    now,
+                                )
+                            },
                             &|anchor| record.gathered(&environments, anchor),
                         )
                     }
@@ -218,6 +228,7 @@ impl Hub {
                 // is taken, resolved now as the space resolves attention, only for an utterance that began attending to
                 // nothing, for the agent and not an answer or a name, so that it can never replace what was captured
                 // as the utterance began.
+                let instants = !state.connections[&connection].chart_buckets;
                 let pointed = pointed.and_then(|resource| {
                     state
                         .utterances
@@ -237,7 +248,14 @@ impl Hub {
                                     &[resource],
                                     state.cards_of(&record.space),
                                     space.channel.as_ref(),
-                                    &|panel, at| space.stage.describe_at(&walls, panel, at, now),
+                                    &|panel, at| {
+                                        space.stage.describe_at(
+                                            &walls,
+                                            panel,
+                                            crate::stage::Pointed { instants, ..at },
+                                            now,
+                                        )
+                                    },
                                     &|anchor| space.gathered(&environments, anchor),
                                 )
                             })

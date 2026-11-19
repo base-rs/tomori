@@ -1531,7 +1531,7 @@ fn several_series_of_bars_stand_side_by_side_each_at_least_two_font_pixels_wide(
             let (_, _, left, right) = plot(&drawing);
             let plotted = drawing.plot.clone().unwrap();
             let stretches = plotted.stretches;
-            assert_eq!(stretches, bar_stretches(256, right - left, count));
+            assert_eq!(stretches, bar_stretches(&chart, right - left));
             // Thinned only where a stretch for each point would make them narrower: eight in a slot are a few dozen.
             assert!(
                 (4..=LINE_VERTICES).contains(&stretches),
@@ -1565,26 +1565,41 @@ fn several_series_of_bars_stand_side_by_side_each_at_least_two_font_pixels_wide(
                     "{count}: {group:?}"
                 );
             }
-            // The readout reads each the bar drawn: its stretch's farthest from the base, a dot at its top.
+            // The readout reads each the bar drawn: of the groups drawn, the one that stands about the place pointed
+            // at, its middle the nearest, and in it each series' bar, a dot at its top, where the bar is drawn to.
             let readout = super::readout::Readout::new(&chart, &plotted, 100.0, (2000.0, 400.0));
+            let pointed = plotted.x(100.0);
+            let middles: Vec<f32> = all
+                .chunks(count)
+                .map(|group| (group[0].0 + group[count - 1].0 + group[count - 1].1) / 2.0)
+                .collect();
+            let about = (0..stretches)
+                .min_by(|a, b| {
+                    (middles[*a] - pointed)
+                        .abs()
+                        .total_cmp(&(middles[*b] - pointed).abs())
+                })
+                .unwrap();
             for (index, series) in chart.series.iter().enumerate() {
-                let stretch = 100 * stretches / 256;
-                let want = series.values
-                    [stretch * 256 / stretches..(stretch + 1) * 256 / stretches]
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .fold(f32::MIN, f32::max);
+                let mut drawn = fills(&drawing, ink(series.colour, 1.0));
+                drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let (x, top, width, _) = drawn[about];
+                // Its group stands about the place pointed at, within its own width of it, and this bar is of it.
+                let wide = width * count as f32;
+                assert!((middles[about] - pointed).abs() < wide, "{pointed}");
+                assert!((x + width / 2.0 - middles[about]).abs() < wide / 2.0);
                 let read = bar_at(&chart, index, 100.0, stretches).unwrap();
-                assert!((read - want).abs() <= want * 1e-3, "{read} {want}");
-                assert_eq!(readout.dots[index].0[1], plotted.y(read));
+                assert!((plotted.y(read) - top).abs() < 0.05, "{read}: {top}");
+                assert_eq!(readout.dots[index].0, [pointed, plotted.y(read)]);
             }
         }
     }
     // Too narrow a plot for two-pixel bars even in one stretch draws them in one, as narrow as they must be.
-    assert_eq!(bar_stretches(256, 4.0, 8), 1);
-    assert_eq!(bar_stretches(256, 300.0, 0), LINE_VERTICES);
-    assert_eq!(bar_stretches(6, 300.0, 3), 6);
+    assert_eq!(bar_stretches(&fixtures::bars(8), 4.0), 1);
+    assert_eq!(bar_stretches(&Chart::new(256), 300.0), LINE_VERTICES);
+    let mut few = fixtures::bars(3);
+    few.points = 6;
+    assert_eq!(bar_stretches(&few, 300.0), 6);
     // A readout of nothing reads nothing; nonsense reads the oldest.
     let chart = fixtures::bars(2);
     assert_eq!(bar_at(&chart, 5, 1.0, 10), None);
@@ -1619,7 +1634,7 @@ fn a_chart_of_buckets_draws_each_bar_across_its_bucket_from_the_window_s_start_t
     // The plot is as many buckets wide as the chart has, with no slot beside them.
     let pitch = (right - left) / 4.0;
     let plotted = drawing.plot.clone().unwrap();
-    assert_eq!((plotted.points, plotted.steps), (4, 4));
+    assert_eq!(plotted.steps, 4);
     // Each bar stands in the middle of its own bucket, whole, the first clear of the plot's left edge and the last of
     // its right, a missing one not drawn.
     let bars = fills(&drawing, ink(Colour::Teal, 1.0));
@@ -1820,6 +1835,637 @@ fn lines_and_shading_on_a_chart_of_buckets_run_between_the_middles_of_its_bucket
             "{x}"
         );
     }
+}
+
+#[test]
+fn a_step_on_a_chart_of_buckets_is_level_across_each_bucket_and_upright_at_their_edges() {
+    // Eight buckets counting 0, 10, … 70, as bars, and the same again as a step over them.
+    let values: Vec<Option<f32>> = (0..8).map(|index| Some(index as f32 * 10.0)).collect();
+    let chart = Chart::new(8)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(80.0), ""))
+        .with_series(Series::new(
+            "requests",
+            Colour::Teal,
+            SeriesStyle::Bars,
+            values.clone(),
+        ))
+        .with_series(Series::new(
+            "limit",
+            Colour::Amber,
+            SeriesStyle::Step,
+            values.clone(),
+        ));
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 8.0;
+    let plotted = drawing.plot.clone().unwrap();
+    let amber = ink(Colour::Amber, 1.0);
+    let step: Vec<_> = strokes(&drawing)
+        .into_iter()
+        .filter(|(.., color)| *color == amber)
+        .collect();
+    let (level, upright): (Vec<_>, Vec<_>) = step
+        .iter()
+        .partition(|(from, to, ..)| (from[1] - to[1]).abs() < 1e-3);
+    // Level across each bucket, from where it begins to where it ends, at its value: where a step held from the
+    // middle of each bucket to the next's changed level in the middle of each bar, and left the last half a bucket
+    // with nothing but an upright.
+    assert_eq!(level.len(), 8);
+    for (bucket, (from, to, width, _)) in level.iter().enumerate() {
+        let begins = left + pitch * bucket as f32;
+        // Its ends overlap the uprights it meets by half its width, and no more.
+        let reach = width / 2.0 + 1e-2;
+        assert!((from[0] - begins).abs() <= reach, "{bucket}: {from:?}");
+        assert!(
+            (to[0] - (begins + pitch)).abs() <= reach,
+            "{bucket}: {to:?}"
+        );
+        assert!((from[1] - plotted.y(bucket as f32 * 10.0)).abs() < 1e-3);
+    }
+    // From the plot's left edge to its right.
+    assert!((level[0].0[0] - left).abs() < 1e-2, "{:?}", level[0]);
+    assert!((level[7].1[0] - right).abs() < 1e-2, "{:?}", level[7]);
+    // Upright where each bucket but the first begins, and nowhere else: never in the middle of a bar.
+    assert_eq!(upright.len(), 7);
+    for (edge, (from, to, ..)) in upright.iter().enumerate() {
+        let x = left + pitch * (edge + 1) as f32;
+        assert!(
+            (from[0] - x).abs() < 1e-2 && (to[0] - x).abs() < 1e-2,
+            "{edge}"
+        );
+    }
+    assert!(dots(&drawing).iter().all(|(.., color)| *color != amber));
+    // So each bar's top is under the step's level above it, all the way across the bar.
+    let bars = fills(&drawing, ink(Colour::Teal, 1.0));
+    assert_eq!(bars.len(), 7);
+    for ((x, y, width, _), (from, to, ..)) in bars.iter().zip(&level[1..]) {
+        assert!((y - from[1]).abs() < 1e-3);
+        assert!(from[0] < *x && x + width < to[0]);
+    }
+    // And its readout reads the bucket the bars read, in the older half of a bucket and in its newer, both dots at
+    // one place.
+    for (at, value) in [(3.25, 30.0), (3.75, 30.0), (7.25, 70.0), (0.1, 0.0)] {
+        let readout = super::readout::Readout::new(&chart, &plotted, at, (306.0, 180.0));
+        assert_eq!(readout.lines[1].0, format!("requests {value}"), "{at}");
+        assert_eq!(readout.lines[2].0, format!("limit {value}"), "{at}");
+        assert_eq!(readout.dots.len(), 2);
+        assert_eq!(readout.dots[0].0, [plotted.x(at), plotted.y(value)]);
+        assert_eq!(readout.dots[0].0, readout.dots[1].0, "{at}");
+    }
+    // The same as instants is level from each point to the next, as ever: seven levels across the plot.
+    let instants = draw(&chart.clone().with_buckets(false), AREA);
+    let level: Vec<_> = strokes(&instants)
+        .into_iter()
+        .filter(|(from, to, _, color)| *color == amber && (from[1] - to[1]).abs() < 1e-3)
+        .collect();
+    assert_eq!(level.len(), 7);
+    assert!((level[0].0[0] - left).abs() < 1e-2 && (level[6].1[0] - right).abs() < 1.0);
+}
+
+#[test]
+fn a_step_on_a_chart_of_buckets_draws_a_bucket_alone_as_a_level_line_and_breaks_at_an_edge() {
+    // Four buckets: the first alone before a gap, and the last two parted by a break.
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(50.0), ""))
+        .with_series(
+            Series::new(
+                "limit",
+                Colour::Amber,
+                SeriesStyle::Step,
+                vec![Some(10.0), None, Some(30.0), Some(40.0)],
+            )
+            .with_breaks(vec![2]),
+        );
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 4.0;
+    let plotted = drawing.plot.clone().unwrap();
+    let amber = ink(Colour::Amber, 1.0);
+    // Each bucket with a value is a level line across it, a bucket alone too, where a point alone is a dot; nothing
+    // across the gap, and no upright where the line breaks.
+    assert!(dots(&drawing).iter().all(|(.., color)| *color != amber));
+    let step: Vec<_> = strokes(&drawing)
+        .into_iter()
+        .filter(|(.., color)| *color == amber)
+        .collect();
+    assert_eq!(step.len(), 3);
+    for ((from, to, ..), (bucket, value)) in
+        step.iter().zip([(0.0, 10.0), (2.0, 30.0), (3.0, 40.0)])
+    {
+        assert!((from[0] - (left + pitch * bucket)).abs() < 1e-2, "{bucket}");
+        assert!(
+            (to[0] - (left + pitch * (bucket + 1.0))).abs() < 1e-2,
+            "{bucket}"
+        );
+        assert_eq!((from[1], to[1]), (plotted.y(value), plotted.y(value)));
+    }
+    // Read as drawn: each its bucket's, and the gap a gap.
+    for (at, value) in [
+        (0.1, Some(10.0)),
+        (1.5, None),
+        (2.9, Some(30.0)),
+        (3.0, Some(40.0)),
+    ] {
+        assert_eq!(chart.value_at(0, at), value, "{at}");
+    }
+}
+
+#[test]
+fn a_step_of_many_buckets_thinned_by_columns_still_runs_from_edge_to_edge() {
+    // Eight step series over forty buckets, each changing at every bucket: more corners than each may take vertices,
+    // so that each is thinned by columns.
+    let mut chart =
+        Chart::new(40)
+            .with_buckets(true)
+            .with_axis(ValueAxis::new(Some(0.0), Some(20.0), ""));
+    for (index, colour) in Colour::SERIES.into_iter().enumerate() {
+        let values = (0..40)
+            .map(|point| Some(index as f32 * 2.0 + if point % 2 == 0 { 1.0 } else { 3.0 }))
+            .collect();
+        chart = chart.with_series(Series::new(
+            format!("region {index}"),
+            colour,
+            SeriesStyle::Step,
+            values,
+        ));
+    }
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 40.0;
+    for series in &chart.series {
+        let color = ink(series.colour, 1.0);
+        let step: Vec<_> = strokes(&drawing)
+            .into_iter()
+            .filter(|(.., drawn)| *drawn == color)
+            .collect();
+        // Thinned: fewer parts than its 79 corners draw.
+        assert!(step.len() < 70, "{}", step.len());
+        // From where its first bucket begins to where its last ends, to within the half of its width by which a
+        // level part overlaps an upright it meets, and never half a bucket short, over 3 font pixels.
+        let ends = step.iter().flat_map(|(from, to, ..)| [from[0], to[0]]);
+        let (least, most) = ends.fold((f32::MAX, f32::MIN), |(least, most), x| {
+            (least.min(x), most.max(x))
+        });
+        assert!(pitch / 2.0 > 3.0);
+        assert!((least - left).abs() < 1.0, "{least}");
+        assert!((most - right).abs() < 1.0, "{most}");
+        // Every upright where a bucket begins, never at the middle of one.
+        for (from, to, ..) in &step {
+            if (from[0] - to[0]).abs() < 1e-3 {
+                let edge = (from[0] - left) / pitch;
+                assert!((edge - edge.round()).abs() < 1e-2, "{edge}");
+            }
+        }
+    }
+}
+
+#[test]
+fn shading_to_a_step_on_a_chart_of_buckets_is_level_across_each_bucket() {
+    // Replicas ready in each of four buckets, 2, 8, not measured and 8, as a step, shaded where they are above a
+    // target of 5.
+    let level = |values: [Option<f32>; 4], style: SeriesStyle, colour: Colour| {
+        Series::new("ready", colour, style, values.to_vec())
+    };
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(level(
+            [Some(2.0), Some(8.0), None, Some(8.0)],
+            SeriesStyle::Step,
+            Colour::Green,
+        ))
+        .with_reference(Reference::new(5.0, "target", Colour::White))
+        .with_shade(Shade::new(
+            Edge::Reference { index: 0 },
+            Edge::Series { index: 0 },
+            true,
+            Colour::Red,
+        ));
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 4.0;
+    let plotted = drawing.plot.clone().unwrap();
+    // How far across the quads of `color` reach within the buckets from `from` to `to`, none of them outside those.
+    let shaded = |drawing: &Drawing, color: Rgba| -> Vec<(f32, f32)> {
+        quads(drawing)
+            .into_iter()
+            .filter(|(_, filled)| *filled == color)
+            .map(|(corners, _)| {
+                let xs = corners.map(|corner| corner[0]);
+                (
+                    xs.into_iter().fold(f32::MAX, f32::min),
+                    xs.into_iter().fold(f32::MIN, f32::max),
+                )
+            })
+            .collect()
+    };
+    let red = shaded(&drawing, ink(Colour::Red, SHADE_ALPHA));
+    assert!(!red.is_empty());
+    // Shaded across the whole of the second bucket and of the fourth, to the plot's right edge, and nowhere in the
+    // first, below the target, or the third, a gap: where the step is drawn above the target, not half a bucket on.
+    for (bucket, above) in [(0.0, false), (1.0, true), (2.0, false), (3.0, true)] {
+        let (begins, ends) = (left + pitch * bucket, left + pitch * (bucket + 1.0));
+        let within: Vec<_> = red
+            .iter()
+            .filter(|(from, to)| *to > begins + 1.0 && *from < ends - 1.0)
+            .collect();
+        assert_eq!(!within.is_empty(), above, "{bucket}: {red:?}");
+        if above {
+            let from = within.iter().map(|span| span.0).fold(f32::MAX, f32::min);
+            let to = within.iter().map(|span| span.1).fold(f32::MIN, f32::max);
+            assert!((from - begins).abs() < 1.0, "{bucket}: {from}");
+            assert!((to - ends).abs() < 1.0, "{bucket}: {to}");
+        }
+    }
+    // Level, from the target up to the step, to within the sliver a piece ends with where the gap closes.
+    for (corners, _) in quads(&drawing) {
+        assert_eq!(corners[0][1], corners[1][1]);
+        assert!((corners[0][1] - plotted.y(8.0)).abs() < 3.0, "{corners:?}");
+        assert!((corners[2][1] - plotted.y(5.0)).abs() < 0.5, "{corners:?}");
+    }
+    // Between a step and a line, nothing is shaded before the middle of the first bucket or after the middle of the
+    // last, where the line is not drawn, though the step is.
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(level([Some(8.0); 4], SeriesStyle::Step, Colour::Green))
+        .with_series(level([Some(2.0); 4], SeriesStyle::Line, Colour::Blue))
+        .with_shade(Shade::new(
+            Edge::Series { index: 1 },
+            Edge::Series { index: 0 },
+            false,
+            Colour::Amber,
+        ));
+    let drawing = draw(&chart, AREA);
+    let amber = shaded(&drawing, ink(Colour::Amber, SHADE_ALPHA));
+    let from = amber.iter().map(|span| span.0).fold(f32::MAX, f32::min);
+    let to = amber.iter().map(|span| span.1).fold(f32::MIN, f32::max);
+    assert!((from - (left + pitch / 2.0)).abs() < 1.0, "{from}");
+    assert!((to - (right - pitch / 2.0)).abs() < 1.0, "{to}");
+}
+
+#[test]
+fn shading_to_bars_on_a_chart_of_buckets_is_level_across_each_bucket_as_the_bars_are_drawn() {
+    // The requests in each of four buckets, 2, 4, 6 and 8, as bars, under a limit of 5 as a step, the room left under
+    // the limit shaded.
+    let level = |name: &str, values: [f32; 4], style: SeriesStyle, colour: Colour| {
+        Series::new(name, colour, style, values.map(Some).to_vec())
+    };
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(level(
+            "requests",
+            [2.0, 4.0, 6.0, 8.0],
+            SeriesStyle::Bars,
+            Colour::Teal,
+        ))
+        .with_series(level("limit", [5.0; 4], SeriesStyle::Step, Colour::Amber))
+        .with_shade(Shade::new(
+            Edge::Series { index: 0 },
+            Edge::Series { index: 1 },
+            true,
+            Colour::Green,
+        ));
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 4.0;
+    let plotted = drawing.plot.clone().unwrap();
+    // Each quad of `color`: from where to where across, and its top and bottom at its left and right.
+    let shaded = |drawing: &Drawing, color: Rgba| -> Vec<[f32; 6]> {
+        quads(drawing)
+            .into_iter()
+            .filter(|(_, filled)| *filled == color)
+            .map(|(corners, _)| {
+                [
+                    corners[0][0].min(corners[2][0]),
+                    corners[1][0].max(corners[3][0]),
+                    corners[0][1],
+                    corners[1][1],
+                    corners[2][1],
+                    corners[3][1],
+                ]
+            })
+            .collect()
+    };
+    let green = shaded(&drawing, ink(Colour::Green, SHADE_ALPHA));
+    // From the plot's left edge, where the first bar's bucket begins, to where the third begins, whose bar is above
+    // the limit: not from the middle of the first bucket, half a bucket short.
+    let from = green.iter().map(|quad| quad[0]).fold(f32::MAX, f32::min);
+    let to = green.iter().map(|quad| quad[1]).fold(f32::MIN, f32::max);
+    assert!((from - left).abs() < 1.0, "{from}");
+    assert!((to - (left + 2.0 * pitch)).abs() < 1.5, "{to}");
+    // Within each bucket, level from the top of its bar to the limit, not sloping to the next bar's.
+    let mut within = [0, 0];
+    for [from, to, top_left, top_right, bottom_left, bottom_right] in green {
+        for (bucket, bar) in [(0, 2.0), (1, 4.0)] {
+            let begins = left + pitch * bucket as f32;
+            // But for a piece that reaches the edge where the next bucket begins, which is the next bucket's there.
+            if from >= begins && to < begins + pitch - 0.01 {
+                within[bucket] += 1;
+                assert_eq!((top_left, bottom_left), (top_right, bottom_right));
+                assert!(
+                    (top_left - plotted.y(5.0)).abs() < 0.5,
+                    "{bucket}: {top_left}"
+                );
+                assert!(
+                    (bottom_left - plotted.y(bar)).abs() < 0.5,
+                    "{bucket}: {bottom_left}"
+                );
+            }
+        }
+    }
+    assert!(within[0] > 8 && within[1] > 8, "{within:?}");
+    // Bars alone, above a target of 5, are shaded so too: across the whole of each bucket whose bar is above it.
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(level(
+            "requests",
+            [2.0, 8.0, 2.0, 8.0],
+            SeriesStyle::Bars,
+            Colour::Teal,
+        ))
+        .with_reference(Reference::new(5.0, "target", Colour::White))
+        .with_shade(Shade::new(
+            Edge::Reference { index: 0 },
+            Edge::Series { index: 0 },
+            true,
+            Colour::Red,
+        ));
+    let red = shaded(&draw(&chart, AREA), ink(Colour::Red, SHADE_ALPHA));
+    for (bucket, above) in [(0.0, false), (1.0, true), (2.0, false), (3.0, true)] {
+        let (begins, ends) = (left + pitch * bucket, left + pitch * (bucket + 1.0));
+        let within: Vec<_> = red
+            .iter()
+            .filter(|quad| quad[1] > begins + 1.0 && quad[0] < ends - 1.0)
+            .collect();
+        assert_eq!(!within.is_empty(), above, "{bucket}: {red:?}");
+        if above {
+            let from = within.iter().map(|quad| quad[0]).fold(f32::MAX, f32::min);
+            let to = within.iter().map(|quad| quad[1]).fold(f32::MIN, f32::max);
+            assert!((from - begins).abs() < 1.0, "{bucket}: {from}");
+            assert!((to - ends).abs() < 1.0, "{bucket}: {to}");
+        }
+    }
+    // The same bars as instants are shaded between their points, as before.
+    let instants = shaded(
+        &draw(&chart.clone().with_buckets(false), AREA),
+        ink(Colour::Red, SHADE_ALPHA),
+    );
+    assert!(instants.iter().any(|quad| quad[2] != quad[3]));
+    // Bars of more buckets than are drawn a bar each are shaded to the bar drawn, the one of its stretch farthest
+    // from the base: 256 buckets of 1 and 9 by turns are 128 bars of 9, shaded above the target all the way across.
+    let many = Chart::new(256)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(Series::new(
+            "requests",
+            Colour::Teal,
+            SeriesStyle::Bars,
+            (0..256)
+                .map(|index| Some(if index % 2 == 0 { 1.0 } else { 9.0 }))
+                .collect(),
+        ))
+        .with_reference(Reference::new(5.0, "target", Colour::White))
+        .with_shade(Shade::new(
+            Edge::Reference { index: 0 },
+            Edge::Series { index: 0 },
+            true,
+            Colour::Red,
+        ));
+    let drawing = draw(&many, WIDE);
+    let (_, _, left, right) = plot(&drawing);
+    assert_eq!(drawing.plot.as_ref().unwrap().stretches, LINE_VERTICES);
+    let red = shaded(&drawing, ink(Colour::Red, SHADE_ALPHA));
+    let across: f32 = red.iter().map(|quad| quad[1] - quad[0]).sum();
+    assert!(across > (right - left) * 0.98, "{across}");
+}
+
+#[test]
+fn a_thinned_line_on_a_chart_of_buckets_reads_each_bucket_s_own_value_where_it_is_not_drawn() {
+    // A line over 256 buckets, up and down at every one, more points than it is drawn with, and one bucket missing.
+    let values: Vec<Option<f32>> = (0..256)
+        .map(|index| {
+            (index != 100).then_some(if index % 2 == 0 { 2.0 } else { 6.0 } + index as f32 / 100.0)
+        })
+        .collect();
+    let chart = Chart::new(256)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(Series::new(
+            "p99",
+            Colour::Amber,
+            SeriesStyle::Line,
+            values.clone(),
+        ));
+    let drawing = draw(&chart, WIDE);
+    let plotted = drawing.plot.clone().unwrap();
+    // Thinned, and drawn from the middle of its first bucket to the middle of its last.
+    let (_, runs) = &plotted.thinned[0];
+    let pitch = plotted.width / 256.0;
+    assert!((runs[0][0][0] - (plotted.left + pitch / 2.0)).abs() < 1e-2);
+    let read = |at: f32| {
+        let readout = super::readout::Readout::new(&chart, &plotted, at, (1300.0, 180.0));
+        (readout.lines[1].0.clone(), readout.dots.clone())
+    };
+    let amber = ink(Colour::Amber, 1.0);
+    // In the oldest half bucket and the newest, and beside the missing bucket, where nothing of it is drawn, it
+    // reads the bucket pointed at, its dot level with that bucket's point; in the missing bucket, no data.
+    for (at, bucket) in [
+        (0.0, 0),
+        (0.3, 0),
+        (255.7, 255),
+        (256.0, 255),
+        (99.8, 99),
+        (101.2, 101),
+    ] {
+        let value = tomori_protocol::chart::rounded(values[bucket].unwrap()).unwrap();
+        assert_eq!(
+            read(at),
+            (
+                format!("p99 {value}"),
+                vec![([plotted.x(at), plotted.y(value)], amber)]
+            ),
+            "{at}"
+        );
+        assert_eq!(chart.value_at(0, at), Some(value), "{at}");
+    }
+    assert_eq!(read(100.5), ("p99 no data".to_owned(), Vec::new()));
+    // Where it is drawn, it is read on the line drawn.
+    let (said, dots) = read(50.5);
+    assert_eq!(said, format!("p99 {}", chart.value_at(0, 50.5).unwrap()));
+    assert_eq!(dots.len(), 1);
+    // The same line as instants reads no data where a thinned line draws nothing, as before: beside its missing
+    // point.
+    let instants = chart.clone().with_buckets(false);
+    let plotted = draw(&instants, WIDE).plot.unwrap();
+    let readout = super::readout::Readout::new(&instants, &plotted, 99.5, (1300.0, 180.0));
+    assert_eq!(readout.lines[1].0, "p99 no data");
+}
+
+/// The value of `series` farthest from zero among its points from `from` to `to`.
+fn farthest(series: &Series, from: usize, to: usize) -> f32 {
+    series.values[from..to]
+        .iter()
+        .flatten()
+        .copied()
+        .fold(
+            0.0,
+            |far: f32, value| if value.abs() > far.abs() { value } else { far },
+        )
+}
+
+#[test]
+fn more_than_128_buckets_are_drawn_a_bar_to_each_stretch_of_them_and_read_as_drawn() {
+    // 256 buckets, each counting more than the last, and 200, which 128 stretches do not divide.
+    for points in [256_usize, 200] {
+        let chart = Chart::new(points as u32)
+            .with_buckets(true)
+            .with_axis(ValueAxis::new(Some(0.0), Some(300.0), ""))
+            .with_series(Series::new(
+                "requests",
+                Colour::Teal,
+                SeriesStyle::Bars,
+                (0..points)
+                    .map(|index| Some(1.0 + ((index * 37) % 251) as f32))
+                    .collect(),
+            ));
+        let drawing = draw(&chart, WIDE);
+        let (_, _, left, right) = plot(&drawing);
+        let plotted = drawing.plot.clone().unwrap();
+        assert_eq!(plotted.steps, points as u32);
+        assert_eq!(plotted.stretches, LINE_VERTICES);
+        assert_eq!(bar_stretches(&chart, right - left), LINE_VERTICES);
+        // A step for each bucket, the plot as many wide: a bar for each stretch, across the buckets of its stretch and
+        // no others, as tall as the farthest of them from the base, the first clear of the plot's left edge and the
+        // last of its right.
+        let pitch = (right - left) / points as f32;
+        let bars = fills(&drawing, ink(Colour::Teal, 1.0));
+        assert_eq!(bars.len(), LINE_VERTICES);
+        for (stretch, (x, y, width, _)) in bars.iter().enumerate() {
+            let part = stretch * points / LINE_VERTICES..(stretch + 1) * points / LINE_VERTICES;
+            let (begins, ends) = (
+                left + pitch * part.start as f32,
+                left + pitch * part.end as f32,
+            );
+            assert!((width - pitch * part.len() as f32 * BAR).abs() < 1e-2);
+            assert!(
+                (x + width / 2.0 - (begins + ends) / 2.0).abs() < 1e-2,
+                "{stretch}"
+            );
+            assert!(*x > begins && x + width < ends, "{stretch}");
+            let value = farthest(&chart.series[0], part.start, part.end);
+            assert!((y - plotted.y(value)).abs() < 1e-2, "{stretch}");
+            // Anywhere in any of its buckets, its readout reads that bar, as the server reads it for the agent.
+            for bucket in part {
+                for within in [0.0, 0.25, 0.5, 0.99] {
+                    let at = bucket as f32 + within;
+                    assert_eq!(
+                        bar_at(&chart, 0, at, plotted.stretches),
+                        Some(value),
+                        "{at}"
+                    );
+                    assert_eq!(chart.value_at(0, at), Some(value), "{at}");
+                }
+            }
+        }
+    }
+    // A chart of instants of 181 points, 15 minutes at 5 seconds, is read as its bars are drawn too, each stretch of
+    // one point or two.
+    let chart = Chart::new(181).with_series(Series::new(
+        "admitted",
+        Colour::Teal,
+        SeriesStyle::Bars,
+        (0..181).map(|index| Some(1.0 + index as f32)).collect(),
+    ));
+    let plotted = draw(&chart, AREA).plot.unwrap();
+    assert_eq!(plotted.stretches, LINE_VERTICES);
+    for point in 0..181 {
+        assert_eq!(
+            bar_at(&chart, 0, point as f32, plotted.stretches),
+            chart.value_at(0, point as f32),
+            "{point}"
+        );
+    }
+}
+
+#[test]
+fn several_series_of_bars_on_a_chart_of_buckets_are_thinned_to_groups_across_whole_buckets() {
+    // Three series over 96 buckets in a standard slot, and over 100 in a wider one, where the stretches they are
+    // thinned to do not divide the buckets.
+    let wider = Area {
+        width: 380.0,
+        ..AREA
+    };
+    let mut uneven = false;
+    for (points, area) in [(96_usize, AREA), (100, wider)] {
+        let mut chart = Chart::new(points as u32)
+            .with_buckets(true)
+            .with_axis(ValueAxis::new(Some(0.0), Some(400.0), ""));
+        for (index, colour) in Colour::SERIES.into_iter().take(3).enumerate() {
+            chart = chart.with_series(Series::new(
+                format!("region {index}"),
+                colour,
+                SeriesStyle::Bars,
+                (0..points)
+                    .map(|point| Some(1.0 + ((point * 37 + index * 11) % 251) as f32))
+                    .collect(),
+            ));
+        }
+        let drawing = draw(&chart, area);
+        let (_, _, left, right) = plot(&drawing);
+        let plotted = drawing.plot.clone().unwrap();
+        let pitch = (right - left) / points as f32;
+        // Thinned to as many stretches as give each bar its two font pixels where a bucket is a whole step of the
+        // plot's width: more than one bucket to a stretch.
+        let stretches = plotted.stretches;
+        assert_eq!(stretches, bar_stretches(&chart, right - left));
+        assert!(stretches > 1 && stretches < points / 2, "{stretches}");
+        assert!((points / stretches) as f32 * pitch * BAR >= BAR_WIDTH * 3.0);
+        assert!((points / (stretches + 1)) as f32 * pitch * BAR < BAR_WIDTH * 3.0);
+        uneven |= points % stretches != 0;
+        for stretch in 0..stretches {
+            let part = stretch * points / stretches..(stretch + 1) * points / stretches;
+            let (begins, ends) = (
+                left + pitch * part.start as f32,
+                left + pitch * part.end as f32,
+            );
+            // Its three bars, in order, side by side, a group in the middle of its buckets and within them, clear of
+            // the plot's edges.
+            let group = pitch * part.len() as f32 * BAR;
+            for (place, series) in chart.series.iter().enumerate() {
+                let (x, y, width, _) = fills(&drawing, ink(series.colour, 1.0))[stretch];
+                assert!(width >= BAR_WIDTH - 1e-2, "{width}");
+                assert!((width - group / 3.0).abs() < 1e-2, "{width}");
+                let starts = (begins + ends) / 2.0 - group / 2.0 + width * place as f32;
+                assert!((x - starts).abs() < 1e-2, "{stretch}: {place}: {x}");
+                assert!(x > begins && x + width < ends, "{stretch}: {place}");
+                // As tall as the farthest from the base of its buckets, which its readout reads anywhere in them.
+                let value = farthest(series, part.start, part.end);
+                assert!((y - plotted.y(value)).abs() < 1e-2, "{stretch}: {place}");
+                for bucket in part.clone() {
+                    let at = bucket as f32 + 0.25;
+                    assert_eq!(bar_at(&chart, place, at, stretches), Some(value), "{at}");
+                }
+            }
+        }
+        let readout = super::readout::Readout::new(&chart, &plotted, 50.25, (400.0, 180.0));
+        for (place, series) in chart.series.iter().enumerate() {
+            let stretch = (0..stretches)
+                .find(|stretch| 50 < (stretch + 1) * points / stretches)
+                .unwrap();
+            let value = farthest(
+                series,
+                stretch * points / stretches,
+                (stretch + 1) * points / stretches,
+            );
+            assert_eq!(readout.dots[place].0, [plotted.x(50.25), plotted.y(value)]);
+        }
+    }
+    assert!(uneven);
 }
 
 #[test]

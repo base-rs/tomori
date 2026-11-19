@@ -1488,6 +1488,7 @@ mod tests {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         client.wait_for(|message| matches!(message, ServerMessage::Welcome { .. }).then_some(()));
         client.create_space("Studio");

@@ -55,6 +55,7 @@ fn hello(client: &mut TestClient) -> (String, Vec<String>) {
         spawns: false,
         limits: None,
         content: true,
+        chart_buckets: false,
     });
     client.wait_for(|message| match message {
         ServerMessage::Content { session, assets } => Some((

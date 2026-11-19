@@ -31,6 +31,7 @@ impl Client {
             spawns: true,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         client.read();
         client
@@ -146,6 +147,7 @@ impl Client {
             spawns: true,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         let read = client.read();
         (client, read)

@@ -973,16 +973,23 @@ fn a_chart_of_buckets_is_read_as_it_is_drawn_each_point_at_the_middle_of_its_buc
         .with_series(series("line", SeriesStyle::Line))
         .with_series(series("step", SeriesStyle::Step))
         .with_series(series("bars", SeriesStyle::Bars));
-    // A line is read between the middles of its buckets, and before the first's as the first.
+    // A line is read between the middles of its buckets, and before the first's as the first; in the half of a
+    // bucket beside a gap, as that bucket, and in the gap as nothing.
     assert_eq!(chart.value_at(0, 0.5), Some(2.0));
     assert_eq!(chart.value_at(0, 1.0), Some(3.0));
     assert_eq!(chart.value_at(0, 1.5), Some(4.0));
     assert_eq!(chart.value_at(0, 0.1), Some(2.0));
+    assert_eq!(chart.value_at(0, 1.9), Some(4.0));
     assert_eq!(chart.value_at(0, 2.5), None);
+    assert_eq!(chart.value_at(0, 3.2), Some(8.0));
     assert_eq!(chart.value_at(0, 4.0), Some(8.0));
-    // A step is held from the middle of its bucket to the next's.
-    assert_eq!(chart.value_at(1, 1.4), Some(2.0));
+    // A step is level across its own bucket, from where it begins to where it ends, never the bucket before for a
+    // place in its older half; a place on an edge is in the later bucket, and a gap is never held across.
+    assert_eq!(chart.value_at(1, 0.99), Some(2.0));
+    assert_eq!(chart.value_at(1, 1.0), Some(4.0));
+    assert_eq!(chart.value_at(1, 1.4), Some(4.0));
     assert_eq!(chart.value_at(1, 1.5), Some(4.0));
+    assert_eq!(chart.value_at(1, 2.5), None);
     // A bar is its whole bucket's, a gap never zero.
     assert_eq!(chart.value_at(2, 1.0), Some(4.0));
     assert_eq!(chart.value_at(2, 1.99), Some(4.0));
@@ -1039,6 +1046,427 @@ fn a_chart_of_buckets_is_read_as_it_is_drawn_each_point_at_the_middle_of_its_buc
     assert_eq!(
         window(vec![Some(90.0); 8]).summary_on(today),
         "requests: 90 at its end, 10:00 UTC"
+    );
+}
+
+#[test]
+fn a_step_over_bars_on_a_chart_of_buckets_reads_the_bucket_the_bars_read() {
+    // Eight buckets counting 0, 10, … 70, as bars, and the same again as a step over them.
+    let values: Vec<Option<f32>> = (0..8).map(|index| Some(index as f32 * 10.0)).collect();
+    let series = |name: &str, style: SeriesStyle, values: &[Option<f32>]| {
+        Series::new(name, Colour::Teal, style, values.to_vec())
+    };
+    let chart = Chart::new(8)
+        .with_buckets(true)
+        .with_series(series("requests", SeriesStyle::Bars, &values))
+        .with_series(series("limit", SeriesStyle::Step, &values));
+    let read = |at: f32| (chart.value_at(0, at), chart.value_at(1, at));
+    // In the older half of a bucket, where a step held from the middle of the bucket before read that bucket.
+    assert_eq!(read(3.25), (Some(30.0), Some(30.0)));
+    assert_eq!(read(7.25), (Some(70.0), Some(70.0)));
+    // On an edge, the later bucket, for both; at the axis's end, the last; nonsense, the oldest.
+    assert_eq!(read(3.0), (Some(30.0), Some(30.0)));
+    assert_eq!(read(8.0), (Some(70.0), Some(70.0)));
+    assert_eq!(read(f32::NAN), (Some(0.0), Some(0.0)));
+    // Everywhere across the axis, and beyond its ends, the step reads the bucket its bars read.
+    for part in -50..=850 {
+        let at = part as f32 / 100.0;
+        assert_eq!(chart.value_at(1, at), chart.value_at(0, at), "{at}");
+    }
+    // A bucket without a value is a gap for the whole of it, and only it: the step is not held into it from the
+    // bucket before, nor is the bucket after it read early.
+    let mut gap = values.clone();
+    gap[4] = None;
+    let broken =
+        Chart::new(8)
+            .with_buckets(true)
+            .with_series(series("limit", SeriesStyle::Step, &gap));
+    for (at, value) in [
+        (3.99, Some(30.0)),
+        (4.0, None),
+        (4.99, None),
+        (5.0, Some(50.0)),
+    ] {
+        assert_eq!(broken.value_at(0, at), value, "{at}");
+    }
+    // The same as instants, each held from its point to the next, is read as before.
+    let instants = chart.clone().with_buckets(false);
+    assert_eq!(instants.value_at(1, 3.75), Some(30.0));
+    assert_eq!(instants.value_at(0, 3.75), Some(40.0));
+}
+
+#[test]
+fn a_line_on_a_chart_of_buckets_reads_each_bucket_s_own_value_where_it_is_not_drawn() {
+    // A line and an area through four buckets, each drawn from the middle of the first to the middle of the last.
+    let series = |name: &str, style: SeriesStyle, values: Vec<Option<f32>>| {
+        Series::new(name, Colour::Teal, style, values)
+    };
+    let joined = vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)];
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_series(series("p50", SeriesStyle::Line, joined.clone()))
+        .with_series(series("p99", SeriesStyle::Area, joined.clone()))
+        .with_series(series(
+            "errors",
+            SeriesStyle::Line,
+            vec![Some(5.0), None, None, Some(7.0)],
+        ))
+        .with_series(series("queued", SeriesStyle::Line, joined).with_breaks(vec![1]))
+        .with_series(series(
+            "filling",
+            SeriesStyle::Line,
+            vec![None, Some(6.0), Some(8.0), None],
+        ));
+    // In the oldest half bucket and the newest, where nothing of the line is drawn, the first bucket's value and the
+    // last's are read, held out to the window's edges, never a gap: a bucket that has a value reads it throughout.
+    for line in [0, 1] {
+        for (at, value) in [
+            (0.0, Some(1.0)),
+            (0.25, Some(1.0)),
+            (0.49, Some(1.0)),
+            (0.5, Some(1.0)),
+            (2.0, Some(2.5)),
+            (3.5, Some(4.0)),
+            (3.51, Some(4.0)),
+            (3.75, Some(4.0)),
+            (4.0, Some(4.0)),
+            (900.0, Some(4.0)),
+            (-3.0, Some(1.0)),
+            (f32::NAN, Some(1.0)),
+        ] {
+            assert_eq!(chart.value_at(line, at), value, "{line}: {at}");
+        }
+    }
+    // A point alone is a dot, read throughout its bucket, and a bucket without a value is a gap throughout.
+    for (at, value) in [
+        (0.0, Some(5.0)),
+        (0.25, Some(5.0)),
+        (0.9, Some(5.0)),
+        (1.1, None),
+        (2.9, None),
+        (3.1, Some(7.0)),
+        (3.75, Some(7.0)),
+        (4.0, Some(7.0)),
+    ] {
+        assert_eq!(chart.value_at(2, at), value, "{at}");
+    }
+    // Beside a break, where its line stops between two buckets that both have values, each half reads its own
+    // bucket's; and on the line where it is drawn.
+    for (at, value) in [
+        (1.4, Some(1.9)),
+        (1.6, Some(2.0)),
+        (1.99, Some(2.0)),
+        (2.0, Some(3.0)),
+        (2.4, Some(3.0)),
+        (2.75, Some(3.25)),
+    ] {
+        assert_eq!(chart.value_at(3, at), value, "{at}");
+    }
+    // A window still filling, its newest bucket without a value yet: the newest bucket that has one reads it to its
+    // end, and the oldest from its beginning, where the line beside it is not drawn.
+    for (at, value) in [
+        (0.9, None),
+        (1.0, Some(6.0)),
+        (1.4, Some(6.0)),
+        (2.0, Some(7.0)),
+        (2.6, Some(8.0)),
+        (2.99, Some(8.0)),
+        (3.0, None),
+        (4.0, None),
+    ] {
+        assert_eq!(chart.value_at(4, at), value, "{at}");
+    }
+    // Linked from another chart at now, where its window ends, each reads its newest bucket, as the bars beside it
+    // would, rather than no data.
+    let live = chart.clone().with_time(TimeAxis::Live { step_ms: 900_000 });
+    let now = live.at_time(ChartTime::BeforeNow { ms: 0.0 }).unwrap();
+    assert_eq!(now, 4.0);
+    assert_eq!(
+        live.read_at(now),
+        "point 4 of 4: p50 4, p99 4, errors 7, queued 4, filling no data"
+    );
+    let oldest = live
+        .at_time(ChartTime::BeforeNow { ms: 3_600_000.0 })
+        .unwrap();
+    assert_eq!(
+        live.read_at(oldest),
+        "point 1 of 4: p50 1, p99 1, errors 5, queued 1, filling no data"
+    );
+    // A chart of instants is read as before: held to its first and last points, and nothing between two points its
+    // line does not join, but for a point alone.
+    let instants = chart.clone().with_buckets(false);
+    assert_eq!(instants.value_at(0, -1.0), Some(1.0));
+    assert_eq!(instants.value_at(0, 9.0), Some(4.0));
+    assert_eq!(instants.value_at(3, 1.4), None);
+    assert_eq!(instants.value_at(4, 0.6), None);
+    assert_eq!(instants.value_at(4, 2.4), None);
+    assert_eq!(instants.value_at(2, 0.4), Some(5.0));
+}
+
+#[test]
+fn a_reader_that_knows_no_buckets_shows_and_reports_one_thing_for_a_chart_of_buckets() {
+    // 96 buckets of 15 minutes, live, as a client that reads no buckets is sent them: 96 instants, each where its
+    // bucket ends, the last now, with the same values, so that its live data applies as it is.
+    let day = requests(96, 900_000);
+    let old = day.clone().instants();
+    assert!(!old.buckets);
+    assert_eq!((old.points, old.steps()), (96, 95));
+    assert!(old.same_data(&day));
+    assert_eq!(old.time, day.time);
+    assert!(serde_json::to_value(&old).unwrap().get("buckets").is_none());
+    // Its labels, which stood at buckets' edges, stand under the points of the buckets that end there: `now` under
+    // its last point, rather than at a point it does not have; and in place of the window's start, a step before its
+    // first point, the time at its first point, written as a label is read.
+    assert_eq!(
+        old.labels,
+        [
+            AxisLabel::new(0, "-23.75 h"),
+            AxisLabel::new(47, "-12 h"),
+            AxisLabel::new(95, "now")
+        ]
+    );
+    assert_eq!(old.clone().cleaned().unwrap().labels, old.labels);
+    // So the time its readout says, read from its labels, is the time it links other charts at, read from its axis,
+    // everywhere, where the labels of the chart of buckets, read as instants, are a step out.
+    let minutes = |chart: &Chart, at: f32| match chart.time_of(at) {
+        Some(ChartTime::BeforeNow { ms }) => ms / 60_000.0,
+        other => unreachable!("a live chart, not {other:?}"),
+    };
+    for (at, said, before) in [
+        (0.0, "-23 h 45 min", 1425.0),
+        (47.0, "-12 h", 720.0),
+        (94.0, "-15 min", 15.0),
+        (95.0, "now", 0.0),
+    ] {
+        assert_eq!(old.time_at(at), said, "{at}");
+        assert_eq!(minutes(&old, at), before, "{at}");
+    }
+    let ignoring = day.clone().with_buckets(false);
+    assert_eq!(ignoring.time_at(94.0), "-30 min");
+    assert_eq!(minutes(&ignoring, 94.0), 15.0);
+    // Pointed at 94.4 of its 95 steps, it says `across` over them, and the server, reading that on the chart it sent,
+    // tells the agent the reading its readout shows; read on the chart of buckets, the same place was another
+    // bucket's.
+    let across = |at: f32| (at / 95.0 * f32::from(ACROSS)).round() as u16;
+    assert_eq!(old.read_at(94.4), "-9 min: requests 94");
+    assert_eq!(
+        old.read_at(old.at_across(across(94.4))),
+        "-9 min: requests 94"
+    );
+    assert_eq!(
+        day.read_at(day.at_across(across(94.4))),
+        "-9 min: requests 95"
+    );
+    assert_eq!(
+        old.read_at(old.at_across(across(0.6))),
+        "-23 h 36 min: requests 1"
+    );
+    assert_eq!(
+        day.read_at(day.at_across(across(0.6))),
+        "-23 h 51 min: requests 0"
+    );
+    // Linked from a line pointed at ten minutes ago, its readout says ten minutes ago, and reads the bar it draws
+    // there, astride the end of the bucket before the last, as bars said as instants always read.
+    let at = old.at_time(ChartTime::BeforeNow { ms: 600_000.0 }).unwrap();
+    assert_eq!(old.read_at(at), "-10 min: requests 94");
+    // A fixed window runs from the end of its first bucket to the end of its last, so that each point is the
+    // instant its bucket ends, and its summary says the same instants.
+    let from_ms = 1_794_614_400_000;
+    let window = requests(96, 900_000).with_time(TimeAxis::Fixed {
+        from_ms,
+        to_ms: from_ms + 86_400_000,
+    });
+    let fixed = window.clone().instants();
+    assert_eq!(
+        fixed.time,
+        Some(TimeAxis::Fixed {
+            from_ms: from_ms + 900_000,
+            to_ms: from_ms + 86_400_000
+        })
+    );
+    for bucket in [0.0_f32, 40.0, 95.0] {
+        assert_eq!(fixed.time_of(bucket), window.time_of(bucket + 1.0));
+    }
+    let today = Some(from_ms / 86_400_000);
+    assert_eq!(fixed.summary_on(today), window.summary_on(today));
+    assert_eq!(
+        fixed.summary_on(today),
+        "requests: 95 at its end, 11-15 00:00 UTC"
+    );
+    // A step that is no whole number of milliseconds is kept to the millisecond below, a window still.
+    let odd = Chart::new(3)
+        .with_buckets(true)
+        .with_time(TimeAxis::Fixed {
+            from_ms: 0,
+            to_ms: 100,
+        })
+        .instants();
+    assert_eq!(
+        odd.time,
+        Some(TimeAxis::Fixed {
+            from_ms: 33,
+            to_ms: 100
+        })
+    );
+    assert_eq!(odd.clone().cleaned().unwrap().time, odd.time);
+    // A chart of instants is as it was.
+    let line = Chart::new(97)
+        .with_time(TimeAxis::Live { step_ms: 900_000 })
+        .with_labels(vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(96, "now")]);
+    assert_eq!(line.clone().instants(), line);
+}
+
+#[test]
+fn a_chart_of_buckets_labelled_only_at_its_ends_still_says_a_time_everywhere_as_instants() {
+    let live = |points: u32, step_ms: u32, labels: Vec<AxisLabel>| {
+        requests(points, step_ms).with_labels(labels)
+    };
+    let labels = |chart: &Chart| -> Vec<(u32, String)> {
+        let labels = chart.labels.iter();
+        labels.map(|label| (label.at, label.text.clone())).collect()
+    };
+    let said = |labels: &[(u32, &str)]| -> Vec<(u32, String)> {
+        let labels = labels.iter();
+        labels.map(|(at, text)| (*at, (*text).to_owned())).collect()
+    };
+    // 96 buckets of 15 minutes labelled where the first begins and where the last ends, and nowhere else. Its label
+    // at the window's start has no point to stand under as instants, which would leave one label, and a time is
+    // read from two: so a label under the first point says the time there, 23 hours and 45 minutes ago, in hours, as
+    // a label is read, where the `-23 h 45 min` a reading writes is no label's.
+    let ends = vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(96, "now")];
+    let day = live(96, 900_000, ends.clone());
+    let old = day.clone().instants();
+    assert_eq!(labels(&old), said(&[(0, "-23.75 h"), (95, "now")]));
+    // So it says a time at every place, the one its axis says, where with the one label it said which point it was.
+    assert_eq!(old.read_at(94.4), "-9 min: requests 94");
+    assert_eq!(old.time_at(0.0), "-23 h 45 min");
+    assert_eq!(old.time_at(47.0), "-12 h");
+    assert_eq!(old.time_at(95.0), "now");
+    for at in [0.0_f32, 20.25, 47.0, 94.4, 95.0] {
+        let Some(ChartTime::BeforeNow { ms }) = old.time_of(at) else {
+            unreachable!("a live chart");
+        };
+        let minutes = (ms / 60_000.0).round() as u32;
+        let written = match (minutes / 60, minutes % 60) {
+            (0, 0) => "now".to_owned(),
+            (0, minutes) => format!("-{minutes} min"),
+            (hours, 0) => format!("-{hours} h"),
+            (hours, minutes) => format!("-{hours} h {minutes} min"),
+        };
+        assert_eq!(old.time_at(at), written, "{at}");
+    }
+    let mut one = old.clone();
+    one.labels.remove(0);
+    assert_eq!(one.read_at(94.4), "point 95 of 96: requests 94");
+    // Nor would the time as a reading writes it do, in two units, which no label is read in.
+    let mut written = old.clone();
+    written.labels[0].text = day.time_at(1.0);
+    assert_eq!(written.labels[0].text, "-23 h 45 min");
+    assert_eq!(written.read_at(94.4), "point 95 of 96: requests 94");
+    // The time a step on is written in the largest unit that says it within a hundredth: whole hours where it is so
+    // many, minutes where hours do not say it, and the labels' own minus sign.
+    let hours = live(
+        24,
+        3_600_000,
+        vec![AxisLabel::new(0, "−24 h"), AxisLabel::new(24, "now")],
+    );
+    assert_eq!(
+        labels(&hours.instants()),
+        said(&[(0, "−23 h"), (23, "now")])
+    );
+    let thirds = live(
+        36,
+        2_400_000,
+        vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(36, "now")],
+    );
+    let thirds = thirds.instants();
+    assert_eq!(labels(&thirds), said(&[(0, "-1400 min"), (35, "now")]));
+    assert_eq!(thirds.time_at(34.0), "-40 min");
+    // A time to come is written with its sign, and the time that is now as `now`.
+    let ahead = live(
+        4,
+        900_000,
+        vec![AxisLabel::new(0, "now"), AxisLabel::new(4, "+1 h")],
+    );
+    assert_eq!(
+        labels(&ahead.instants()),
+        said(&[(0, "+0.25 h"), (3, "+1 h")])
+    );
+    let about = live(
+        2,
+        900_000,
+        vec![AxisLabel::new(0, "-15 min"), AxisLabel::new(2, "+15 min")],
+    );
+    assert_eq!(
+        labels(&about.instants()),
+        said(&[(0, "now"), (1, "+15 min")])
+    );
+    // Clock times, as the server labels a chart held to a window, are written as a reading writes them: a window from
+    // 02:00 in eight buckets of an hour says 03:00 under its first point.
+    let clock = live(
+        8,
+        3_600_000,
+        vec![
+            AxisLabel::new(0, "02:00"),
+            AxisLabel::new(4, "06:00"),
+            AxisLabel::new(8, "10:00 UTC"),
+        ],
+    );
+    let clock = clock.instants();
+    assert_eq!(
+        labels(&clock),
+        said(&[(0, "03:00"), (3, "06:00"), (7, "10:00 UTC")])
+    );
+    assert_eq!(clock.time_at(1.5), "04:30");
+    // A label that stood where the second bucket begins stands under the first point itself, and none is added.
+    let second = live(
+        96,
+        900_000,
+        vec![
+            AxisLabel::new(0, "-24 h"),
+            AxisLabel::new(1, "-23.75 h"),
+            AxisLabel::new(96, "now"),
+        ],
+    );
+    assert_eq!(
+        labels(&second.instants()),
+        said(&[(0, "-23.75 h"), (95, "now")])
+    );
+    // Where the labels say no time at the first point from the label at the window's start, none is added: one that
+    // says no time, one alone, and one of another kind than the labels the time there is read from.
+    let named = live(
+        96,
+        900_000,
+        vec![AxisLabel::new(0, "start"), AxisLabel::new(96, "end")],
+    );
+    assert_eq!(labels(&named.instants()), said(&[(95, "end")]));
+    let alone = live(96, 900_000, vec![AxisLabel::new(0, "-24 h")]);
+    assert_eq!(labels(&alone.instants()), said(&[]));
+    let mixed = live(
+        96,
+        900_000,
+        vec![
+            AxisLabel::new(0, "02:00"),
+            AxisLabel::new(48, "-12 h"),
+            AxisLabel::new(96, "now"),
+        ],
+    );
+    assert_eq!(
+        labels(&mixed.clone().instants()),
+        said(&[(47, "-12 h"), (95, "now")])
+    );
+    assert_eq!(mixed.instants().time_at(94.4), "-9 min");
+    // A fixed window of fewer milliseconds than it has buckets keeps where it begins, its step no whole millisecond.
+    let brief = Chart::new(8).with_buckets(true).with_time(TimeAxis::Fixed {
+        from_ms: 10,
+        to_ms: 15,
+    });
+    assert_eq!(
+        brief.instants().time,
+        Some(TimeAxis::Fixed {
+            from_ms: 10,
+            to_ms: 15
+        })
     );
 }
 

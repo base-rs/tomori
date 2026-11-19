@@ -131,6 +131,7 @@ fn an_oversized_hello_is_refused() {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         let error = client.error();
         assert!(

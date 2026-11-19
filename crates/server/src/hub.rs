@@ -624,6 +624,9 @@ struct ConnectionRecord {
     spawns: bool,
     /// Whether the client said in Hello that it reads content by digest. See `design/content.md`.
     reads_content: bool,
+    /// Whether the client said in Hello that it reads a chart whose points are buckets: any other is sent each as
+    /// instants, and its place across one is read so. See `design/projection.md`.
+    chart_buckets: bool,
     /// The session ticket its content requests present, once it is sent one, and how many of them are open. See
     /// `design/content.md`.
     content: Option<ContentSession>,
@@ -3295,6 +3298,7 @@ impl Hub {
                 live_panels: false,
                 spawns: false,
                 reads_content: false,
+                chart_buckets: false,
                 content: None,
                 limits: Limits::TODAY,
                 projected: None,
@@ -3545,6 +3549,7 @@ impl Hub {
                 spawns,
                 limits,
                 content,
+                chart_buckets,
             } = message
             {
                 // Before Hello rejoins the space they were in, so that they are sent its environment's state and what is projected in it.
@@ -3560,6 +3565,7 @@ impl Hub {
                     record.live_panels = record.patches && live_panels;
                     record.spawns = spawns;
                     record.reads_content = content;
+                    record.chart_buckets = chart_buckets;
                     // The lesser of what it and this server state, an older client's read as today's, whatever it
                     // says, within the most any connection takes; frames each way from the next on. See
                     // `design/projection.md` and `design/server.md`.
@@ -5615,6 +5621,26 @@ impl Hub {
                     let mut plain = (*projection).clone();
                     plain.panels =
                         crate::stage::within_volumes(plain.panels, diagrams, world_edges, &limits);
+                    projection = Arc::new(plain);
+                }
+                // A client that reads no buckets is sent each chart of buckets as the instants it reads them as, so
+                // that what it draws, reads and reports agree.
+                let buckets = state
+                    .connections
+                    .get(&connection)
+                    .is_some_and(|record| record.chart_buckets);
+                if !buckets
+                    && projection
+                        .panels
+                        .iter()
+                        .any(|panel| panel.chart.as_ref().is_some_and(|chart| chart.buckets))
+                {
+                    let mut plain = (*projection).clone();
+                    plain.panels = plain
+                        .panels
+                        .into_iter()
+                        .map(crate::stage::without_buckets)
+                        .collect();
                     projection = Arc::new(plain);
                 }
                 let live = state

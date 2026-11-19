@@ -219,6 +219,7 @@ mod tests {
             spawns: false,
             limits: Some(tomori_protocol::Limits::MOST),
             content: false,
+            chart_buckets: true,
         };
         let hello = Frame::client(&hello).payload.len();
         assert!(hello * 2 < WATCHING_FRAME_BYTES, "{hello} bytes");

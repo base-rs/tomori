@@ -1927,6 +1927,8 @@ impl SpaceModel {
                             chip: chip
                                 .as_deref()
                                 .filter(|chip| chip.len() <= tomori_environment::CONTEXT_ID_BYTES),
+                            // How their client reads a chart is its connection's to say, which `panels` knows.
+                            instants: false,
                         },
                     )?,
                 }))

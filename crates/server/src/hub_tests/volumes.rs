@@ -33,6 +33,7 @@ impl Client {
             spawns: false,
             limits: Some(Limits::TODAY.with_volumes(volumes, nodes)),
             content: false,
+            chart_buckets: false,
         });
         client.read();
         client

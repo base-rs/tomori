@@ -51,6 +51,7 @@ impl Client {
             spawns: false,
             limits,
             content: false,
+            chart_buckets: false,
         });
         client.read();
         client
@@ -441,6 +442,7 @@ fn a_client_joining_again_or_reconnecting_is_sent_the_projection_whole() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     rejoined.read(&again);
     assert_eq!((rejoined.wholes, rejoined.patches.len()), (1, 0));
@@ -510,6 +512,7 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
             spawns: false,
             limits: None,
             content: false,
+            chart_buckets: false,
         });
         let Some(ServerMessage::Welcome { limits, .. }) = client.read().into_iter().next() else {
             unreachable!("the welcome comes first");
@@ -577,6 +580,7 @@ fn hello_limits_are_negotiated_within_the_most_and_welcome_states_the_most() {
         spawns: false,
         limits: None,
         content: false,
+        chart_buckets: false,
     });
     assert_eq!(kept(&blind), (Limits::TODAY, false));
 }

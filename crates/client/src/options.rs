@@ -172,6 +172,11 @@ pub struct Options {
     /// connection says in its Hello. `false`, the default, is never told, and arrives at home, as the spectator, which
     /// chooses where it watches from itself. See `design/environments.md`.
     pub spawns: bool,
+    /// Whether the session reads a chart whose points are buckets, `Chart::buckets`, drawing each across its step,
+    /// reading a time in the bucket that holds it and saying where it points across one over `Chart::steps`, which each
+    /// connection says in its Hello. `false`, the default, is sent each chart of buckets as instants, `Chart::instants`,
+    /// as a session that reads every chart's points as instants needs. See `design/projection.md`.
+    pub chart_buckets: bool,
     /// What this client reads and draws at most, which each connection states in its Hello: by default frames of up to
     /// [`tomori_protocol::MOST_FRAME_BYTES`], which the connection reads, and a projection within today's bounds,
     /// [`tomori_protocol::Limits::TODAY`], since what a session draws is its own to say; see
@@ -212,6 +217,7 @@ impl std::fmt::Debug for Options {
             .field("projection_patches", &self.projection_patches)
             .field("live_panels", &self.live_panels)
             .field("spawns", &self.spawns)
+            .field("chart_buckets", &self.chart_buckets)
             .field("limits", &self.limits)
             .field("content", &self.content)
             .finish()
@@ -244,6 +250,7 @@ impl Options {
             projection_patches: false,
             live_panels: false,
             spawns: false,
+            chart_buckets: false,
             limits: Limits::TODAY.with_frame_bytes(tomori_protocol::MOST_FRAME_BYTES as u32),
             content: None,
         }

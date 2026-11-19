@@ -5339,6 +5339,11 @@ impl Session for Conversation {
         self.arrives
     }
 
+    /// And reads charts of buckets, as [`crate::chart`] draws and reads them.
+    fn chart_buckets(&self) -> bool {
+        true
+    }
+
     fn report(&mut self, report: Report) {
         // Reported every frame, and needing nothing more of the match below.
         if let Report::Replaying(replaying) = report {
