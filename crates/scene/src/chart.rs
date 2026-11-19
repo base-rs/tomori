@@ -303,6 +303,8 @@ struct Plot<'a> {
     width: f32,
     height: f32,
     range: (f32, f32),
+    /// How many stretches its bars are drawn in, [`bar_stretches`].
+    stretches: usize,
 }
 
 impl Plot<'_> {
@@ -391,6 +393,13 @@ impl Plot<'_> {
         matches!(bound, Bound::Edge(edge) if self.stepped(edge))
     }
 
+    /// Whether `bound` is a series of bars on a chart of buckets, each drawn across its own bucket, and so level
+    /// across it, as a step is.
+    fn bound_barred(&self, bound: Bound) -> bool {
+        self.chart.buckets
+            && matches!(bound, Bound::Edge(Edge::Series { index }) if self.chart.series.get(index as usize).is_some_and(|series| series.style == SeriesStyle::Bars))
+    }
+
     fn bound_broken(&self, bound: Bound, index: usize) -> bool {
         matches!(bound, Bound::Edge(edge) if self.broken(edge, index))
     }
@@ -399,14 +408,26 @@ impl Plot<'_> {
     /// straight line from one point to the next, or a step's value held from its point to the next; `None` where it is
     /// not measured at either end, or breaks between them. On a chart of buckets, whose points stand at the middles of
     /// their buckets, `at` may be up to half a point before the first or after the last: a step's value is its
-    /// bucket's, half a point either side of its point, an edge in the later, and a line's is nothing beyond its first
-    /// and last points, where none is drawn.
+    /// bucket's, half a point either side of its point, an edge in the later, as is a series of bars', the bar drawn
+    /// across that bucket, as tall as the point of its stretch farthest from the base; and a line's is nothing beyond
+    /// its first and last points, where none is drawn.
     fn sample(&self, bound: Bound, at: f32) -> Option<f32> {
         let (low, high) = self.range;
         let last = self.chart.points.saturating_sub(1) as usize;
-        if self.chart.buckets && self.bound_stepped(bound) {
+        if self.chart.buckets
+            && let Bound::Edge(Edge::Series { index: series }) = bound
+            && let Some(series) = self.chart.series.get(series as usize)
+            && matches!(series.style, SeriesStyle::Step | SeriesStyle::Bars)
+        {
             let index = (at.round().max(0.0) as usize).min(last);
-            return Some(self.bound(bound, index)?.clamp(low, high));
+            let value = if series.style == SeriesStyle::Bars {
+                let base = 0.0_f32.clamp(low, high);
+                let points = self.chart.points as usize;
+                stretch_bar(&series.values, (points, self.stretches), index, base)
+            } else {
+                series.values.get(index).copied().flatten()
+            };
+            return Some(value?.clamp(low, high));
         }
         if self.chart.buckets
             && matches!(bound, Bound::Edge(Edge::Series { .. }))
@@ -447,10 +468,13 @@ impl Plot<'_> {
     /// and only then, the narrowest across where the gap closes. Between a step series and another edge, whose gap is
     /// level from point to point, a piece is one level quad as tall as the gap is on average. Everything is clipped to
     /// the plot. On a chart of buckets, a region runs between the middles of its first and last buckets, as its lines
-    /// do, but for one with a step for an edge, level across each bucket, which runs from where the first begins to
-    /// where the last ends, shading nothing where its other edge is a line that is not drawn.
+    /// do, but for one with a step or a series of bars for an edge, level across each bucket, which runs from where the
+    /// first begins to where the last ends, in level pieces as a step's does, shading nothing where its other edge is
+    /// a line that is not drawn.
     fn fill(&self, from: Bound, to: Bound, above: bool, quads: usize) -> Vec<[[f32; 2]; 4]> {
-        let stepped = self.bound_stepped(from) || self.bound_stepped(to);
+        let stepped = [from, to]
+            .into_iter()
+            .any(|bound| self.bound_stepped(bound) || self.bound_barred(bound));
         // Across where the points stand, from the first, at 0, to the last, `width` on, `last` steps; or, with a step
         // on a chart of buckets, across every bucket, the first point `inset` steps in.
         let (first, width, last, inset) = if stepped && self.chart.buckets {
@@ -930,20 +954,22 @@ pub fn draw(chart: &Chart, area: Area) -> Drawing {
         * CELL_WIDTH as f32
         + 4.0;
     let row = CELL_HEIGHT as f32;
+    let width = (area.width - gutter - 2.0).max(1.0);
+    let stretches = bar_stretches(chart, width);
     let plot = Plot {
         chart,
         left: area.x + gutter,
         top: area.y + row / 2.0,
-        width: (area.width - gutter - 2.0).max(1.0),
+        width,
         height: (area.height - 2.0 * row).max(1.0),
         range,
+        stretches,
     };
     let barred: Vec<_> = chart
         .series
         .iter()
         .filter(|series| series.style == SeriesStyle::Bars)
         .collect();
-    let stretches = bar_stretches(chart, plot.width);
     drawing.plot = Some(PlotArea {
         left: plot.left,
         top: plot.top,
@@ -1165,21 +1191,30 @@ pub fn bar_at(chart: &Chart, index: usize, at: f32, stretches: usize) -> Option<
     let nearest = (if at.is_nan() { 0.0 } else { at - chart.inset() })
         .round()
         .clamp(0.0, (points - 1) as f32) as usize;
-    // The stretch whose points hold it, as [`bars`] cuts them, which are not all as many where the stretches do not
-    // divide the points.
-    let stretch = (0..stretches)
-        .find(|stretch| nearest < (stretch + 1) * points / stretches)
-        .unwrap_or(stretches - 1);
     let (low, high) = chart.range();
     let base = 0.0_f32.clamp(low, high);
-    let values = &series.values;
+    stretch_bar(&series.values, (points, stretches), nearest, base)
+        .and_then(tomori_protocol::chart::rounded)
+}
+
+/// The value the bar drawn over point `index` stands at, of a series of `values` over `points` points drawn in
+/// `stretches`: that of the points of the stretch that holds `index`, as [`bars`] cuts them, which are not all as many
+/// where the stretches do not divide the points, farthest from `base`; `None` where none of them has a value.
+fn stretch_bar(
+    values: &[Option<f32>],
+    (points, stretches): (usize, usize),
+    index: usize,
+    base: f32,
+) -> Option<f32> {
+    let stretch = (0..stretches)
+        .find(|stretch| index < (stretch + 1) * points / stretches)
+        .unwrap_or(stretches - 1);
     values[(stretch * points / stretches).min(values.len())
         ..((stretch + 1) * points / stretches).min(values.len())]
         .iter()
         .flatten()
         .copied()
         .max_by(|a, b| (a - base).abs().total_cmp(&(b - base).abs()))
-        .and_then(tomori_protocol::chart::rounded)
 }
 
 /// The bars of `series`, the `place`th of `count` series of bars, from `base` to each value, held within the plot: one

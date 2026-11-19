@@ -1147,7 +1147,11 @@ fn a_chart_of_buckets_pointed_at_by_a_client_that_reads_none_is_read_as_that_cli
     assert_eq!(*instants, volume.clone().cleaned().unwrap().instants());
     assert_eq!(
         instants.labels,
-        [AxisLabel::new(47, "-12 h"), AxisLabel::new(95, "now")]
+        [
+            AxisLabel::new(0, "-23.75 h"),
+            AxisLabel::new(47, "-12 h"),
+            AxisLabel::new(95, "now")
+        ]
     );
     // A panel of a chart of instants, or of none, is sent as it is.
     for plain in [
@@ -1187,6 +1191,80 @@ fn a_chart_of_buckets_pointed_at_by_a_client_that_reads_none_is_read_as_that_cli
     assert!(
         linked.ends_with("linked charts at that time: \"volume: -10 min: requests 95\")"),
         "{linked}"
+    );
+}
+
+#[test]
+fn a_line_on_a_chart_of_buckets_linked_at_its_window_s_ends_reads_its_end_buckets() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    // The requests in each 15 minutes of 24 hours as bars, and their latency over the same buckets as a line, the
+    // bucket `index` of each reading `index`, labelled only where the first begins and where the last ends.
+    let buckets = |name: &str, style: SeriesStyle| {
+        Chart::new(96)
+            .with_buckets(true)
+            .with_time(TimeAxis::Live { step_ms: 900_000 })
+            .with_labels(vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(96, "now")])
+            .with_series(Series::new(
+                name,
+                Colour::Teal,
+                style,
+                (0..96).map(|index| Some(index as f32)).collect(),
+            ))
+    };
+    for (id, chart) in [
+        ("volume", buckets("requests", SeriesStyle::Bars)),
+        ("latency", buckets("p99", SeriesStyle::Line)),
+    ] {
+        stage
+            .publish(&walls, publishing(Panel::chart(id, id, chart)), 0)
+            .unwrap();
+    }
+    let shown = stage.view("s", &walls, 0);
+    let panel = |title: &str| shown.panels.iter().find(|panel| panel.title == title);
+    let across = |title: &str, across: u16, instants: bool| {
+        stage
+            .describe_at(
+                &walls,
+                &panel(title).unwrap().id,
+                crate::stage::Pointed {
+                    across: Some(across),
+                    instants,
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
+            .unwrap()
+    };
+    // Pointing at the bars at now, where the window ends, the line linked there is in its last bucket, which has a
+    // value, and reads it, though its line is drawn only as far as that bucket's middle; and so where the window
+    // begins, and pointing at the line itself.
+    for (place, read) in [(10_000, ("now", 95)), (0, ("-24 h", 0))] {
+        let (time, bucket) = read;
+        let pointed = across("volume", place, false);
+        assert!(
+            pointed.ends_with(&format!(
+                "; at the time pointed at: \"{time}: requests {bucket}\"; linked charts at that time: \"latency: \
+                 {time}: p99 {bucket}\")"
+            )),
+            "{pointed}"
+        );
+        let pointed = across("latency", place, false);
+        assert!(
+            pointed.contains(&format!("at the time pointed at: \"{time}: p99 {bucket}\"")),
+            "{pointed}"
+        );
+    }
+    // A client that reads no buckets, sent each as instants labelled under their first and last points, is told the
+    // time its readout says, read from those two labels, with what each chart it draws reads there.
+    let place = (94.4_f32 / 95.0 * 10_000.0).round() as u16;
+    let pointed = across("volume", place, true);
+    assert!(
+        pointed.ends_with(
+            "; at the time pointed at: \"-9 min: requests 94\"; linked charts at that time: \"latency: -9 min: p99 \
+             94.4\")"
+        ),
+        "{pointed}"
     );
 }
 

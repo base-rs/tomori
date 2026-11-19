@@ -592,8 +592,12 @@ impl Chart {
     /// and reads it: unchanged where its points are instants already; and where they are buckets, each point the
     /// instant its bucket ends, as a chart said totals over intervals before it could say buckets. Its values are
     /// unchanged, so that a panel's live data applies to it as it is. Each label, which stood at a bucket's edge, stands
-    /// under the point of the bucket that ends there, and one where the first bucket begins, a time before its first
-    /// point, is left out. A live axis is unchanged, its last point now, where its last bucket ends; a fixed window
+    /// under the point of the bucket that ends there. The one where the first bucket begins, a time before its first
+    /// point, has no point to stand under: where it and the next label that says a time say times of one kind, a label
+    /// under the first point says the time a step on instead, one a reader reads as a time, `-23.75 h` or `02:15` a
+    /// step of 15 minutes on from `-24 h` or `02:00`, unless a label stood at that edge already, so that a chart
+    /// labelled only at its ends still says a time at every place; otherwise it is left out. A live axis is unchanged,
+    /// its last point now, where its last bucket ends; a fixed window
     /// runs from the end of its first bucket, to the millisecond, to the end of its last. So the times its labels say,
     /// those its axis says and the place a reader reports across it agree, a step for each bucket, though it spans a
     /// step less than the window counted, draws each bar astride the end of its interval and reads the bucket before
@@ -608,25 +612,77 @@ impl Chart {
     ///     .with_buckets(true)
     ///     .instants();
     /// assert!(!day.buckets);
-    /// assert_eq!(day.labels, [AxisLabel::new(95, "now")]);
+    /// assert_eq!(
+    ///     day.labels,
+    ///     [AxisLabel::new(0, "-23.75 h"), AxisLabel::new(95, "now")]
+    /// );
     /// assert_eq!(day.time_of(95.0), Some(ChartTime::BeforeNow { ms: 0.0 }));
+    /// // Its labels say the time its axis says: a step before its last point, 15 minutes ago.
+    /// assert_eq!(day.time_at(94.0), "-15 min");
+    /// assert_eq!(day.time_of(94.0), Some(ChartTime::BeforeNow { ms: 900_000.0 }));
     /// ```
     pub fn instants(mut self) -> Self {
         if !self.buckets {
             return self;
         }
         let steps = i128::from(self.steps());
+        let first = self.first_instant();
         self.buckets = false;
         self.labels.retain_mut(|label| {
             let point = label.at.checked_sub(1);
             label.at = point.unwrap_or_default();
             point.is_some()
         });
+        if let Some(text) = first
+            && !self.labels.iter().any(|label| label.at == 0)
+        {
+            self.labels.insert(0, AxisLabel::new(0, text));
+        }
         if let Some(TimeAxis::Fixed { from_ms, to_ms }) = &mut self.time {
+            // A whole number of milliseconds, the step kept to the millisecond below: of a window of fewer
+            // milliseconds than it has buckets, nothing, so that it begins where it did, a window still.
             let step = (i128::from(*to_ms) - i128::from(*from_ms)) / steps;
             *from_ms = (i128::from(*from_ms) + step) as i64;
         }
         self
+    }
+
+    /// What a label under its first point says once its points are instants, [`Chart::instants`], in place of the
+    /// label where its first bucket begins: the time a step on from it, where it and the next label that says a time
+    /// are the two its labels read the time there from, [`Chart::time_at`], written so that a reader reads it as a
+    /// time of their kind. A clock time is written as `time_at` writes it, `02:15`; a relative one in the larger unit
+    /// of the two, or the largest smaller one that says it within a hundredth, `-23.75 h`, `-1400 min` or `-23 h`,
+    /// since the `-23 h 45 min` a reading writes is read by no label, and `now` at none. `None` where its labels say
+    /// no time there, or read it from other labels than the one where its first bucket begins.
+    fn first_instant(&self) -> Option<String> {
+        let [(from_at, from), (to_at, to)] = self.timed(1.0)?;
+        if from_at != 0.0 {
+            return None;
+        }
+        if from.clock {
+            return Some(self.time_at(1.0));
+        }
+        let seconds = from.seconds + (to.seconds - from.seconds) / f64::from(to_at);
+        if seconds == 0.0 {
+            return Some("now".to_owned());
+        }
+        let larger = if to.unit.1 > from.unit.1 { to } else { from };
+        let hundredths = |value: f64| (value * 100.0).round() / 100.0;
+        let (written, size) = UNITS
+            .iter()
+            .rev()
+            .map(|(_, written, size)| (*written, *size))
+            .filter(|(_, size)| *size <= larger.unit.1)
+            .find(|(_, size)| {
+                let value = seconds.abs() / size;
+                (hundredths(value) - value).abs() < 1e-6
+            })
+            .unwrap_or(("s", 1.0));
+        let sign = if seconds < 0.0 { larger.minus } else { '+' };
+        Some(format!(
+            "{sign}{} {written}",
+            hundredths(seconds.abs() / size)
+        ))
     }
 
     /// The chart, its points in time as `time` says.
@@ -1214,9 +1270,11 @@ impl Chart {
     /// On a chart of buckets, `at` is so many steps from where its first begins, and each point stands at the middle
     /// of its bucket ([`Chart::inset`]). A bar's and a step's are those of the bucket that holds `at`, from where it
     /// begins to where it ends, a place on an edge in the later, never the bucket before for a time in a bucket's older
-    /// half, so that a step over bars reads the bucket the bars read, everywhere. A line's or an area's is read between
-    /// the middles of its buckets, and has none before the middle of the first or after that of the last, where
-    /// nothing of it is drawn, but for a point alone there, a dot.
+    /// half, so that a step over bars reads the bucket the bars read, everywhere. A line's or an area's is read in the
+    /// bucket that holds `at` too: on the line, between the middles of two buckets it joins, and, in a half of a
+    /// bucket the line does not reach, before the middle of the first bucket, after that of the last, or beside a gap
+    /// or a break, that bucket's own value, held, though nothing is drawn there, so that a bucket that has a value
+    /// never reads as a gap, as at the window's end, where a time linked from another chart at now is.
     ///
     /// ```
     /// use tomori_protocol::chart::{Chart, Colour, Series, SeriesStyle};
@@ -1232,19 +1290,19 @@ impl Chart {
     /// assert_eq!(chart.value_at(0, 1.25), Some(20.0));
     /// assert_eq!(chart.value_at(1, 1.25), Some(20.0));
     /// assert_eq!(chart.value_at(2, 1.25), Some(17.5));
-    /// // Before the middle of the first bucket, the bar and the step are the first bucket's, and no line is drawn.
+    /// // Before the middle of the first bucket, where no line is drawn, each reads the first bucket's value.
     /// assert_eq!(chart.value_at(1, 0.25), Some(10.0));
-    /// assert_eq!(chart.value_at(2, 0.25), None);
+    /// assert_eq!(chart.value_at(2, 0.25), Some(10.0));
+    /// // And at the end of the last, the last's.
+    /// assert_eq!(chart.value_at(2, 3.0), Some(30.0));
     /// ```
     pub fn value_at(&self, series: usize, at: f32) -> Option<f32> {
         let series = self.series.get(series)?;
         let points = self.points.clamp(2, CHART_POINTS) as usize;
         let last = (points - 1) as f32;
-        // Where it is among the points, the first at 0: on a chart of buckets, half a step in from where `at` counts.
-        let along = if at.is_nan() { 0.0 } else { at } - self.inset();
-        // Before the first point or after the last, which only a chart of buckets has room for, and draws no line in.
-        let beyond = self.buckets && !(0.0..=last).contains(&along);
-        let at = along.clamp(0.0, last);
+        // Where it is among the points, the first at 0: on a chart of buckets, half a step in from where `at` counts,
+        // and held to the first and last, so that the half a bucket beyond each reads as its point does.
+        let at = (if at.is_nan() { 0.0 } else { at } - self.inset()).clamp(0.0, last);
         let value = |index: usize| series.values.get(index).copied().flatten();
         // Whether the point `index` is joined to the next by its line.
         let joined = |index: usize| {
@@ -1275,8 +1333,6 @@ impl Chart {
                     .copied()
                     .max_by(|a, b| (a - base).abs().total_cmp(&(b - base).abs()))
             }
-            // A point alone is drawn as a dot, read within half a point of it, whichever side of it.
-            _ if beyond => value(nearest).filter(|_| alone(nearest)),
             _ if share == 0.0 => value(index),
             _ if joined(index) => {
                 let (from, to) = (
@@ -1287,7 +1343,9 @@ impl Chart {
                     (f64::from(from) + (f64::from(to) - f64::from(from)) * f64::from(share)) as f32,
                 )
             }
-            _ if alone(nearest) => value(nearest),
+            // Where its line is not drawn: a point alone, a dot, is read within half a point of it; and on a chart
+            // of buckets, each bucket's own value is, in the half of it the line does not reach.
+            _ if self.buckets || alone(nearest) => value(nearest),
             _ => None,
         };
         value.and_then(rounded)
@@ -1306,21 +1364,8 @@ impl Chart {
         } else {
             at.clamp(0.0, last)
         };
-        let mut times: Vec<(f32, Time)> = self
-            .labels
-            .iter()
-            .filter_map(|label| Time::read(&label.text).map(|time| (label.at as f32, time)))
-            .collect();
-        times.sort_by(|a, b| a.0.total_cmp(&b.0));
-        times.dedup_by(|a, b| a.0 == b.0);
-        // The pair about it, or else nearest it, of one kind.
-        let pairs = times.windows(2).filter(|pair| pair[0].1.kin(pair[1].1));
-        let pair = pairs.min_by(|a, b| {
-            let distance = |pair: &&[(f32, Time)]| (pair[0].0 - at).max(at - pair[1].0).max(0.0);
-            distance(a).total_cmp(&distance(b))
-        });
         let nearest = (at.round() as u32).min(self.steps());
-        let Some([(from_at, from), (to_at, to)]) = pair.map(|pair| [pair[0], pair[1]]) else {
+        let Some([(from_at, from), (to_at, to)]) = self.timed(at) else {
             let points = self.points.max(2);
             let point = ((at - self.inset()).round() as u32).min(points - 1);
             return self
@@ -1355,6 +1400,25 @@ impl Chart {
             larger.minus,
             step.abs() < larger.unit.1,
         )
+    }
+
+    /// The two labels its time at `at` is read from, [`Chart::time_at`], each with where it stands: the two about it
+    /// that say a time of one kind, or else the two such nearest it; none where no two labels next to each other, of
+    /// those that say a time, say times of one kind.
+    fn timed(&self, at: f32) -> Option<[(f32, Time); 2]> {
+        let mut times: Vec<(f32, Time)> = self
+            .labels
+            .iter()
+            .filter_map(|label| Time::read(&label.text).map(|time| (label.at as f32, time)))
+            .collect();
+        times.sort_by(|a, b| a.0.total_cmp(&b.0));
+        times.dedup_by(|a, b| a.0 == b.0);
+        let pairs = times.windows(2).filter(|pair| pair[0].1.kin(pair[1].1));
+        let pair = pairs.min_by(|a, b| {
+            let distance = |pair: &&[(f32, Time)]| (pair[0].0 - at).max(at - pair[1].0).max(0.0);
+            distance(a).total_cmp(&distance(b))
+        });
+        pair.map(|pair| [pair[0], pair[1]])
     }
 
     /// The time at `at`, a point's index or a share of the way between two, held to its points, as its [`TimeAxis`] says:

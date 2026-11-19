@@ -50,7 +50,8 @@ pub struct Readout {
 impl Readout {
     /// `chart`'s readout at `at`, a point's index or a share of the way between two, on its plot drawn at `plot`, on a
     /// face `bounds` font pixels wide and tall inside its padding: its line at `at`, a dot on each series where it has
-    /// a value as it is drawn, a thinned line's on the line drawn, held within the plot, and its label to the right of
+    /// a value as it is drawn, a thinned line's on the line drawn, or, on a chart of buckets, where the line does not
+    /// reach into the bucket pointed at, that bucket's own value, held within the plot, and its label to the right of
     /// the line, or left of it where there is no room, at the plot's top or its bottom, whichever covers less of the
     /// series about it, held inside the face, its lines cut to fit across it.
     pub fn new(chart: &Chart, plot: &PlotArea, at: f32, (width, height): (f32, f32)) -> Self {
@@ -62,9 +63,13 @@ impl Readout {
             .iter()
             .find(|(thinned, _)| *thinned == index)
         {
+            // Where its line is drawn; and, on a chart of buckets, where it is not, in a half of a bucket the line
+            // does not reach, that bucket's own value, as the chart reads it, so that a bucket that has a value never
+            // reads as a gap.
             Some((_, runs)) => plot
                 .drawn(runs, x)
-                .and_then(tomori_protocol::chart::rounded),
+                .and_then(tomori_protocol::chart::rounded)
+                .or_else(|| chart.value_at(index, at).filter(|_| chart.buckets)),
             None if chart.series[index].style == tomori_protocol::chart::SeriesStyle::Bars => {
                 super::bar_at(chart, index, at, plot.stretches)
             }

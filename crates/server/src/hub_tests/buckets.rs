@@ -155,12 +155,13 @@ fn a_client_that_reads_no_buckets_is_sent_them_as_instants_and_read_as_it_shows_
     let at = |chart: &Chart| -> Vec<u32> { chart.labels.iter().map(|label| label.at).collect() };
     assert_eq!(at(&buckets), [0, 48, 96]);
     // Old is sent the same panel as instants, each where its bucket ends, with the same values and summary: `now`
-    // under its last point, where it ignored a label at a point it has not, and the window's start, a step before its
-    // first point, left out. A chart of instants is sent to both as it is.
+    // under its last point, where it ignored a label at a point it has not, and, in place of the window's start, a
+    // step before its first point, the time at that point. A chart of instants is sent to both as it is.
     let (_, instants) = chart(&older, "Volume");
     assert_eq!(instants, buckets.clone().instants());
     assert!(!instants.buckets);
-    assert_eq!(at(&instants), [47, 95]);
+    assert_eq!(at(&instants), [0, 47, 95]);
+    assert_eq!(instants.labels[0].text, "-23.75 h");
     assert!(instants.same_data(&buckets));
     assert_eq!(chart(&older, "Latency"), chart(&seen, "Latency"));
     let body =
