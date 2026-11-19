@@ -1594,6 +1594,234 @@ fn several_series_of_bars_stand_side_by_side_each_at_least_two_font_pixels_wide(
     assert_eq!(bar_at(&gap, 1, 3.0, 10), None);
 }
 
+/// The requests in each of four buckets of 15 minutes, the third missing, as bars, labelled at their edges.
+fn buckets() -> Chart {
+    Chart::new(4)
+        .with_buckets(true)
+        .with_labels(vec![
+            AxisLabel::new(0, "-1 h"),
+            AxisLabel::new(2, "-30 min"),
+            AxisLabel::new(4, "now"),
+        ])
+        .with_series(Series::new(
+            "requests",
+            Colour::Teal,
+            SeriesStyle::Bars,
+            vec![Some(2.0), Some(4.0), None, Some(8.0)],
+        ))
+}
+
+#[test]
+fn a_chart_of_buckets_draws_each_bar_across_its_bucket_from_the_window_s_start_to_its_end() {
+    let chart = buckets();
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    // The plot is as many buckets wide as the chart has, with no slot beside them.
+    let pitch = (right - left) / 4.0;
+    let plotted = drawing.plot.clone().unwrap();
+    assert_eq!((plotted.points, plotted.steps), (4, 4));
+    // Each bar stands in the middle of its own bucket, whole, the first clear of the plot's left edge and the last of
+    // its right, a missing one not drawn.
+    let bars = fills(&drawing, ink(Colour::Teal, 1.0));
+    assert_eq!(bars.len(), 3);
+    for ((x, _, width, _), bucket) in bars.iter().zip([0.0, 1.0, 3.0]) {
+        assert!((width - pitch * BAR).abs() < 1e-3, "{width}");
+        let middle = left + pitch * (bucket + 0.5);
+        assert!((x + width / 2.0 - middle).abs() < 1e-3, "{bucket}: {x}");
+        assert!(*x >= left + pitch * bucket && x + width <= left + pitch * (bucket + 1.0));
+    }
+    // The same bars as instants stand on their points, the first and last half cut away at the plot's edges, the
+    // plot one fewer steps wide than it has bars.
+    let instants = draw(&chart.clone().with_buckets(false), AREA);
+    let stood = fills(&instants, ink(Colour::Teal, 1.0));
+    let apart = (right - left) / 3.0;
+    assert_eq!(instants.plot.as_ref().unwrap().steps, 3);
+    assert!((stood[0].0 - left).abs() < 1e-3 && (stood[0].2 - apart * BAR / 2.0).abs() < 1e-3);
+    assert!((stood[2].0 + stood[2].2 - right).abs() < 1e-3);
+    // Its labels stand at its buckets' edges: where its first begins, between its second and third, and where its
+    // last ends, a grid line down at each.
+    let label = |text: &str| {
+        let label = drawing
+            .labels
+            .iter()
+            .find(|label| crate::ui_text::plain(&label.cells) == text);
+        let label = label.unwrap();
+        (label.x, label.x + label.width())
+    };
+    assert!((label("-1 h").0 - left).abs() < 1e-3);
+    let middle = label("-30 min");
+    assert!(((middle.0 + middle.1) / 2.0 - (left + right) / 2.0).abs() < 1e-3);
+    assert!((label("now").1 - right).abs() < 3.0);
+    let (top, bottom, ..) = plot(&drawing);
+    for x in [left, (left + right) / 2.0, right] {
+        assert!(
+            strokes(&drawing).iter().any(|(from, to, ..)| {
+                (from[0] - x).abs() < 1e-3 && *from == [from[0], top] && *to == [from[0], bottom]
+            }),
+            "{x}"
+        );
+    }
+    // A label where its last bucket ends is kept, though a chart of instants has no point there, and none beyond.
+    let ends = |chart: &Chart| -> Vec<u32> {
+        let mut chart = chart.clone();
+        chart.labels.push(AxisLabel::new(5, "beyond"));
+        bounded(&chart)
+            .labels
+            .iter()
+            .map(|label| label.at)
+            .collect()
+    };
+    assert_eq!(ends(&chart), [0, 2, 4]);
+    assert_eq!(ends(&chart.clone().with_buckets(false)), [0, 2]);
+    assert!(bounded(&chart).buckets);
+    // A place on its plot is so many steps from where its first bucket begins, and its bar the bucket that holds it.
+    let down = plotted.top + plotted.height / 2.0;
+    assert_eq!(plotted.at([left, down]), Some(0.0));
+    assert_eq!(plotted.at([right, down]), Some(4.0));
+    assert_eq!(plotted.x(2.0), (left + right) / 2.0);
+    for (at, value) in [
+        (0.0, Some(2.0)),
+        (0.9, Some(2.0)),
+        (1.0, Some(4.0)),
+        (1.9, Some(4.0)),
+        (2.5, None),
+        (3.1, Some(8.0)),
+        (4.0, Some(8.0)),
+        (f32::NAN, Some(2.0)),
+    ] {
+        assert_eq!(bar_at(&chart, 0, at, plotted.stretches), value, "{at}");
+    }
+    // Its readout stands where it is pointed at, in the older half of the last bucket, and reads that bucket, a dot
+    // at its bar's top.
+    let readout = super::readout::Readout::new(&chart, &plotted, 3.1, (306.0, 180.0));
+    assert_eq!(readout.x, plotted.x(3.1));
+    assert_eq!(readout.lines[0].0, "-14 min");
+    assert_eq!(readout.lines[1].0, "requests 8");
+    assert_eq!(
+        readout.dots,
+        [([readout.x, plotted.y(8.0)], ink(Colour::Teal, 1.0))]
+    );
+}
+
+#[test]
+fn a_day_of_buckets_fills_its_plot_with_a_bar_for_each_and_every_label() {
+    let chart = fixtures::requests();
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    // 96 bars, each as wide, none cut, evenly from the plot's left edge to its right, a gap as wide before the first as
+    // after the last: no slot is left empty at the window's start.
+    let bars = fills(&drawing, ink(Colour::Teal, 1.0));
+    assert_eq!(bars.len(), 96);
+    let pitch = (right - left) / 96.0;
+    assert!(
+        bars.iter()
+            .all(|(_, _, width, _)| (width - pitch * BAR).abs() < 1e-3)
+    );
+    let (first, last) = (bars[0], bars[95]);
+    let before = first.0 - left;
+    let after = right - (last.0 + last.2);
+    assert!((before - after).abs() < 1e-2, "{before} {after}");
+    assert!(
+        (before - pitch * (1.0 - BAR) / 2.0).abs() < 1e-2,
+        "{before}"
+    );
+    // Its first and last labels, the window's start and now, stand at the plot's edges, and the middle one at its
+    // middle.
+    let said = texts(&drawing);
+    for text in ["-24 h", "-12 h", "now"] {
+        assert!(said.contains(&text.to_owned()), "{text}: {said:?}");
+    }
+}
+
+#[test]
+fn lines_and_shading_on_a_chart_of_buckets_run_between_the_middles_of_its_buckets() {
+    // A line rising over four buckets, its area shaded, and a target it crosses, shaded above.
+    let chart = Chart::new(4)
+        .with_buckets(true)
+        .with_axis(ValueAxis::new(Some(0.0), Some(10.0), ""))
+        .with_series(Series::new(
+            "p99",
+            Colour::Amber,
+            SeriesStyle::Area,
+            vec![Some(2.0), Some(4.0), Some(6.0), Some(8.0)],
+        ))
+        .with_reference(Reference::new(5.0, "target", Colour::White))
+        .with_shade(Shade::new(
+            Edge::Reference { index: 0 },
+            Edge::Series { index: 0 },
+            true,
+            Colour::Red,
+        ));
+    let drawing = draw(&chart, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 4.0;
+    let (first, last) = (left + pitch / 2.0, right - pitch / 2.0);
+    // Its line runs from the middle of its first bucket to the middle of its last, each point at its bucket's middle.
+    let amber = ink(Colour::Amber, 1.0);
+    let line: Vec<_> = strokes(&drawing)
+        .into_iter()
+        .filter(|(.., color)| *color == amber)
+        .collect();
+    let ends = line.iter().flat_map(|(from, to, ..)| [from[0], to[0]]);
+    let (least, most) = ends.fold((f32::MAX, f32::MIN), |(least, most), x| {
+        (least.min(x), most.max(x))
+    });
+    assert!(
+        (least - first).abs() < 1.5 && (most - last).abs() < 1.5,
+        "{least} {most}"
+    );
+    // Its shading stays between them, and the shading above the target begins where the line crosses it, between the
+    // middles of its second and third buckets.
+    let within = |color: Rgba| {
+        let shaded: Vec<f32> = quads(&drawing)
+            .into_iter()
+            .filter(|(_, filled)| *filled == color)
+            .flat_map(|(corners, _)| corners.map(|corner| corner[0]))
+            .collect();
+        assert!(!shaded.is_empty());
+        shaded
+            .into_iter()
+            .fold((f32::MAX, f32::MIN), |(least, most), x| {
+                (least.min(x), most.max(x))
+            })
+    };
+    let area = within(ink(Colour::Amber, AREA_ALPHA));
+    assert!(
+        (area.0 - first).abs() < 1.0 && (area.1 - last).abs() < 1.0,
+        "{area:?}"
+    );
+    let above = within(ink(Colour::Red, SHADE_ALPHA));
+    let crossing = left + pitch * 2.0;
+    assert!(
+        (above.0 - crossing).abs() < 2.0 && (above.1 - last).abs() < 1.0,
+        "{above:?}"
+    );
+    // It is read as it is drawn: between the middles of its buckets, on the line.
+    assert_eq!(chart.value_at(0, 2.0), Some(5.0));
+    // Two series of bars stand side by side within each bucket, clear of the plot's edges.
+    let mut pair = buckets();
+    pair.series.push(Series::new(
+        "errors",
+        Colour::Red,
+        SeriesStyle::Bars,
+        vec![Some(1.0); 4],
+    ));
+    let drawing = draw(&pair, AREA);
+    let (_, _, left, right) = plot(&drawing);
+    let pitch = (right - left) / 4.0;
+    assert_eq!(drawing.plot.as_ref().unwrap().stretches, 4);
+    let errors = fills(&drawing, ink(Colour::Red, 1.0));
+    assert_eq!(errors.len(), 4);
+    for ((x, _, width, _), bucket) in errors.iter().zip(0..4) {
+        // The second of two, in the right half of its group, in the middle of its bucket.
+        assert!((width - pitch * BAR / 2.0).abs() < 1e-3, "{width}");
+        assert!(
+            (x - (left + pitch * (bucket as f32 + 0.5))).abs() < 1e-3,
+            "{x}"
+        );
+    }
+}
+
 #[test]
 fn a_legend_of_eight_series_wraps_onto_a_second_row_and_says_how_many_more_do_not_fit() {
     let plain = |rows: &[Vec<Cell>]| {

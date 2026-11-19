@@ -676,6 +676,47 @@ fn time_follows_what_a_chart_shows_or_says_nothing_where_its_chart_says_nothing(
 }
 
 #[test]
+fn time_follows_the_whole_time_a_chart_s_buckets_count() {
+    let walls = console();
+    let mut stage = Stage::default();
+    let live = |points: u32, step_ms: u32| Chart::new(points).with_time(TimeAxis::Live { step_ms });
+    let charts = [
+        // Requests in each 15 minutes of 24 hours, and in each minute of an hour, a bucket each.
+        Panel::chart("day", "Day", live(96, 900_000).with_buckets(true)),
+        Panel::chart("hour", "Hour", live(60, 60_000).with_buckets(true)),
+        // A line over the same 24 hours, 97 instants 15 minutes apart; and 96 instants, which span the 95 between.
+        Panel::chart("line", "Line", live(97, 900_000)),
+        Panel::chart("instants", "Instants", live(96, 900_000)),
+    ];
+    for panel in charts {
+        stage
+            .publish(&walls, Publishing::new(panel).unwrap(), 0)
+            .unwrap();
+    }
+    let shown = stage.view("s", &walls, 0);
+    let follows = |title: &str| {
+        let panel = shown
+            .panels
+            .iter()
+            .find(|panel| panel.title == title)
+            .unwrap();
+        panel.context.clone()
+    };
+    let minutes = |minutes: u32| {
+        [chip(
+            "time",
+            "Time",
+            ContextValue::Live { minutes },
+            ContextSetting::Follows,
+        )]
+    };
+    assert_eq!(follows("Day"), minutes(1440));
+    assert_eq!(follows("Hour"), minutes(60));
+    assert_eq!(follows("Line"), minutes(1440));
+    assert_eq!(follows("Instants"), minutes(1425));
+}
+
+#[test]
 fn a_setting_of_a_parameter_no_longer_declared_is_kept_shown_nowhere_and_binds_again_once_declared()
 {
     let walls = console();

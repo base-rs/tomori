@@ -1143,6 +1143,89 @@ fn pointing_at_a_chart_links_a_readout_on_every_chart_sharing_its_time() {
 }
 
 /// A panel's faces give no linked readout before its face is drawn, nor for a panel of no chart.
+/// A chart of buckets and a line over the same window, on one wall, link at the same place across each, from the
+/// window's start to now, and the buckets' readout reads the bucket that holds the time.
+#[test]
+fn a_chart_of_buckets_links_to_a_line_over_its_window_at_the_same_place_across_each() {
+    use tomori_protocol::chart::{AxisLabel, Chart, Colour, Series, SeriesStyle, TimeAxis};
+    // The requests in each 15 minutes of 24 hours, the bucket `index` counting `index`, and a line of 97 instants over
+    // the same 24 hours.
+    let timed = |points: u32, style: SeriesStyle| {
+        Chart::new(points)
+            .with_time(TimeAxis::Live { step_ms: 900_000 })
+            .with_labels(vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(96, "now")])
+            .with_series(Series::new(
+                "requests",
+                Colour::Teal,
+                style,
+                (0..points).map(|index| Some(index as f32)).collect(),
+            ))
+    };
+    let chart = |id: &str, chart: Chart, slot: u32| {
+        Panel::new(id, id, chart.summary(), on("wall-1", slot)).with_chart(chart)
+    };
+    let shown = projection(vec![
+        chart("volume", timed(96, SeriesStyle::Bars).with_buckets(true), 0),
+        chart("latency", timed(97, SeriesStyle::Line), 1),
+    ]);
+    let mut projector = Projector::default();
+    projector.update(input(&shown, HOME, None));
+    let walls: Vec<(&Wall, Mat4)> = shown
+        .walls
+        .iter()
+        .filter_map(|wall| model(&wall.frame()).map(|frame| (wall, frame)))
+        .collect();
+    let plot = |projector: &Projector, panel: &str| {
+        let face = projector.faces[panel].sizes[0].face.as_ref();
+        face.and_then(|face| face.plot.clone()).unwrap()
+    };
+    // The ray from home at `share` of the way across the plot of `panel`, halfway down it.
+    let towards = |projector: &Projector, panel: &str, share: f32| {
+        let (panel_model, _) = projector
+            .stands(shown.panel(panel).unwrap(), &walls)
+            .unwrap();
+        let canvas = face(projector, panel);
+        let plot = plot(projector, panel);
+        let (width, height) = canvas.size();
+        let [x, y] = [plot.left + plot.width * share, plot.top + plot.height / 2.0];
+        let local = Vec3::new(
+            (x + canvas.padding.0 as f32) * canvas.pixel - width / 2.0,
+            height / 2.0 - (y + canvas.padding.1 as f32) * canvas.pixel,
+            0.0,
+        );
+        Ray::new(HOME, panel_model.transform_point3(local) - HOME)
+    };
+    // How far across its plot the readout linked over `panel` stands, and what it reads.
+    let linked = |projector: &Projector, panel: &str| {
+        let (_, readout, _) = &projector.linked[panel];
+        let plot = plot(projector, panel);
+        (
+            (readout.x - plot.left) / plot.width,
+            readout.lines[1].0.clone(),
+        )
+    };
+    // Pointing at the line some twelve minutes ago, in the older half of the last 15 minutes, the buckets' readout
+    // stands as far across its plot, to a font pixel, and reads the last bucket, never the one before; and so along it.
+    for (share, bucket) in [(0.992, 95), (0.503, 48), (0.004, 0), (0.203, 19)] {
+        let ray = towards(&projector, "latency", share);
+        let output = projector.update(input(&shown, HOME, ray));
+        assert_eq!(output.linked.len(), 1, "{share}");
+        let (across, read) = linked(&projector, "volume");
+        assert!((across - share).abs() < 0.004, "{share}: {across}");
+        assert_eq!(read, format!("requests {bucket}"), "{share}");
+    }
+    // Pointing at the buckets, the line's readout stands as far across its own, and the place said across the buckets
+    // is that share of the window they count.
+    for share in [0.99, 0.25] {
+        let ray = towards(&projector, "volume", share);
+        let output = projector.update(input(&shown, HOME, ray));
+        let said = f32::from(output.across.expect("on the plot"));
+        assert!((said - 10_000.0 * share).abs() < 40.0, "{share}: {said}");
+        let (across, _) = linked(&projector, "latency");
+        assert!((across - share).abs() < 0.004, "{share}: {across}");
+    }
+}
+
 #[test]
 fn a_face_not_yet_drawn_or_of_no_chart_links_no_readout() {
     let chart = crate::chart::fixtures::pressure();

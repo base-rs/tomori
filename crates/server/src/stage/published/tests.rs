@@ -1020,6 +1020,77 @@ fn a_published_panel_is_described_to_the_agent_as_its_environment_s() {
 }
 
 #[test]
+fn a_chart_of_buckets_pointed_at_is_read_in_the_bucket_that_holds_the_time_and_links_to_a_line() {
+    let walls = yard();
+    let mut stage = Stage::default();
+    // The requests in each 15 minutes of 24 hours, a bucket each, the bucket `index` counting `index`; and a line over
+    // the same 24 hours, 97 instants 15 minutes apart, on its wall.
+    let labels = vec![AxisLabel::new(0, "-24 h"), AxisLabel::new(96, "now")];
+    let series = |name: &str, style: SeriesStyle, points: u32| {
+        Series::new(
+            name,
+            Colour::Teal,
+            style,
+            (0..points).map(|index| Some(index as f32)).collect(),
+        )
+    };
+    let live = TimeAxis::Live { step_ms: 900_000 };
+    let volume = Chart::new(96)
+        .with_buckets(true)
+        .with_time(live)
+        .with_labels(labels.clone())
+        .with_series(series("requests", SeriesStyle::Bars, 96));
+    let latency = Chart::new(97)
+        .with_time(live)
+        .with_labels(labels)
+        .with_series(series("p99", SeriesStyle::Line, 97));
+    for (id, chart) in [("volume", volume), ("latency", latency)] {
+        stage
+            .publish(&walls, publishing(Panel::chart(id, id, chart)), 0)
+            .unwrap();
+    }
+    let shown = stage.view("s", &walls, 0);
+    // Its label where its last bucket ends, which a chart of 96 instants has no point for, is kept.
+    let kept = shown.panels.iter().find(|panel| panel.title == "volume");
+    assert_eq!(kept.unwrap().chart.as_ref().unwrap().labels.len(), 2);
+    let across = |title: &str, across: u16| {
+        let id = &shown.panels.iter().find(|panel| panel.title == title);
+        stage
+            .describe_at(
+                &walls,
+                &id.unwrap().id,
+                crate::stage::Pointed {
+                    across: Some(across),
+                    ..crate::stage::Pointed::default()
+                },
+                0,
+            )
+            .unwrap()
+    };
+    // Ten minutes ago, in the older half of the last bucket, which counts the last 15 minutes: read as that bucket,
+    // pointed at and linked, at the same place across each chart.
+    let pointed = across("volume", 9_931);
+    assert!(
+        pointed.ends_with(
+            "; at the time pointed at: \"-10 min: requests 95\"; linked charts at that time: \"latency: -10 min: \
+             p99 95.34\")"
+        ),
+        "{pointed}"
+    );
+    let linked = across("latency", 9_931);
+    assert!(
+        linked.ends_with(
+            "; at the time pointed at: \"-10 min: p99 95.34\"; linked charts at that time: \"volume: -10 min: \
+             requests 95\")"
+        ),
+        "{linked}"
+    );
+    // Where its first bucket begins, 24 hours ago, and where its last ends, now, are the line's ends.
+    assert!(across("latency", 0).ends_with("\"volume: -24 h: requests 0\")"));
+    assert!(across("latency", u16::MAX).ends_with("\"volume: now: requests 95\")"));
+}
+
+#[test]
 fn a_chart_pointed_at_is_described_with_what_the_charts_sharing_its_time_read_then() {
     let declared = roomy();
     let walls = Walls {

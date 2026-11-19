@@ -205,6 +205,69 @@ fn a_copy_held_to_a_window_waits_for_it_and_takes_only_content_for_exactly_it() 
 }
 
 #[test]
+fn a_chart_of_buckets_held_to_a_window_is_labelled_at_its_buckets_edges() {
+    let walls = console();
+    let mut stage = Stage::default();
+    stage.declare_parameters(
+        "console",
+        crate::stage::context::declared(vec![ContextParameter::new(
+            "region", "Region", "US-EAST1",
+        )])
+        .unwrap(),
+    );
+    // The requests in each minute of 30, a bucket each, live, and a copy of it held to the window.
+    let requests = |id: &str, time: TimeAxis| {
+        let chart = Chart::new(30)
+            .with_buckets(true)
+            .with_time(time)
+            .with_series(Series::new(
+                "requests",
+                Colour::Teal,
+                SeriesStyle::Bars,
+                vec![Some(41.0); 30],
+            ));
+        Publishing::new(Panel::chart(id, "Requests", chart).depends_on(["region"])).unwrap()
+    };
+    let live = TimeAxis::Live { step_ms: 60_000 };
+    stage
+        .publish(&walls, requests("requests", live), 0)
+        .unwrap();
+    let source = stage.view("s", &walls, 0).panels[0].id.clone();
+    let to = Destination::Free(Pose::at([0.0, 1.5, -1.5]));
+    let (copy, instance) = stage
+        .copy_panel(&walls, &source, vec![("time".into(), WINDOW)], &to)
+        .unwrap();
+    let edges = |chart: &Chart| -> Vec<(u32, String)> {
+        chart
+            .labels
+            .iter()
+            .map(|label| (label.at, label.text.clone()))
+            .collect()
+    };
+    let window = [
+        (0, "02:20".to_owned()),
+        (15, "02:35".to_owned()),
+        (30, "02:50 UTC".to_owned()),
+    ];
+    // Waiting, its chart is of buckets still, over the window, labelled from where its first begins to where its last
+    // ends, which a chart of 30 instants has no point for.
+    let waiting = shown(&stage, &copy).chart.unwrap();
+    assert!(waiting.buckets && !waiting.has_values());
+    assert_eq!(waiting.time, Some(FIXED));
+    assert_eq!(edges(&waiting), window);
+    // Its window's own content is its buckets over exactly that window, labelled so, its newest ending as it does.
+    assert_eq!(
+        stage.publish(&walls, requests(&instance, FIXED), 1),
+        Ok(Change::Updated)
+    );
+    let held = shown(&stage, &copy);
+    let chart = held.chart.as_deref().unwrap();
+    assert!(chart.buckets && chart.has_values());
+    assert_eq!(edges(chart), window);
+    assert_eq!(held.body, "requests: 41 at its end, 02:50 UTC");
+}
+
+#[test]
 fn an_environment_without_history_says_honestly_it_has_no_data_for_the_window() {
     let walls = console();
     let (mut stage, _, (copy, instance)) = copied();

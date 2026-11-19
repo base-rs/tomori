@@ -191,9 +191,10 @@ pub enum Resource {
     /// ([`crate::Panel::rows`]), the `row`'s id, so that the server describes the row the participant saw, even where
     /// the list changed meanwhile. The server describes it from its own store of the space's panels, and the item from
     /// its own copy of the body; an older server ignores `line` and `row`. On a chart panel's plot, `across` says where
-    /// along its time axis the ray meets it, in [`crate::chart::ACROSS`] parts from its oldest point to its newest, so
-    /// that the server reads the time there and each series' value from its own copy of the chart; an older server
-    /// ignores it. See `design/projection.md` and `design/panel-actions.md`.
+    /// along its time axis the ray meets it, in [`crate::chart::ACROSS`] parts from its oldest point to its newest, or,
+    /// where its points are buckets, from where its first begins to where its last ends, so that the server reads the
+    /// time there and each series' value from its own copy of the chart; an older server ignores it. See
+    /// `design/projection.md` and `design/panel-actions.md`.
     #[non_exhaustive]
     Panel {
         panel: String,
@@ -300,7 +301,7 @@ impl Resource {
     }
 
     /// The chart panel whose [`crate::Panel::id`] is `panel`, pointed at on its plot `across` its time axis, in
-    /// [`crate::chart::ACROSS`] parts from its oldest point to its newest.
+    /// [`crate::chart::ACROSS`] parts from its oldest point to its newest, or across its buckets.
     ///
     /// ```
     /// use tomori_protocol::Resource;

@@ -100,7 +100,9 @@ pub fn described((from_ms, to_ms): (i64, i64)) -> String {
 /// the Unix epoch in UTC, written as its summary writes its times, [`tomori_protocol::chart::utc_minute`]: its first,
 /// middle and last points' clock times in UTC, `02:20`, the last saying `UTC`; the date
 /// before the first where the window is not within today, `11-12 02:20`, and, across days, before any on another day than
-/// the label before it; as many as it has points, at most [`LABELS`].
+/// the label before it; as many as it has points, at most [`LABELS`]. A chart whose points are buckets is labelled at
+/// their edges, one more than it has points: given so many, its labels are where its first begins, its middle and
+/// where its last ends.
 pub fn labels(points: u32, (from_ms, to_ms): (i64, i64), today: i64) -> Vec<AxisLabel> {
     let last = points.max(1) - 1;
     let count = LABELS.min(last + 1);
@@ -212,7 +214,7 @@ impl Stage {
             .expect("a panel held depends on time");
         if published.shows_window(window) {
             if let Some(chart) = &mut panel.chart {
-                chart.labels = labels(chart.points, window, today);
+                chart.labels = labels(chart.steps() + 1, window, today);
                 panel.body = super::clean_body(&chart.summary_on(Some(today)));
             }
             return panel;
@@ -229,9 +231,10 @@ impl Stage {
         if let Some(chart) = &mut panel.chart {
             let (from_ms, to_ms) = window;
             **chart = Chart::new(chart.points)
+                .with_buckets(chart.buckets)
                 .with_axis(chart.axis.clone())
                 .with_time(TimeAxis::Fixed { from_ms, to_ms })
-                .with_labels(labels(chart.points, window, today))
+                .with_labels(labels(chart.steps() + 1, window, today))
                 .with_status(Note::new(waiting.clone(), tone));
         }
         panel.body = waiting;
