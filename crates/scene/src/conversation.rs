@@ -867,6 +867,11 @@ impl Conversation {
         self.error = Some(error.into());
     }
 
+    /// The state of the connection as it was last told, or `None` before it has been told any.
+    pub fn connection(&self) -> Option<&ConnectionState> {
+        self.state.as_ref()
+    }
+
     pub fn apply(&mut self, event: Event) {
         match event {
             Event::State(state) => self.connection_changed(state),

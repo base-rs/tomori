@@ -159,3 +159,94 @@ fn discover_lists_the_spaces_on_a_server_given_to_it() {
             .contains("Join one with: tomori-spectator --server ADDRESS --space SPACE_ID")
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn the_spectator_records_without_a_window_and_finishes_its_file_when_interrupted() {
+    use std::os::unix::fs::PermissionsExt;
+    // A GPU test: skipped where there is no adapter, unless `TOMORI_REQUIRE_GPU` is set.
+    tomori_render::test_gpu::with(|_| {
+        let folder = Path::new(env!("CARGO_TARGET_TMPDIR")).join("tomori-record");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join("bin")).unwrap();
+        // An ffmpeg that lists the encoders looked for, and writes the file it is asked for once its inputs end.
+        let ffmpeg = folder.join("bin").join("ffmpeg");
+        let script = format!(
+            "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = -encoders ]; then\n    printf ' V....D libx264 x\\n V....D h264_videotoolbox x\\n A....D aac x\\n'\n    exit 0\n  fi\ndone\nfor last; do :; done\ntouch '{started}'\ncat <&3 > /dev/null & cat > /dev/null\nwait\necho moov > \"$last\"\n",
+            started = folder.join("started").display()
+        );
+        {
+            let _writing = SPAWN.write().unwrap();
+            std::fs::write(&ffmpeg, script).unwrap();
+            std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let file = folder.join("demo.mp4");
+        let path = std::env::join_paths([
+            &folder.join("bin"),
+            Path::new("/usr/bin"),
+            Path::new("/bin"),
+        ])
+        .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tomori"));
+        command
+            .args([
+                "--spectator",
+                "--record",
+                file.to_str().unwrap(),
+                "--no-window",
+            ])
+            .args([
+                "--record-playback",
+                "off",
+                "--record-fps",
+                "10",
+                "--record-size",
+                "128x72",
+            ])
+            .env("PATH", path)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("TOMORI_SERVER")
+            .env_remove("TOMORI_TOKEN")
+            .env("XDG_CACHE_HOME", env!("CARGO_TARGET_TMPDIR"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = {
+            let _spawning = SPAWN.read().unwrap();
+            command.spawn().expect("tomori starts")
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !folder.join("started").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the recording never started"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        let signalled = Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(signalled.success());
+        let output = child.wait_with_output().expect("tomori runs");
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert!(
+            stdout(&output).starts_with("Recorded "),
+            "{}",
+            stdout(&output)
+        );
+        assert!(stdout(&output).contains("stopped: received SIGINT"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "moov\n");
+    });
+}
+
+#[test]
+fn a_recording_that_cannot_be_made_is_refused() {
+    let output = tomori(&["--spectator", "--record", "demo.avi"], None);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("--record writes .mp4 or .mov files, not .avi"));
+    let output = tomori(&["--desktop", "--record", "demo.mp4"], None);
+    assert!(stderr(&output).contains("--record applies only to --spectator"));
+}

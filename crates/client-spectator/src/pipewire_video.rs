@@ -175,7 +175,7 @@ fn extent() -> wgpu::Extent3d {
     }
 }
 
-fn pack_rows(bytes: &[u8], row: usize, stride: usize, height: usize) -> Vec<u8> {
+pub(crate) fn pack_rows(bytes: &[u8], row: usize, stride: usize, height: usize) -> Vec<u8> {
     assert!(stride >= row && bytes.len() >= stride * height);
     if stride == row {
         return bytes[..row * height].to_vec();

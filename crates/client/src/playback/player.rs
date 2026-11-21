@@ -53,6 +53,9 @@ struct Shared {
     voices: [AtomicU32; VOICES],
 }
 
+/// Told, from the audio callback, what a [`Player`] has rendered: the rate it rendered at, the layout, and the interleaved samples, exactly as the device is given them. It must not wait.
+pub type Tap = Box<dyn FnMut(u32, Layout, &[i16]) + Send>;
+
 /// How many others' voices playing at once the player tells the application of at most.
 pub const VOICES: usize = 16;
 
@@ -106,6 +109,8 @@ pub struct Player {
     probe: bool,
     /// The ambience level, for mixers made later.
     ambience_gain: f32,
+    /// Who is told what each render produced, after the mix is made: a copy for a recording, which changes nothing of what plays. See [`Self::tap`].
+    tap: Option<Tap>,
 }
 
 /// The ambience's thread: what tells it, and the thread, which ends once that goes.
@@ -150,6 +155,7 @@ impl Player {
             agent_skipped: false,
             probe: false,
             ambience_gain: 1.0,
+            tap: None,
         };
         let control = PlayerControl {
             commands,
@@ -163,6 +169,11 @@ impl Player {
     /// alone, never playing them: see [`Mixer::measure`].
     pub fn measure(&mut self, measured: Receiver<AudioFrame>) {
         self.measured = Some(measured);
+    }
+
+    /// Tell `tap` what each render produces from now on, or nobody, with `None`: the mix as the device is given it, voices, agent speech, ambience and ducking included, whatever the device does with it. The tap is called from the render, which is the audio callback, so it must not wait, and it changes nothing of what is rendered. See `design/spectator.md`.
+    pub fn tap(&mut self, tap: Option<Tap>) {
+        self.tap = tap;
     }
 
     /// Its mixer, once prepared, for tests that look at what it holds.
@@ -275,6 +286,9 @@ impl Player {
         match layout {
             Layout::Mono => mixer.mix(output),
             Layout::Stereo => mixer.mix_stereo(output),
+        }
+        if let Some(tap) = &mut self.tap {
+            tap(sample_rate, layout, output);
         }
         self.shared.replaying.store(
             mixer.is_source_recent(REPLAY_SOURCE, REPLAY_PAUSE),

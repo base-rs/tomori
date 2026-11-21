@@ -1,7 +1,7 @@
 // Released under the MIT License.
 // Copyright, 2026, by Samuel Williams.
 
-//! Ending a child process with its parent. On Linux this runs in the forked child before it executes its program, where the child's coverage counters are discarded with its memory, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
+//! Ending a child process with its parent, and giving it a descriptor of its own, the recording's audio pipe. This runs in the forked child before it executes its program, where the child's coverage counters are discarded with its memory, so it is left out of the coverage gate; see the `[[package.metadata.bake.test.coverage.exclude]]` entries in `Cargo.toml`.
 use std::process::Command;
 
 /// Have Linux end the process `command` starts, with `SIGTERM`, when this process ends, even if it is killed and cannot run `Drop`. Elsewhere, the child is only ended by `Drop`.
@@ -27,4 +27,31 @@ pub fn end_with_parent(command: &mut Command) {
     }
     #[cfg(not(target_os = "linux"))]
     let _ = command;
+}
+
+/// Give the process `command` starts the open descriptor `descriptor` as its descriptor `target`, which it reads or writes as it does standard input and output: descriptors are otherwise closed on `exec`. It runs in the forked child before it executes its program, where only calls that are safe in a signal handler are made.
+#[cfg(unix)]
+pub fn pass_descriptor(
+    command: &mut Command,
+    descriptor: std::os::fd::RawFd,
+    target: std::os::fd::RawFd,
+) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: this pre-exec closure only calls async-signal-safe libc functions (`dup2`, `fcntl`) and does not access shared Rust state.
+    unsafe {
+        command.pre_exec(move || {
+            if descriptor == target {
+                // Already where it is wanted: it need only survive the exec.
+                let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                if flags == -1
+                    || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::dup2(descriptor, target) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }

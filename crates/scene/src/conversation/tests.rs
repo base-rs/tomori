@@ -2885,6 +2885,19 @@ fn activity_is_never_ready_unless_the_server_says_idle() {
 }
 
 #[test]
+fn the_connection_is_the_state_it_was_last_told() {
+    let mut conversation = crate::test_support::conversation("Ada");
+    assert_eq!(conversation.connection(), None);
+    conversation.apply(connected());
+    assert!(matches!(
+        conversation.connection(),
+        Some(ConnectionState::Connected { .. })
+    ));
+    conversation.apply(Event::State(ConnectionState::Closed));
+    assert_eq!(conversation.connection(), Some(&ConnectionState::Closed));
+}
+
+#[test]
 fn the_joined_space_is_current_only_while_connected_and_gone_after_leaving() {
     assert!(
         crate::test_support::conversation("Ada")
