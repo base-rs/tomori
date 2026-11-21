@@ -347,6 +347,8 @@ mod tests {
             assert_eq!(capture.recording.frames.lost(), 1);
             assert!(drawn.try_recv().is_err());
             // A readback that fails ends the recording, and sends nothing.
+            // Two together are taken oldest first, and each is told of.
+            held[1].send(Err(wgpu::BufferAsyncError)).unwrap();
             held[0].send(Err(wgpu::BufferAsyncError)).unwrap();
             capture.collect();
             let reason = capture.recording.stop.reason().unwrap();
