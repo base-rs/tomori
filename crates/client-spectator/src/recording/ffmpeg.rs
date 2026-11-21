@@ -206,9 +206,26 @@ fn output(path: &Path) -> OsString {
     output
 }
 
+/// The video filter that converts the frames, drawn into an sRGB target and read back as the bytes it holds, to BT.709 limited-range 4:2:0, and tags every frame with what the picture is: sRGB's transfer, BT.709's primaries and matrix, limited range.
+///
+/// The conversion keeps the bytes' encoding, so that the transfer is sRGB's and not BT.709's, and `setparams` is what tags the frames: ffmpeg 7 and later take the encoder's colour from the frames and ignore the output options that say it, so that with the options alone the transfer and primaries are left unspecified, as they were.
+const VIDEO_FILTER: &str = "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:range=tv";
+
+/// The bitstream filter that writes the colour into the video's own headers, as the codec numbers it (BT.709 primaries and matrix 1, sRGB's transfer 13, limited range), whatever the encoder wrote there: VideoToolbox, NVENC and the software encoders do not all take it from the frames or the options.
+fn colour_filter(codec: Codec) -> &'static str {
+    match codec {
+        Codec::H264 => {
+            "h264_metadata=colour_primaries=1:transfer_characteristics=13:matrix_coefficients=1:video_full_range_flag=0"
+        }
+        Codec::Hevc => {
+            "hevc_metadata=colour_primaries=1:transfer_characteristics=13:matrix_coefficients=1:video_full_range_flag=0"
+        }
+    }
+}
+
 /// The ffmpeg command that encodes `options`' recording with `ffmpeg`: video on standard input, audio on file descriptor 3, the file out.
 ///
-/// The video is converted to BT.709 limited-range 4:2:0 and tagged so, which is what players assume of high definition, and the file's index is moved to its front, so that the file plays as it downloads. The pipes are set up by the caller.
+/// The video is converted to BT.709 limited-range 4:2:0 and tagged, in the video's headers and in the container, as BT.709 with sRGB's transfer, which is what the frames hold, and the file's index is moved to its front, so that the file plays as it downloads. The pipes are set up by the caller.
 pub fn command(ffmpeg: &Ffmpeg, options: &RecordOptions, container: Container) -> Command {
     let (width, height) = options.size;
     let mut command = Command::new(&ffmpeg.program);
@@ -226,10 +243,7 @@ pub fn command(ffmpeg: &Ffmpeg, options: &RecordOptions, container: Container) -
         .args(["-i"])
         .arg(format!("pipe:{AUDIO_DESCRIPTOR}"))
         .args(["-map", "0:v:0", "-map", "1:a:0"])
-        .args([
-            "-vf",
-            "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p",
-        ])
+        .args(["-vf", VIDEO_FILTER])
         .args(["-c:v", ffmpeg.encoder])
         .args(encoder_arguments(ffmpeg.encoder, options));
     if options.codec == Codec::Hevc {
@@ -237,9 +251,11 @@ pub fn command(ffmpeg: &Ffmpeg, options: &RecordOptions, container: Container) -
         command.args(["-tag:v", "hvc1"]);
     }
     command
+        .args(["-bsf:v", colour_filter(options.codec)])
         .args(["-colorspace", "bt709", "-color_primaries", "bt709"])
-        .args(["-color_trc", "bt709", "-color_range", "tv"])
-        .args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        .args(["-color_trc", "iec61966-2-1", "-color_range", "tv"])
+        .args(["-c:a", "aac", "-b:a", "192k"])
+        .args(["-movflags", "+faststart+write_colr"])
         .args(["-f", container.format()])
         .arg(output(&options.path));
     command
@@ -338,14 +354,77 @@ mod tests {
         assert!(contains(&arguments, &["-c:a", "aac", "-b:a", "192k"]));
         assert!(contains(
             &arguments,
-            &["-movflags", "+faststart", "-f", "mp4"]
+            &["-movflags", "+faststart+write_colr", "-f", "mp4"]
         ));
-        assert!(contains(
-            &arguments,
-            &["-color_trc", "bt709", "-color_range", "tv"]
-        ));
+        assert_tagged(&arguments, Codec::H264);
         assert_eq!(arguments.last().unwrap(), "file:demo.mp4");
         assert!(!arguments.contains(&"-tag:v".to_owned()));
+    }
+
+    /// That `arguments` convert to BT.709 limited range and tag the video as sRGB's transfer, BT.709's primaries and matrix and limited range, on the frames, in the encoder, in the video's headers as `codec` numbers them, and in the container.
+    fn assert_tagged(arguments: &[String], codec: Codec) {
+        let filter = arguments
+            .iter()
+            .skip_while(|argument| *argument != "-vf")
+            .nth(1)
+            .unwrap();
+        assert!(
+            filter.starts_with("scale=out_color_matrix=bt709:out_range=tv,format=yuv420p,"),
+            "{filter}"
+        );
+        assert!(
+            filter.ends_with(
+                "setparams=colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:range=tv"
+            ),
+            "{filter}"
+        );
+        assert!(contains(
+            arguments,
+            &["-colorspace", "bt709", "-color_primaries", "bt709"]
+        ));
+        assert!(contains(
+            arguments,
+            &["-color_trc", "iec61966-2-1", "-color_range", "tv"]
+        ));
+        let bitstream = match codec {
+            Codec::H264 => "h264_metadata",
+            Codec::Hevc => "hevc_metadata",
+        };
+        assert!(contains(
+            arguments,
+            &[
+                "-bsf:v",
+                &format!(
+                    "{bitstream}=colour_primaries=1:transfer_characteristics=13:matrix_coefficients=1:video_full_range_flag=0"
+                )
+            ]
+        ));
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument.contains("+write_colr")),
+            "{arguments:?}"
+        );
+        assert_eq!(arguments.iter().filter(|a| *a == "-bsf:v").count(), 1);
+    }
+
+    #[test]
+    fn every_encoder_tags_the_video_as_bt709_with_srgb_transfer() {
+        for (encoder, codec) in [
+            ("h264_videotoolbox", Codec::H264),
+            ("hevc_videotoolbox", Codec::Hevc),
+            ("h264_nvenc", Codec::H264),
+            ("hevc_nvenc", Codec::Hevc),
+            ("libx264", Codec::H264),
+            ("libx265", Codec::Hevc),
+        ] {
+            for path in ["a.mp4", "a.mov"] {
+                let mut options = RecordOptions::new(path);
+                options.codec = codec;
+                let arguments = arguments(&built(&ffmpeg(encoder), &options));
+                assert_tagged(&arguments, codec);
+            }
+        }
     }
 
     #[test]
