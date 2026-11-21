@@ -610,13 +610,16 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
             if flashing {
                 white(&gpu, &capture.view);
             } else {
-                view.render(crate::spectator_view::RenderInputs {
-                    device: &gpu.device,
-                    queue: &gpu.queue,
-                    renderer: &mut renderer,
-                    target: capture.view.clone(),
-                    aspect: 320.0 / 180.0,
-                });
+                view.render(
+                    crate::spectator_view::RenderInputs {
+                        device: &gpu.device,
+                        queue: &gpu.queue,
+                        renderer: &mut renderer,
+                        target: capture.view.clone(),
+                        aspect: 320.0 / 180.0,
+                    },
+                    base + at,
+                );
             }
             capture.capture(&gpu.queue, base + at);
             // Delivered before the time moves on.

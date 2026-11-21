@@ -26,7 +26,7 @@ fn publish(mut state: State) -> Result<()> {
     loop {
         // Drawing late, the next frame is due at once.
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
-        state.draw()?;
+        state.draw(next)?;
         next = next_frame_time(next, Instant::now(), interval);
     }
 }
@@ -55,7 +55,7 @@ fn record_frames(mut recorder: Recorder) -> Result<()> {
     while !recorder.recording.stop.requested() {
         // Drawing late, the next frame is due at once.
         std::thread::sleep(next.saturating_duration_since(Instant::now()));
-        recorder.draw();
+        recorder.draw(next);
         next = next_frame_time(next, Instant::now(), interval);
     }
     Ok(())
@@ -129,16 +129,20 @@ impl Recorder {
         }
     }
 
-    fn draw(&mut self) {
+    /// Draw the frame due at `due`, whose camera is as of then, so that the motion is as even as the frames.
+    fn draw(&mut self, due: Instant) {
         let drawn = Instant::now();
         let (width, height) = self.recording.size;
-        self.spectator.render(RenderInputs {
-            device: &self.device,
-            queue: &self.queue,
-            renderer: &mut self.renderer,
-            target: self.capture.view.clone(),
-            aspect: width as f32 / height as f32,
-        });
+        self.spectator.render(
+            RenderInputs {
+                device: &self.device,
+                queue: &self.queue,
+                renderer: &mut self.renderer,
+                target: self.capture.view.clone(),
+                aspect: width as f32 / height as f32,
+            },
+            due,
+        );
         self.capture.capture(&self.queue, drawn);
         self.recording.watch(&self.spectator.feed);
     }
@@ -175,14 +179,17 @@ impl State {
         }
     }
 
-    fn draw(&mut self) -> Result<()> {
-        self.spectator.render(RenderInputs {
-            device: &self.device,
-            queue: &self.queue,
-            renderer: &mut self.renderer,
-            target: self.video.view.clone(),
-            aspect: pipewire_video::WIDTH as f32 / pipewire_video::HEIGHT as f32,
-        });
+    fn draw(&mut self, due: Instant) -> Result<()> {
+        self.spectator.render(
+            RenderInputs {
+                device: &self.device,
+                queue: &self.queue,
+                renderer: &mut self.renderer,
+                target: self.video.view.clone(),
+                aspect: pipewire_video::WIDTH as f32 / pipewire_video::HEIGHT as f32,
+            },
+            due,
+        );
         self.video
             .capture(&self.device, &self.queue)
             .context("publishing headless spectator frame")

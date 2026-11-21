@@ -9,20 +9,22 @@
 //!
 //! The feed is polled once per rendered frame, on the render thread. It is
 //! non-blocking: the connection's `poll` drains whatever events are waiting,
-//! and the presence hook (set via [`Connection::watch_presence`]) writes each
-//! relayed presence into a shared map that the feed reads after the poll.
+//! and the presence hook (set via [`Connection::watch_presence_at`]) keeps each
+//! relayed presence, with when it arrived, in the [`Smoother`], which the feed
+//! reads after the poll: the followed participant's head, smoothed as the
+//! spectator is asked to, or as it came.
 use crate::{
     capture,
     connection::Connection,
     controller::Pose,
     conversation::{Conversation, Mode},
     identity::{Identity, Overrides, Store},
+    smoothing::{Presence, Smoother, Smoothing, View},
     speaker,
 };
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Instant,
 };
 use tomori_client::{DuckUnder, Hearing};
@@ -38,16 +40,6 @@ const NEUTRAL: Vec3 = tomori_scene::arrival::HOME;
 
 /// The spectator's vertical field of view, in radians.
 const FIELD_OF_VIEW: f32 = 1.4;
-
-/// A participant's latest presence report, as relayed by the server, and whether they asked not to be drawn.
-#[derive(Clone)]
-struct ParticipantPresence {
-    head: tomori_protocol::Pose,
-    left: Option<tomori_protocol::Pose>,
-    right: Option<tomori_protocol::Pose>,
-    hands: Option<[Option<Hand>; 2]>,
-    hidden: bool,
-}
 
 /// The options a spectator is started with: [`Self::new`]'s, none, changed field by field, so that options added later
 /// break no application that sets its own.
@@ -71,6 +63,8 @@ pub struct SpectatorOptions {
     /// that a participant whose voice it does not play, such as someone presenting with it, still has them duck while
     /// they speak, measured and never played. See `design/spectator.md`.
     pub duck_under: DuckUnder,
+    /// How much it smooths the camera that follows a participant's head from their presence, which arrives unevenly, at a lower rate than it draws, and shakes with the head's tremor: lightly, by default, strongly for cinematic footage, or not at all. S in its window cycles through them. See `design/spectator.md`.
+    pub smoothing: Smoothing,
     /// Whether its window, or the PipeWire source's preview window, is borderless, for a clean capture into OBS or a
     /// shared screen, rather than a decorated window with the platform's title bar that can be moved, resized and made
     /// full screen. The PipeWire source without a window has no window to be borderless. See `design/spectator.md`.
@@ -83,8 +77,8 @@ pub struct SpectatorOptions {
 }
 
 impl SpectatorOptions {
-    /// No server, space, participant or token, every voice played, no ambience, ducking under the voices played, a
-    /// decorated window, no recording, and no content kept.
+    /// No server, space, participant or token, every voice played, no ambience, ducking under the voices played, light
+    /// smoothing of the camera, a decorated window, no recording, and no content kept.
     pub fn new() -> Self {
         Self::default()
     }
@@ -106,9 +100,9 @@ pub struct Watched<'a> {
 pub struct Feed {
     conversation: Conversation,
     connection: Connection,
-    /// The latest presence for each participant source number, written by the
-    /// presence hook during `Connection::poll` and read after.
-    presence: Arc<Mutex<BTreeMap<u32, ParticipantPresence>>>,
+    /// The presence of each participant by source number, kept by the presence
+    /// hook during `Connection::poll` and read after, and the camera it makes.
+    presence: Arc<Mutex<Smoother>>,
     /// The participant name to follow, or `None` for the first available.
     follow: Option<String>,
     /// The source number of the participant currently being followed.
@@ -123,6 +117,8 @@ pub struct Feed {
     last_caption: Option<String>,
     /// Whether the connection has been up, so that losing it is told from not yet having made it.
     connected: bool,
+    /// Whether the connection was up at the last poll, so that the presence kept from before it was lost is not moved through.
+    up: bool,
 }
 
 impl Feed {
@@ -178,10 +174,10 @@ impl Feed {
             conversation.join_space(space.clone());
         }
 
-        // The presence hook writes each relayed presence into the shared map.
-        let presence = Arc::new(Mutex::new(BTreeMap::new()));
+        // The presence hook keeps each relayed presence, with when it arrived.
+        let presence = Arc::new(Mutex::new(Smoother::new(options.smoothing)));
         let hook = presence.clone();
-        connection.watch_presence(move |message| match message {
+        connection.watch_presence_at(move |message, arrived| match message {
             ServerMessage::Presence {
                 source,
                 head,
@@ -191,18 +187,17 @@ impl Feed {
                 hidden,
                 ..
             } => {
-                hook.lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        *source,
-                        ParticipantPresence {
-                            head: *head,
-                            left: *left,
-                            right: *right,
-                            hands: hands.as_deref().copied(),
-                            hidden: *hidden,
-                        },
-                    );
+                hook.lock().unwrap_or_else(PoisonError::into_inner).push(
+                    *source,
+                    arrived,
+                    Presence {
+                        head: *head,
+                        left: *left,
+                        right: *right,
+                        hands: hands.as_deref().copied(),
+                        hidden: *hidden,
+                    },
+                );
             }
             _ => unreachable!("the connection hands its presence hook only presence"),
         });
@@ -219,7 +214,26 @@ impl Feed {
             last_poll: Instant::now(),
             last_caption: None,
             connected: false,
+            up: false,
         }
+    }
+
+    /// The presence kept, which the presence hook writes during a poll and this reads after it.
+    fn kept(&self) -> MutexGuard<'_, Smoother> {
+        self.presence.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How much it smooths the camera, as it was last chosen.
+    pub fn smoothing(&self) -> Smoothing {
+        self.kept().mode()
+    }
+
+    /// Smooth the camera by the next level from now on, none, then light, then cinematic, and none again, as the window's S key chooses, logging the choice, and return it. See `design/spectator.md`.
+    pub fn next_smoothing(&mut self) -> Smoothing {
+        let smoothing = self.smoothing().next();
+        self.kept().set_mode(smoothing);
+        log::info!("Spectator: smoothing {}", smoothing.name());
+        smoothing
     }
 
     /// Whether the server's connection, up once, is down: the spectator has lost the space it watched, and retries. A connection that has not yet been made is not lost. See `design/spectator.md`.
@@ -305,6 +319,11 @@ impl Feed {
     /// Poll the connection and produce the current frame, for a view `aspect` times as wide as it is tall. Non-blocking.
     pub fn poll(&mut self, aspect: f32) -> Watched<'_> {
         let now = Instant::now();
+        self.poll_at(aspect, now, now)
+    }
+
+    /// [`Self::poll`] at `now`, drawing the camera as the followed participant's presence puts it at `view`, the frame's time on the clock that paces it: the recording's, whose frames are an even interval apart however long each took to draw, so that its motion is smooth whatever the draw's timing. Time must not go back from one call to the next.
+    pub fn poll_at(&mut self, aspect: f32, now: Instant, view: Instant) -> Watched<'_> {
         let dt = now
             .duration_since(self.last_poll)
             .as_secs_f32()
@@ -312,26 +331,35 @@ impl Feed {
         self.last_poll = now;
 
         // Process connection events, including presence. The presence hook
-        // writes into the shared map during this call.
+        // keeps it during this call.
         self.connection.poll(true, &mut self.conversation);
-        self.connected |= matches!(
+        let up = matches!(
             self.conversation.connection(),
             Some(tomori_client::ConnectionState::Connected { .. })
         );
+        self.connected |= up;
 
         // Read the presence captured by the hook.
-        let presence = self.presence.lock().unwrap().clone();
+        let presence = self.presence.clone();
+        let mut presence = presence.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.up && !up {
+            // What it kept is from before the connection was lost: the participants are somewhere else, not moving.
+            presence.interrupt();
+        }
+        self.up = up;
 
         // Determine which participant to follow.
         self.update_following(&presence);
 
-        self.watch(&presence, aspect, dt, now)
+        let followed = presence.view(self.following, view);
+        drop(presence);
+        self.watch(followed, aspect, dt, now)
     }
 
     /// Pick the participant to follow: by name if given, else the first
     /// available in the space's participant list, never one who asked not to
     /// be drawn, whose view is theirs to keep (see `design/people.md`).
-    fn update_following(&mut self, presence: &BTreeMap<u32, ParticipantPresence>) {
+    fn update_following(&mut self, presence: &Smoother) {
         let Some((space, _)) = self.conversation.joined_space() else {
             self.following = None;
             self.following_name = None;
@@ -341,7 +369,7 @@ impl Feed {
         let target = self.follow.as_deref();
         let participant = space.participants.iter().find(|p| {
             target.is_none_or(|t| p.name == t)
-                && presence.get(&p.source).is_some_and(|seen| !seen.hidden)
+                && presence.latest(p.source).is_some_and(|seen| !seen.hidden)
         });
 
         match participant {
@@ -365,22 +393,14 @@ impl Feed {
     }
 
     /// One frame, `dt` seconds after the last, at `now`: the frame step as a watcher, from the followed participant's
-    /// head in `presence`, or the neutral view, heard from there too.
-    fn watch(
-        &mut self,
-        presence: &BTreeMap<u32, ParticipantPresence>,
-        aspect: f32,
-        dt: f32,
-        now: Instant,
-    ) -> Watched<'_> {
-        let followed = self.following.and_then(|source| presence.get(&source));
+    /// head in `followed`, smoothed as it was asked, or the neutral view, heard from there too.
+    fn watch(&mut self, followed: Option<View>, aspect: f32, dt: f32, now: Instant) -> Watched<'_> {
         // The camera: the followed participant's head, where their presence puts it in the space's shared scene, or,
         // with nobody to follow, where a spectator arrives, looking ahead.
-        let camera = match followed {
-            Some(followed) => Mat4::from_rotation_translation(
-                Quat::from_array(followed.head.orientation),
-                Vec3::from_array(followed.head.position),
-            ),
+        let camera = match &followed {
+            Some(followed) => {
+                Mat4::from_rotation_translation(followed.head.orientation, followed.head.position)
+            }
             None => self.neutral(),
         };
         let to_pose = |pose: Option<tomori_protocol::Pose>| {
@@ -461,6 +481,7 @@ mod tests {
     use super::*;
     use crate::server_choice::{Choice, Source};
     use crate::test_support::{Nowhere, Server, Silent};
+    use glam::Quat;
     use tomori_client::{ConnectionState, Event};
     use tomori_protocol::{Activity, ClientMessage, ConnectionRole, SpaceState};
     use tomori_scene::{environment::Environment, swarm::CENTER};
@@ -579,7 +600,7 @@ mod tests {
 
     /// One frame of `feed`, `dt` seconds after the last, with nobody to follow.
     fn frame(feed: &mut Feed, dt: f32) -> Seen {
-        Seen::of(&feed.watch(&BTreeMap::new(), 16.0 / 9.0, dt, Instant::now()))
+        Seen::of(&feed.watch(None, 16.0 / 9.0, dt, Instant::now()))
     }
 
     /// The frame once `feed`'s space has grown in, as it does for everyone joining it.
@@ -628,13 +649,16 @@ mod tests {
         renderer: &mut crate::graphics::Renderer,
         target: &wgpu::Texture,
     ) {
-        view.render(crate::spectator_view::RenderInputs {
-            device: &gpu.device,
-            queue: &gpu.queue,
-            renderer,
-            target: target.create_view(&Default::default()),
-            aspect: target.width() as f32 / target.height() as f32,
-        });
+        view.render(
+            crate::spectator_view::RenderInputs {
+                device: &gpu.device,
+                queue: &gpu.queue,
+                renderer,
+                target: target.create_view(&Default::default()),
+                aspect: target.width() as f32 / target.height() as f32,
+            },
+            Instant::now(),
+        );
     }
 
     /// What the spectator's view of `feed` draws in an offscreen target of `width` by `height`, which a row of takes a
@@ -746,6 +770,169 @@ mod tests {
         });
     }
 
+    /// The spectator following the participant `SOURCE` of a space it is not connected to, who has reported `reports` at the seconds given, counted from `base`, as the connection's presence hook keeps them.
+    const SOURCE: u32 = 4;
+
+    fn following(smoothing: Smoothing, base: Instant, reports: &[(f64, f32, f32)]) -> Feed {
+        let mut feed = feed(SpectatorOptions {
+            smoothing,
+            ..Default::default()
+        });
+        for sent in reports {
+            report(&mut feed, base, *sent);
+        }
+        feed.following = Some(SOURCE);
+        feed
+    }
+
+    /// `feed` is told that `SOURCE` is at `x`, facing `yaw`, `second` seconds after `base`, as its connection's presence hook tells it.
+    fn report(feed: &mut Feed, base: Instant, (second, x, yaw): (f64, f32, f32)) {
+        let at = base + std::time::Duration::from_secs_f64(second);
+        feed.kept().push(
+            SOURCE,
+            at,
+            Presence {
+                head: tomori_protocol::Pose {
+                    position: [x, 1.6, 0.0],
+                    orientation: Quat::from_rotation_y(yaw).to_array(),
+                },
+                left: Some(pose(x)),
+                right: None,
+                hands: Some([None, None]),
+                hidden: false,
+            },
+        );
+    }
+
+    /// The frame of `feed` at `second` after `base`, seeing from the followed participant.
+    fn looking(feed: &mut Feed, base: Instant, second: f64) -> Seen {
+        let at = base + std::time::Duration::from_secs_f64(second);
+        let view = feed.kept().view(feed.following, at);
+        Seen::of(&feed.watch(view, 16.0 / 9.0, 1.0 / 60.0, at))
+    }
+
+    #[test]
+    fn the_camera_is_the_followed_head_smoothed_between_its_reports() {
+        // Walking along X at one metre a second, reported every 50 ms as time passes, drawn every 16.7 ms.
+        let base = Instant::now();
+        let reports: Vec<_> = (0..80)
+            .map(|count| (count as f64 * 0.05, count as f32 * 0.05, 0.0))
+            .collect();
+        let mut steps = Vec::new();
+        for smoothing in [Smoothing::Light, Smoothing::Off] {
+            let mut feed = following(smoothing, base, &[]);
+            let (mut before, mut kept) = (0.0, 0);
+            let mut moved = Vec::new();
+            for frame in 0..200 {
+                let second = frame as f64 / 60.0;
+                for (at, x, yaw) in reports[kept..].iter().take_while(|(at, ..)| *at <= second) {
+                    report(&mut feed, base, (*at, *x, *yaw));
+                    kept += 1;
+                }
+                let x = looking(&mut feed, base, second).eye().x;
+                moved.push(x - before);
+                before = x;
+            }
+            steps.push(moved[60..].to_vec());
+        }
+        // Without smoothing the camera stands still between reports and steps; with it, it moves every frame, by about the same.
+        assert!(steps[1].contains(&0.0));
+        assert!(
+            steps[0].iter().all(|step| *step > 0.008 && *step < 0.025),
+            "{:?}",
+            steps[0]
+        );
+    }
+
+    #[test]
+    fn without_smoothing_the_camera_is_the_latest_report_exactly() {
+        let base = Instant::now();
+        // An orientation that is not a unit, as the network may carry, and a controller.
+        let mut feed = following(Smoothing::Off, base, &[(0.0, 0.1, 0.2), (0.05, 3.7, 0.9)]);
+        let raw = tomori_protocol::Pose {
+            position: [9.0, 1.6, -2.0],
+            orientation: [0.0, 0.0, 0.0, 2.0],
+        };
+        feed.kept().push(
+            SOURCE,
+            base + std::time::Duration::from_millis(100),
+            Presence {
+                head: raw,
+                left: Some(pose(0.25)),
+                right: Some(pose(0.5)),
+                hands: Some([None, None]),
+                hidden: false,
+            },
+        );
+        let at = base + std::time::Duration::from_millis(101);
+        let view = feed.kept().view(feed.following, at);
+        let watched = feed.watch(view, 16.0 / 9.0, 1.0 / 60.0, at);
+        let camera = Mat4::from_rotation_translation(
+            Quat::from_array(raw.orientation),
+            Vec3::from_array(raw.position),
+        );
+        assert_eq!(
+            watched.projection,
+            tomori_scene::depth::perspective(FIELD_OF_VIEW, 16.0 / 9.0) * camera.inverse()
+        );
+        assert_eq!(
+            watched
+                .controllers
+                .map(|controller| controller.map(|pose| pose.position)),
+            [Some([0.25, 1.6, 0.0]), Some([0.5, 1.6, 0.0])]
+        );
+    }
+
+    #[test]
+    fn a_followed_head_that_cannot_be_drawn_leaves_the_camera_at_the_neutral_view() {
+        let base = Instant::now();
+        let mut feed = following(Smoothing::Light, base, &[]);
+        feed.kept().push(
+            SOURCE,
+            base,
+            Presence {
+                head: tomori_protocol::Pose {
+                    position: [f32::NAN; 3],
+                    orientation: [0.0, 0.0, 0.0, 1.0],
+                },
+                left: None,
+                right: None,
+                hands: None,
+                hidden: false,
+            },
+        );
+        assert_eq!(looking(&mut feed, base, 1.0).eye(), NEUTRAL);
+    }
+
+    #[test]
+    fn the_s_key_s_smoothing_is_chosen_cycled_and_logged() {
+        let watch = crate::test_log::watch("Spectator: smoothing ");
+        // Light, unless asked, and as asked.
+        let mut feed = feed(SpectatorOptions::new());
+        assert_eq!(feed.smoothing(), Smoothing::Light);
+        assert_eq!(
+            self::feed(SpectatorOptions {
+                smoothing: Smoothing::Cinematic,
+                ..Default::default()
+            })
+            .smoothing(),
+            Smoothing::Cinematic
+        );
+        for smoothing in [Smoothing::Cinematic, Smoothing::Off, Smoothing::Light] {
+            assert_eq!(feed.next_smoothing(), smoothing);
+            assert_eq!(feed.smoothing(), smoothing);
+        }
+        let said: Vec<String> = watch.records().into_iter().map(|(_, said)| said).collect();
+        assert_eq!(
+            said,
+            [
+                "Spectator: smoothing cinematic",
+                "Spectator: smoothing off",
+                "Spectator: smoothing light"
+            ]
+        );
+    }
+
     #[test]
     fn a_connection_lost_is_told_from_one_not_yet_made() {
         // Before it has connected to anything, it is not lost.
@@ -762,6 +949,9 @@ mod tests {
         });
         until(&mut feed, |feed| feed.conversation.joined_space().is_some());
         assert!(!feed.connection_lost());
+        bea.send(presence(None));
+        until(&mut feed, |feed| feed.following.is_some());
+        assert_eq!(feed.kept().interrupted(), 0);
         // The server goes away, and the recording that watches for it stops.
         let origin = crate::recording::Origin::default();
         let (frames, _drawn) =
@@ -778,6 +968,8 @@ mod tests {
         drop(bea);
         drop(server);
         until(&mut feed, |feed| feed.connection_lost());
+        // What it kept of the participants is from before, and the first they report after is where they are.
+        assert_eq!(feed.kept().interrupted(), 1);
         recording.watch(&feed);
         assert_eq!(
             recording.stop.reason().as_deref(),
@@ -808,13 +1000,8 @@ mod tests {
             pointing: None,
             hidden,
         };
-        let heard = |feed: &Feed, hidden: bool| {
-            feed.presence
-                .lock()
-                .unwrap()
-                .values()
-                .any(|seen| seen.hidden == hidden)
-        };
+        let heard =
+            |feed: &Feed, hidden: bool| feed.kept().reports().any(|seen| seen.hidden == hidden);
         // Bea chose that others see her name only: the spectator waits for her rather than seeing from her head.
         until(&mut feed, |feed| feed.conversation.joined_space().is_some());
         bea.send(asking(true));
@@ -848,6 +1035,8 @@ mod tests {
             space: Some(space),
             follow: Some("Bea".into()),
             token: None,
+            // Her head is where each report puts it, whenever the test looks.
+            smoothing: Smoothing::Off,
             ..Default::default()
         });
         until(&mut feed, |feed| {
@@ -1008,7 +1197,7 @@ mod tests {
             let (mut ambience, mut sounds) = (None, 0);
             for _ in 0..400 {
                 let listener = feed
-                    .watch(&BTreeMap::new(), 16.0 / 9.0, 1.0 / 60.0, Instant::now())
+                    .watch(None, 16.0 / 9.0, 1.0 / 60.0, Instant::now())
                     .frame
                     .listener;
                 // It hears from the neutral view's camera with nobody to follow, where it sees from.
@@ -1669,7 +1858,7 @@ mod tests {
         for _ in 0..3 {
             frame(&mut feed, 1.0 / 60.0);
         }
-        let watched = feed.watch(&BTreeMap::new(), 4.0 / 3.0, 1.0 / 60.0, Instant::now());
+        let watched = feed.watch(None, 4.0 / 3.0, 1.0 / 60.0, Instant::now());
         let face = watched
             .frame
             .projection

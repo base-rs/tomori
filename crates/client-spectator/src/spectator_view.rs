@@ -10,6 +10,7 @@
 //! See `design/spectator.md`.
 use crate::{graphics::Renderer, spectator_feed::Feed};
 use glam::Mat4;
+use std::time::Instant;
 use tomori_render::scene_graphics::{self, Panels};
 
 pub(crate) struct SpectatorView {
@@ -31,8 +32,9 @@ impl SpectatorView {
         Self { feed, panels: None }
     }
 
-    pub fn render(&mut self, input: RenderInputs<'_>) {
-        let watched = self.feed.poll(input.aspect);
+    /// Draw a frame, with the camera as of `at`, the time on the clock that paces the frames: the recording's slot, whose frames are an even interval apart however long each took, or the time now. See [`Feed::poll_at`].
+    pub fn render(&mut self, input: RenderInputs<'_>, at: Instant) {
+        let watched = self.feed.poll_at(input.aspect, Instant::now(), at);
         let panels = self
             .panels
             .get_or_insert_with(|| Panels::new(input.device, input.renderer));

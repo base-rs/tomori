@@ -12,9 +12,12 @@ pub mod headless_spectator;
 mod letterbox;
 pub mod pipewire_video;
 pub mod recording;
+mod smoothing;
 pub mod spectator_feed;
 pub mod spectator_view;
 pub mod spectator_window;
+#[cfg(test)]
+mod test_log;
 
 // The modules this crate's own modules use, from `tomori-client`, `tomori-scene`, `tomori-render` and `tomori-client-desktop`, under their paths.
 #[cfg(test)]
@@ -26,6 +29,7 @@ use tomori_render::{controller, graphics};
 use tomori_scene::test_support;
 use tomori_scene::{conversation, spatial_audio};
 
+pub use smoothing::Smoothing;
 pub use spectator_feed::SpectatorOptions;
 /// Whose voices a spectator plays, its [`SpectatorOptions::voices`].
 pub use tomori_client::{DuckUnder, Hearing};
