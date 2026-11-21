@@ -462,6 +462,14 @@ fn probe(file: &Path, arguments: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// That a probed video stream is tagged as the recording draws it: sRGB's transfer, BT.709's primaries and matrix, limited range.
+fn assert_colour(video: &serde_json::Value) {
+    assert_eq!(video["color_transfer"], "iec61966-2-1", "{video}");
+    assert_eq!(video["color_primaries"], "bt709", "{video}");
+    assert_eq!(video["color_space"], "bt709", "{video}");
+    assert_eq!(video["color_range"], "tv", "{video}");
+}
+
 /// Clear `view` to white.
 fn white(gpu: &test_gpu::Gpu, view: &wgpu::TextureView) {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -631,7 +639,7 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
             "v:0",
             "-count_frames",
             "-show_entries",
-            "stream=codec_name,width,height,r_frame_rate,nb_read_frames,duration",
+            "stream=codec_name,width,height,r_frame_rate,nb_read_frames,duration,color_range,color_space,color_transfer,color_primaries",
         ],
     );
     let video = &video["streams"][0];
@@ -640,6 +648,7 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
     assert_eq!(video["r_frame_rate"], "30/1");
     assert_eq!(video["codec_name"], "h264");
     assert_eq!(video["nb_read_frames"], "60");
+    assert_colour(video);
     let seconds = |value: &serde_json::Value| value.as_str().unwrap().parse::<f64>().unwrap();
     assert!((seconds(&video["duration"]) - 2.0).abs() < 0.01, "{video}");
     let audio = probe(
@@ -754,7 +763,7 @@ fn encoded_with(
             "v:0",
             "-count_frames",
             "-show_entries",
-            "stream=codec_name,codec_tag_string,pix_fmt,width,height,r_frame_rate,nb_read_frames,color_space",
+            "stream=codec_name,codec_tag_string,pix_fmt,width,height,r_frame_rate,nb_read_frames,color_range,color_space,color_transfer,color_primaries",
         ],
     );
     std::fs::remove_dir_all(&folder).unwrap();
@@ -777,7 +786,7 @@ fn the_software_encoders_make_files_that_play_as_h264_and_as_hevc() {
         assert_eq!(video["codec_name"], name);
         assert_eq!(video["codec_tag_string"], tag);
         assert_eq!(video["pix_fmt"], "yuv420p");
-        assert_eq!(video["color_space"], "bt709");
+        assert_colour(&video);
         assert_eq!(
             (video["width"].as_u64(), video["height"].as_u64()),
             (Some(64), Some(64))
@@ -785,6 +794,32 @@ fn the_software_encoders_make_files_that_play_as_h264_and_as_hevc() {
         assert_eq!(video["r_frame_rate"], "10/1");
         assert_eq!(video["nb_read_frames"], report.frames.to_string());
         assert_eq!(report.frames, 10);
+    }
+}
+
+#[test]
+fn every_encoder_ffmpeg_has_here_tags_the_colour_in_h264_and_hevc_in_mp4_and_mov() {
+    use crate::recording::ffmpeg::Platform;
+    let mut platforms = vec![Platform::Other];
+    if Platform::current() != Platform::Other {
+        platforms.push(Platform::current());
+    }
+    for platform in platforms {
+        for (codec, name) in [(Codec::H264, "h264"), (Codec::Hevc, "hevc")] {
+            for container in ["mp4", "mov"] {
+                let Some((_, video)) = encoded_with(
+                    &format!("colour-{platform:?}-{name}-{container}"),
+                    &format!("colour.{container}"),
+                    codec,
+                    platform,
+                    false,
+                ) else {
+                    continue;
+                };
+                assert_eq!(video["codec_name"], name);
+                assert_colour(&video);
+            }
+        }
     }
 }
 
