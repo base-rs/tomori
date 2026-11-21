@@ -97,12 +97,18 @@ fn run_recording(
 fn finish_recording(session: Session, shown: anyhow::Result<()>) -> anyhow::Result<()> {
     match (shown, session.finish()) {
         (shown, Ok(report)) => {
-            println!("{report}");
+            say(&mut std::io::stdout(), &report);
             shown
         }
         (Ok(()), Err(error)) => Err(error),
         (Err(shown), Err(error)) => Err(shown.context(format!("{error:#}"))),
     }
+}
+
+/// Say what was recorded on `output`. The file is finished by now, so whether anyone can be told, as when the terminal has gone or the output is a pipe that was closed, changes nothing.
+fn say(output: &mut impl std::io::Write, report: &recording::Report) {
+    let _ = writeln!(output, "{report}");
+    let _ = output.flush();
 }
 
 /// Refuse a recording where the output is a PipeWire source, which has none.
@@ -187,6 +193,38 @@ mod tests {
             Some("ffmpeg failed with exit status")
         );
         assert!(format!("{error:#}").ends_with("no display"), "{error:#}");
+    }
+
+    #[test]
+    fn a_report_is_said_and_not_missed_when_there_is_nobody_to_say_it_to() {
+        struct Gone;
+        impl std::io::Write for Gone {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let report = recording::Report {
+            path: "demo.mp4".into(),
+            duration: std::time::Duration::from_secs(2),
+            fps: 30,
+            frames: 60,
+            duplicated: 0,
+            dropped: 0,
+            silence: std::time::Duration::ZERO,
+            lost_sound: 0,
+            bytes: 1_000,
+            reason: None,
+        };
+        let mut said = Vec::new();
+        say(&mut said, &report);
+        assert_eq!(
+            String::from_utf8(said).unwrap(),
+            "Recorded demo.mp4: 2.00 s, 60 frames at 30 fps (0 repeated, 0 dropped), 0.0 MB\n"
+        );
+        say(&mut Gone, &report);
     }
 
     #[test]

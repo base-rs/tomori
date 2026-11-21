@@ -246,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recording_without_a_window_draws_at_its_rate_until_it_is_to_end() {
+    fn a_recording_without_a_window_draws_until_it_is_to_end() {
         tomori_render::test_gpu::with(|gpu| {
             let (recording, drawn) = recording();
             let stop = recording.stop.clone();
@@ -255,16 +255,24 @@ mod tests {
                 feed(),
                 recording,
             );
+            // It draws until it has drawn three frames, and is then told to end: nothing here waits for a time.
             let ender = std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(250));
+                let mut frames = Vec::new();
+                while frames.len() < 3 {
+                    frames.push(
+                        drawn
+                            .recv_timeout(Duration::from_secs(60))
+                            .expect("three frames are drawn"),
+                    );
+                }
                 stop.request("received SIGINT");
+                frames
             });
             record_frames(recorder).unwrap();
-            ender.join().unwrap();
-            // About thirty a second for a quarter of a second, each the recording's size.
-            let frames: Vec<_> = drawn.try_iter().collect();
-            assert!((2..=12).contains(&frames.len()), "{}", frames.len());
+            let frames = ender.join().unwrap();
+            // Each the recording's size, in the order they were drawn, from when the first was.
             assert!(frames.iter().all(|(_, frame)| frame.len() == 64 * 64 * 4));
+            assert_eq!(frames[0].0, Duration::ZERO);
             assert!(frames.windows(2).all(|pair| pair[0].0 < pair[1].0));
         });
     }

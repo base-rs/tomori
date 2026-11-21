@@ -172,7 +172,7 @@ fn the_spectator_records_without_a_window_and_finishes_its_file_when_interrupted
         // An ffmpeg that lists the encoders looked for, and writes the file it is asked for once its inputs end.
         let ffmpeg = folder.join("bin").join("ffmpeg");
         let script = format!(
-            "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = -encoders ]; then\n    printf ' V....D libx264 x\\n V....D h264_videotoolbox x\\n A....D aac x\\n'\n    exit 0\n  fi\ndone\nfor last; do :; done\ntouch '{started}'\ncat <&3 > /dev/null & cat > /dev/null\nwait\necho moov > \"$last\"\n",
+            "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = -encoders ]; then\n    printf ' V....D libx264 x\\n V....D h264_videotoolbox x\\n A....D aac x\\n'\n    exit 0\n  fi\ndone\nfor last; do :; done\ntouch '{started}'\ncat <&3 > /dev/null & cat > /dev/null\nwait\necho moov > \"${{last#file:}}\"\n",
             started = folder.join("started").display()
         );
         {

@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use std::{
     ffi::OsString,
     io::ErrorKind,
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -198,6 +199,13 @@ fn encoder_arguments(encoder: &str, options: &RecordOptions) -> Vec<String> {
     }
 }
 
+/// `path` as ffmpeg's output: with the `file:` protocol named, so that a name that starts with `-`, as `-demo.mp4`, is not an option, and one with a colon after a few letters, as `12:30 demo.mp4`, is not a protocol, whatever the file's folder is.
+fn output(path: &Path) -> OsString {
+    let mut output = OsString::from("file:");
+    output.push(path);
+    output
+}
+
 /// The ffmpeg command that encodes `options`' recording with `ffmpeg`: video on standard input, audio on file descriptor 3, the file out.
 ///
 /// The video is converted to BT.709 limited-range 4:2:0 and tagged so, which is what players assume of high definition, and the file's index is moved to its front, so that the file plays as it downloads. The pipes are set up by the caller.
@@ -233,7 +241,7 @@ pub fn command(ffmpeg: &Ffmpeg, options: &RecordOptions, container: Container) -
         .args(["-color_trc", "bt709", "-color_range", "tv"])
         .args(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
         .args(["-f", container.format()])
-        .arg(&options.path);
+        .arg(output(&options.path));
     command
 }
 
@@ -336,7 +344,7 @@ mod tests {
             &arguments,
             &["-color_trc", "bt709", "-color_range", "tv"]
         ));
-        assert_eq!(arguments.last().unwrap(), "demo.mp4");
+        assert_eq!(arguments.last().unwrap(), "file:demo.mp4");
         assert!(!arguments.contains(&"-tag:v".to_owned()));
     }
 
@@ -360,7 +368,7 @@ mod tests {
         ));
         assert!(contains(&arguments, &["-tag:v", "hvc1"]));
         assert!(contains(&arguments, &["-f", "mov"]));
-        assert_eq!(arguments.last().unwrap(), "demo.MOV");
+        assert_eq!(arguments.last().unwrap(), "file:demo.MOV");
 
         let software = |encoder, codec| {
             let mut options = RecordOptions::new("a.mp4");
@@ -393,6 +401,32 @@ mod tests {
                 "19"
             ]
         ));
+    }
+
+    #[test]
+    fn the_output_is_a_file_whatever_its_name_looks_like() {
+        for name in [
+            "-demo.mp4",
+            "12:30 demo.mp4",
+            "a:b.mp4",
+            "démo ✓.mov",
+            "-x:y z.mp4",
+            "dir/-a:b.mp4",
+            "/abs/a:b.mp4",
+        ] {
+            let mut options = RecordOptions::new(name);
+            options.overwrite = true;
+            let arguments = arguments(&built(&ffmpeg("libx264"), &options));
+            assert_eq!(arguments.last().unwrap(), &format!("file:{name}"));
+            // Nothing else is taken for the name, and the options before it are not changed by it.
+            assert_eq!(
+                arguments
+                    .iter()
+                    .filter(|argument| argument.contains(name))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

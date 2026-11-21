@@ -8,8 +8,11 @@ use super::{FORMAT, Recording};
 use crate::letterbox::Letterbox;
 use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
-    time::Instant,
+    time::{Duration, Instant},
 };
+
+/// The longest finishing waits for the frames in flight to be read back.
+const FINISH_WAIT: Duration = Duration::from_secs(5);
 
 /// How many readbacks may be in flight at once.
 const IN_FLIGHT: usize = 3;
@@ -176,22 +179,47 @@ impl Capture {
                     .slice(..)
                     .get_mapped_range()
                     .expect("the readback buffer is mapped once its callback succeeds");
-                crate::pipewire_video::pack_rows(
+                let mut frame = self.recording.frames.buffer();
+                crate::pipewire_video::pack_rows_into(
+                    &mut frame,
                     &mapped,
                     self.row,
                     self.padded_row,
                     self.recording.size.1 as usize,
-                )
+                );
+                frame
             };
             readback.buffer.unmap();
             self.recording.frames.send(drawn, frame);
         }
     }
 
-    /// Wait for the frames still being read back and hand them on: the recording is ending.
+    /// Wait for the frames still being read back and hand them on: the recording is ending. It waits for the GPU no longer than [`FINISH_WAIT`], so that one that has hung cannot keep the spectator from ending.
     pub fn finish(&mut self) {
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        self.collect();
+        self.finish_within(FINISH_WAIT);
+    }
+
+    fn finish_within(&mut self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        loop {
+            let _ = self.device.poll(wgpu::PollType::Poll);
+            self.collect();
+            if self
+                .readbacks
+                .iter()
+                .all(|readback| readback.pending.is_none())
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                log::warn!(
+                    "Recording: the GPU did not finish reading back the last frames in {} s; they are left out",
+                    wait.as_secs_f32()
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }
 
@@ -325,7 +353,16 @@ mod tests {
             assert!(reason.starts_with("the GPU readback failed"), "{reason}");
             assert!(drawn.try_recv().is_err());
             assert!(capture.readbacks[0].pending.is_none());
-            // Let the rest go, so that finishing does not wait for them.
+            // Finishing does not wait for ever for readbacks that never come.
+            let started = Instant::now();
+            capture.finish_within(Duration::from_millis(30));
+            assert!(started.elapsed() >= Duration::from_millis(30));
+            assert!(
+                capture
+                    .readbacks
+                    .iter()
+                    .any(|readback| readback.pending.is_some())
+            );
             for readback in &mut capture.readbacks {
                 readback.pending = None;
             }

@@ -10,7 +10,7 @@ use std::{
     os::{fd::AsRawFd, unix::process::CommandExt},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex, PoisonError},
-    thread::JoinHandle,
+    thread::{self, JoinHandle},
 };
 
 /// How many of the encoder's last lines are kept.
@@ -37,6 +37,17 @@ impl Said {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join("; ")
+    }
+}
+
+/// Wait up to `within` for the thread that reads the encoder's messages, and leave it if it has not ended, as when a process the encoder left behind holds them open.
+pub fn join_within(reader: JoinHandle<()>, within: std::time::Duration) {
+    let deadline = std::time::Instant::now() + within;
+    while !reader.is_finished() && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if reader.is_finished() {
+        let _ = reader.join();
     }
 }
 
@@ -70,9 +81,17 @@ pub fn launch(mut command: Command) -> Result<Launched> {
     let said = Said::default();
     let kept = said.clone();
     let reader = match system::spawn("tomori-record-ffmpeg", move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            log::warn!("ffmpeg: {line}");
-            kept.keep(line);
+        let mut messages = BufReader::new(stderr);
+        let mut line = Vec::new();
+        // Whatever bytes it says them in: a line that is not UTF-8 is read lossily, and the next is read.
+        while messages
+            .read_until(b'\n', &mut line)
+            .is_ok_and(|read| read > 0)
+        {
+            let text = String::from_utf8_lossy(&line).trim_end().to_owned();
+            log::warn!("ffmpeg: {text}");
+            kept.keep(text);
+            line.clear();
         }
     }) {
         Ok(reader) => reader,
@@ -162,6 +181,38 @@ mod tests {
             "starting the thread that reads ffmpeg's messages"
         );
         std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    #[test]
+    fn what_the_child_says_is_read_on_past_bytes_that_are_not_text() {
+        let launched = launch(shell(
+            "printf 'caf\\377 bad\\n' >&2; echo later >&2; exit 4",
+        ))
+        .unwrap();
+        let mut child = launched.child;
+        child.wait().unwrap();
+        launched.reader.join().unwrap();
+        assert_eq!(launched.said.summary(), "caf\u{fffd} bad; later");
+    }
+
+    #[test]
+    fn the_messages_are_waited_for_only_so_long() {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let reader = thread::spawn(move || {
+            let _ = held.recv();
+        });
+        let started = std::time::Instant::now();
+        join_within(reader, std::time::Duration::from_millis(30));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
+        // One that has ended is joined.
+        let ended = thread::spawn(|| {});
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !ended.is_finished() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        join_within(ended, std::time::Duration::from_secs(60));
+        drop(release);
     }
 
     #[test]

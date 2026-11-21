@@ -24,6 +24,7 @@ pub mod audio;
 pub mod capture;
 pub mod clock;
 pub mod ffmpeg;
+mod force_exit;
 pub mod options;
 mod process;
 pub mod session;
@@ -93,9 +94,17 @@ impl Stop {
     }
 }
 
-/// When a recording begins, which is when its first frame is drawn, and not when the encoder starts, which is before the window and the GPU are ready: its video, its sound and its report are timed from then, so that the file does not begin with the seconds the spectator took to start. Shared by whatever draws, copies the sound, writes and finishes the recording.
+/// When a recording begins, which is when its first frame is drawn, and not when the encoder starts, which is before the window and the GPU are ready: its video, its sound and its report are timed from then, so that the file does not begin with the seconds the spectator took to start. Shared by whatever draws, copies the sound, writes and finishes the recording. It is the recording's clock, which a test sets by hand, so that nothing it checks depends on how long a machine took.
 #[derive(Clone, Debug, Default)]
-pub struct Origin(Arc<OnceLock<Instant>>);
+pub struct Origin(Arc<OriginState>);
+
+#[derive(Debug, Default)]
+struct OriginState {
+    start: OnceLock<Instant>,
+    /// What a test says has elapsed, instead of the time that has.
+    #[cfg(test)]
+    set: Mutex<Option<Duration>>,
+}
 
 impl Origin {
     /// An origin that began at `at`.
@@ -105,24 +114,43 @@ impl Origin {
         origin
     }
 
+    /// An origin that began at `at` and that has been going on for as long as a test says, with [`Self::set_elapsed`], and no longer.
+    #[cfg(test)]
+    pub fn by_hand(at: Instant) -> Self {
+        let origin = Self::at(at);
+        origin.set_elapsed(Duration::ZERO);
+        origin
+    }
+
+    /// Say how long a recording started by hand has gone on.
+    #[cfg(test)]
+    pub fn set_elapsed(&self, elapsed: Duration) {
+        *self.0.set.lock().unwrap() = Some(elapsed);
+    }
+
     /// Begin the recording at `at`, unless it began already.
     pub fn begin(&self, at: Instant) {
-        let _ = self.0.set(at);
+        let _ = self.0.start.set(at);
     }
 
     /// Whether the recording has begun.
     pub fn begun(&self) -> bool {
-        self.0.get().is_some()
+        self.0.start.get().is_some()
     }
 
     /// How long the recording has gone on, or nothing before it begins.
     pub fn elapsed(&self) -> Duration {
-        self.0.get().map_or(Duration::ZERO, Instant::elapsed)
+        #[cfg(test)]
+        if let Some(elapsed) = *self.0.set.lock().unwrap() {
+            return elapsed;
+        }
+        self.0.start.get().map_or(Duration::ZERO, Instant::elapsed)
     }
 
     /// When `at` was in the recording, or nothing before it began.
     pub fn since(&self, at: Instant) -> Duration {
         self.0
+            .start
             .get()
             .map_or(Duration::ZERO, |start| at.saturating_duration_since(*start))
     }

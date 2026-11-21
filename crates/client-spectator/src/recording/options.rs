@@ -62,8 +62,7 @@ impl Container {
     pub fn of(path: &Path) -> Result<Self> {
         let extension = path
             .extension()
-            .and_then(|extension| extension.to_str())
-            .map(str::to_ascii_lowercase);
+            .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
         match extension.as_deref() {
             Some("mp4") => Ok(Self::Mp4),
             Some("mov") => Ok(Self::Mov),
@@ -323,6 +322,16 @@ mod tests {
             "--record writes .mp4 or .mov files; name the file with one of them"
         );
         assert!(RecordOptions::new("a.webm").check().is_err());
+        // A name that is not UTF-8 is refused for its extension, not for being unreadable.
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let odd = Path::new(std::ffi::OsStr::from_bytes(b"demo.\xff"));
+            assert!(message(Container::of(odd)).contains("not .\u{fffd}"));
+            assert_eq!(
+                Container::of(Path::new(std::ffi::OsStr::from_bytes(b"d\xffemo.mp4"))).unwrap(),
+                Container::Mp4
+            );
+        }
     }
 
     #[test]

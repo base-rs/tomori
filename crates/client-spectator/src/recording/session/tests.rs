@@ -70,16 +70,30 @@ fn session(folder: &Path, command: Command, limits: Limits) -> Session {
     Session::launch(&options(folder), command, Stop::default(), limits).unwrap()
 }
 
-/// Draw a frame for each of `count` slots, a tenth of a second apart.
-fn draw(session: &Session, count: usize) {
+/// A recording whose time is said by the test, and when it began.
+fn by_hand(folder: &Path, command: Command, limits: Limits) -> (Session, Origin, Instant) {
+    let base = Instant::now();
+    let origin = Origin::by_hand(base);
+    let session = Session::launch_at(
+        origin.clone(),
+        &options(folder),
+        command,
+        Stop::default(),
+        limits,
+    )
+    .unwrap();
+    (session, origin, base)
+}
+
+/// Draw a frame for each of `count` slots, a tenth of a second apart, at the times they are drawn at, and say that the time has come to the end of the last.
+fn draw(session: &Session, origin: &Origin, base: Instant, count: u64) {
     let recording = session.recording();
-    recording.origin.begin(Instant::now());
     for index in 0..count {
         recording
             .frames
-            .send(Instant::now(), vec![index as u8; FRAME]);
-        std::thread::sleep(millis(100));
+            .send(base + millis(100 * index), vec![index as u8; FRAME]);
     }
+    origin.set_elapsed(millis(100 * count));
 }
 
 #[test]
@@ -90,8 +104,8 @@ fn the_recording_ends_the_same_way_whatever_asked_for_it() {
         ("server", "the server disconnected"),
     ] {
         let folder = folder(name);
-        let session = session(&folder, indexing(&folder), Limits::default());
-        draw(&session, 5);
+        let (session, origin, base) = by_hand(&folder, indexing(&folder), Limits::default());
+        draw(&session, &origin, base, 5);
         session.stop().request(reason);
         assert!(session.stop().requested());
         let report = session.finish().unwrap();
@@ -102,8 +116,8 @@ fn the_recording_ends_the_same_way_whatever_asked_for_it() {
         );
         assert_eq!(report.reason.as_deref(), Some(reason));
         // A video as long as the recording, 10 frames a second, and sound to the same length, 48,000 frames a second of stereo 16-bit.
-        assert!((5..=6).contains(&report.frames), "{}", report.frames);
-        assert_eq!(report.duration, millis(report.frames * 100));
+        assert_eq!(report.frames, 5);
+        assert_eq!(report.duration, millis(500));
         assert_eq!(
             std::fs::metadata(folder.join("video")).unwrap().len(),
             report.frames * FRAME as u64
@@ -127,8 +141,8 @@ fn the_recording_ends_the_same_way_whatever_asked_for_it() {
 #[test]
 fn a_recording_dropped_without_being_finished_is_finished() {
     let folder = folder("dropped");
-    let session = session(&folder, indexing(&folder), Limits::default());
-    draw(&session, 2);
+    let (session, origin, base) = by_hand(&folder, indexing(&folder), Limits::default());
+    draw(&session, &origin, base, 2);
     drop(session);
     assert_eq!(
         std::fs::read_to_string(folder.join("demo.mp4")).unwrap(),
@@ -226,24 +240,19 @@ fn what_the_system_refuses_is_reported_and_the_recording_does_not_start() {
 fn an_encoder_that_stops_reading_is_ended_rather_than_waited_for() {
     let folder = folder("stuck");
     let mut stuck = Command::new("sh");
-    stuck.arg("-c").arg("sleep 60");
+    stuck.arg("-c").arg("exec sleep 60");
     let limits = Limits {
         drain: millis(300),
         finalise: Duration::from_secs(30),
     };
-    let session = session(&folder, stuck, limits);
+    let (session, origin, base) = by_hand(&folder, stuck, limits);
     // More than a pipe holds, so that the writers are stuck.
-    let recording = session.recording();
-    recording.origin.begin(Instant::now());
-    for _ in 0..8 {
-        recording.frames.send(Instant::now(), vec![0; FRAME]);
-        std::thread::sleep(millis(60));
-    }
+    draw(&session, &origin, base, 8);
     let started = Instant::now();
     log::set_max_level(log::LevelFilter::Trace);
     let error = session.finish().unwrap_err().to_string();
     assert!(error.starts_with("ffmpeg failed with signal: 9"), "{error}");
-    // Ended by the drain limit, not by the minute it would have slept.
+    // Ended by the drain limit, not by the minute it would have slept: a watchdog, not a speed.
     assert!(started.elapsed() < Duration::from_secs(30));
     std::fs::remove_dir_all(&folder).unwrap();
 }
@@ -251,13 +260,13 @@ fn an_encoder_that_stops_reading_is_ended_rather_than_waited_for() {
 #[test]
 fn an_encoder_that_does_not_finish_the_file_is_reported_with_the_file_that_may_not_play() {
     let folder = folder("unfinished");
-    let slow = encoder(&folder, "sleep 60");
+    let slow = encoder(&folder, "exec sleep 60");
     let limits = Limits {
         drain: Duration::from_secs(10),
         finalise: millis(300),
     };
-    let session = session(&folder, slow, limits);
-    draw(&session, 1);
+    let (session, origin, base) = by_hand(&folder, slow, limits);
+    draw(&session, &origin, base, 1);
     let error = session.finish().unwrap_err().to_string();
     assert!(
         error.starts_with("ffmpeg did not finish writing "),
@@ -442,7 +451,7 @@ fn probe(file: &Path, arguments: &[&str]) -> serde_json::Value {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-of", "json"])
         .args(arguments)
-        .arg(file)
+        .arg(format!("file:{}", file.display()))
         .output()
         .unwrap();
     assert!(
@@ -492,19 +501,54 @@ fn tone(index: u32) -> AudioFrame {
     }
 }
 
+/// The command that records `options` with the ffmpeg on this machine, for a platform's encoders, or `None` where there is none, saying so, or failing where `TOMORI_REQUIRE_FFMPEG` says to.
+fn ffmpeg_command(
+    options: &RecordOptions,
+    platform: crate::recording::ffmpeg::Platform,
+) -> Option<Command> {
+    if !have_ffmpeg() {
+        return None;
+    }
+    match crate::recording::ffmpeg::Ffmpeg::detect("ffmpeg", options.codec, platform) {
+        Ok(ffmpeg) => Some(crate::recording::ffmpeg::command(
+            &ffmpeg,
+            options,
+            options.check().unwrap(),
+        )),
+        Err(error) => {
+            // A build of ffmpeg without the encoder skips the test, as one without ffmpeg does.
+            let required = std::env::var(REQUIRE_FFMPEG)
+                .is_ok_and(|value| !matches!(value.as_str(), "" | "0"));
+            assert!(!required, "{REQUIRE_FFMPEG} is set but {error:#}");
+            eprintln!("Skipping a recording test: {error:#}");
+            None
+        }
+    }
+}
+
 #[test]
 fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
-    if !have_ffmpeg() {
-        return;
-    }
+    use tomori_client::playback::Layout;
     let folder = folder("end-to-end");
     let mut options = RecordOptions::new(folder.join("scene.mp4"));
     options.size = (320, 180);
     options.fps = 30;
-    // The recording renders the player itself, as it does without a speaker.
-    options.playback = false;
+    let Some(command) = ffmpeg_command(&options, crate::recording::ffmpeg::Platform::current())
+    else {
+        return;
+    };
     let Some(report) = test_gpu::with(|gpu| {
-        let session = Session::start(&options).unwrap();
+        // Time is said by this test, a frame and a block of sound at a time, so that what is in the file does not depend on how long anything took.
+        let base = Instant::now();
+        let origin = Origin::by_hand(base);
+        let session = Session::launch_at(
+            origin.clone(),
+            &options,
+            command,
+            Stop::default(),
+            Limits::default(),
+        )
+        .unwrap();
         let mut capture = Capture::new(&gpu.device, None, session.recording());
         let mut renderer = crate::graphics::Renderer::new(
             &gpu.device,
@@ -525,25 +569,36 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
         mixer.jitter.target_latency = millis(40);
         mixer.jitter.latency_limit = millis(400);
         let (player, _control) = Player::new(audio, mixer);
-        let _output = session
-            .playback(Box::new(crate::test_support::Nowhere))
-            .open(
-                Arc::new(Mutex::new(player)),
-                Box::new(|_| {}),
-                Route::default(),
-            )
+        let player = Arc::new(Mutex::new(player));
+        // A speaker that plays nowhere, whose callback this test is: it renders the player 10 ms at a time.
+        let tee = session.playback(Box::new(crate::test_support::Nowhere));
+        let _output = tee
+            .open(player.clone(), Box::new(|_| {}), Route::default())
             .unwrap();
-        // Two seconds at 30 frames a second: the scene for the first, and then, with a tone 20 ms at a time, white.
-        let started = Instant::now();
-        let (mut tones, mut frames) = (0, 0_u64);
-        while started.elapsed() < Duration::from_secs(2) {
-            let flashing = started.elapsed() >= Duration::from_secs(1);
-            let flashed = started.elapsed().saturating_sub(Duration::from_secs(1));
+        let clock = FrameClock::new(30);
+        let mut block = vec![0; 960];
+        let (mut heard, mut tones) = (Duration::ZERO, 0_u32);
+        let mut hear_until = |until: Duration| {
+            while heard + millis(10) <= until {
+                heard += millis(10);
+                origin.set_elapsed(heard);
+                player
+                    .lock()
+                    .unwrap()
+                    .render(48_000, Layout::Stereo, &mut block);
+            }
+        };
+        // Two seconds at 30 frames a second: the scene for the first, and then, with a tone, white.
+        for frame in 0..60 {
+            let at = clock.timestamp(frame);
+            hear_until(at);
+            origin.set_elapsed(at);
+            let flashing = at >= Duration::from_secs(1);
+            let flashed = at.saturating_sub(Duration::from_secs(1));
             while flashing && u64::from(tones) < flashed.as_millis() as u64 / 20 + 3 {
                 sender.send(tone(tones)).unwrap();
                 tones += 1;
             }
-            let drawn = Instant::now();
             if flashing {
                 white(&gpu, &capture.view);
             } else {
@@ -555,20 +610,19 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
                     aspect: 320.0 / 180.0,
                 });
             }
-            capture.capture(&gpu.queue, drawn);
-            frames += 1;
-            std::thread::sleep(
-                (started + millis(frames * 1_000 / 30)).saturating_duration_since(Instant::now()),
-            );
+            capture.capture(&gpu.queue, base + at);
+            // Delivered before the time moves on.
+            capture.finish();
         }
-        capture.finish();
+        hear_until(Duration::from_secs(2));
+        origin.set_elapsed(Duration::from_secs(2));
         drop(capture);
         session.finish().unwrap()
     }) else {
         return;
     };
-    // Two seconds, and however long finishing took, which an instrumented build or a busy machine lengthens: the file is as long as the recording, whatever that was.
-    assert!(report.frames >= 55, "{report}");
+    // Two seconds at 30 a second, each drawn in its slot.
+    assert_eq!((report.frames, report.duplicated), (60, 0), "{report}");
     let file = &options.path;
     let video = probe(
         file,
@@ -585,13 +639,9 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
     assert_eq!(video["height"], 180);
     assert_eq!(video["r_frame_rate"], "30/1");
     assert_eq!(video["codec_name"], "h264");
-    assert_eq!(video["nb_read_frames"], report.frames.to_string());
+    assert_eq!(video["nb_read_frames"], "60");
     let seconds = |value: &serde_json::Value| value.as_str().unwrap().parse::<f64>().unwrap();
-    let length = report.frames as f64 / 30.0;
-    assert!(
-        (seconds(&video["duration"]) - length).abs() < 0.1,
-        "{video}"
-    );
+    assert!((seconds(&video["duration"]) - 2.0).abs() < 0.01, "{video}");
     let audio = probe(
         file,
         &[
@@ -605,15 +655,13 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
     assert_eq!(audio["codec_name"], "aac");
     assert_eq!(audio["sample_rate"], "48000");
     assert_eq!(audio["channels"], 2);
-    assert!(
-        (seconds(&audio["duration"]) - length).abs() < 0.1,
-        "{audio}"
-    );
-    // The white and the tone began together, and the file has them within a tenth of a second of each other: the first frame whose one pixel, scaled down from all of it, is bright, and the first sample that is loud.
+    // AAC is written in blocks of 1,024 frames, so the sound is that much longer, at most.
+    assert!((seconds(&audio["duration"]) - 2.0).abs() < 0.05, "{audio}");
+    // The white and the tone began together, to within what the pipeline adds: a block of 10 ms of sound, and the frame the white is drawn in, 33 ms, since the time is said by the test and nothing here waits.
     let decoded = |arguments: &[&str]| {
         let output = Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
-            .arg(file)
+            .arg(format!("file:{}", file.display()))
             .args(arguments)
             .arg("-")
             .output()
@@ -645,15 +693,15 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
         .position(|pair| i16::from_le_bytes(*pair).abs() > 1_000)
         .expect("a tone");
     let (white_at, tone_at) = (first_white as f64 / 30.0, first_loud as f64 / 48_000.0);
-    assert!((0.9..=1.4).contains(&white_at), "white from {white_at} s");
+    assert!((white_at - 1.0).abs() < 0.04, "white from {white_at} s");
     assert!(
-        (white_at - tone_at).abs() < 0.15,
+        (tone_at - white_at).abs() < 0.05,
         "white from {white_at} s, tone from {tone_at} s"
     );
     // The tone is in the file: it is not silent.
     let levels = Command::new("ffmpeg")
         .args(["-hide_banner", "-i"])
-        .arg(file)
+        .arg(format!("file:{}", file.display()))
         .args(["-af", "volumedetect", "-vn", "-f", "null", "-"])
         .output()
         .unwrap();
@@ -667,37 +715,40 @@ fn an_offscreen_scene_and_a_tone_are_recorded_to_a_file_that_plays() {
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
-/// Record a second of 64-pixel frames with the encoders `codec` and `platform` choose, with the options a command line gives, and say what ffprobe finds, or `None` where ffmpeg, ffprobe or the encoder is missing.
+/// Record a second of 64-pixel frames to `name` in a folder of the test's own, with the encoders `codec` and `platform` choose, from `directory` if one is given, and say what ffprobe finds, or `None` where ffmpeg, ffprobe or the encoder is missing.
 fn encoded_with(
+    test: &str,
     name: &str,
     codec: Codec,
     platform: crate::recording::ffmpeg::Platform,
+    relative: bool,
 ) -> Option<(Report, serde_json::Value)> {
-    if !have_ffmpeg() {
-        return None;
-    }
-    let ffmpeg = match crate::recording::ffmpeg::Ffmpeg::detect("ffmpeg", codec, platform) {
-        Ok(ffmpeg) => ffmpeg,
-        Err(error) => {
-            // A build of ffmpeg without the encoder skips the test, as one without ffmpeg does.
-            let required = std::env::var(REQUIRE_FFMPEG)
-                .is_ok_and(|value| !matches!(value.as_str(), "" | "0"));
-            assert!(!required, "{REQUIRE_FFMPEG} is set but {error:#}");
-            eprintln!("Skipping a recording test: {error:#}");
-            return None;
-        }
-    };
-    let folder = folder(name);
+    let folder = folder(test);
     let mut options = options(&folder);
     options.codec = codec;
-    options.path = folder.join("demo.mov");
-    let container = options.check().unwrap();
-    let command = crate::recording::ffmpeg::command(&ffmpeg, &options, container);
-    let session = Session::launch(&options, command, Stop::default(), Limits::default()).unwrap();
-    draw(&session, 10);
+    options.path = if relative {
+        PathBuf::from(name)
+    } else {
+        folder.join(name)
+    };
+    let mut command = ffmpeg_command(&options, platform)?;
+    if relative {
+        command.current_dir(&folder);
+    }
+    let base = Instant::now();
+    let origin = Origin::by_hand(base);
+    let session = Session::launch_at(
+        origin.clone(),
+        &options,
+        command,
+        Stop::default(),
+        Limits::default(),
+    )
+    .unwrap();
+    draw(&session, &origin, base, 10);
     let report = session.finish().unwrap();
     let probed = probe(
-        &options.path,
+        &folder.join(name),
         &[
             "-select_streams",
             "v:0",
@@ -714,9 +765,13 @@ fn encoded_with(
 fn the_software_encoders_make_files_that_play_as_h264_and_as_hevc() {
     use crate::recording::ffmpeg::Platform;
     for (codec, name, tag) in [(Codec::H264, "h264", "avc1"), (Codec::Hevc, "hevc", "hvc1")] {
-        let Some((report, video)) =
-            encoded_with(&format!("software-{name}"), codec, Platform::Other)
-        else {
+        let Some((report, video)) = encoded_with(
+            &format!("software-{name}"),
+            "demo.mov",
+            codec,
+            Platform::Other,
+            false,
+        ) else {
             continue;
         };
         assert_eq!(video["codec_name"], name);
@@ -729,5 +784,73 @@ fn the_software_encoders_make_files_that_play_as_h264_and_as_hevc() {
         );
         assert_eq!(video["r_frame_rate"], "10/1");
         assert_eq!(video["nb_read_frames"], report.frames.to_string());
+        assert_eq!(report.frames, 10);
     }
+}
+
+#[test]
+fn a_file_is_written_whatever_its_name_looks_like_to_ffmpeg() {
+    use crate::recording::ffmpeg::Platform;
+    // A name that starts with a dash is an option, and one with a colon after a few letters is a protocol, to ffmpeg, unless it is told the name is a file's; and a date and time is a likely name for a demo.
+    for (index, name) in [
+        "-demo.mp4",
+        "12:30 demo.mp4",
+        "a:b.mp4",
+        "démo ✓ 2026-11-20 12:30.mov",
+        "-x:y z.mp4",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for relative in [false, true] {
+            let Some((report, video)) = encoded_with(
+                &format!("names-{index}-{relative}"),
+                name,
+                Codec::H264,
+                Platform::current(),
+                relative,
+            ) else {
+                return;
+            };
+            assert_eq!(video["codec_name"], "h264", "{name} {relative}");
+            assert_eq!(video["nb_read_frames"], "10", "{name} {relative}");
+            assert_eq!(report.frames, 10);
+        }
+    }
+}
+
+#[test]
+fn ffmpeg_ended_by_a_signal_after_it_wrote_the_file_has_finished_it() {
+    use std::os::unix::process::ExitStatusExt;
+    let folder = folder("signalled");
+    let file = folder.join("demo.mp4");
+    let status = |code: i32| std::process::ExitStatus::from_raw(code << 8);
+    // Zero does.
+    assert!(finished(status(0), "", &file));
+    // 255 does not, without a file, or having said anything at the level it is run at, errors; nor does any other.
+    assert!(!finished(status(255), "", &file));
+    std::fs::write(&file, b"").unwrap();
+    assert!(!finished(status(255), "", &file));
+    std::fs::write(&file, b"moov").unwrap();
+    assert!(finished(status(255), "", &file));
+    assert!(!finished(status(255), "Error writing trailer", &file));
+    assert!(!finished(status(1), "", &file));
+    // Ended by a signal itself, it has not finished.
+    assert!(!finished(std::process::ExitStatus::from_raw(15), "", &file));
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[test]
+fn a_recording_whose_encoder_was_sent_a_signal_after_it_finished_the_file_is_reported() {
+    let folder = folder("sigterm");
+    let file = folder.join("demo.mp4");
+    let command = encoder(
+        &folder,
+        &format!("echo moov > '{}'; exit 255", file.display()),
+    );
+    let (session, origin, base) = by_hand(&folder, command, Limits::default());
+    draw(&session, &origin, base, 2);
+    let report = session.finish().unwrap();
+    assert_eq!((report.frames, report.bytes), (2, 5));
+    std::fs::remove_dir_all(&folder).unwrap();
 }

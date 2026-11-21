@@ -56,3 +56,7 @@ tomori-scene = { version = "0.2.0", path = "../scene", features = ["testing"] }
 [[package.metadata.bake.test.coverage.exclude]]
 path = "src/child_process.rs"
 reason = "Runs in a forked child before it executes its program, where the child's coverage counters are discarded."
+
+[[package.metadata.bake.test.coverage.exclude]]
+path = "src/recording/force_exit.rs"
+reason = "Ends the process by a signal's default action from its handler, after which it writes no coverage."

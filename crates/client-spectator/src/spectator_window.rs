@@ -332,8 +332,12 @@ impl Contents for SpectatorWindow {
         };
         if Instant::now() >= next {
             self.draw(surface)?;
-            // An even cadence, without catching up with bursts after a stall.
-            next = next_frame_time(next, Instant::now(), self.frame_interval);
+            // The recording keeps an even cadence, without catching up with bursts after a stall; the PipeWire source's frames, as before, are an interval apart from the end of each.
+            next = if self.capture.is_some() {
+                next_frame_time(next, Instant::now(), self.frame_interval)
+            } else {
+                Instant::now() + self.frame_interval
+            };
             self.next_video_frame = Some(next);
         }
         Ok(Wake::At(next))
@@ -473,9 +477,12 @@ mod tests {
             let next = demo.about_to_wait(&mut surface).unwrap();
             assert_ne!(next, Wake::Wait);
             assert_eq!(surface.presented, 1);
-            // Not yet due: nothing more is drawn.
-            assert_eq!(demo.about_to_wait(&mut surface).unwrap(), next);
+            // Not yet due, however long it took to get here: nothing more is drawn.
+            let later = Instant::now() + Duration::from_secs(3_600);
+            demo.next_video_frame = Some(later);
+            assert_eq!(demo.about_to_wait(&mut surface).unwrap(), Wake::At(later));
             assert_eq!(surface.presented, 1);
+            demo.next_video_frame = Some(Instant::now());
             input(
                 &mut demo,
                 &mut surface,
@@ -548,9 +555,12 @@ mod tests {
             let next = demo.about_to_wait(&mut surface).unwrap();
             assert!(matches!(next, Wake::At(_)));
             assert_eq!(surface.presented, 1);
-            // Not yet due: nothing more is drawn.
-            assert_eq!(demo.about_to_wait(&mut surface).unwrap(), next);
+            // Not yet due, however long it took to get here: nothing more is drawn.
+            let later = Instant::now() + Duration::from_secs(3_600);
+            demo.next_video_frame = Some(later);
+            assert_eq!(demo.about_to_wait(&mut surface).unwrap(), Wake::At(later));
             assert_eq!(surface.presented, 1);
+            demo.next_video_frame = Some(Instant::now());
             // The window's size changes the preview, not the recording.
             input(
                 &mut demo,

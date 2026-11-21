@@ -151,6 +151,8 @@ impl Resampler {
 }
 
 /// Puts blocks of the player's mix on the recording's clock, as the interleaved 16-bit little-endian stereo samples ffmpeg reads at 48 kHz.
+///
+/// A block is put right when the sound is more than [`TOLERANCE`] from the clock, by silence before it or by leaving out its early part, which are hard cuts and may click; a device whose clock differs from the recording's by 50 parts in a million needs one about every 400 s. A crossfade, or resampling by the drift, would hide them, and is a follow-up. After every block the sound is within [`TOLERANCE`] of the clock at the time the block was rendered.
 #[derive(Default)]
 pub struct Aligner {
     /// The frames written, which are the frames of the file.

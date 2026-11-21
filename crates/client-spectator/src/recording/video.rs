@@ -12,7 +12,7 @@ use super::{
 use std::{
     io::Write,
     sync::{
-        Arc, Mutex, PoisonError,
+        Arc, Mutex, PoisonError, Weak,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
@@ -23,7 +23,7 @@ use std::{
 /// How many bytes of frames the render loop may have waiting for the writer, which an encoder that cannot keep up lets fill; at least [`MINIMUM_QUEUED`] frames, and at most [`MAXIMUM_QUEUED`], each a whole frame of RGBA.
 const QUEUED_BYTES: usize = 128 * 1024 * 1024;
 const MINIMUM_QUEUED: usize = 4;
-const MAXIMUM_QUEUED: usize = 16;
+const MAXIMUM_QUEUED: usize = 128;
 /// How many frames behind the clock a slot is written, for the frame drawn at its time to arrive.
 const LEAD: u32 = 2;
 /// The longest the writer sleeps without looking for a frame or the end.
@@ -31,8 +31,46 @@ const LOOK: Duration = Duration::from_millis(20);
 /// How far behind the clock the writer may fall before it says so.
 const BEHIND: Duration = Duration::from_secs(1);
 
+/// The bytes of a frame, which go back to the pool they came from when the last slot it fills has been written, so that a 4K frame, 33 MB, is not allocated and faulted in again sixty times a second.
+pub struct Buffer {
+    data: Vec<u8>,
+    pool: Weak<Mutex<Vec<Vec<u8>>>>,
+    /// How many spare buffers the pool keeps.
+    spare: usize,
+}
+
+impl Buffer {
+    /// Bytes that belong to no pool.
+    pub fn plain(data: Vec<u8>) -> Self {
+        Self {
+            data,
+            pool: Weak::new(),
+            spare: 0,
+        }
+    }
+}
+
+impl std::ops::Deref for Buffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        if let Some(pool) = self.pool.upgrade() {
+            let mut pool = pool.lock().unwrap_or_else(PoisonError::into_inner);
+            if pool.len() < self.spare {
+                pool.push(std::mem::take(&mut self.data));
+            }
+        }
+    }
+}
+
 /// A frame, shared between the slots it fills.
-pub type Frame = Arc<Vec<u8>>;
+pub type Frame = Arc<Buffer>;
 
 /// When the recording ends, said once by whoever finishes it, to the writers of the video and the sound.
 #[derive(Default)]
@@ -56,6 +94,9 @@ pub struct FrameSender {
     sender: SyncSender<(Duration, Frame)>,
     origin: Origin,
     lost: Arc<AtomicU64>,
+    /// The buffers of frames that have been written, to fill again.
+    pool: Arc<Mutex<Vec<Vec<u8>>>>,
+    spare: usize,
 }
 
 impl FrameSender {
@@ -67,14 +108,34 @@ impl FrameSender {
             sender,
             origin,
             lost: Arc::default(),
+            pool: Arc::default(),
+            // The queue's, and the slots in hand.
+            spare: queued + 2,
         };
         (sender, frames)
+    }
+
+    /// A buffer to put a frame in, empty: one a frame written already left, if there is one.
+    pub fn buffer(&self) -> Vec<u8> {
+        let mut buffer = self
+            .pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default();
+        buffer.clear();
+        buffer
     }
 
     /// Hand over `frame`, drawn at `drawn`. If the writer has fallen so far behind that [`QUEUED`] frames wait, the frame is dropped, and counted, rather than the render loop waiting; returns whether it was sent.
     pub fn send(&self, drawn: Instant, frame: Vec<u8>) -> bool {
         let at = self.origin.since(drawn);
-        match self.sender.try_send((at, Arc::new(frame))) {
+        let buffer = Buffer {
+            data: frame,
+            pool: Arc::downgrade(&self.pool),
+            spare: self.spare,
+        };
+        match self.sender.try_send((at, Arc::new(buffer))) {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 self.lost.fetch_add(1, Ordering::Relaxed);
@@ -120,14 +181,18 @@ pub fn write(
         let lead = clock.interval() * LEAD;
         loop {
             let ended = ending.at();
+            // The time is read before the frames are, so that every frame drawn before it is among them.
+            let elapsed = origin.elapsed();
             while let Ok((at, frame)) = frames.try_recv() {
                 pacer.draw(at, frame);
             }
             // A recording that ended before its first frame was drawn is black for its length.
             if ended.is_some() && !pacer.ready() {
-                pacer.draw(Duration::ZERO, Arc::new(vec![0; frame_bytes]));
+                pacer.draw(
+                    Duration::ZERO,
+                    Arc::new(Buffer::plain(vec![0; frame_bytes])),
+                );
             }
-            let elapsed = origin.elapsed();
             let slots = match ended {
                 Some(end) => clock.frames_in(end),
                 None => elapsed.checked_sub(lead).map_or(0, |time| clock.due(time)),

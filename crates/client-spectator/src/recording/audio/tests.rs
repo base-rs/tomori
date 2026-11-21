@@ -582,3 +582,45 @@ fn without_the_thread_to_render_it_the_sound_cannot_be_recorded_and_the_connecti
         "Cannot start the thread that renders the recording's sound: the system refused to start tomori-record-player"
     );
 }
+
+#[test]
+fn the_sound_stays_within_the_tolerance_of_the_clock_however_the_callbacks_vary() {
+    // A device whose callbacks come every 10 ms of its own clock, which runs 100 parts in a million fast against the recording's, with each callback up to 15 ms early or late, and now and then a stall of up to 200 ms after which they come in a burst. The block's time is when it was rendered, and the sound is never further from the clock than the tolerance, after any block.
+    let mut aligner = Aligner::default();
+    let mut bytes = Vec::new();
+    let mut seed = 12_345_u64;
+    let mut random = move |below: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % below
+    };
+    let (mut worst, mut previous) = (0_i64, Duration::ZERO);
+    let mut stalled_until = Duration::ZERO;
+    for index in 1..=6_000_u64 {
+        let ideal = Duration::from_nanos(index * 9_999_000);
+        let jitter = random(31) as i64 - 15;
+        let mut at = if jitter < 0 {
+            ideal.saturating_sub(millis(-jitter as u64))
+        } else {
+            ideal + millis(jitter as u64)
+        };
+        if random(200) == 0 {
+            stalled_until = ideal + millis(random(200));
+        }
+        // After a stall they come together, at the time it ended; and they never go back in time.
+        at = at.max(stalled_until).max(previous);
+        previous = at;
+        aligner.block(&stereo(at, 480, 1), &mut bytes);
+        bytes.clear();
+        let off = aligner.written() as i64 - frames_in(at);
+        worst = worst.max(off.abs());
+        assert!(
+            off.abs() <= TOLERANCE,
+            "block {index} at {at:?} is {off} frames off"
+        );
+    }
+    // It is corrected, at a cost of silence or of sound left out, and not left to drift.
+    assert!(aligner.padded + aligner.trimmed > 0);
+    assert!(worst > 0);
+}

@@ -51,6 +51,26 @@ struct Parts {
     reader: JoinHandle<()>,
 }
 
+/// How long the encoder's last messages are waited for once it has ended: a process it left behind may hold them open.
+const MESSAGES: Duration = Duration::from_secs(2);
+
+/// Puts the signals back as they were when it goes.
+struct Restore;
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        signals::release();
+    }
+}
+
+/// Whether the encoder finished the file at `path`, with `status` and having said `said`. A zero status does. So does 255 with nothing said at the level it is run at, errors, and a file: that is how ffmpeg ends when it is sent SIGTERM, as by a supervisor that ends the whole group, after it has written the file's index.
+fn finished(status: std::process::ExitStatus, said: &str, path: &std::path::Path) -> bool {
+    status.success()
+        || (status.code() == Some(255)
+            && said.is_empty()
+            && std::fs::metadata(path).is_ok_and(|file| file.len() > 0))
+}
+
 /// End an encoder of a recording that could not start.
 fn abandon(mut child: Child) {
     let _ = child.kill();
@@ -133,6 +153,17 @@ impl Session {
         stop: Stop,
         limits: Limits,
     ) -> Result<Self> {
+        Self::launch_at(Origin::default(), options, command, stop, limits)
+    }
+
+    /// [`launch`](Self::launch), for a recording whose time is `origin`'s, which a test sets by hand.
+    fn launch_at(
+        origin: Origin,
+        options: &RecordOptions,
+        command: std::process::Command,
+        stop: Stop,
+        limits: Limits,
+    ) -> Result<Self> {
         let process::Launched {
             child,
             video,
@@ -140,7 +171,6 @@ impl Session {
             said,
             reader,
         } = process::launch(command)?;
-        let origin = Origin::default();
         let clock = FrameClock::new(options.fps);
         let ending = Arc::new(Ending::default());
         let frame_bytes = options.size.0 as usize * options.size.1 as usize * 4;
@@ -235,8 +265,8 @@ impl Session {
         else {
             bail!("the recording has finished already");
         };
-        // A second Ctrl+C while the file is finished ends the program at once; the encoder, in a group of its own, goes on to write the file.
-        signals::release();
+        // A second Ctrl+C while the file is finished ends the program at once, the encoder, in a group of its own, going on to write the file; the signals are as they were once it is.
+        let _restore = Restore;
         let end = self.origin.elapsed();
         self.tap.close();
         self.ending.end(end);
@@ -273,8 +303,8 @@ impl Session {
             }
             std::thread::sleep(Duration::from_millis(5));
         };
-        let _ = reader.join();
-        if !status.success() {
+        process::join_within(reader, MESSAGES);
+        if !finished(status, &said.summary(), &self.options.path) {
             bail!(
                 "ffmpeg failed with {status} and {} may not play: {}",
                 self.options.path.display(),
