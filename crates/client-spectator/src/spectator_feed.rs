@@ -348,8 +348,20 @@ impl Feed {
         }
         self.up = up;
 
-        // Determine which participant to follow.
+        // Determine which participant to follow, and forget those who have left.
         self.update_following(&presence);
+        let space = self.conversation.joined_space();
+        presence.forget_absent(
+            |source| {
+                space.is_some_and(|(space, _)| {
+                    space
+                        .participants
+                        .iter()
+                        .any(|participant| participant.source == source)
+                })
+            },
+            now,
+        );
 
         let followed = presence.view(self.following, view);
         drop(presence);
@@ -906,6 +918,8 @@ mod tests {
 
     #[test]
     fn the_s_key_s_smoothing_is_chosen_cycled_and_logged() {
+        // The window's S key logs alike, and its test may run alongside this one.
+        let _alone = crate::test_log::exclusive();
         let watch = crate::test_log::watch("Spectator: smoothing ");
         // Light, unless asked, and as asked.
         let mut feed = feed(SpectatorOptions::new());
@@ -1262,6 +1276,11 @@ mod tests {
         bea.send(ClientMessage::Leave);
         until(&mut feed, |feed| feed.following.is_none());
         assert_eq!(feed.following_name, None);
+        // Her presence is kept a while, in case the space has yet to name a sender, and forgotten once she has been gone for long.
+        assert_eq!(feed.kept().reports().count(), 1);
+        let later = Instant::now() + std::time::Duration::from_secs(60);
+        feed.poll_at(16.0 / 9.0, later, later);
+        assert_eq!(feed.kept().reports().count(), 0);
     }
 
     #[test]

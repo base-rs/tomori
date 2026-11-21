@@ -83,6 +83,8 @@ fn blend_controller(from: Option<Pose>, to: Option<Pose>, fraction: f32) -> Opti
 pub(super) struct Track {
     /// The latest report, as it came, whether or not it is usable.
     latest: Presence,
+    /// When the latest report arrived.
+    heard: Option<Instant>,
     samples: VecDeque<Sample>,
     /// The observed interval between reports, in seconds.
     interval: f64,
@@ -106,6 +108,7 @@ impl Default for Track {
                 hands: None,
                 hidden: false,
             },
+            heard: None,
             samples: VecDeque::with_capacity(CAPACITY),
             interval: INTERVAL,
             interrupted: false,
@@ -118,6 +121,14 @@ impl Default for Track {
 }
 
 impl Track {
+    pub fn heard(&self) -> Option<Instant> {
+        self.heard
+    }
+
+    pub fn heard_at(&mut self, arrived: Instant) {
+        self.heard = Some(arrived);
+    }
+
     pub fn latest(&self) -> &Presence {
         &self.latest
     }
@@ -138,6 +149,12 @@ impl Track {
     /// Keep a report that arrived `at` seconds after the first, cutting where the head jumped, after a gap or a lost connection. A cut is where the participant is, not a motion to it, so that the time before it, which nothing was seen of, is left out of the reports' times but for one interval.
     pub fn push(&mut self, at: f64, presence: Presence) {
         self.latest = presence;
+        if presence.hidden {
+            // They asked not to be drawn: nothing they report until they let others see them is kept, so that what is drawn of them then begins where they are, not a moment before.
+            self.samples.clear();
+            self.restart();
+            return;
+        }
         if !usable(&presence.head) {
             return;
         }

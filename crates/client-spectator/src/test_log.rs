@@ -52,6 +52,14 @@ pub fn record() {
     });
 }
 
+/// Held by tests whose records are about the same text, so that one test's records are not another's: a feed's S key and a window's, which log alike. Each takes it before it acts or watches, and holds it until it has read what it watched for.
+pub fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static ALONE: Mutex<()> = Mutex::new(());
+    ALONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Records that contain the text a test watches for, from when it began watching until it is dropped.
 pub struct Watch(Arc<Watched>);
 

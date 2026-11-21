@@ -6,7 +6,7 @@
 //! Presence arrives at a lower and more uneven rate than the spectator draws, 20 times a second at most from the server and later still for a busy network, and carries the head's natural tremor and its quick glances, so that a view that takes each report as it comes steps on the network's timing and shakes. Two stages, both on the render thread and neither allocating once a participant's buffer exists, make it continuous:
 //!
 //! 1. *Interpolation* ([`track`]). Each participant's reports are kept with when they arrived, in a short fixed buffer, and the view is drawn from a playhead that runs a small delay behind the newest, one and a half or two reports' intervals as observed, bounded, interpolating the position linearly and the orientation along the shortest arc between the reports on either side of it. A gap holds the last pose, and the playhead catches up at a bounded speed when reports resume; a jump of the head too far to have been walked, a teleport, a gap too long to be a delay, a reconnection, or following someone else, is cut, not interpolated.
-//! 2. *Filtering* ([`filter`]). A One Euro filter on the interpolated position and orientation: a low-pass whose cutoff rises with the speed of the head, so that a still head's tremor is smoothed heavily while a deliberate turn is followed within a few frames. The orientation is filtered as a rotation from the filtered one, the quaternion renormalised, so that it is always valid, and its roll about the view axis is damped more than its yaw and pitch, to keep the horizon level.
+//! 2. *Filtering* ([`filter`]). A One Euro filter on the interpolated position and orientation: a low-pass whose cutoff rises with the speed of the head, so that a still head's tremor is smoothed heavily while a deliberate turn is followed within a few frames. The orientation is filtered as a rotation from the filtered one, the quaternion renormalised, so that it is always valid, and its roll, measured against the horizon, is damped more than its yaw and pitch, to keep the horizon level.
 //!
 //! The delay is the price: the view lags the participant by about a tenth of a second, which a flat screen shows no one. The delay and the filter are chosen per level, [`Smoothing`], by [`Tuning`]; `off` is the view taken straight from the latest report, as it was before.
 mod filter;
@@ -88,11 +88,11 @@ pub(crate) struct Tuning {
     pub position: Cutoff,
     /// The orientation's cutoff, against the head's angular speed.
     pub orientation: Cutoff,
-    /// What the orientation's cutoff is multiplied by for the roll about the view axis, so that the horizon stays level more than the view steadies in yaw and pitch.
+    /// What the orientation's cutoff is multiplied by for the roll, the tilting of the horizon (see [`filter`]), so that the horizon stays level more than the view steadies in yaw and pitch.
     pub roll: f32,
 }
 
-/// Light: a delay of one and a half reports' intervals, 60 to 150 ms; a still head's position smoothed at 3 Hz and its orientation at 1.5 Hz, with the roll at 0.75 Hz, rising by 1 Hz for each metre or radian a second, so that a turn of a quarter turn a second is followed within about 60 ms.
+/// Light: a delay of one and a half reports' intervals, 60 to 150 ms; a still head's position smoothed at 1.2 Hz and its orientation at 0.8 Hz, with the roll at 0.4 Hz, each rising by 1.5 Hz for each metre or radian a second, so that a quarter turn a second is followed within about 50 ms.
 pub(crate) const LIGHT: Tuning = Tuning {
     delay_intervals: 1.5,
     min_delay: 0.06,
@@ -111,7 +111,7 @@ pub(crate) const LIGHT: Tuning = Tuning {
     roll: 0.5,
 };
 
-/// Cinematic: a delay of two reports' intervals, 100 to 250 ms; a still head's position smoothed at 1 Hz and its orientation at 0.6 Hz, the roll at 0.18 Hz, rising by 0.3 and 0.4 Hz for each metre or radian a second, so that it glides and a quick glance becomes a slow pan.
+/// Cinematic: a delay of two reports' intervals, 100 to 250 ms; a still head's position smoothed at 0.5 Hz and its orientation at 0.3 Hz, the roll at 0.09 Hz, rising by 0.4 and 0.5 Hz for each metre or radian a second, so that it glides and a quick glance becomes a slow pan.
 pub(crate) const CINEMATIC: Tuning = Tuning {
     delay_intervals: 2.0,
     min_delay: 0.10,
@@ -135,6 +135,9 @@ pub(crate) const TELEPORT: f32 = 1.0;
 
 /// The longest silence, in seconds, that is a gap the view holds through and catches up from. Longer is a participant coming back: the view goes to where they are.
 pub(crate) const GAP: f64 = 1.0;
+
+/// How long a participant the space does not name is kept after their last report.
+pub(crate) const ABSENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A participant's latest presence report, as relayed by the server, and whether they asked not to be drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -194,7 +197,9 @@ impl Smoother {
     pub fn push(&mut self, source: u32, arrived: Instant, presence: Presence) {
         let origin = *self.origin.get_or_insert(arrived);
         let at = arrived.saturating_duration_since(origin).as_secs_f64();
-        self.tracks.entry(source).or_default().push(at, presence);
+        let track = self.tracks.entry(source).or_default();
+        track.heard_at(arrived);
+        track.push(at, presence);
     }
 
     /// The latest report of `source`, whatever the level.
@@ -206,6 +211,16 @@ impl Smoother {
     #[cfg(test)]
     pub fn reports(&self) -> impl Iterator<Item = &Presence> {
         self.tracks.values().map(Track::latest)
+    }
+
+    /// Forget the participants `present` does not name, not heard from for [`ABSENCE`] as of `now`: those who left, so that what is kept is bounded by who is in the space, not by who has been. A report can come before the space names its sender, so those just heard from stay.
+    pub fn forget_absent(&mut self, present: impl Fn(u32) -> bool, now: Instant) {
+        self.tracks.retain(|source, track| {
+            present(*source)
+                || track
+                    .heard()
+                    .is_some_and(|heard| now.saturating_duration_since(heard) < ABSENCE)
+        });
     }
 
     /// How many participants' first reports after this will be cuts, because the connection was lost.

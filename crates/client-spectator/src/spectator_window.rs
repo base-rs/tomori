@@ -440,7 +440,8 @@ mod tests {
             assert_eq!(demo.spectator.feed.duck_under(), crate::DuckUnder::Everyone);
             input(&mut demo, &mut surface, key(KeyCode::KeyD));
             assert_eq!(demo.spectator.feed.duck_under(), crate::DuckUnder::Played);
-            // S cycles through the smoothing of the camera, light to begin with, showing nothing.
+            // S cycles through the smoothing of the camera, light to begin with, showing nothing. It logs, as the feed's test watches for.
+            let alone = crate::test_log::exclusive();
             assert_eq!(demo.spectator.feed.smoothing(), crate::Smoothing::Light);
             for smoothing in [
                 crate::Smoothing::Cinematic,
@@ -450,6 +451,7 @@ mod tests {
                 input(&mut demo, &mut surface, key(KeyCode::KeyS));
                 assert_eq!(demo.spectator.feed.smoothing(), smoothing);
             }
+            drop(alone);
             assert_eq!(surface.titles, Vec::<String>::new());
             input(
                 &mut demo,

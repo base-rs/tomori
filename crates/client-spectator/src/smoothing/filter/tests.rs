@@ -4,7 +4,7 @@
 use super::*;
 use crate::smoothing::{
     CINEMATIC, LIGHT,
-    traces::{Noise, angle, deviation, orientation},
+    traces::{Noise, angle, deviation, orientation, tilt},
 };
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -231,18 +231,139 @@ fn roll_is_damped_more_than_yaw_and_pitch() {
 }
 
 #[test]
-fn roll_is_the_rotation_about_the_view_axis_even_when_looking_up() {
-    // Pitched 60 degrees up, a rotation about the view axis is still the roll, damped as ever.
-    let looking = orientation(0.8, 1.0, 0.0);
-    let after = |extra: Quat| {
-        let mut filter = Filter::new(head(Vec3::ZERO, looking), 0);
-        let mut output = filter.output();
-        for _ in 0..15 {
-            output = filter.step(head(Vec3::ZERO, looking * extra), FRAME, &LIGHT);
+fn the_axis_that_tilts_the_horizon_is_the_view_axis_when_level_and_turns_with_the_pitch() {
+    // Level: the view axis. Pitched: between it and the camera's own Y axis, in their plane, unit, and square to the right vector.
+    for pitch in [0.0_f32, 0.3, 0.8, 1.2, -0.8, -1.2] {
+        let q = orientation(0.7, pitch, 0.0);
+        let axis = horizon_axis(q);
+        assert!(
+            (axis.length() - 1.0).abs() < 1e-5 && axis.x.abs() < 1e-6,
+            "{pitch}: {axis}"
+        );
+        // It is the camera's Z axis turned by the pitch: its world-vertical part is the horizon's tilt rate.
+        assert!(
+            (axis - Vec3::new(0.0, pitch.sin(), pitch.cos())).length() < 1e-5,
+            "{pitch}: {axis}"
+        );
+    }
+    // Straight up or down: the camera's Y axis, a turn about which is not a turn of the horizon; never NaN.
+    for pitch in [FRAC_PI_2, -FRAC_PI_2] {
+        let axis = horizon_axis(orientation(0.4, pitch, 0.0));
+        assert!(
+            (axis.length() - 1.0).abs() < 1e-5 && axis.is_finite(),
+            "{pitch}: {axis}"
+        );
+        assert!(axis.y.abs() > 0.999, "{pitch}: {axis}");
+    }
+    // On its side there is none, so the view axis.
+    assert_eq!(horizon_axis(orientation(0.0, 0.0, FRAC_PI_2)), Vec3::Z);
+}
+
+/// A head that turns about the world's vertical by `turn`, from `pitch`, over `frames` frames; the largest tilt of the horizon the filter's output has on the way, and how many frames it takes to cover nine tenths of the turn.
+fn world_turn(tuning: &Tuning, pitch: f32, turn: f32, frames: usize) -> (f32, usize) {
+    let start = orientation(0.0, pitch, 0.0);
+    let mut filter = Filter::new(head(Vec3::ZERO, start), 0);
+    let (mut worst, mut covered) = (0.0f32, usize::MAX);
+    for frame in 1..=600 {
+        let yaw = turn * (frame as f32 / frames as f32).min(1.0);
+        let output = filter.step(
+            head(Vec3::ZERO, orientation(yaw, pitch, 0.0)),
+            FRAME,
+            tuning,
+        );
+        worst = worst.max(tilt(output.orientation).abs());
+        if covered == usize::MAX && angle(start, output.orientation) >= 0.9 * turn.abs() {
+            covered = frame;
         }
-        angle(looking, output.orientation) / angle(Quat::IDENTITY, extra)
-    };
-    assert!(after(Quat::from_rotation_z(0.1)) < after(Quat::from_rotation_y(0.1)) * 0.9);
+    }
+    (worst, covered)
+}
+
+#[test]
+fn a_turn_about_the_vertical_at_any_pitch_does_not_tilt_the_horizon_and_is_followed_as_at_pitch_zero()
+ {
+    let mut levelled = Vec::new();
+    for tuning in [&LIGHT, &CINEMATIC] {
+        let (_, level) = world_turn(tuning, 0.0, FRAC_PI_2, 30);
+        for degrees in [0.0_f32, 15.0, 30.0, 45.0, 70.0, -45.0] {
+            let (worst, covered) = world_turn(tuning, degrees.to_radians(), FRAC_PI_2, 30);
+            // No tilt at all, within rounding; and covered as quickly as level, a frame either way.
+            assert!(worst < 0.1, "{degrees}: {worst}");
+            assert!(
+                covered.abs_diff(level) <= 1,
+                "{degrees}: {covered} against {level}"
+            );
+        }
+        levelled.push(level as f32 * FRAME);
+    }
+    // And that is as quickly as a quarter turn in half a second is followed: within the level's bound after it ends.
+    assert!(
+        levelled[0] <= 0.5 + 0.35 && levelled[1] <= 0.5 + 0.7,
+        "{levelled:?}"
+    );
+}
+
+#[test]
+fn a_deliberate_tilt_of_the_head_arrives_but_later_than_a_turn_at_any_pitch() {
+    for tuning in [&LIGHT, &CINEMATIC] {
+        for degrees in [0.0_f32, 30.0, 60.0] {
+            let looking = orientation(0.5, degrees.to_radians(), 0.0);
+            let tilted = looking * Quat::from_rotation_z(0.3);
+            let (mut roll, mut turn) = (
+                Filter::new(head(Vec3::ZERO, looking), 0),
+                Filter::new(head(Vec3::ZERO, looking), 0),
+            );
+            let turned = orientation(0.8, degrees.to_radians(), 0.0);
+            let (mut rolled, mut yawed) = (0, 0);
+            for frame in 1..=600 {
+                let a = roll
+                    .step(head(Vec3::ZERO, tilted), FRAME, tuning)
+                    .orientation;
+                let b = turn
+                    .step(head(Vec3::ZERO, turned), FRAME, tuning)
+                    .orientation;
+                if rolled == 0 && tilt(a).abs() >= 0.9 * tilt(tilted).abs() {
+                    rolled = frame;
+                }
+                if yawed == 0 && angle(looking, b) >= 0.9 * angle(looking, turned) {
+                    yawed = frame;
+                }
+            }
+            // The tilt arrives, within a few seconds, and later than an equal turn, which is let through.
+            assert!(rolled > 0 && rolled < 300, "{degrees}: {rolled}");
+            assert!(rolled > yawed, "{degrees}: {rolled} {yawed}");
+        }
+    }
+}
+
+#[test]
+fn looking_straight_up_or_down_neither_jumps_nor_goes_bad() {
+    for pitch in [FRAC_PI_2, -FRAC_PI_2, FRAC_PI_2 - 1e-4, FRAC_PI_2 - 1e-2] {
+        for tuning in [&LIGHT, &CINEMATIC] {
+            let mut noise = Noise::new(5);
+            let mut filter = Filter::new(head(Vec3::ZERO, orientation(0.0, pitch, 0.0)), 0);
+            let mut previous = filter.output().orientation;
+            for frame in 0..600 {
+                // Turning about the vertical with tremor, as a head looking at the ceiling would.
+                let yaw = frame as f32 * 0.02 + noise.next() * 0.004;
+                let input = orientation(yaw, pitch, noise.next() * 0.004);
+                let output = filter
+                    .step(head(Vec3::ZERO, input), FRAME, tuning)
+                    .orientation;
+                assert!(
+                    output.is_finite() && (output.length() - 1.0).abs() < 1e-5,
+                    "{pitch}: {frame}"
+                );
+                // It follows a steady turn of 1.2 rad/s without a jump: no frame moves further than a few times the turn.
+                assert!(
+                    angle(previous, output) < 0.05,
+                    "{pitch}: {frame}: {}",
+                    angle(previous, output)
+                );
+                previous = output;
+            }
+        }
+    }
 }
 
 #[test]

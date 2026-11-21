@@ -3,7 +3,9 @@
 
 //! A One Euro filter ([Casiez, Roussel and Vogel, CHI 2012](https://gery.casiez.net/1euro/)) on a head's position and orientation: a first-order low-pass whose cutoff is `min_cutoff + beta × speed`, so that a still head is smoothed heavily, which is where tremor shows, and a moving one is followed, which is where lag does. The speed is itself low-passed at 1 Hz, so that one noisy frame does not open the filter.
 //!
-//! The orientation is filtered as a rotation: the filtered orientation moves towards the input by a fraction of the rotation between them, found along the shortest arc and expressed about the filtered orientation's own axes, and is renormalised, so that it is a unit quaternion whatever the input. Its Z axis is the view axis, so the fraction for the rotation about it, the roll, is the others' times `tuning.roll`, less than one: roll is damped more than yaw and pitch, which keeps the horizon level without forcing the head upright, since a deliberate tilt still arrives, later.
+//! The orientation is filtered as a rotation: the filtered orientation moves towards the input by a fraction of the rotation between them, found along the shortest arc and expressed about the filtered orientation's own axes, and is renormalised, so that it is a unit quaternion whatever the input. The fraction for the part of the rotation that tilts the horizon, the roll, is the rest's times `tuning.roll`, less than one: roll is damped more than yaw and pitch, which keeps the horizon level without forcing the head upright, since a deliberate tilt still arrives, later.
+//!
+//! The roll is measured against the horizon, not the view axis: a turn about the world's vertical, at any pitch, has a component about the view axis that is the sine of the pitch, and damping that as roll would curve the turn and tilt the horizon. So the rotation is split about the axis in the view's Y–Z plane that tilts the camera's right vector out of the horizontal ([`horizon_axis`]), which is the view axis when looking level and turns towards the camera's own Y axis as it pitches up or down, and about the others, which tilt nothing. Looking straight up or down the split is still well defined, since the view axis is then a turn about the vertical, which is let through; only a camera rolled a quarter turn has no such axis, and then the view axis is used.
 use super::{Placed, Tuning};
 use glam::{Quat, Vec3};
 use std::f32::consts::TAU;
@@ -24,6 +26,18 @@ pub(super) fn rotation_vector(q: Quat) -> Vec3 {
         q.xyz() * 2.0
     } else {
         q.xyz() / sine * (2.0 * sine.atan2(q.w))
+    }
+}
+
+/// The axis, in the view's own axes, that a rotation of the camera tilts its horizon about: the camera's right vector leaves the horizontal plane as the camera turns about it, by the rate of the rotation's part along it, and a turn about any axis at right angles to it, the right vector itself, or the world's vertical, leaves it be. The view axis, Z, when the camera is level; the Y axis when it looks straight up or down; and Z again when the camera lies on its side, where no axis does.
+pub(super) fn horizon_axis(orientation: Quat) -> Vec3 {
+    let up = orientation.conjugate() * Vec3::Y;
+    let axis = Vec3::new(0.0, -up.z, up.y);
+    let length = axis.length();
+    if length < 1e-3 {
+        Vec3::Z
+    } else {
+        axis / length
     }
 }
 
@@ -79,13 +93,10 @@ impl Filter {
         let rest = factor(cutoff, dt);
         let roll = factor(cutoff * tuning.roll, dt);
         let remaining = rotation_vector(self.orientation.conjugate() * head.orientation);
-        self.orientation = (self.orientation
-            * Quat::from_scaled_axis(Vec3::new(
-                rest * remaining.x,
-                rest * remaining.y,
-                roll * remaining.z,
-            )))
-        .normalize();
+        let tilting = horizon_axis(self.orientation);
+        let tilt = remaining.dot(tilting);
+        let moved = (remaining - tilting * tilt) * rest + tilting * (tilt * roll);
+        self.orientation = (self.orientation * Quat::from_scaled_axis(moved)).normalize();
         self.output()
     }
 }

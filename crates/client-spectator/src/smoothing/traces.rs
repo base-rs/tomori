@@ -55,6 +55,15 @@ pub(super) fn angle(from: Quat, to: Quat) -> f32 {
     from.angle_between(to)
 }
 
+/// How far the camera's horizon is tilted, in degrees: the elevation of its right vector above the horizontal plane.
+pub(super) fn tilt(orientation: Quat) -> f32 {
+    (orientation * Vec3::X)
+        .y
+        .clamp(-1.0, 1.0)
+        .asin()
+        .to_degrees()
+}
+
 /// The standard deviation of `values`.
 pub(super) fn deviation(values: &[f32]) -> f32 {
     let mean = values.iter().sum::<f32>() / values.len() as f32;

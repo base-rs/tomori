@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 use super::{
-    traces::{Noise, Run, angle, arrivals, deviation, orientation, pose, report},
+    traces::{Noise, Run, angle, arrivals, deviation, orientation, pose, report, tilt},
     *,
 };
 use std::f32::consts::FRAC_PI_2;
@@ -556,6 +556,126 @@ fn a_deliberate_turn_is_followed_within_a_bounded_delay() {
         let last = frames.last().unwrap().1.head.orientation;
         assert!(angle(last, orientation(FRAC_PI_2, 0.0, 0.0)) < 1.0_f32.to_radians());
     }
+}
+
+#[test]
+fn a_turn_about_the_vertical_keeps_the_horizon_level_and_is_followed_in_time_at_any_pitch() {
+    // Still, a quarter turn about the world's vertical in half a second, and still, at each pitch, as a viewer looking down at a wall of charts, or up at a ceiling, turns.
+    for (level, bound) in [(Smoothing::Light, 0.35), (Smoothing::Cinematic, 0.7)] {
+        for degrees in [0.0_f32, 30.0, 45.0, 70.0, -45.0] {
+            let pitch = degrees.to_radians();
+            let turning = |second: f64| Placed {
+                position: at(0.0),
+                orientation: orientation(
+                    FRAC_PI_2 * ((second - 2.0) / 0.5).clamp(0.0, 1.0) as f32,
+                    pitch,
+                    0.0,
+                ),
+            };
+            let mut run = Run::new(level);
+            run.queue(arrivals(turning, (0.0, 6.0), (0.03, 0.01), 3));
+            let frames = run.play(SOURCE, (1.0, 6.0), FPS);
+            // The horizon stays within a degree, nothing of the turn being taken for a tilt.
+            let worst = frames
+                .iter()
+                .map(|(_, view)| tilt(view.head.orientation).abs())
+                .fold(0.0, f32::max);
+            assert!(worst <= 1.0, "{level:?} at {degrees}: {worst}");
+            // Nine tenths of the turn is drawn within the bound of the head's reaching it, whatever the pitch.
+            let start = orientation(0.0, pitch, 0.0);
+            let reached = frames
+                .iter()
+                .find(|(_, view)| angle(start, view.head.orientation) >= 0.9 * FRAC_PI_2)
+                .map(|(second, _)| *second)
+                .unwrap();
+            let delay = reached - 2.45;
+            assert!(
+                delay > 0.0 && delay <= bound,
+                "{level:?} at {degrees}: {delay}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deliberate_tilt_of_the_head_still_arrives_damped() {
+    // Still, then tilted by 20 degrees about the view axis in half a second while looking 30 degrees down: within a tenth of it some seconds on.
+    for level in [Smoothing::Light, Smoothing::Cinematic] {
+        let pitch = -30.0_f32.to_radians();
+        let tilting = |second: f64| Placed {
+            position: at(0.0),
+            orientation: orientation(
+                0.0,
+                pitch,
+                0.35 * ((second - 2.0) / 0.5).clamp(0.0, 1.0) as f32,
+            ),
+        };
+        let mut run = Run::new(level);
+        run.queue(arrivals(tilting, (0.0, 8.0), (0.03, 0.01), 3));
+        let frames = run.play(SOURCE, (1.0, 8.0), FPS);
+        let end = tilt(tilting(8.0).orientation);
+        let (_, last) = frames.last().unwrap();
+        assert!(
+            (tilt(last.head.orientation) - end).abs() < 0.1 * end.abs(),
+            "{level:?}"
+        );
+        // It lags the head's tilt by more than a turn would: at 2.6 s, a tenth of a second after it ends, short of nine tenths.
+        let soon = frames.iter().find(|(second, _)| *second >= 2.6).unwrap();
+        assert!(tilt(soon.1.head.orientation) < 0.9 * end, "{level:?}");
+    }
+}
+
+#[test]
+fn nothing_reported_while_hidden_is_drawn_once_they_let_others_see_them() {
+    let hidden = |position: Vec3| Presence {
+        hidden: true,
+        ..report(position, Quat::IDENTITY)
+    };
+    let mut run = Run::new(Smoothing::Light);
+    // Seen, then asking not to be drawn and moving to 0.8 m a report, then seen again 5 m back where they began.
+    for count in 0..10 {
+        run.arrive(SOURCE, count as f64 * 0.05, report(at(0.0), Quat::IDENTITY));
+    }
+    for count in 10..40 {
+        let second = count as f64 * 0.05;
+        run.arrive(SOURCE, second, hidden(at(count as f32 * 0.8)));
+    }
+    assert!(run.smoother.latest(SOURCE).unwrap().hidden);
+    // Nothing of it is kept to be drawn.
+    assert!(run.smoother.view(Some(SOURCE), run.at(2.0)).is_none());
+    run.arrive(SOURCE, 2.0, report(at(-5.0), Quat::IDENTITY));
+    run.arrive(SOURCE, 2.05, report(at(-5.0), Quat::IDENTITY));
+    for frame in 0..30 {
+        let second = 2.05 + frame as f64 / FPS;
+        let view = run.smoother.view(Some(SOURCE), run.at(second)).unwrap();
+        // Where they are, from the first frame, and never where they were while hidden.
+        assert_eq!(view.head.position, at(-5.0), "{frame}");
+    }
+    assert!(!run.smoother.latest(SOURCE).unwrap().hidden);
+}
+
+#[test]
+fn participants_who_have_left_are_forgotten_after_a_while_and_those_just_heard_from_are_not() {
+    let mut run = Run::new(Smoothing::Light);
+    for source in [1, 2, 3] {
+        run.arrive(source, 0.0, report(at(0.0), Quat::IDENTITY));
+    }
+    // 4 reports only just before.
+    run.arrive(4, 9.0, report(at(0.0), Quat::IDENTITY));
+    let present = |source: u32| source == 1;
+    // Not yet missed for long.
+    run.smoother.forget_absent(present, run.at(4.0));
+    assert_eq!(run.smoother.reports().count(), 4);
+    // Later, only those named, and those heard from within the time, are kept.
+    run.smoother.forget_absent(present, run.at(10.0));
+    assert!(run.smoother.latest(1).is_some() && run.smoother.latest(4).is_some());
+    assert!(run.smoother.latest(2).is_none() && run.smoother.latest(3).is_none());
+    run.smoother.forget_absent(present, run.at(20.0));
+    assert!(run.smoother.latest(4).is_none() && run.smoother.latest(1).is_some());
+    // A name nobody has reported is no one.
+    run.smoother
+        .forget_absent(|source| source == 7, run.at(30.0));
+    assert_eq!(run.smoother.reports().count(), 0);
 }
 
 #[test]
