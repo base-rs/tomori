@@ -65,6 +65,8 @@ pub struct Command {
     pub ambience: bool,
     /// Whose speech a spectator's ducking follows: the voices it plays, unless `--duck-under everyone` says otherwise.
     pub duck_under: tomori_client_spectator::DuckUnder,
+    /// How much a spectator smooths its camera: lightly, unless `--smoothing` says otherwise.
+    pub smoothing: tomori_client_spectator::Smoothing,
     /// Whether a spectator's window, or its PipeWire preview's, is borderless, as `--borderless` asks, rather than decorated.
     pub borderless: bool,
     /// What `--spectator` records its output to, a video file with sound, as `--record` and its options ask, or none.
@@ -82,7 +84,7 @@ impl Command {
         overrides.server = server;
         overrides.token = token;
         let (mut space, mut follow, mut audio_output, mut mode) = (None, None, None, None);
-        let (mut voices, mut ambience, mut duck_under) = (None, None, None);
+        let (mut voices, mut ambience, mut duck_under, mut smoothing) = (None, None, None, None);
         let mut borderless = false;
         let mut recording = tomori_client_spectator::recording::options::RecordFlags::default();
         let mut arguments = arguments.into_iter();
@@ -116,6 +118,11 @@ impl Command {
                 "--duck-under" => {
                     duck_under = Some(tomori_client_spectator::cli::parse_duck_under(&value(
                         "played or everyone",
+                    )?)?)
+                }
+                "--smoothing" => {
+                    smoothing = Some(tomori_client_spectator::cli::parse_smoothing(&value(
+                        "off, light or cinematic",
                     )?)?)
                 }
                 _ if mode.is_none() => {
@@ -168,6 +175,10 @@ impl Command {
             duck_under.is_none() || mode.spectator(),
             "--duck-under applies only to the spectator modes; use --help"
         );
+        ensure!(
+            smoothing.is_none() || mode.spectator(),
+            "--smoothing applies only to the spectator modes; use --help"
+        );
         // The headless PipeWire source has no window to be borderless.
         ensure!(
             !borderless || matches!(mode, Mode::Spectator | Mode::SpectatorPipewirePreview),
@@ -201,6 +212,7 @@ impl Command {
             voices: voices.unwrap_or_default(),
             ambience: ambience.unwrap_or_default(),
             duck_under: duck_under.unwrap_or_default(),
+            smoothing: smoothing.unwrap_or_default(),
             borderless,
             record,
         })
@@ -229,6 +241,7 @@ impl Command {
         options.voices = self.voices;
         options.ambience = self.ambience;
         options.duck_under = self.duck_under;
+        options.smoothing = self.smoothing;
         options.borderless = self.borderless;
         options.record = self.record.clone();
         options.content = self.overrides.content.clone();
@@ -290,7 +303,7 @@ pub fn help(program: &str, drawable: &[tomori_scene::environment::Environment]) 
         .map(|environment| environment.id())
         .collect();
     format!(
-        "{program} [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--borderless] [--record FILE [--record-size WxH] [--record-fps N] [--record-codec h264|hevc] [--record-playback on|off] [--record-overwrite] [--no-window]] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view, in a window to move, resize or make full screen.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `{program} discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --voices WHICH    with the spectator modes, play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.\n  --ambience ON|OFF with the spectator modes, play the environment's ambience and ambient sounds beneath the voices, as the participant followed hears them (on), or not (off, the default, for a clean capture); A in the window turns it on and off.\n  --duck-under WHOSE  with the spectator modes, duck the agent's speech and the ambience under the voices played (played, the default) or under everyone's speech (everyone), measuring and never playing the voices --voices leaves out, so that someone presenting is not heard twice and is still spoken over quietly; D in the window switches.\n  --borderless      with --spectator or --spectator-pipewire-preview, show its window without a title bar or border, at least 1080p, for a clean capture into OBS or a shared screen.\n  --record FILE     with --spectator, also record what the window shows, and the sound it plays, to a video file, .mp4 or .mov, until the window closes, Ctrl-C, or the server disconnects; needs ffmpeg (on macOS: brew install ffmpeg). The window is its preview.\n  --record-size WxH with --record, the recording's size (default 1920x1080, up to 3840x2160), however the window is sized.\n  --record-fps N    with --record, the recording's constant frame rate (default 30, up to 120); a slow frame repeats the one before rather than losing time.\n  --record-codec NAME  with --record, h264 (default) or hevc; on macOS the hardware VideoToolbox encoder, elsewhere NVENC if there is a GPU for it, otherwise libx264 or libx265.\n  --record-playback ON|OFF  with --record, keep playing the sound to the speaker (on, the default) or record it alone (off).\n  --record-overwrite  with --record, replace FILE if it exists; otherwise it is refused.\n  --no-window       with --record, record without showing a window.\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
+        "{program} [MODE] [--server ADDRESS] [--name NAME] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--smoothing off|light|cinematic] [--borderless] [--record FILE [--record-size WxH] [--record-fps N] [--record-codec h264|hevc] [--record-playback on|off] [--record-overwrite] [--no-window]] [--audio-output NAME]\n\nModes:\n  (none)                  desktop window (no headset needed), without a server.\n  --desktop               take part in a server's spaces from a desktop window, as on the headset.\n  --xr                    use the desktop OpenXR runtime.\n  --console               show the headset's panel in the terminal, driven by typed commands.\n  discover                list the servers on the network; with --server ADDRESS, list that server's spaces too.\n  --spectator             render the live space as a read-only, participant-following view, in a window to move, resize or make full screen.\n  --spectator-pipewire    headless PipeWire video source (Linux; Ctrl-C to stop).\n  --spectator-pipewire-preview  PipeWire video source with preview window.\n                          The spectator modes are also the tomori-spectator executable: tomori-spectator, --pipewire and --pipewire-preview; see tomori-spectator --help.\n  --licenses              show the licenses of the bundled controller assets, transcoder, fonts and environments' assets.\n\nOptions:\n  --server ADDRESS  with --desktop, --xr, --console, discover (and the spectator modes), connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.\n  --name NAME       with --desktop, --xr or --console, the display name other participants see (default: this computer's name).\n  --token TOKEN     a token from the server, such as from `tomori-server auth mint`, presented to the server this device connects to and kept for it; TOMORI_TOKEN does the same.\n  --space ID        with the spectator modes, join this space (see `{program} discover --server ADDRESS`).\n  --follow NAME     with the spectator modes, follow this participant by name (default: the first in the space).\n  --voices WHICH    with the spectator modes, play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.\n  --ambience ON|OFF with the spectator modes, play the environment's ambience and ambient sounds beneath the voices, as the participant followed hears them (on), or not (off, the default, for a clean capture); A in the window turns it on and off.\n  --duck-under WHOSE  with the spectator modes, duck the agent's speech and the ambience under the voices played (played, the default) or under everyone's speech (everyone), measuring and never playing the voices --voices leaves out, so that someone presenting is not heard twice and is still spoken over quietly; D in the window switches.\n  --smoothing LEVEL with the spectator modes, smooth the camera that follows a participant's head, whose presence arrives unevenly, slower than the window draws, and shakes with their head: light (the default) interpolates it and filters out small jitter while following a turn within a tenth of a second; cinematic does so more, for demo footage, a steady camera that trails a quick glance by a fraction of a second; off takes each report as it comes. S in the window cycles through them. The recording's camera is smoothed on its own clock, so that its motion is as even as its frames.\n  --borderless      with --spectator or --spectator-pipewire-preview, show its window without a title bar or border, at least 1080p, for a clean capture into OBS or a shared screen.\n  --record FILE     with --spectator, also record what the window shows, and the sound it plays, to a video file, .mp4 or .mov, until the window closes, Ctrl-C, or the server disconnects; needs ffmpeg (on macOS: brew install ffmpeg). The window is its preview.\n  --record-size WxH with --record, the recording's size (default 1920x1080, up to 3840x2160), however the window is sized.\n  --record-fps N    with --record, the recording's constant frame rate (default 30, up to 120); a slow frame repeats the one before rather than losing time.\n  --record-codec NAME  with --record, h264 (default) or hevc; on macOS the hardware VideoToolbox encoder, elsewhere NVENC if there is a GPU for it, otherwise libx264 or libx265.\n  --record-playback ON|OFF  with --record, keep playing the sound to the speaker (on, the default) or record it alone (off).\n  --record-overwrite  with --record, replace FILE if it exists; otherwise it is refused.\n  --no-window       with --record, record without showing a window.\n  --audio-output NAME  with the spectator modes on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.\n\n--desktop controls:\n{}\n\nDesktop window controls: left mouse attract, right drag orbit, wheel zoom, E environment, R reset, Space pause, Esc quit.\nTOMORI_ENVIRONMENT={} selects the desktop window's initial environment (default {}); with a server, the space chooses it.",
         crate::DESKTOP_CONTROLS,
         choices.join("|"),
         Environment::first(drawable).id()
@@ -387,6 +400,8 @@ mod tests {
             "on",
             "--duck-under",
             "everyone",
+            "--smoothing",
+            "cinematic",
         ];
         let with_output = [&spectator[..], &["--audio-output", "sink"]].concat();
         // An output is a PipeWire node, so it is refused where there is no PipeWire.
@@ -410,6 +425,7 @@ mod tests {
                 options.voices,
                 options.ambience,
                 options.duck_under,
+                options.smoothing,
             ),
             (
                 Some("host:2"),
@@ -419,6 +435,7 @@ mod tests {
                 tomori_client_spectator::Hearing::Agent,
                 true,
                 tomori_client_spectator::DuckUnder::Everyone,
+                tomori_client_spectator::Smoothing::Cinematic,
             )
         );
         #[cfg(target_os = "linux")]
@@ -433,6 +450,7 @@ mod tests {
             ("--voices", "all, agent or none"),
             ("--ambience", "on or off"),
             ("--duck-under", "played or everyone"),
+            ("--smoothing", "off, light or cinematic"),
         ] {
             assert_eq!(
                 error(&["--desktop", option]),
@@ -563,6 +581,23 @@ mod tests {
                 .duck_under,
             tomori_client_spectator::DuckUnder::Played
         );
+        assert!(error(&["--desktop", "--smoothing", "off"]).starts_with("--smoothing applies"));
+        assert!(error(&["--spectator", "--smoothing", "heavy"]).starts_with("--smoothing takes"));
+        // The camera is smoothed lightly unless asked.
+        assert_eq!(
+            parse(&["--spectator"])
+                .unwrap()
+                .spectator_options()
+                .smoothing,
+            tomori_client_spectator::Smoothing::Light
+        );
+        assert_eq!(
+            parse(&["--spectator", "--smoothing", "off"])
+                .unwrap()
+                .spectator_options()
+                .smoothing,
+            tomori_client_spectator::Smoothing::Off
+        );
     }
 
     #[test]
@@ -659,6 +694,9 @@ mod tests {
         assert!(help.starts_with("tomori [MODE]"));
         assert!(help.contains("(see `tomori discover --server ADDRESS`)"));
         assert!(help.contains("also the tomori-spectator executable"));
+        assert!(help.contains("[--smoothing off|light|cinematic]"));
+        assert!(help.contains("--smoothing LEVEL with the spectator modes"));
+        assert!(help.contains("S in the window cycles through them"));
         assert!(
             help.contains("--borderless      with --spectator or --spectator-pipewire-preview")
         );

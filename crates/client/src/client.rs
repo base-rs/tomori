@@ -245,6 +245,11 @@ impl Client {
         self.events().try_recv().ok()
     }
 
+    /// The next event, if one is waiting, with when it arrived. See [`Events::try_recv_at`].
+    pub fn try_event_at(&self) -> Option<(Event, std::time::Instant)> {
+        self.events().try_recv_at().ok()
+    }
+
     /// Move received audio to another thread, typically to a [`crate::playback::Player`]. Returns `None` if already taken. Audio attributed to this client's own participant number is never delivered.
     pub fn take_audio(&mut self) -> Option<Receiver<AudioFrame>> {
         self.audio.take()

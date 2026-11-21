@@ -12,7 +12,7 @@ use crate::Event;
 
 #[derive(Default)]
 struct State {
-    queue: VecDeque<Event>,
+    queue: VecDeque<(Event, Instant)>,
     /// The connection thread has finished: nothing more will arrive.
     finished: bool,
 }
@@ -36,16 +36,17 @@ impl Events {
     }
 
     pub(crate) fn push(&self, event: Event) {
+        let arrived = Instant::now();
         let mut state = self.lock();
         if let Event::Message(ServerMessage::Presence { source, .. }) = &event {
             let source = *source;
-            if let Some(index) = state.queue.iter().position(|queued| {
+            if let Some(index) = state.queue.iter().position(|(queued, _)| {
                 matches!(queued, Event::Message(ServerMessage::Presence { source: queued, .. }) if *queued == source)
             }) {
                 state.queue.remove(index);
             }
         }
-        state.queue.push_back(event);
+        state.queue.push_back((event, arrived));
         drop(state);
         self.ready.notify_all();
     }
@@ -58,6 +59,11 @@ impl Events {
 
     /// The next event, if one is waiting.
     pub fn try_recv(&self) -> Result<Event, TryRecvError> {
+        self.try_recv_at().map(|(event, _)| event)
+    }
+
+    /// The next event, if one is waiting, with when it arrived, as the connection thread took it, rather than when the application takes it, so that a spectator can time the presence it renders by when it was sent, not by when it polls.
+    pub fn try_recv_at(&self) -> Result<(Event, Instant), TryRecvError> {
         let mut state = self.lock();
         match state.queue.pop_front() {
             Some(event) => Ok(event),
@@ -70,7 +76,7 @@ impl Events {
     pub fn recv(&self) -> Result<Event, RecvError> {
         let mut state = self.lock();
         loop {
-            if let Some(event) = state.queue.pop_front() {
+            if let Some((event, _)) = state.queue.pop_front() {
                 return Ok(event);
             }
             if state.finished {
@@ -88,7 +94,7 @@ impl Events {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
         loop {
-            if let Some(event) = state.queue.pop_front() {
+            if let Some((event, _)) = state.queue.pop_front() {
                 return Ok(event);
             }
             if state.finished {
@@ -152,6 +158,20 @@ mod tests {
         assert_eq!(events.try_recv(), Ok(presence(2, 9_999.0)));
         assert_eq!(events.try_recv(), Ok(Event::Message(ServerMessage::LEFT)));
         assert_eq!(events.try_recv(), Err(TryRecvError::Empty));
+    }
+
+    #[test]
+    fn an_event_is_taken_with_when_it_arrived() {
+        let events = Events::new();
+        let before = Instant::now();
+        events.push(presence(1, 0.0));
+        events.push(presence(1, 1.0));
+        let after = Instant::now();
+        // The replacing presence is stamped as it arrived, not as the one it replaced.
+        let (event, arrived) = events.try_recv_at().unwrap();
+        assert_eq!(event, presence(1, 1.0));
+        assert!(before <= arrived && arrived <= after);
+        assert_eq!(events.try_recv_at(), Err(TryRecvError::Empty));
     }
 
     #[test]

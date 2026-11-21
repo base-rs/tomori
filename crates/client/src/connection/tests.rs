@@ -1318,6 +1318,36 @@ fn the_others_voices_are_placed_from_their_presence_and_forgotten_on_leaving() {
 }
 
 #[test]
+fn presence_is_handed_on_with_when_it_arrived() {
+    let peer = Peer::start();
+    let mut session = Script::default();
+    let mut connection = with_peer(&peer, &mut session, Scripted::default(), Nowhere);
+    let watched = Arc::new(Mutex::new(Vec::new()));
+    let watching = watched.clone();
+    connection.watch_presence_at(move |message, arrived| {
+        if let ServerMessage::Presence { source, .. } = message {
+            watching.lock().unwrap().push((*source, arrived));
+        }
+    });
+    let before = Instant::now();
+    let presence = ServerMessage::Presence {
+        source: 2,
+        head: pose(1.0),
+        left: None,
+        right: None,
+        hands: None,
+        pointing: None,
+        hidden: false,
+    };
+    peer.say(presence, &mut connection, &mut session);
+    let after = Instant::now();
+    let watched = watched.lock().unwrap();
+    assert_eq!(watched.len(), 1);
+    assert_eq!(watched[0].0, 2);
+    assert!(before <= watched[0].1 && watched[0].1 <= after);
+}
+
+#[test]
 fn a_microphone_failure_is_reported_whenever_it_happens() {
     let peer = Peer::start();
     let failed = Arc::new(Mutex::new(Vec::new()));

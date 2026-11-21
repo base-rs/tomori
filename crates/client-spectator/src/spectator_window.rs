@@ -122,7 +122,9 @@ impl SpectatorWindow {
             gpu.width,
             gpu.height
         );
-        log::info!("Spectator: Esc closes the window.");
+        log::info!(
+            "Spectator: Esc closes the window; V, A, D and S choose the voices, ambience, ducking and camera smoothing."
+        );
         let next_video_frame = fixed.then(Instant::now);
         let frame_interval = match &recording {
             Some(recording) => FrameClock::new(recording.fps).interval(),
@@ -200,7 +202,8 @@ impl SpectatorWindow {
         surface.request_redraw();
     }
 
-    fn draw(&mut self, surface: &mut dyn Surface) -> Result<()> {
+    /// Draw a frame, whose camera is as of `at`: now, or the time the recording's frame is due.
+    fn draw(&mut self, surface: &mut dyn Surface, at: Instant) -> Result<()> {
         let frame = if self.hidden() {
             None
         } else {
@@ -226,13 +229,16 @@ impl SpectatorWindow {
             ),
             (None, None) => return Ok(()),
         };
-        self.spectator.render(RenderInputs {
-            device: &self.device,
-            queue: &self.queue,
-            renderer: &mut self.renderer,
-            target,
-            aspect: size.x / size.y,
-        });
+        self.spectator.render(
+            RenderInputs {
+                device: &self.device,
+                queue: &self.queue,
+                renderer: &mut self.renderer,
+                target,
+                aspect: size.x / size.y,
+            },
+            at,
+        );
         if let Some(video) = &mut self.video {
             if let Err(error) = video.capture(&self.device, &self.queue) {
                 log::error!("PipeWire output stopped: {error:#}; preview remains available");
@@ -261,7 +267,8 @@ impl SpectatorWindow {
 
 impl Contents for SpectatorWindow {
     /// The spectator's window only follows its feed; V cycles through the voices it plays, A turns the ambience on and
-    /// off, D ducks under everyone's speech or the voices played alone, and Escape closes it.
+    /// off, D ducks under everyone's speech or the voices played alone, S cycles through the smoothing of the camera,
+    /// and Escape closes it.
     fn input(&mut self, input: Input, surface: &mut dyn Surface) -> Result<Flow> {
         match input {
             Input::Close => {
@@ -304,6 +311,13 @@ impl Contents for SpectatorWindow {
             } => {
                 self.spectator.feed.next_duck_under();
             }
+            Input::Key {
+                code: KeyCode::KeyS,
+                pressed: true,
+                repeat: false,
+            } => {
+                self.spectator.feed.next_smoothing();
+            }
             _ => {}
         }
         Ok(Flow::Continue)
@@ -314,7 +328,7 @@ impl Contents for SpectatorWindow {
         if self.fixed() || self.hidden() {
             return Ok(());
         }
-        self.draw(surface)?;
+        self.draw(surface, Instant::now())?;
         surface.request_redraw();
         Ok(())
     }
@@ -331,7 +345,13 @@ impl Contents for SpectatorWindow {
             return Ok(Wake::Wait);
         };
         if Instant::now() >= next {
-            self.draw(surface)?;
+            // The recording's camera is as of the time its frame is due, so that its motion is as even as its frames.
+            let at = if self.capture.is_some() {
+                next
+            } else {
+                Instant::now()
+            };
+            self.draw(surface, at)?;
             // The recording keeps an even cadence, without catching up with bursts after a stall; the PipeWire source's frames, as before, are an interval apart from the end of each.
             next = if self.capture.is_some() {
                 next_frame_time(next, Instant::now(), self.frame_interval)
@@ -420,6 +440,18 @@ mod tests {
             assert_eq!(demo.spectator.feed.duck_under(), crate::DuckUnder::Everyone);
             input(&mut demo, &mut surface, key(KeyCode::KeyD));
             assert_eq!(demo.spectator.feed.duck_under(), crate::DuckUnder::Played);
+            // S cycles through the smoothing of the camera, light to begin with, showing nothing. It logs, as the feed's test watches for.
+            let alone = crate::test_log::exclusive();
+            assert_eq!(demo.spectator.feed.smoothing(), crate::Smoothing::Light);
+            for smoothing in [
+                crate::Smoothing::Cinematic,
+                crate::Smoothing::Off,
+                crate::Smoothing::Light,
+            ] {
+                input(&mut demo, &mut surface, key(KeyCode::KeyS));
+                assert_eq!(demo.spectator.feed.smoothing(), smoothing);
+            }
+            drop(alone);
             assert_eq!(surface.titles, Vec::<String>::new());
             input(
                 &mut demo,

@@ -2,7 +2,7 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-spectator` executable's command line: which output, which space and whom to follow, and running it.
-use crate::{SpectatorOptions, recording::options::RecordFlags};
+use crate::{Smoothing, SpectatorOptions, recording::options::RecordFlags};
 use anyhow::{Context, Result, bail, ensure};
 use tomori_client::{DuckUnder, Hearing};
 
@@ -26,6 +26,12 @@ pub fn parse_ambience(value: &str) -> Result<bool> {
         "off" => Ok(false),
         _ => bail!("--ambience takes on or off, not {value:?}"),
     }
+}
+
+/// How much `--smoothing` names the camera is smoothed, `off`, `light` or `cinematic`, for a command line that takes it, such as `tomori --spectator`'s.
+pub fn parse_smoothing(value: &str) -> Result<Smoothing> {
+    Smoothing::named(value)
+        .with_context(|| format!("--smoothing takes off, light or cinematic, not {value:?}"))
 }
 
 /// Where the spectator's view goes.
@@ -64,6 +70,7 @@ impl Command {
             voices: Hearing::All,
             ambience: false,
             duck_under: DuckUnder::Played,
+            smoothing: Smoothing::Light,
             borderless: false,
             record: None,
             content: None,
@@ -89,6 +96,9 @@ impl Command {
                 "--ambience" => options.ambience = parse_ambience(&value("on or off")?)?,
                 "--duck-under" => {
                     options.duck_under = parse_duck_under(&value("played or everyone")?)?
+                }
+                "--smoothing" => {
+                    options.smoothing = parse_smoothing(&value("off, light or cinematic")?)?
                 }
                 "--audio-output" => audio_output = Some(value("an output's name")?),
                 "--borderless" => options.borderless = true,
@@ -166,7 +176,7 @@ impl Command {
 }
 
 /// What `--help` shows.
-pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--record FILE [--record-size WxH] [--record-fps N] [--record-codec h264|hevc] [--record-playback on|off] [--record-overwrite] [--no-window]] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--audio-output NAME]
+pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--record FILE [--record-size WxH] [--record-fps N] [--record-codec h264|hevc] [--record-playback on|off] [--record-overwrite] [--no-window]] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--smoothing off|light|cinematic] [--audio-output NAME]
 
 Renders a live space as a read-only view that follows a participant, for OBS or a call.
 
@@ -191,6 +201,7 @@ Options:
   --voices WHICH       play every voice (all, the default), the agent's speech alone (agent), as for a demonstration whose own voice would come back out of its speakers, or none; V in the window cycles through them.
   --ambience ON|OFF    play the environment's ambience and ambient sounds beneath the voices, as the participant followed hears them (on), or not (off, the default, for a clean capture); A in the window turns it on and off.
   --duck-under WHOSE   duck the agent's speech and the ambience under the voices played (played, the default) or under everyone's speech (everyone), measuring and never playing the voices --voices leaves out, so that someone presenting is not heard twice and is still spoken over quietly; D in the window switches.
+  --smoothing LEVEL    smooth the camera that follows a participant's head, whose presence arrives unevenly, slower than the window draws, and shakes with their head: light (the default) interpolates it and filters out small jitter while following a turn within a tenth of a second; cinematic does so more, for demo footage, a steady camera that trails a quick glance by a fraction of a second; off takes each report as it comes. S in the window cycles through them. The recording's camera is smoothed on its own clock, so that its motion is as even as its frames.
   --audio-output NAME  on Linux, play to this PipeWire output, by its node name (see `pactl list short sinks`), instead of the default.";
 
 #[cfg(test)]
@@ -261,6 +272,7 @@ mod tests {
                 voices: Hearing::All,
                 ambience: false,
                 duck_under: DuckUnder::Played,
+                smoothing: Smoothing::Light,
                 borderless: false,
                 record: None,
                 content: None,
@@ -312,6 +324,29 @@ mod tests {
         assert_eq!(
             error(&["--duck-under"]),
             "--duck-under needs played or everyone"
+        );
+    }
+
+    #[test]
+    fn the_camera_is_smoothed_lightly_by_default_and_the_level_is_named() {
+        assert_eq!(parse(&[]).unwrap().options.smoothing, Smoothing::Light);
+        for smoothing in Smoothing::EVERY {
+            let command = parse(&["--smoothing", smoothing.name()]).unwrap();
+            assert_eq!(command.options.smoothing, smoothing);
+        }
+        assert_eq!(
+            parse(&["--smoothing", "cinematic", "--pipewire-preview"])
+                .map(|command| command.options.smoothing)
+                .ok(),
+            cfg!(target_os = "linux").then_some(Smoothing::Cinematic)
+        );
+        assert_eq!(
+            error(&["--smoothing", "heavy"]),
+            "--smoothing takes off, light or cinematic, not \"heavy\""
+        );
+        assert_eq!(
+            error(&["--smoothing"]),
+            "--smoothing needs off, light or cinematic"
         );
     }
 
@@ -457,6 +492,8 @@ mod tests {
             "--voices",
             "--ambience",
             "--duck-under",
+            "--smoothing off|light|cinematic",
+            "S in the window",
             "--borderless",
             "--record ",
             "--record-size",

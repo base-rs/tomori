@@ -519,7 +519,7 @@ fn issued<'a>(link: &'a mut Option<Link>, what: &str) -> Option<(&'a mut Link, F
 }
 
 /// A hook that renders the other participants' presence reports.
-type PresenceHook = Box<dyn FnMut(&ServerMessage) + Send>;
+type PresenceHook = Box<dyn FnMut(&ServerMessage, Instant) + Send>;
 
 impl Connection {
     /// A connection for the participant `identity`, keeping what it learns in `store`, with the platform's `multicast` permission, microphone and speaker. It connects straight away to a server given at startup, reporting [`Report::Connecting`] to `session`; otherwise the session starts at the server list. It reports the Feedback setting kept, as [`Report::Feedback`].
@@ -841,7 +841,15 @@ impl Connection {
     }
 
     /// Receive the other participants' presence reports, as a spectator that renders them does. The hook is called for every [`ServerMessage::Presence`], from the render loop's thread.
-    pub fn watch_presence(&mut self, hook: impl FnMut(&ServerMessage) + Send + 'static) {
+    pub fn watch_presence(&mut self, mut hook: impl FnMut(&ServerMessage) + Send + 'static) {
+        self.watch_presence_at(move |message, _| hook(message));
+    }
+
+    /// As [`Self::watch_presence`], with when each report arrived, as the connection thread took it rather than when this connection polls, so that a spectator can time the motion it renders by when it was sent, however unevenly it polls.
+    pub fn watch_presence_at(
+        &mut self,
+        hook: impl FnMut(&ServerMessage, Instant) + Send + 'static,
+    ) {
         self.presence = Some(Box::new(hook));
     }
 
@@ -869,7 +877,7 @@ impl Connection {
         });
         started = Slowest::keep(&mut self.slowest, Kind::named("tick"), started);
         let mut reopen = None;
-        while let Some(event) = self.client.as_ref().and_then(Client::try_event) {
+        while let Some((event, arrived)) = self.client.as_ref().and_then(Client::try_event_at) {
             let kind = Kind::event(&event);
             match &event {
                 Event::State(ConnectionState::Connected { certificate, .. }) => {
@@ -920,7 +928,7 @@ impl Connection {
             if let Event::Message(message @ ServerMessage::Presence { .. }) = &event
                 && let Some(presence) = self.presence.as_deref_mut()
             {
-                presence(message);
+                presence(message, arrived);
             }
             session.apply(event);
             // After the session applies the welcome, which clears earlier errors, so that a failure is shown again.
