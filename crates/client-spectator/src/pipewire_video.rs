@@ -176,15 +176,27 @@ fn extent() -> wgpu::Extent3d {
 }
 
 fn pack_rows(bytes: &[u8], row: usize, stride: usize, height: usize) -> Vec<u8> {
+    let mut packed = Vec::with_capacity(row * height);
+    pack_rows_into(&mut packed, bytes, row, stride, height);
+    packed
+}
+
+/// Append the `height` rows of `row` bytes in `bytes`, which are `stride` bytes apart, to `packed`, without the padding between them.
+pub(crate) fn pack_rows_into(
+    packed: &mut Vec<u8>,
+    bytes: &[u8],
+    row: usize,
+    stride: usize,
+    height: usize,
+) {
     assert!(stride >= row && bytes.len() >= stride * height);
     if stride == row {
-        return bytes[..row * height].to_vec();
+        packed.extend_from_slice(&bytes[..row * height]);
+        return;
     }
-    let mut packed = Vec::with_capacity(row * height);
     for line in bytes.chunks_exact(stride).take(height) {
         packed.extend_from_slice(&line[..row]);
     }
-    packed
 }
 
 /// The GStreamer process that publishes the frames as a PipeWire node, and the thread that writes them to it.

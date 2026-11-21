@@ -595,3 +595,84 @@ fn voices_to_measure_duck_agent_speech_and_are_never_played() {
     render(&mut player, FRAME);
     assert_eq!(player.mixer().expect("prepared").sources().count(), 0);
 }
+
+/// What a tap was told by one render: the rate, the layout and every sample.
+type Heard = (u32, Layout, Vec<i16>);
+
+/// A tap that keeps what it is told.
+fn tapped(player: &mut Player) -> Arc<Mutex<Vec<Heard>>> {
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let kept = heard.clone();
+    player.tap(Some(Box::new(move |rate, layout, samples| {
+        kept.lock().unwrap().push((rate, layout, samples.to_vec()));
+    })));
+    heard
+}
+
+#[test]
+fn a_tap_is_given_the_mix_the_device_is_given_and_changes_nothing_of_it() {
+    let (other_sender, mut other, _other_control) = player();
+    let (sender, mut player, _control) = player();
+    let heard = tapped(&mut player);
+    for sequence in 0..3 {
+        for sender in [&sender, &other_sender] {
+            sender.send(frame(1, sequence, 100)).unwrap();
+            sender.send(frame(AGENT_SOURCE, sequence, 20)).unwrap();
+        }
+        let played = render(&mut player, FRAME);
+        // A player that is not tapped plays the same.
+        assert_eq!(played, render(&mut other, FRAME));
+        assert_eq!(played, [120; FRAME]);
+        let heard = heard.lock().unwrap();
+        assert_eq!(heard.last().unwrap(), &(RATE, Layout::Mono, played.clone()));
+    }
+    assert_eq!(heard.lock().unwrap().len(), 3);
+    // Stereo is given as the device is given it, interleaved.
+    let mut stereo = vec![1; FRAME * 2];
+    sender.send(frame(1, 3, 100)).unwrap();
+    player.render(RATE, Layout::Stereo, &mut stereo);
+    let heard = heard.lock().unwrap();
+    assert_eq!(heard.last().unwrap(), &(RATE, Layout::Stereo, stereo));
+}
+
+#[test]
+fn a_tap_hears_what_the_voices_chosen_leave_out_as_the_device_does() {
+    let (sender, mut player, control) = player();
+    let (measure, measured) = mpsc::sync_channel(64);
+    player.measure(measured);
+    let heard = tapped(&mut player);
+    // A voice measured for ducking and never played, and agent speech muted: neither is in the mix, for either.
+    control.set_agent_muted(true);
+    measure.send(frame(1, 0, 10_000)).unwrap();
+    sender.send(frame(AGENT_SOURCE, 0, 1_000)).unwrap();
+    sender.send(frame(2, 0, 50)).unwrap();
+    let played = render(&mut player, FRAME);
+    assert_eq!(played, [50; FRAME]);
+    assert_eq!(heard.lock().unwrap()[0].2, played);
+    // Unmuted and ducked under the voice measured, the agent is as quiet to the tap as to the device.
+    control.set_agent_muted(false);
+    let mut loudest = 0;
+    for sequence in 1..76 {
+        measure.send(frame(1, sequence, 10_000)).unwrap();
+        sender.send(frame(AGENT_SOURCE, sequence, 1_000)).unwrap();
+        let played = render(&mut player, FRAME);
+        assert_eq!(heard.lock().unwrap().last().unwrap().2, played);
+        loudest = played.into_iter().fold(loudest, i16::max);
+    }
+    assert!(loudest > 0);
+    let ducked = heard.lock().unwrap().last().unwrap().2.clone();
+    assert!(ducked.iter().all(|&sample| sample < 1_000), "{ducked:?}");
+}
+
+#[test]
+fn a_tap_is_told_nothing_once_removed_or_for_an_unknown_rate() {
+    let (_sender, mut player, _control) = player();
+    let heard = tapped(&mut player);
+    player.render(0, Layout::Mono, &mut [1; 4]);
+    assert!(heard.lock().unwrap().is_empty());
+    render(&mut player, FRAME);
+    assert_eq!(heard.lock().unwrap().len(), 1);
+    player.tap(None);
+    render(&mut player, FRAME);
+    assert_eq!(heard.lock().unwrap().len(), 1);
+}

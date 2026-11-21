@@ -65,6 +65,8 @@ pub enum Wake {
     Wait,
     /// At this time, or the next event if sooner.
     At(Instant),
+    /// Close the window now, as [`Flow::Exit`] does for an input: the contents have ended on their own, such as a recording that was stopped by a signal.
+    Exit,
 }
 
 /// The device a window's contents draw with, and the size and format of the images they draw into.

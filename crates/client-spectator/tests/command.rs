@@ -96,3 +96,235 @@ fn the_pipewire_source_stops_when_gstreamer_does() {
     let stderr = stderr(&output);
     assert!(stderr.contains("GStreamer exited"), "{stderr}");
 }
+
+/// A new directory under the target directory, for this test alone.
+#[cfg(unix)]
+fn folder(name: &str) -> std::path::PathBuf {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+#[test]
+fn a_recording_that_cannot_be_made_is_refused_before_anything_starts() {
+    let output = spectator(&["--record", "demo.avi"], None);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("--record writes .mp4 or .mov files, not .avi"));
+    let output = spectator(&["--record-fps", "60"], None);
+    assert!(stderr(&output).contains("--record-fps needs --record; use --help"));
+    assert!(stdout(&spectator(&["--help"], None)).contains("--record FILE"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recording_does_not_overwrite_a_file_unless_asked_and_needs_ffmpeg() {
+    let folder = folder("spectator-record-refused");
+    let file = folder.join("demo.mp4");
+    std::fs::write(&file, "earlier").unwrap();
+    let output = spectator(&["--record", file.to_str().unwrap(), "--no-window"], None);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("already exists; --record-overwrite replaces it"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "earlier");
+    // Allowed to replace it, and with no ffmpeg to find, it says how to install one.
+    let nowhere = folder.join("nowhere");
+    std::fs::create_dir_all(&nowhere).unwrap();
+    let arguments = [
+        "--record",
+        file.to_str().unwrap(),
+        "--record-overwrite",
+        "--no-window",
+    ];
+    let output = spectator(&arguments, Some(&nowhere));
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(stderr.contains("ffmpeg was not found"), "{stderr}");
+    assert!(stderr.contains("install"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "earlier");
+}
+
+/// An `ffmpeg` that lists the encoders the spectator looks for, notes that it started, reads what it is given, and, once its inputs end, writes the file it was asked for, as ffmpeg writes its index; or, if `hangs`, does not, and sleeps instead.
+#[cfg(unix)]
+fn fake_ffmpeg(folder: &Path, hangs: bool) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = folder.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let ffmpeg = bin.join("ffmpeg");
+    let script = format!(
+        "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = -encoders ]; then\n    printf ' V....D libx264 x\\n V....D h264_videotoolbox x\\n A....D aac x\\n'\n    exit 0\n  fi\ndone\nfor last; do :; done\ntouch '{started}'\ncat <&3 > /dev/null & cat > /dev/null\nwait\n{then}\n",
+        started = folder.join("started").display(),
+        then = if hangs {
+            "exec sleep 8".to_owned()
+        } else {
+            "echo moov > \"${last#file:}\"".to_owned()
+        }
+    );
+    {
+        let _writing = SPAWN.write().unwrap();
+        std::fs::write(&ffmpeg, script).unwrap();
+        std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::env::join_paths([bin.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap()
+}
+
+/// How a recording against a fake ffmpeg is started and signalled.
+#[cfg(unix)]
+struct Signalled<'a> {
+    /// Where it records, a folder of its own under the target folder.
+    name: &'a str,
+    /// What is sent it, one after another, once the encoder has started.
+    signals: &'a [i32],
+    /// Whether it starts with hang-ups ignored, as under `nohup`.
+    ignoring_hangups: bool,
+    /// Whether the encoder never finishes the file.
+    hangs: bool,
+}
+
+/// Record without a window against a fake ffmpeg, signal it as `signalled` says, and say how it ended.
+#[cfg(unix)]
+fn record_signalled(signalled: Signalled) -> (Output, std::path::PathBuf) {
+    let folder = folder(signalled.name);
+    let path = fake_ffmpeg(&folder, signalled.hangs);
+    let file = folder.join("demo.mp4");
+    let mut command = if signalled.ignoring_hangups {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "trap '' HUP; exec \"$0\" \"$@\""])
+            .arg(env!("CARGO_BIN_EXE_tomori-spectator"));
+        command
+    } else {
+        Command::new(env!("CARGO_BIN_EXE_tomori-spectator"))
+    };
+    command
+        .args([
+            "--record",
+            file.to_str().unwrap(),
+            "--no-window",
+            "--record-playback",
+            "off",
+        ])
+        .args(["--record-fps", "10", "--record-size", "128x72"])
+        .env("PATH", path)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("TOMORI_SERVER")
+        .env_remove("TOMORI_TOKEN")
+        .env("XDG_CACHE_HOME", env!("CARGO_TARGET_TMPDIR"))
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = {
+        let _spawning = SPAWN.read().unwrap();
+        command.spawn().expect("tomori-spectator starts")
+    };
+    // The encoder starts once the signals that end a recording are noted, and not before.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !folder.join("started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recording never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for signal in signalled.signals {
+        // SAFETY: signalling the child this test started.
+        assert_eq!(unsafe { libc::kill(child.id() as i32, *signal) }, 0);
+        // In the order they were sent: a signal sent to a process that is in the middle of handling another is not lost, but may be held as one.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    (
+        child.wait_with_output().expect("tomori-spectator runs"),
+        file,
+    )
+}
+
+/// Record without a window until `signal`, and say how it ended.
+#[cfg(unix)]
+fn record_until(name: &str, signal: i32) -> (Output, std::path::PathBuf) {
+    record_signalled(Signalled {
+        name,
+        signals: &[signal],
+        ignoring_hangups: false,
+        hangs: false,
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn a_recording_without_a_window_is_finished_and_reported_when_interrupted_or_terminated() {
+    // A GPU test: skipped where there is no adapter, unless `TOMORI_REQUIRE_GPU` is set.
+    tomori_render::test_gpu::with(|_| {
+        for (name, signal, reason) in [
+            ("spectator-record-int", libc::SIGINT, "SIGINT"),
+            ("spectator-record-term", libc::SIGTERM, "SIGTERM"),
+        ] {
+            let (output, file) = record_until(name, signal);
+            let (stdout, stderr) = (stdout(&output), stderr(&output));
+            assert!(output.status.success(), "{stdout} {stderr}");
+            // The file was finished before it was reported, and the report names it, its length and why it ended.
+            assert!(stdout.starts_with("Recorded "), "{stdout}");
+            assert!(stdout.contains("demo.mp4: "), "{stdout}");
+            assert!(
+                stdout.contains(&format!("stopped: received {reason}")),
+                "{stdout}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "moov\n");
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_recording_in_a_window_needs_a_display_and_still_finishes_its_file() {
+    let folder = folder("spectator-record-display");
+    let path = fake_ffmpeg(&folder, false);
+    let file = folder.join("demo.mov");
+    let output = spectator(
+        &["--record", file.to_str().unwrap()],
+        Some(Path::new(&path)),
+    );
+    assert!(!output.status.success());
+    // The encoder started and was ended cleanly, so that the file is as complete as an empty recording is.
+    assert!(folder.join("started").exists());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "moov\n");
+    assert!(
+        stdout(&output).starts_with("Recorded "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hang_up_that_was_ignored_stays_ignored_and_a_second_signal_ends_the_program_at_once() {
+    use std::os::unix::process::ExitStatusExt;
+    // A GPU test: skipped where there is no adapter, unless `TOMORI_REQUIRE_GPU` is set.
+    tomori_render::test_gpu::with(|_| {
+        // Started with hang-ups ignored, as under `nohup`: one does not end the recording, so the interrupt that follows is the first signal it notes.
+        let (output, file) = record_signalled(Signalled {
+            name: "spectator-record-nohup",
+            signals: &[libc::SIGHUP, libc::SIGINT],
+            ignoring_hangups: true,
+            hangs: false,
+        });
+        let (stdout, stderr) = (stdout(&output), stderr(&output));
+        assert!(output.status.success(), "{stdout} {stderr}");
+        assert!(stdout.contains("stopped: received SIGINT"), "{stdout}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "moov\n");
+
+        // An encoder that never finishes the file: the first interrupt starts to finish it, and the second ends the spectator, by the interrupt, where it is.
+        let (output, _) = record_signalled(Signalled {
+            name: "spectator-record-twice",
+            signals: &[libc::SIGINT, libc::SIGINT],
+            ignoring_hangups: false,
+            hangs: true,
+        });
+        assert_eq!(
+            output.status.signal(),
+            Some(libc::SIGINT),
+            "{:?}",
+            output.status
+        );
+    });
+}

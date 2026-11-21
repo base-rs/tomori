@@ -75,6 +75,8 @@ pub struct SpectatorOptions {
     /// shared screen, rather than a decorated window with the platform's title bar that can be moved, resized and made
     /// full screen. The PipeWire source without a window has no window to be borderless. See `design/spectator.md`.
     pub borderless: bool,
+    /// What to record the spectator's output to, a video file with sound, or `None`, by default, to record nothing. See `design/spectator.md`.
+    pub record: Option<crate::recording::RecordOptions>,
     /// The folder what its server offers by digest, its environments' assets, is fetched into and kept in, such as
     /// `tomori_client::cache_folder()`, or `None`, by default, to fetch nothing. See `design/clients.md`.
     pub content: Option<std::path::PathBuf>,
@@ -82,7 +84,7 @@ pub struct SpectatorOptions {
 
 impl SpectatorOptions {
     /// No server, space, participant or token, every voice played, no ambience, ducking under the voices played, a
-    /// decorated window, and no content kept.
+    /// decorated window, no recording, and no content kept.
     pub fn new() -> Self {
         Self::default()
     }
@@ -119,6 +121,8 @@ pub struct Feed {
     sceneries: Sceneries,
     last_poll: Instant,
     last_caption: Option<String>,
+    /// Whether the connection has been up, so that losing it is told from not yet having made it.
+    connected: bool,
 }
 
 impl Feed {
@@ -214,7 +218,17 @@ impl Feed {
             sceneries: Sceneries::empty(),
             last_poll: Instant::now(),
             last_caption: None,
+            connected: false,
         }
+    }
+
+    /// Whether the server's connection, up once, is down: the spectator has lost the space it watched, and retries. A connection that has not yet been made is not lost. See `design/spectator.md`.
+    pub fn connection_lost(&self) -> bool {
+        self.connected
+            && !matches!(
+                self.conversation.connection(),
+                Some(tomori_client::ConnectionState::Connected { .. })
+            )
     }
 
     /// Whose voices it plays, as its connection was last told.
@@ -300,6 +314,10 @@ impl Feed {
         // Process connection events, including presence. The presence hook
         // writes into the shared map during this call.
         self.connection.poll(true, &mut self.conversation);
+        self.connected |= matches!(
+            self.conversation.connection(),
+            Some(tomori_client::ConnectionState::Connected { .. })
+        );
 
         // Read the presence captured by the hook.
         let presence = self.presence.lock().unwrap().clone();
@@ -726,6 +744,45 @@ mod tests {
             let mut view = crate::spectator_view::SpectatorView::new(feed);
             render(&gpu, &mut view, &mut renderer, &target);
         });
+    }
+
+    #[test]
+    fn a_connection_lost_is_told_from_one_not_yet_made() {
+        // Before it has connected to anything, it is not lost.
+        let mut waiting = feed(SpectatorOptions::new());
+        waiting.poll(16.0 / 9.0);
+        assert!(!waiting.connection_lost());
+        let server = Server::start();
+        let bea = server.remote("Bea", Some(server.owner("Bea")));
+        let space = bea.create_space("Studio", || {}).id;
+        let mut feed = feed(SpectatorOptions {
+            server: Some(server.address()),
+            space: Some(space),
+            ..Default::default()
+        });
+        until(&mut feed, |feed| feed.conversation.joined_space().is_some());
+        assert!(!feed.connection_lost());
+        // The server goes away, and the recording that watches for it stops.
+        let origin = crate::recording::Origin::default();
+        let (frames, _drawn) =
+            crate::recording::video::FrameSender::new(origin.clone(), 64 * 64 * 4);
+        let recording = crate::recording::Recording {
+            size: (64, 64),
+            fps: 30,
+            origin,
+            frames,
+            stop: crate::recording::Stop::default(),
+        };
+        recording.watch(&feed);
+        assert!(!recording.stop.requested());
+        drop(bea);
+        drop(server);
+        until(&mut feed, |feed| feed.connection_lost());
+        recording.watch(&feed);
+        assert_eq!(
+            recording.stop.reason().as_deref(),
+            Some("the server disconnected")
+        );
     }
 
     #[test]

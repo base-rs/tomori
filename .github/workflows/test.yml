@@ -70,9 +70,9 @@ jobs:
           # If the sccache server dies, compile without it rather than failing the build.
           echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "$GITHUB_ENV"
           if [ "$GITHUB_REF" != refs/heads/main ]; then echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"; fi
-      # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU.
-      - name: Install the ALSA development files for the desktop client, and lavapipe
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers
+      # Mesa's software Vulkan driver, lavapipe, and the Vulkan loader, so that the offscreen rendering tests run without a GPU; and ffmpeg, with ffprobe, which the spectator's recording test encodes a scene and a tone with.
+      - name: Install the ALSA development files for the desktop client, lavapipe, and ffmpeg
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev libvulkan1 mesa-vulkan-drivers ffmpeg
       - uses: actions/cache@v6
         with:
           path: .tools/sherpa-onnx
@@ -104,6 +104,8 @@ jobs:
           TOMORI_REQUIRE_GPU: 1
           # Fail the speech model tests, rather than skipping them, if a model is missing.
           TOMORI_REQUIRE_MODELS: 1
+          # Fail the spectator's recording test, rather than skipping it, if ffmpeg or ffprobe is missing.
+          TOMORI_REQUIRE_FFMPEG: 1
         run: |
           cargo nextest run --workspace --all-targets --locked --profile ci
           cargo test --workspace --doc --locked
@@ -121,6 +123,7 @@ jobs:
         env:
           TOMORI_REQUIRE_GPU: 1
           TOMORI_REQUIRE_MODELS: 1
+          TOMORI_REQUIRE_FFMPEG: 1
           NEXTEST_PROFILE: ci
         run: cargo bake --locked test:coverage --all-targets true --nextest true 2>&1 | tee coverage.log
       # Bake reports a coverage failure as one line holding every uncovered region, often megabytes long, which the Actions log viewer doesn't show. This step extracts the counts, computes the percentage, and writes it to both the log and the job summary.

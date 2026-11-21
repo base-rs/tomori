@@ -154,6 +154,7 @@ impl<C: Contents, S: FnOnce(Gpu) -> Result<C>> ApplicationHandler for App<C, S> 
         match contents.about_to_wait(surface) {
             Ok(Wake::Wait) => event_loop.set_control_flow(ControlFlow::Wait),
             Ok(Wake::At(time)) => event_loop.set_control_flow(ControlFlow::WaitUntil(time)),
+            Ok(Wake::Exit) => event_loop.exit(),
             Err(error) => self.fail(event_loop, Err(error)),
         }
     }

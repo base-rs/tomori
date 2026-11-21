@@ -2,8 +2,8 @@
 // Copyright, 2026, by Samuel Williams.
 
 //! The `tomori-spectator` executable's command line: which output, which space and whom to follow, and running it.
-use crate::SpectatorOptions;
-use anyhow::{Context, Result, bail};
+use crate::{SpectatorOptions, recording::options::RecordFlags};
+use anyhow::{Context, Result, bail, ensure};
 use tomori_client::{DuckUnder, Hearing};
 
 /// The voices `--voices` names, `all`, `agent` or `none`, for a command line that takes it, such as `tomori --spectator`'s.
@@ -65,9 +65,11 @@ impl Command {
             ambience: false,
             duck_under: DuckUnder::Played,
             borderless: false,
+            record: None,
             content: None,
         };
         let (mut audio_output, mut mode) = (None, None);
+        let mut recording = RecordFlags::default();
         let mut arguments = arguments.into_iter();
         while let Some(argument) = arguments.next() {
             let mut value = |what: &str| {
@@ -75,6 +77,9 @@ impl Command {
                     .next()
                     .with_context(|| format!("{argument} needs {what}"))
             };
+            if recording.take(&argument, &mut value)? {
+                continue;
+            }
             match argument.as_str() {
                 "--server" => options.server = Some(value("an address")?),
                 "--token" => options.token = Some(value("a token")?),
@@ -99,6 +104,16 @@ impl Command {
             }
         }
         let mode = mode.unwrap_or(Mode::Window);
+        let without_window = recording.without_window();
+        options.record = recording.into_options()?;
+        ensure!(
+            options.record.is_none() || mode == Mode::Window,
+            "--record applies only to the window, not the PipeWire source; use --help"
+        );
+        ensure!(
+            !(without_window && options.borderless),
+            "--borderless applies only to a window, and --no-window shows none; use --help"
+        );
         // Without a window there is nothing to be borderless.
         anyhow::ensure!(
             !options.borderless || mode != Mode::Pipewire,
@@ -151,7 +166,7 @@ impl Command {
 }
 
 /// What `--help` shows.
-pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--audio-output NAME]
+pub const HELP: &str = "tomori-spectator [--pipewire | --pipewire-preview] [--borderless] [--record FILE [--record-size WxH] [--record-fps N] [--record-codec h264|hevc] [--record-playback on|off] [--record-overwrite] [--no-window]] [--server ADDRESS] [--token TOKEN] [--space ID] [--follow NAME] [--voices all|agent|none] [--ambience on|off] [--duck-under played|everyone] [--audio-output NAME]
 
 Renders a live space as a read-only view that follows a participant, for OBS or a call.
 
@@ -162,6 +177,13 @@ Outputs:
 
 Options:
   --borderless         show the window, or --pipewire-preview's, without a title bar or border, at least 1080p, for a clean capture into OBS or a shared screen.
+  --record FILE        also record what the window shows, and the sound it plays, to a video file, .mp4 or .mov, until the window closes, Ctrl-C, or the server disconnects; needs ffmpeg (on macOS: brew install ffmpeg). The window is its preview.
+  --record-size WxH    the recording's size (default 1920x1080, up to 3840x2160), however the window is sized.
+  --record-fps N       the recording's constant frame rate (default 30, up to 120); a slow frame repeats the one before rather than losing time.
+  --record-codec NAME  h264 (default) or hevc; on macOS the hardware VideoToolbox encoder, elsewhere NVENC if there is a GPU for it, otherwise libx264 or libx265.
+  --record-playback ON|OFF  with --record, keep playing the sound to the speaker (on, the default) or record it alone (off).
+  --record-overwrite   replace FILE if it exists; otherwise it is refused.
+  --no-window          with --record, record without showing a window.
   --server ADDRESS     connect to this Tomori server (host:port) instead of choosing one; TOMORI_SERVER does the same.
   --token TOKEN        a token from the server, such as from `tomori-server auth mint`; TOMORI_TOKEN does the same.
   --space ID           join this space (see `tomori discover --server ADDRESS`).
@@ -240,6 +262,7 @@ mod tests {
                 ambience: false,
                 duck_under: DuckUnder::Played,
                 borderless: false,
+                record: None,
                 content: None,
             }
         );
@@ -327,6 +350,68 @@ mod tests {
     }
 
     #[test]
+    fn the_window_records_with_its_options_and_nothing_else_does() {
+        assert_eq!(parse(&[]).unwrap().options.record, None);
+        let record = parse(&["--record", "demo.mp4"])
+            .unwrap()
+            .options
+            .record
+            .unwrap();
+        assert_eq!(record, crate::recording::RecordOptions::new("demo.mp4"));
+        let command = parse(&[
+            "--borderless",
+            "--record",
+            "demo.mov",
+            "--record-size",
+            "3840x2160",
+            "--record-fps",
+            "60",
+            "--record-codec",
+            "hevc",
+            "--record-playback",
+            "off",
+            "--record-overwrite",
+        ])
+        .unwrap();
+        let record = command.options.record.unwrap();
+        assert_eq!(record.size, (3840, 2160));
+        assert_eq!(record.fps, 60);
+        assert_eq!(record.codec, crate::recording::Codec::Hevc);
+        assert!(record.overwrite && !record.playback && record.window);
+        assert!(command.options.borderless);
+        // Without a window, there is none to be borderless.
+        let record = parse(&["--record", "demo.mp4", "--no-window"])
+            .unwrap()
+            .options
+            .record;
+        assert!(!record.unwrap().window);
+        assert_eq!(
+            error(&["--record", "demo.mp4", "--no-window", "--borderless"]),
+            "--borderless applies only to a window, and --no-window shows none; use --help"
+        );
+        assert_eq!(
+            error(&["--no-window"]),
+            "--no-window needs --record; use --help"
+        );
+        assert_eq!(
+            error(&["--record-fps", "60"]),
+            "--record-fps needs --record; use --help"
+        );
+        assert!(error(&["--record", "demo.webm"]).contains(".mp4 or .mov"));
+        assert!(
+            error(&["--record", "demo.mp4", "--record-size", "5000x5000"]).contains("3840x2160")
+        );
+        assert_eq!(error(&["--record"]), "--record needs a file name");
+        // The PipeWire source is not recorded.
+        for output in ["--pipewire", "--pipewire-preview"] {
+            assert_eq!(
+                error(&[output, "--record", "demo.mp4"]),
+                "--record applies only to the window, not the PipeWire source; use --help"
+            );
+        }
+    }
+
+    #[test]
     fn a_mistaken_command_line_says_what_is_wrong() {
         assert_eq!(error(&["--fly"]), "Unknown option \"--fly\"; use --help");
         assert_eq!(
@@ -373,6 +458,13 @@ mod tests {
             "--ambience",
             "--duck-under",
             "--borderless",
+            "--record ",
+            "--record-size",
+            "--record-fps",
+            "--record-codec",
+            "--record-playback",
+            "--record-overwrite",
+            "--no-window",
         ] {
             assert!(HELP.contains(output), "{output}");
         }
