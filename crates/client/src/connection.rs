@@ -332,6 +332,8 @@ pub struct Connection {
     slowest: Option<Slowest>,
     /// Where what servers offer by digest is fetched into, if anywhere; see [`Self::fetch_into`].
     content: Option<Arc<tomori_assets::Cache>>,
+    /// The compressed form of texture the device samples, if it said; see [`Self::sample_textures`].
+    textures: Option<&'static str>,
 }
 
 /// The longest part of [`Connection::poll`] in a while, as [`Connection::slowest`] says: applying one event, by its kind,
@@ -590,6 +592,7 @@ impl Connection {
             names: HashMap::new(),
             slowest: None,
             content: None,
+            textures: None,
         }
     }
 
@@ -618,6 +621,13 @@ impl Connection {
     /// `design/clients.md`.
     pub fn fetch_into(&mut self, cache: Arc<tomori_assets::Cache>) {
         self.content = Some(cache);
+    }
+
+    /// Fetch a texture that servers offer in several compressed forms only in `form`, the one the device samples, such
+    /// as `astc` on a headset or `bc7` on a desktop, from the next connection on; or every form, `None`, as by default.
+    /// See [`crate::Options::textures`].
+    pub fn sample_textures(&mut self, form: Option<&'static str>) {
+        self.textures = form;
     }
 
     /// The longest part of a poll since this was last asked, and what it was, or `None` if there was no poll. See
@@ -1276,6 +1286,7 @@ impl Connection {
         options.chart_buckets = session.chart_buckets();
         options.hearing = self.hearing;
         options.content = self.content.clone();
+        options.textures = self.textures;
         // Fails only if the system cannot start the client's thread or scheduler. The headset says so and stays usable: choosing the server again tries again.
         match Client::connect(options) {
             Ok(mut client) => {

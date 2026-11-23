@@ -95,7 +95,7 @@ impl Participant {
     pub fn with_sceneries(
         gpu: Gpu,
         mut conversation: Conversation,
-        connection: Connection,
+        mut connection: Connection,
         sceneries: &Sceneries,
     ) -> Self {
         conversation.set_drawable(sceneries.environments());
@@ -128,6 +128,11 @@ impl Participant {
             "TOMORI_TIER",
         );
         renderer.set_tier(tier.tier);
+        // Textures offered in several compressed forms are fetched only in the one this GPU samples, BC7 on most.
+        connection.sample_textures(
+            tomori_render::textures::Compression::sampled(gpu.device.features())
+                .map(tomori_render::textures::Compression::name),
+        );
         let panels = Panels::new(&gpu.device, &renderer);
         log::info!(
             "Desktop adapter: {} — {}x{}, {samples}x multisampling",
