@@ -35,7 +35,11 @@ fn words_begun_pointing_at_a_volume_name_the_node_or_edge_the_ray_meets() {
     }));
     conversation.take_actions();
     let model = crate::board::model(&pose).unwrap()
-        * crate::projection::volume::placed(&panel, &diagram, crate::projection::Fit::Text);
+        * crate::projection::volume::placed(
+            &panel,
+            &crate::projection::volume::Mesh::new(&diagram),
+            crate::projection::Fit::Text,
+        );
     let mut step = Step::default();
     let now = Instant::now();
     let mut named = Vec::new();
