@@ -670,3 +670,228 @@ fn a_watcher_asks_for_the_images_its_space_s_image_panels_show_a_few_at_a_time_a
     // All held, one for each panel that shows its image, and nothing more is asked for.
     assert_eq!(watch(&mut conversation, 4), (Vec::new(), 4));
 }
+
+/// Where, ahead of home, two frozen charts of the same half hour float side by side, `x` along.
+fn chart_at(x: f32) -> Vec3 {
+    arrival::HOME + Vec3::new(x, 0.0, -2.0)
+}
+
+/// Through the middle of the first chart's plot, a little below its middle: the same time on both.
+fn on_the_plot() -> Vec3 {
+    chart_at(-0.6) + Vec3::new(0.0, -20.0 * crate::projection::PIXEL, 0.0)
+}
+
+/// A space, as `role`, that Bea is in, floating the two frozen charts of [`chart_at`], by whose time a readout over one
+/// is linked to the other.
+fn charted(role: ConnectionRole) -> Conversation {
+    use tomori_protocol::chart::{AxisLabel, TimeAxis};
+    use tomori_protocol::{Panel, Place, Pose};
+    let mut conversation = lobby(role);
+    let frozen = |id: &str, x: f32| {
+        let mut chart = crate::chart::fixtures::admissions();
+        let last = chart.points - 1;
+        chart.labels = vec![AxisLabel::new(0, "02:20"), AxisLabel::new(last, "02:50")];
+        chart.time = Some(TimeAxis::Fixed {
+            from_ms: 1_794_450_000_000,
+            to_ms: 1_794_451_800_000,
+        });
+        Panel::new(
+            id,
+            id,
+            chart.summary(),
+            Place::Free {
+                pose: Pose::upright_facing(chart_at(x).to_array(), arrival::HOME.to_array()),
+            },
+        )
+        .with_chart(chart)
+    };
+    show_projection(
+        &mut conversation,
+        Vec::new(),
+        vec![frozen("us-east1", -0.6), frozen("eu-west1", 0.6)],
+    );
+    conversation.apply(space(|state| {
+        state.projection = true;
+        state.participants.push(Participant {
+            name: "Bea".into(),
+            source: 2,
+            engagement: None,
+            colour: None,
+        });
+    }));
+    conversation.take_actions();
+    conversation
+}
+
+/// Bea's presence, her head at home and her right ray from her eyes drawn in full to `at`, where it meets something.
+fn bea_pointing_at(at: Vec3) -> Event {
+    let towards = at - arrival::HOME;
+    Event::Message(ServerMessage::Presence {
+        source: 2,
+        head: tomori_protocol::Pose::at(arrival::HOME.to_array()),
+        left: None,
+        right: Some(tomori_protocol::Pose::at(arrival::HOME.to_array())),
+        hands: None,
+        pointing: Some(Box::new([
+            None,
+            Some(tomori_protocol::Ray {
+                aim: tomori_protocol::Pose {
+                    position: arrival::HOME.to_array(),
+                    orientation: glam::Quat::from_rotation_arc(Vec3::NEG_Z, towards.normalize())
+                        .to_array(),
+                },
+                length: towards.length(),
+                meets: true,
+            }),
+        ])),
+        hidden: false,
+    })
+}
+
+/// The overlays drawn over the charts of `frame`: each readout's first line, the time it reads.
+fn overlays(frame: &Frame) -> Vec<String> {
+    frame
+        .projection
+        .iter()
+        .filter_map(|sheet| sheet.canvas.as_deref())
+        .filter(|canvas| canvas.background[3] == 0.0 && !canvas.labels.is_empty())
+        .map(|canvas| crate::ui_text::plain(&canvas.labels[0].cells))
+        .collect()
+}
+
+#[test]
+fn a_watcher_following_a_participant_shows_the_readout_and_linked_cursor_they_point_at_and_does_nothing()
+ {
+    // What the participant sees, pointing at the first chart's plot from home.
+    let mut theirs = charted(ConnectionRole::Owner);
+    let mut step = clocked();
+    let pointing = Senses {
+        beam: true,
+        ray: crate::pointing::Ray::new(arrival::HOME, on_the_plot() - arrival::HOME),
+        ..participant()
+    };
+    let start = Instant::now();
+    let mut seen = Vec::new();
+    for index in 1..=4u32 {
+        let now = start + std::time::Duration::from_secs_f32(FRAME * index as f32);
+        seen = overlays(&step.update(&pointing, &mut theirs, &mut felt(), now, FRAME));
+    }
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen[0].starts_with("02:3"), "{seen:?}");
+    // A watcher, with an owner's token, in the same space, told of Bea's ray along the same line.
+    let mut watched = charted(ConnectionRole::Owner);
+    watched.apply(bea_pointing_at(on_the_plot()));
+    watched.take_actions();
+    let mut watcher = clocked();
+    let mut feedback = felt();
+    let mut watch = |watcher: &mut Step, watched: &mut Conversation, index: u32| {
+        let now = start + std::time::Duration::from_secs_f32(FRAME * index as f32);
+        overlays(&watcher.watch(camera(), watched, &mut feedback, now, FRAME))
+    };
+    // Following nobody, it points at nothing, and shows no readout.
+    for index in 1..=4 {
+        assert!(watch(&mut watcher, &mut watched, index).is_empty());
+    }
+    // Following Bea, it shows her readout and the cursor linked to it, as she sees them.
+    watcher.follow(Some(2));
+    let mut shown = Vec::new();
+    for index in 5..=8 {
+        shown = watch(&mut watcher, &mut watched, index);
+    }
+    assert_eq!(shown, seen);
+    // As her ray moves off the charts, so does what it shows.
+    watched.apply(bea_pointing_at(arrival::HOME + Vec3::new(0.0, 2.0, -2.0)));
+    let mut gone = vec![String::new()];
+    for index in 9..=40 {
+        gone = watch(&mut watcher, &mut watched, index);
+    }
+    assert!(gone.is_empty(), "{gone:?}");
+    // And back on, then following nobody again, none.
+    watched.apply(bea_pointing_at(on_the_plot()));
+    for index in 41..=72 {
+        shown = watch(&mut watcher, &mut watched, index);
+    }
+    assert_eq!(shown, seen);
+    // Left of the plot, where its values are labelled, the label on her ray names the chart instead.
+    let (width, _) = crate::projection::fitted_size(
+        watched
+            .projection()
+            .and_then(|projection| projection.panel("us-east1"))
+            .unwrap(),
+        crate::projection::Fit::Text,
+    );
+    watched.apply(bea_pointing_at(
+        on_the_plot() - Vec3::new(width * 0.49, 0.0, 0.0),
+    ));
+    let mut labelled = false;
+    for index in 41..=72 {
+        let now = start + std::time::Duration::from_secs_f32(FRAME * index as f32);
+        let frame = watcher.watch(camera(), &mut watched, &mut felt(), now, FRAME);
+        labelled = frame
+            .projection
+            .iter()
+            .filter_map(|sheet| sheet.canvas.as_deref())
+            .any(|canvas| canvas.plain().starts_with("us-east1") && canvas.rows.len() <= 4);
+    }
+    assert!(labelled);
+    watcher.follow(None);
+    assert!(watch(&mut watcher, &mut watched, 73).is_empty());
+    // It only showed it: nothing was sent, words begun now would name nothing it pointed at, and nothing was felt.
+    assert!(watched.take_actions().is_empty());
+    watcher.follow(Some(2));
+    watch(&mut watcher, &mut watched, 74);
+    watched.talk(true);
+    watched.talk(false);
+    let actions = watched.take_actions();
+    let Some(tomori_client::connection::Action::BeginUtterance(utterance)) = actions.first() else {
+        unreachable!("recording begins, not {actions:?}")
+    };
+    assert!(utterance.attention.is_empty(), "{:?}", utterance.attention);
+    assert!(
+        feedback
+            .haptics(start + std::time::Duration::from_secs(2))
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_watcher_tells_its_client_side_what_the_followed_participant_s_right_ray_is_on_and_nothing_they_do()
+ {
+    let mut conversation = furnished(ConnectionRole::Owner);
+    let told = registered(&mut conversation).0;
+    let mut watcher = clocked();
+    let start = Instant::now();
+    let watch = |watcher: &mut Step, conversation: &mut Conversation, index: u32| {
+        let now = start + std::time::Duration::from_secs_f32(FRAME * index as f32);
+        watcher.watch(camera(), conversation, &mut felt(), now, FRAME);
+    };
+    // Once its scenery has grown in, following nobody, its client side is told nothing is pointed at.
+    for index in 1..=400 {
+        watch(&mut watcher, &mut conversation, index);
+    }
+    assert_eq!(told.lock().unwrap().pointed.last(), Some(&None));
+    // Following Bea, whose ray meets its thing, it is told the thing is pointed at, though nothing is done to it: once
+    // she is drawn where she now is, having faded out where she was.
+    conversation.apply(bea_pointing_at(arrival::HOME + Vec3::new(0.0, 1.0, -0.5)));
+    watcher.follow(Some(2));
+    for index in 401..=600 {
+        watch(&mut watcher, &mut conversation, index);
+    }
+    {
+        let told = told.lock().unwrap();
+        assert_eq!(told.pointed.last(), Some(&Some("thing".to_owned())));
+        assert!(!told.controls);
+        assert!(told.participant.iter().all(Option::is_none));
+    }
+    // What it asks is still dropped, and nothing reaches the server.
+    let actions = conversation.take_actions();
+    assert!(
+        !format!("{actions:?}").contains("EnvironmentIntent"),
+        "{actions:?}"
+    );
+    assert!(watcher.dropped() > 0);
+    // Following nobody again, nothing is pointed at.
+    watcher.follow(None);
+    watch(&mut watcher, &mut conversation, 601);
+    assert_eq!(told.lock().unwrap().pointed.last(), Some(&None));
+}

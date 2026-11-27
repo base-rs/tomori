@@ -1501,10 +1501,28 @@ impl Step {
                 visual.working
             );
         }
-        // Each hand's ray, trigger and grip, which act alike on Tomori's own things. See `design/interaction.md`.
-        let rays = Hands {
-            right: senses.ray,
-            left: senses.left_ray,
+        // The others, each drawn between the presence updates that bring them, about a frame behind, from the same tracks
+        // an environment's client side is given their hands from, their orbits quick while their voices play. See
+        // `design/people.md`.
+        self.people.hear(conversation.voices());
+        self.people.colour(conversation.hues());
+        self.people.update(
+            now,
+            dt,
+            conversation.hands_forgotten(),
+            conversation.people(),
+            senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
+            self.followed.filter(|_| self.watching),
+        );
+        // Each hand's ray, trigger and grip, which act alike on Tomori's own things. See `design/interaction.md`. A
+        // watcher has no rays of its own: following a participant, it points along theirs as they are drawn this frame,
+        // for what pointing shows alone. See `design/spectator.md`.
+        let rays = match self.followed.filter(|_| self.watching) {
+            Some(source) => self.followed_rays(source),
+            None => Hands {
+                right: senses.ray,
+                left: senses.left_ray,
+            },
         };
         let triggers = Hands {
             right: senses.trigger,
@@ -1968,11 +1986,12 @@ impl Step {
         }
         // The teleport pad each ray meets, if any, which nothing nearer takes, below; a panel behind it is not pulled
         // off, as one behind a card is not. A ray pointing down still meets the pads and targets on the floor, as the
-        // pad stood on, and shows while it does.
+        // pad stood on, and shows while it does. A watcher draws no pads, so its rays meet none.
         let pads_met = Hands::from_fn(|side| {
             rays[side]
                 .filter(|_| {
                     points[side]
+                        && !self.watching
                         && grown
                         && self.board.held_in(side).is_none()
                         && !self.projector.carrying_in(side)
@@ -2458,10 +2477,13 @@ impl Step {
                 .filter(|_| conversation.ticks())
         });
         // The buttons on the right controller act on what the right ray is on, or else the left's.
-        let serving = self.serving(Side::Right);
-        conversation.point_pad(resolved[serving].pad.is_some());
-        conversation.point_item(resolved[serving].item.clone());
-        conversation.point_chip(chip_of(resolved[serving].target.as_ref()));
+        // A watcher has no buttons, so they act on nothing it points at.
+        if !self.watching {
+            let serving = self.serving(Side::Right);
+            conversation.point_pad(resolved[serving].pad.is_some());
+            conversation.point_item(resolved[serving].item.clone());
+            conversation.point_chip(chip_of(resolved[serving].target.as_ref()));
+        }
         // What the trigger and B act on next frame, the right ray's alone in the environment for now.
         let right_object = resolved.right.object.clone();
         if let Some(client) = self.client.as_mut() {
@@ -2554,7 +2576,8 @@ impl Step {
             let pulling = attracts[side];
             let hand = &mut self.hands[side];
             let entered_row = hand.row_hover.update(row, pulling);
-            if hand.hover.update(target, pulling) | entered_row {
+            // A watcher's hands are not its own, so it feels nothing of what its rays enter.
+            if (hand.hover.update(target, pulling) | entered_row) && !self.watching {
                 feedback.emit_on(feedback::Event::Hover, side.into(), now);
             }
             // The ray has something to say while it meets something, its hand is busy, or it aims a teleport.
@@ -2629,11 +2652,14 @@ impl Step {
                                 }
                             })
                     })
-                    .map(|action| (self.controls, action));
+                    .map(|action| (self.controls, action))
+                    .filter(|_| !self.watching);
+                // A watcher's label names the panel alone: it has no controls to tick, choose or scroll with.
+                let scrolls = self.projector.scrollable(panel) && !self.watching;
                 projection.push(self.hands[side].ray_label.sheet(
                     shown,
                     (*point, senses.viewer.unwrap_or(arrival::HOME)),
-                    self.projector.scrollable(panel).then_some(self.controls),
+                    scrolls.then_some(self.controls),
                     tick,
                 ));
             }
@@ -2653,37 +2679,27 @@ impl Step {
         projection.extend(projected.left.hint.clone());
         // The images the panels drawn show, of those held, for the renderer to decode and draw over them.
         let images = conversation.images().drawn(&projection);
-        // What each shown ray points at, which words begun now name, the one moved onto most recently first.
-        for side in Side::BOTH {
-            if let Some(picked) = &resolved[side].object {
-                conversation.label_object(&picked.object, &picked.label);
+        // What each shown ray points at, which words begun now name, the one moved onto most recently first; nothing for
+        // a watcher, which says nothing, and points only to show what the participant it follows points at.
+        if !self.watching {
+            for side in Side::BOTH {
+                if let Some(picked) = &resolved[side].object {
+                    conversation.label_object(&picked.object, &picked.label);
+                }
             }
+            let attended = |side: Side| {
+                self.hands[side]
+                    .target
+                    .clone()
+                    .filter(|_| side == Side::Right || ray_shown[side])
+            };
+            let left_first = match (self.hands.left.since, self.hands.right.since) {
+                (Some(left), Some(right)) => left > right,
+                _ => false,
+            } && ray_shown.left;
+            conversation.point(attended(Side::Right));
+            conversation.point_left(attended(Side::Left), left_first);
         }
-        let attended = |side: Side| {
-            self.hands[side]
-                .target
-                .clone()
-                .filter(|_| side == Side::Right || ray_shown[side])
-        };
-        let left_first = match (self.hands.left.since, self.hands.right.since) {
-            (Some(left), Some(right)) => left > right,
-            _ => false,
-        } && ray_shown.left;
-        conversation.point(attended(Side::Right));
-        conversation.point_left(attended(Side::Left), left_first);
-        // The others, each drawn between the presence updates that bring them, about a frame behind, from the same tracks
-        // an environment's client side is given their hands from, their orbits quick while their voices play. See
-        // `design/people.md`.
-        self.people.hear(conversation.voices());
-        self.people.colour(conversation.hues());
-        self.people.update(
-            now,
-            dt,
-            conversation.hands_forgotten(),
-            conversation.people(),
-            senses.head_pose.map(|pose| Vec3::from_array(pose.position)),
-            self.followed.filter(|_| self.watching),
-        );
         // What the environment's server side sent reaches its client side, which says what to ask, what it sounds and
         // what its scenery draws.
         let drawn = match self.client.as_mut() {

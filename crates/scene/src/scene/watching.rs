@@ -10,7 +10,9 @@ use glam::Mat4;
 use tomori_client::feedback::Feedback;
 
 use super::{Frame, Marker, Senses, Step};
-use crate::{controller::Pose, controller_ui::Sheet, conversation::Conversation};
+use crate::{
+    controller::Pose, controller_ui::Sheet, conversation::Conversation, pointing::Ray, sides::Hands,
+};
 
 /// Each thing a [`Frame`] draws or reports, so that what a watcher leaves out of a participant's frame is declared, by
 /// [`PERSONAL`], and everything else is drawn by both. [`Frame::elements`] names every field of a frame as one of
@@ -193,8 +195,8 @@ impl Frame<'_> {
 }
 
 /// What a watcher senses: its camera, `camera`, as its head and the viewer that what faces a viewer faces, focused so
-/// that it sees the agent's activity, and nothing else: no rays, triggers, grips, palms, controllers or hands, and no
-/// attractor drawn.
+/// that it sees the agent's activity, and nothing else: no rays of its own, triggers, grips, palms, controllers or
+/// hands, and no attractor drawn. The rays it points along are the followed participant's; see [`Step::follow`].
 fn senses(camera: Mat4) -> Senses {
     Senses {
         focused: true,
@@ -210,7 +212,8 @@ fn senses(camera: Mat4) -> Senses {
 impl Step {
     /// One frame as a watcher sees it, such as a spectator, from `camera`, the head of the participant it follows or
     /// the place a participant joining the space stands: [`Self::update`], the participant's own frame step, with no
-    /// input, so that nothing is pointed at, hovered, chosen or carried, and without what [`PERSONAL`] names. As a
+    /// input, so that nothing is chosen or carried, and nothing pointed at or hovered but what the participant it
+    /// follows points at, which it shows (see [`Self::follow`]), and without what [`PERSONAL`] names. As a
     /// watcher, it also holds no rights over walls, whatever its role, so that it draws no handles or padlocks; its
     /// environment's client side is told no participant, what that asks its server side is dropped and its passes are
     /// not felt; its sounds and the environment's ambience are handed to `feedback`, as a participant's are, which plays
@@ -237,9 +240,31 @@ impl Step {
 
     /// Follow `source`, the participant a watcher sees from, whose swarm it then leaves out of the people it draws, since
     /// it sees from inside their head and draws their controllers and hands as theirs; their rays it draws, as
-    /// everyone's. See `design/spectator.md`.
+    /// everyone's, and points along, so that it shows what they point at as they see it: a chart's readout and the
+    /// cursors linked to it, the label on the ray, and what is hovered, its environment's client side told what the
+    /// right ray is on. It only shows it: nothing is chosen, scrolled, carried or sent, its words name nothing, it feels
+    /// nothing, and its labels say nothing of controls. See `design/spectator.md`.
     pub fn follow(&mut self, source: Option<u32>) {
         self.followed = source;
+    }
+
+    /// The rays of the participant `source`, as drawn this frame, which a watcher following them points along: none
+    /// while they show none, or are not drawn.
+    pub(super) fn followed_rays(&self, source: u32) -> Hands<Option<Ray>> {
+        let pointing = self
+            .people
+            .drawn()
+            .iter()
+            .find(|(drawn, _)| *drawn == source)
+            .map(|(_, present)| present.pointing)
+            .unwrap_or_default();
+        let ray = |ray: Option<crate::people::Ray>| {
+            ray.and_then(|ray| Ray::new(ray.origin, ray.direction))
+        };
+        Hands {
+            left: ray(pointing[0]),
+            right: ray(pointing[1]),
+        }
     }
 
     /// How many intents its environment's client sides have asked while it watched, all dropped, since a watcher asks
